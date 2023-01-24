@@ -29,7 +29,7 @@ def read_h5ad_gcs(filename: str, storage_client: Client = Client()) -> AnnData:
 
 def read_h5ad_local(filename: str) -> AnnData:
     r"""
-    Read `.h5ad`-formatted hdf5 file from the local file.
+    Read `.h5ad`-formatted hdf5 file from the local disk.
 
     Args:
         filename (str): Path to the local data file.
