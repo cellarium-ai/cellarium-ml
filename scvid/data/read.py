@@ -39,7 +39,7 @@ def read_h5ad_local(filename: str) -> AnnData:
     return read_h5ad(filename)
 
 
-def read_h5ad_file(filename: str) -> AnnData:
+def read_h5ad_file(filename: str, **kwargs) -> AnnData:
     r"""
     Read `.h5ad`-formatted hdf5 file from a filename.
 
@@ -47,7 +47,7 @@ def read_h5ad_file(filename: str) -> AnnData:
         filename (str): Path to the data file.
     """
     if filename.startswith("gs:"):
-        return read_h5ad_gcs(filename)
+        return read_h5ad_gcs(filename, **kwargs)
 
     if filename.startswith("file:"):
         return read_h5ad_local(filename)
