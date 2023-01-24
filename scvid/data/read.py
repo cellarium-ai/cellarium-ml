@@ -1,10 +1,10 @@
 import re
 
 from anndata import AnnData, read_h5ad
-from google.cloud import storage
+from google.cloud.storage import Client
 
 
-def read_h5ad_gcs(filename: str) -> AnnData:
+def read_h5ad_gcs(filename: str, storage_client: Client = Client()) -> AnnData:
     r"""
     Read `.h5ad`-formatted hdf5 file from the Google Cloud Storage.
 
@@ -20,7 +20,6 @@ def read_h5ad_gcs(filename: str) -> AnnData:
     filename = re.sub(r"^gs://?", "", filename)
     bucket_name, blob_name = filename.split("/", 1)
 
-    storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
@@ -28,7 +27,19 @@ def read_h5ad_gcs(filename: str) -> AnnData:
         return read_h5ad(f)
 
 
-def read_h5ad_filename(filename: str) -> AnnData:
+def read_h5ad_local(filename: str) -> AnnData:
+    r"""
+    Read `.h5ad`-formatted hdf5 file from the local file.
+
+    Args:
+        filename (str): Path to the local data file.
+    """
+    assert filename.startswith("file:")
+    filename = re.sub(r"^file://?", "", filename)
+    return read_h5ad(filename)
+
+
+def read_h5ad_file(filename: str) -> AnnData:
     r"""
     Read `.h5ad`-formatted hdf5 file from a filename.
 
@@ -39,5 +50,6 @@ def read_h5ad_filename(filename: str) -> AnnData:
         return read_h5ad_gcs(filename)
 
     if filename.startswith("file:"):
-        filename = re.sub(r"^file://?", "", filename)
+        return read_h5ad_local(filename)
+
     return read_h5ad(filename)
