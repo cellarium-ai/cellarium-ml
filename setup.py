@@ -10,7 +10,7 @@ VERSION = """
 __version__ = '{}'
 """
 
-with open("README.md", "r") as fh:
+with open("README.rst", "r") as fh:
     long_description = fh.read()
 
 # tests
@@ -27,7 +27,7 @@ setuptools.setup(
     cmdclass=versioneer.get_cmdclass(),
     description="Distributed single-cell data analysis",
     long_description=long_description,
-    # long_description_content_type="text/x-rst",
+    long_description_content_type="text/x-rst",
     url="https://cellarium.ai",
     project_urls={
         "Source": "https://github.com/cellarium-ai/scvi-distributed",
@@ -37,6 +37,8 @@ setuptools.setup(
     install_requires=[
         "anndata @ git+https://github.com/cellarium-ai/anndata.git@distributed",
         "scvi-tools @ git+https://github.com/cellarium-ai/scvi-tools.git@distributed",
+        "google-cloud-storage",
+        "braceexpand",
     ],
     extras_require={
         "test": TEST_REQUIRE,
