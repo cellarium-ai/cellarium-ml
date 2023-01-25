@@ -19,7 +19,7 @@ class AnnDataSchema:
         >>> schema.validate_adata(adata)
 
     Args:
-        adata (AnnData): Reference AnnData.
+        adata (AnnData): Reference AnnData object.
     """
 
     attrs = ["obs", "obsm", "var", "varm", "var_names", "layers"]
@@ -34,10 +34,10 @@ class AnnDataSchema:
 
         for attr in self.attrs:
             value = getattr(adata, attr)
-            value_ref = self.attr_values[attr]
+            ref_value = self.attr_values[attr]
             if attr == "obs":
                 # compare the elements inside the Index object and their order
-                if not value_ref.columns.equals(value.columns):
+                if not ref_value.columns.equals(value.columns):
                     raise ValueError(
                         ".obs attribute columns for anndata passed in does not match .obs attribute columns "
                         "of the reference anndata."
@@ -46,7 +46,7 @@ class AnnDataSchema:
                 # For var compare if two DataFrames have the same shape and elements
                 # and the same row/column index.
                 # For var_names compare the elements inside the Index object and their order
-                if not value_ref.equals(value):
+                if not ref_value.equals(value):
                     raise ValueError(
                         f".{attr} attribute for anndata passed in does not match .{attr} attribute "
                         "of the reference anndata."
@@ -54,7 +54,7 @@ class AnnDataSchema:
             elif attr in ["layers", "obsm", "varm"]:
                 # compare the keys
                 # TODO: stricter comparison for varm
-                if not set(value_ref.keys()) == set(value.keys()):
+                if not set(ref_value.keys()) == set(value.keys()):
                     raise ValueError(
                         f".{attr} attribute keys for anndata passed in does not match .{attr} attribute keys "
                         "of the reference anndata."
