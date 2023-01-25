@@ -2,7 +2,7 @@ from anndata import AnnData
 
 
 class AnnDataSchema:
-    """
+    r"""
     Store reference AnnData attributes for a collection of distributed AnnData objects.
 
     Validate AnnData objects against reference attributes.
