@@ -1,3 +1,4 @@
+import numpy as np
 from anndata import AnnData
 
 
@@ -53,9 +54,17 @@ class AnnDataSchema:
                     )
             elif attr in ["layers", "obsm", "varm"]:
                 # compare the keys
-                # TODO: stricter comparison for varm
                 if not set(ref_value.keys()) == set(value.keys()):
                     raise ValueError(
                         f".{attr} attribute keys for anndata passed in does not match .{attr} attribute keys "
                         "of the reference anndata."
                     )
+                if attr == "varm":
+                    for key in ref_value:
+                        arr = value[key]
+                        ref_arr = ref_value[key]
+                        if not np.array_equal(ref_arr, arr):
+                            raise ValueError(
+                                f".{attr} attribute for anndata passed in does not match .{attr} attribute "
+                                "of the reference anndata."
+                            )
