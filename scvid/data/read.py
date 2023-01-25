@@ -1,10 +1,11 @@
 import re
+from typing import Optional
 
 from anndata import AnnData, read_h5ad
 from google.cloud.storage import Client
 
 
-def read_h5ad_gcs(filename: str, storage_client: Client = Client()) -> AnnData:
+def read_h5ad_gcs(filename: str, storage_client: Optional[Client] = None) -> AnnData:
     r"""
     Read `.h5ad`-formatted hdf5 file from the Google Cloud Storage.
 
@@ -19,6 +20,9 @@ def read_h5ad_gcs(filename: str, storage_client: Client = Client()) -> AnnData:
     # parse bucket and blob names from the filename
     filename = re.sub(r"^gs://?", "", filename)
     bucket_name, blob_name = filename.split("/", 1)
+
+    if storage_client is None:
+        storage_client = Client()
 
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
