@@ -13,12 +13,21 @@ def adata():
     X = np.zeros((n_cell, n_gene))
     L = np.zeros((n_cell, n_gene))
     M = np.zeros((n_cell, 2))
+    V = np.zeros((n_gene, 2))
     obs = pd.DataFrame(
         dict(batch=np.array(["a", "b"])[np.random.randint(0, 2, n_cell)]),
         index=[f"cell{i:03d}" for i in range(n_cell)],
     )
     var = pd.DataFrame(index=[f"gene{i:03d}" for i in range(n_gene)])
-    return AnnData(X, dtype=X.dtype, obs=obs, var=var, layers={"L": L}, obsm={"M": M})
+    return AnnData(
+        X,
+        dtype=X.dtype,
+        obs=obs,
+        var=var,
+        layers={"L": L},
+        obsm={"M": M},
+        varm={"V": V},
+    )
 
 
 @pytest.fixture
@@ -26,14 +35,23 @@ def ref_adata():
     X = np.ones((n_cell_ref, n_gene))
     L = np.ones((n_cell_ref, n_gene))
     M = np.ones((n_cell_ref, 2))
+    V = np.zeros((n_gene, 2))
     obs = pd.DataFrame(
         dict(batch=np.array(["a", "b"])[np.random.randint(0, 2, n_cell_ref)]),
         index=[f"ref_cell{i:03d}" for i in range(n_cell_ref)],
     )
     var = pd.DataFrame(index=[f"gene{i:03d}" for i in range(n_gene)])
-    return AnnData(X, dtype=X.dtype, obs=obs, var=var, layers={"L": L}, obsm={"M": M})
+    return AnnData(
+        X,
+        dtype=X.dtype,
+        obs=obs,
+        var=var,
+        layers={"L": L},
+        obsm={"M": M},
+        varm={"V": V},
+    )
 
 
 def test_validate_adata(ref_adata, adata):
     schema = AnnDataSchema(ref_adata)
-    schema.validate_adata(adata)
+    schema.validate_anndata(adata)
