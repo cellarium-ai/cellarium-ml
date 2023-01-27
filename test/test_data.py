@@ -97,70 +97,44 @@ def test_validate_adata(ref_adata, adata, delete_ref):
     schema.validate_anndata(adata)
 
 
-@pytest.fixture
-def permute_obs_columns(adata):
-    adata.obs = adata.obs.iloc[:, [1, 0, 2]]
+@pytest.fixture(
+    params=[
+        "permute_obs_columns",
+        "rename_obs_columns",
+        "permute_var_columns",
+        "change_obs_dtype",
+        "change_obs_categories",
+    ]
+)
+def change_adata(adata, request):
+    if request.param == "permute_obs_columns":
+        adata.obs = adata.obs.iloc[:, [1, 0, 2]]
+        err_msg = ".obs attribute columns for anndata passed in"
+
+    elif request.param == "rename_obs_columns":
+        cols = adata.obs.columns
+        adata.obs = adata.obs.rename(columns={c: f"{c}_" for c in cols})
+        err_msg = ".obs attribute columns for anndata passed in"
+
+    elif request.param == "permute_var_columns":
+        adata.var = adata.var.iloc[:, [1, 0, 2]]
+        err_msg = ".var attribute for anndata passed in"
+
+    elif request.param == "change_obs_dtype":
+        adata.obs["A"] = np.ones(n_cell)
+        err_msg = ".obs attribute dtypes for anndata passed in"
+
+    elif request.param == "change_obs_categories":
+        adata.obs["C"] = pd.Categorical(
+            np.array(["g", "h"])[np.random.randint(0, 2, n_cell)],
+            categories=["g", "h"],
+        )
+        err_msg = ".obs attribute dtypes for anndata passed in"
+
+    return err_msg
 
 
-def test_permuted_obs_columns(schema, adata, permute_obs_columns):
-    with pytest.raises(
-        ValueError,
-        match=".obs attribute columns for anndata passed in",
-    ):
-        schema.validate_anndata(adata)
-
-
-@pytest.fixture
-def rename_obs_columns(adata):
-    cols = adata.obs.columns
-    adata.obs = adata.obs.rename(columns={c: f"{c}_" for c in cols})
-
-
-def test_renamed_obs_columns(schema, adata, rename_obs_columns):
-    with pytest.raises(
-        ValueError,
-        match=".obs attribute columns for anndata passed in",
-    ):
-        schema.validate_anndata(adata)
-
-
-@pytest.fixture
-def permute_var_columns(adata):
-    adata.var = adata.var.iloc[:, [1, 0, 2]]
-
-
-def test_permuted_var_columns(schema, adata, permute_var_columns):
-    with pytest.raises(
-        ValueError,
-        match=".var attribute for anndata passed in",
-    ):
-        schema.validate_anndata(adata)
-
-
-@pytest.fixture
-def change_obs_dtype(adata):
-    adata.obs["A"] = np.ones(n_cell)
-
-
-def test_changed_obs_dtype(schema, adata, change_obs_dtype):
-    with pytest.raises(
-        ValueError,
-        match=".obs attribute dtypes for anndata passed in",
-    ):
-        schema.validate_anndata(adata)
-
-
-@pytest.fixture
-def change_obs_categories(adata):
-    adata.obs["C"] = pd.Categorical(
-        np.array(["g", "h"])[np.random.randint(0, 2, n_cell)],
-        categories=["g", "h"],
-    )
-
-
-def test_changed_obs_categories(schema, adata, change_obs_categories):
-    with pytest.raises(
-        ValueError,
-        match=".obs attribute dtypes for anndata passed in",
-    ):
+def test_changed_adata(schema, adata, change_adata):
+    err_msg = change_adata
+    with pytest.raises(ValueError, match=err_msg):
         schema.validate_anndata(adata)
