@@ -23,7 +23,7 @@ class AnnDataSchema:
         adata (AnnData): Reference AnnData object.
     """
 
-    attrs = ["obs", "obsm", "var", "varm", "var_names", "layers"]
+    attrs = ["obs", "obsm", "var", "varm", "varp", "var_names", "layers"]
 
     def __init__(self, adata: AnnData) -> None:
         self.attr_values = {}
@@ -43,6 +43,11 @@ class AnnDataSchema:
                         ".obs attribute columns for anndata passed in does not match .obs attribute columns "
                         "of the reference anndata."
                     )
+                if not ref_value.dtypes.equals(value.dtypes):
+                    raise ValueError(
+                        ".obs attribute dtypes for anndata passed in does not match .obs attribute dtypes "
+                        "of the reference anndata."
+                    )
             elif attr in ["var", "var_names"]:
                 # For var compare if two DataFrames have the same shape and elements
                 # and the same row/column index.
@@ -52,14 +57,14 @@ class AnnDataSchema:
                         f".{attr} attribute for anndata passed in does not match .{attr} attribute "
                         "of the reference anndata."
                     )
-            elif attr in ["layers", "obsm", "varm"]:
+            elif attr in ["layers", "obsm", "varm", "varp"]:
                 # compare the keys
                 if not set(ref_value.keys()) == set(value.keys()):
                     raise ValueError(
                         f".{attr} attribute keys for anndata passed in does not match .{attr} attribute keys "
                         "of the reference anndata."
                     )
-                if attr == "varm":
+                if attr in ["varm", "varp"]:
                     for key in ref_value:
                         arr = value[key]
                         ref_arr = ref_value[key]

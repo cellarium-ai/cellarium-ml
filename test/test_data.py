@@ -9,38 +9,31 @@ n_cell_ref, n_cell, n_gene = (3, 5, 4)
 
 
 @pytest.fixture
-def adata():
-    X = np.zeros((n_cell, n_gene))
-    L = np.zeros((n_cell, n_gene))
-    M = np.zeros((n_cell, 2))
-    V = np.zeros((n_gene, 2))
-    obs = pd.DataFrame(
-        dict(batch=np.array(["a", "b"])[np.random.randint(0, 2, n_cell)]),
-        index=[f"cell{i:03d}" for i in range(n_cell)],
-    )
-    var = pd.DataFrame(index=[f"gene{i:03d}" for i in range(n_gene)])
-    return AnnData(
-        X,
-        dtype=X.dtype,
-        obs=obs,
-        var=var,
-        layers={"L": L},
-        obsm={"M": M},
-        varm={"V": V},
-    )
-
-
-@pytest.fixture
 def ref_adata():
     X = np.ones((n_cell_ref, n_gene))
     L = np.ones((n_cell_ref, n_gene))
     M = np.ones((n_cell_ref, 2))
     V = np.zeros((n_gene, 2))
+    P = np.zeros((n_gene, n_gene))
     obs = pd.DataFrame(
-        dict(batch=np.array(["a", "b"])[np.random.randint(0, 2, n_cell_ref)]),
+        {
+            "A": np.array(["a", "b"])[np.random.randint(0, 2, n_cell_ref)],
+            "B": np.array(["c", "d"])[np.random.randint(0, 2, n_cell_ref)],
+            "C": pd.Categorical(
+                np.array(["e", "f"])[np.random.randint(0, 2, n_cell_ref)],
+                categories=["e", "f"],
+            ),
+        },
         index=[f"ref_cell{i:03d}" for i in range(n_cell_ref)],
     )
-    var = pd.DataFrame(index=[f"gene{i:03d}" for i in range(n_gene)])
+    var = pd.DataFrame(
+        {
+            "D": np.zeros(n_gene),
+            "E": np.ones(n_gene),
+            "F": np.arange(n_gene),
+        },
+        index=[f"gene{i:03d}" for i in range(n_gene)],
+    )
     return AnnData(
         X,
         dtype=X.dtype,
@@ -49,9 +42,127 @@ def ref_adata():
         layers={"L": L},
         obsm={"M": M},
         varm={"V": V},
+        varp={"P": P},
     )
 
 
-def test_validate_adata(ref_adata, adata):
+@pytest.fixture
+def adata():
+    X = np.zeros((n_cell, n_gene))
+    L = np.zeros((n_cell, n_gene))
+    M = np.zeros((n_cell, 2))
+    V = np.zeros((n_gene, 2))
+    P = np.zeros((n_gene, n_gene))
+    obs = pd.DataFrame(
+        {
+            "A": np.array(["a", "b"])[np.random.randint(0, 2, n_cell)],
+            "B": np.array(["c", "d"])[np.random.randint(0, 2, n_cell)],
+            "C": pd.Categorical(
+                np.array(["e", "f"])[np.random.randint(0, 2, n_cell)],
+                categories=["e", "f"],
+            ),
+        },
+        index=[f"cell{i:03d}" for i in range(n_cell)],
+    )
+    var = pd.DataFrame(
+        {
+            "D": np.zeros(n_gene),
+            "E": np.ones(n_gene),
+            "F": np.arange(n_gene),
+        },
+        index=[f"gene{i:03d}" for i in range(n_gene)],
+    )
+    return AnnData(
+        X,
+        dtype=X.dtype,
+        obs=obs,
+        var=var,
+        layers={"L": L},
+        obsm={"M": M},
+        varm={"V": V},
+        varp={"P": P},
+    )
+
+
+@pytest.fixture
+def permute_obs_columns(adata):
+    n_cols = len(adata.obs.columns)
+    adata.obs = adata.obs.iloc[:, np.random.permutation(n_cols)]
+
+
+@pytest.fixture
+def rename_obs_columns(adata):
+    cols = adata.obs.columns
+    adata.obs = adata.obs.rename(columns={c: f"{c}_" for c in cols})
+
+
+@pytest.fixture
+def permute_var_columns(adata):
+    n_cols = len(adata.var.columns)
+    adata.var = adata.var.iloc[:, np.random.permutation(n_cols)]
+
+
+@pytest.fixture
+def change_obs_dtype(adata):
+    adata.obs["A"] = np.ones(n_cell)
+
+
+@pytest.fixture
+def change_obs_categories(adata):
+    adata.obs["C"] = pd.Categorical(
+        np.array(["g", "h"])[np.random.randint(0, 2, n_cell)],
+        categories=["g", "h"],
+    )
+
+
+@pytest.mark.parametrize("delete_ref", [False, True])
+def test_validate_adata(ref_adata, adata, delete_ref):
     schema = AnnDataSchema(ref_adata)
+    if delete_ref:
+        del ref_adata
     schema.validate_anndata(adata)
+
+
+def test_permuted_obs_columns(ref_adata, adata, permute_obs_columns):
+    schema = AnnDataSchema(ref_adata)
+    with pytest.raises(
+        ValueError,
+        match=".obs attribute columns for anndata passed in",
+    ):
+        schema.validate_anndata(adata)
+
+
+def test_renamed_obs_columns(ref_adata, adata, rename_obs_columns):
+    schema = AnnDataSchema(ref_adata)
+    with pytest.raises(
+        ValueError,
+        match=".obs attribute columns for anndata passed in",
+    ):
+        schema.validate_anndata(adata)
+
+
+def test_permuted_var_columns(ref_adata, adata, permute_var_columns):
+    schema = AnnDataSchema(ref_adata)
+    with pytest.raises(
+        ValueError,
+        match=".var attribute for anndata passed in",
+    ):
+        schema.validate_anndata(adata)
+
+
+def test_changed_obs_dtype(ref_adata, adata, change_obs_dtype):
+    schema = AnnDataSchema(ref_adata)
+    with pytest.raises(
+        ValueError,
+        match=".obs attribute dtypes for anndata passed in",
+    ):
+        schema.validate_anndata(adata)
+
+
+def test_changed_obs_categories(ref_adata, adata, change_obs_categories):
+    schema = AnnDataSchema(ref_adata)
+    with pytest.raises(
+        ValueError,
+        match=".obs attribute dtypes for anndata passed in",
+    ):
+        schema.validate_anndata(adata)
