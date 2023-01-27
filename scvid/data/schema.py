@@ -17,7 +17,7 @@ class AnnDataSchema:
         >>> adata.obs["batch"] = [2, 3, 4, 5]
         >>> adata.var["mu"] = ["a", "b", "c"]
         >>> schema = AnnDataSchema(ref_adata)
-        >>> schema.validate_adata(adata)
+        >>> schema.validate_anndata(adata)
 
     Args:
         adata (AnnData): Reference AnnData object.

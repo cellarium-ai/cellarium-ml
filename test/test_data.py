@@ -102,8 +102,7 @@ def rename_obs_columns(adata):
 
 @pytest.fixture
 def permute_var_columns(adata):
-    n_cols = len(adata.var.columns)
-    adata.var = adata.var.iloc[:, np.random.permutation(n_cols)]
+    adata.var = adata.var.iloc[:, [1, 0, 2]]
 
 
 @pytest.fixture
