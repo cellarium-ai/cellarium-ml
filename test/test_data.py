@@ -47,6 +47,11 @@ def ref_adata():
 
 
 @pytest.fixture
+def schema(ref_adata):
+    return AnnDataSchema(ref_adata)
+
+
+@pytest.fixture
 def adata():
     X = np.zeros((n_cell, n_gene))
     L = np.zeros((n_cell, n_gene))
@@ -86,8 +91,7 @@ def adata():
 
 @pytest.fixture
 def permute_obs_columns(adata):
-    n_cols = len(adata.obs.columns)
-    adata.obs = adata.obs.iloc[:, np.random.permutation(n_cols)]
+    adata.obs = adata.obs.iloc[:, [1, 0, 2]]
 
 
 @pytest.fixture
@@ -123,8 +127,7 @@ def test_validate_adata(ref_adata, adata, delete_ref):
     schema.validate_anndata(adata)
 
 
-def test_permuted_obs_columns(ref_adata, adata, permute_obs_columns):
-    schema = AnnDataSchema(ref_adata)
+def test_permuted_obs_columns(schema, adata, permute_obs_columns):
     with pytest.raises(
         ValueError,
         match=".obs attribute columns for anndata passed in",
@@ -132,8 +135,7 @@ def test_permuted_obs_columns(ref_adata, adata, permute_obs_columns):
         schema.validate_anndata(adata)
 
 
-def test_renamed_obs_columns(ref_adata, adata, rename_obs_columns):
-    schema = AnnDataSchema(ref_adata)
+def test_renamed_obs_columns(schema, adata, rename_obs_columns):
     with pytest.raises(
         ValueError,
         match=".obs attribute columns for anndata passed in",
@@ -141,8 +143,7 @@ def test_renamed_obs_columns(ref_adata, adata, rename_obs_columns):
         schema.validate_anndata(adata)
 
 
-def test_permuted_var_columns(ref_adata, adata, permute_var_columns):
-    schema = AnnDataSchema(ref_adata)
+def test_permuted_var_columns(schema, adata, permute_var_columns):
     with pytest.raises(
         ValueError,
         match=".var attribute for anndata passed in",
@@ -150,8 +151,7 @@ def test_permuted_var_columns(ref_adata, adata, permute_var_columns):
         schema.validate_anndata(adata)
 
 
-def test_changed_obs_dtype(ref_adata, adata, change_obs_dtype):
-    schema = AnnDataSchema(ref_adata)
+def test_changed_obs_dtype(schema, adata, change_obs_dtype):
     with pytest.raises(
         ValueError,
         match=".obs attribute dtypes for anndata passed in",
@@ -159,8 +159,7 @@ def test_changed_obs_dtype(ref_adata, adata, change_obs_dtype):
         schema.validate_anndata(adata)
 
 
-def test_changed_obs_categories(ref_adata, adata, change_obs_categories):
-    schema = AnnDataSchema(ref_adata)
+def test_changed_obs_categories(schema, adata, change_obs_categories):
     with pytest.raises(
         ValueError,
         match=".obs attribute dtypes for anndata passed in",
