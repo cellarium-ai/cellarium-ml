@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple, Union
 
 import braceexpand
@@ -11,11 +11,27 @@ from anndata.experimental.multi_files._anncollection import (
     AnnCollectionView,
     ConvertType,
 )
-from scvi.data._utils import get_anndata_attribute
 from boltons.cacheutils import LRU
+from scvi.data._utils import get_anndata_attribute
 
 from .read import read_h5ad_file
 from .schema import AnnDataSchema
+
+
+class GetattrMode:
+    lazy = False
+
+
+_GETATTR_MODE = GetattrMode()
+
+
+@contextmanager
+def lazy_getattr():
+    try:
+        _GETATTR_MODE.lazy = True
+        yield
+    finally:
+        _GETATTR_MODE.lazy = False
 
 
 class DistributedAnnDataCollection(AnnCollection):
@@ -29,25 +45,26 @@ class DistributedAnnDataCollection(AnnCollection):
         filenames: Union[Sequence[str], str],
         limits: Optional[Sequence[int]] = None,
         shard_size: Optional[int] = None,
-        maxsize: int = 2,
+        maxsize: Optional[int] = None,
         cachesize_strict: bool = True,
         label: Optional[str] = None,
         keys: Optional[Sequence[str]] = None,
         index_unique: Optional[str] = None,
         convert: Optional[ConvertType] = None,
-        harmonize_dtypes: bool = False,
         indices_strict: bool = True,
     ):
         self.filenames = expand_urls(filenames)
         assert isinstance(self.filenames[0], str)
         if (limits is None) == (shard_size is None):
-            raise ValueError("Either `limits` or `shard_size` must be specified, but not both.")
+            raise ValueError(
+                "Either `limits` or `shard_size` must be specified, but not both."
+            )
         if shard_size is not None:
             limits = [shard_size * (i + 1) for i in range(len(self.filenames))]
         else:
             limits = list(limits)
         # lru cache
-        self.cache = LRU(maxsize=maxsize)
+        self.cache = LRU(maxsize)
         self.cachesize_strict = cachesize_strict
         # schema
         adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
@@ -60,19 +77,19 @@ class DistributedAnnDataCollection(AnnCollection):
         ]
         if keys is None:
             keys = self.filenames
-        self.uns = OrderedDict()
-        super().__init__(
-            adatas=lazy_adatas,
-            join_obs=None,
-            join_obsm=None,
-            join_vars=None,
-            label=label,
-            keys=keys,
-            index_unique=index_unique,
-            convert=convert,
-            harmonize_dtypes=harmonize_dtypes,
-            indices_strict=indices_strict,
-        )
+        with lazy_getattr():
+            super().__init__(
+                adatas=lazy_adatas,
+                join_obs=None,
+                join_obsm=None,
+                join_vars=None,
+                label=label,
+                keys=keys,
+                index_unique=index_unique,
+                convert=convert,
+                harmonize_dtypes=False,
+                indices_strict=indices_strict,
+            )
 
     def __getitem__(self, index: Index):
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
@@ -105,7 +122,7 @@ class DistributedAnnDataCollection(AnnCollection):
         if isinstance(indices, int):
             indices = (indices,)
         if self.cachesize_strict:
-            assert len(indices) <= self.cache.maxsize
+            assert len(indices) <= self.cache.max_size
         adatas = [None] * len(indices)
         for i, idx in enumerate(indices):
             if self.adatas[idx].cached:
@@ -121,28 +138,29 @@ class LazyAnnData:
     r"""
     Lazy AnnData backed by a file.
 
+    Accessing attributes under `lazy_getattr` context returns schema attributes.
+
     Args:
         filename (str): Name of anndata file.
-        cache (LRU): Shared LRU cache storing buffered anndatas.
         limits (Tuple[int, int]): Limits of the cell indices.
         schema (AnnDataSchema): Schema used as a reference for lazy attributes.
-        cache (LRUCache): Cache for storing buffered anndatas.
+        cache (LRU): Shared LRU cache storing buffered anndatas.
     """
 
-    lazy_attrs = ["obs", "obsm", "var", "varm", "varp", "var_names", "layers"]
+    lazy_attrs = ["obs", "obsm", "layers", "var", "varm", "varp", "var_names"]
 
     def __init__(
         self,
         filename: str,
         limits: Tuple[int, int],
         schema: AnnDataSchema,
-        cache: Optional[LRUCache] = None,
+        cache: Optional[LRU] = None,
     ):
         self.filename = filename
         self.limits = limits
         self.schema = schema
         if cache is None:
-            cache = LRUCache()
+            cache = LRU()
         self.cache = cache
 
     @property
@@ -159,6 +177,7 @@ class LazyAnnData:
 
     @property
     def obs_names(self) -> pd.Index:
+        """This is different from the backed anndata"""
         return pd.RangeIndex(*self.limits)
 
     @property
@@ -169,28 +188,36 @@ class LazyAnnData:
     def adata(self) -> AnnData:
         """Return backed anndata from the filename"""
         if not self.cached:
+            # fetch anndata
             adata = read_h5ad_file(self.filename)
+            print(f"DEBUG FETCHING {self.filename}")
+            # validate anndata
             assert (
                 self.n_obs == adata.n_obs
             ), "n_obs of LazyAnnData object and backed anndata must match."
             self.schema.validate_anndata(adata)
+            # cache anndata
             self.cache[self.filename] = adata
         return self.cache[self.filename]
 
     def __getattr__(self, attr):
-        if attr in self.lazy_attrs:
-            return self.schema.attr_values[attr]
-        adata = self.adata
-        if hasattr(adata, attr):
-            return getattr(adata, attr)
-        raise AttributeError(f"Backed AnnData object has no attribute '{attr}'")
+        if _GETATTR_MODE.lazy:
+            # This is only used during the initialization of DistributedAnnDataCollection
+            if attr in self.lazy_attrs:
+                return self.schema.attr_values[attr]
+            raise AttributeError(f"Lazy AnnData object has no attribute '{attr}'")
+        else:
+            adata = self.adata
+            if hasattr(adata, attr):
+                return getattr(adata, attr)
+            raise AttributeError(f"Backed AnnData object has no attribute '{attr}'")
 
     def __getitem__(self, idx) -> AnnData:
         return self.adata[idx]
 
     def __repr__(self) -> str:
         if self.cached:
-            buffered = "Buffered "
+            buffered = "Cached "
         else:
             buffered = ""
         backed_at = f" backed at {str(self.filename)!r}"
@@ -216,13 +243,8 @@ class LazyAnnData:
 def _(
     adata: AnnCollection,
     attr_name: str,
-    attr_key: Optional[str],
-    mod_key: Optional[str] = None,
+    attr_key: Optional[str] = None,
 ) -> Union[np.ndarray, pd.DataFrame]:
-    if attr_name == "var":
-        field = adata.var[attr_key]
-        field = field.to_numpy().reshape(-1, 1)
-        return field
     return adata.lazy_attr(attr_name, attr_key)
 
 
