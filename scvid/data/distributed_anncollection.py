@@ -12,71 +12,43 @@ from anndata.experimental.multi_files._anncollection import (
     ConvertType,
 )
 from scvi.data._utils import get_anndata_attribute
+from boltons.cacheutils import LRU
 
-from .read import read_h5ad_gcs
+from .read import read_h5ad_file
 from .schema import AnnDataSchema
 
 
-class LRUCache:
-    def __init__(self, maxsize: int):
-        self.cache = OrderedDict()
-        self._maxsize = maxsize
-
-    def __getitem__(self, key):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        raise KeyError(f"{key} not found in the cache")
-
-    def __setitem__(self, key, value):
-        while len(self.cache) >= self.maxsize:
-            self.cache.popitem(last=False)
-        self.cache[key] = value
-        self.cache.move_to_end(key)
-
-    def __contains__(self, key) -> bool:
-        return key in self.cache
-
-    def __len__(self) -> int:
-        return len(self.cache)
-
-    @property
-    def maxsize(self) -> int:
-        return self._maxsize
-
-    @maxsize.setter
-    def maxsize(self, value: int):
-        while len(self.cache) > value:
-            lru_key, lru_value = self.cache.popitem(last=False)
-            del lru_value
-        self._maxsize = value
-
-
 class LazyAnnData:
-    """Lazy AnnData"""
+    r"""
+    Lazy AnnData backed by a file.
 
-    view_attrs = ["obs", "obsm", "layers", "var", "var_names"]
+    Args:
+        filename (str): Name of anndata file.
+        cache (LRU): Shared LRU cache storing buffered anndatas.
+        limits (Tuple[int, int]): Limits of the cell indices.
+        schema (AnnDataSchema): Schema used as a reference for lazy attributes.
+        cache (LRUCache): Cache for storing buffered anndatas.
+    """
+
+    lazy_attrs = ["obs", "obsm", "var", "varm", "varp", "var_names", "layers"]
 
     def __init__(
         self,
         filename: str,
-        cache: LRUCache = LRUCache(maxsize=1),
-        n_obs: Optional[int] = None,
-        idx: Optional[int] = None,
-        reference: AnnDataSchema = None,
+        limits: Tuple[int, int],
+        schema: AnnDataSchema,
+        cache: Optional[LRUCache] = None,
     ):
         self.filename = filename
+        self.limits = limits
+        self.schema = schema
+        if cache is None:
+            cache = LRUCache()
         self.cache = cache
-        self._n_obs = n_obs or self.adata.n_obs
-        self.idx = idx or 0
-        # TODO: allow to use index range instead of fixed size
-        self._obs_names = pd.RangeIndex(
-            self.n_obs * self.idx, self.n_obs * (self.idx + 1)
-        )
 
     @property
     def n_obs(self) -> int:
-        return self._n_obs
+        return self.limits[1] - self.limits[0]
 
     @property
     def n_vars(self) -> int:
@@ -88,7 +60,7 @@ class LazyAnnData:
 
     @property
     def obs_names(self) -> pd.Index:
-        return self._obs_names
+        return pd.RangeIndex(*self.limits)
 
     @property
     def cached(self) -> bool:
@@ -96,21 +68,19 @@ class LazyAnnData:
 
     @property
     def adata(self) -> AnnData:
-        """Return backed AnnData from the filename"""
+        """Return backed anndata from the filename"""
         if not self.cached:
-            print(f"DEBUG fetching {self.filename}")
-            _adata = read_h5ad_gcs(self.filename)
-            self.cache[self.filename] = _adata
-            # TODO: assert that view_attrs indeed match to the cached values
-            assert self.n_obs == _adata.n_obs
-            self.reference.validate_adata(_adata)
+            adata = read_h5ad_file(self.filename)
+            assert (
+                self.n_obs == adata.n_obs
+            ), "n_obs of LazyAnnData object and backed anndata must match."
+            self.schema.validate_anndata(adata)
+            self.cache[self.filename] = adata
         return self.cache[self.filename]
 
     def __getattr__(self, attr):
-        if attr in self.view_attrs:
-            # load the attribute from the least recently used adata
-            # assuming this attribute is the same for all anndata files
-            return getattr(self.reference, attr)
+        if attr in self.lazy_attrs:
+            return self.schema.attr_values[attr]
         adata = self.adata
         if hasattr(adata, attr):
             return getattr(adata, attr)
