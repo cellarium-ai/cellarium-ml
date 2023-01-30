@@ -16,6 +16,6 @@ format: FORCE
 	isort .
 
 test: lint FORCE
-	pytest
+	pytest test
 
 FORCE:
