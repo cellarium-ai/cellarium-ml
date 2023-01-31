@@ -116,7 +116,7 @@ class DistributedAnnDataCollection(AnnCollection):
                 indices_strict=indices_strict,
             )
 
-    def __getitem__(self, index: Index):
+    def __getitem__(self, index: Index) -> AnnCollectionView:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
         adatas_indices = [i for i, e in enumerate(resolved_idx[0]) if e is not None]
@@ -140,7 +140,7 @@ class DistributedAnnDataCollection(AnnCollection):
                 adatas[i] = self.adatas[idx].adata
         return adatas
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         n_obs, n_vars = self.shape
         descr = f"DistributedAnnCollection object with n_obs × n_vars = {self.n_obs} × {self.n_vars}"
         descr += f"\n  constructed from {len(self.filenames)} AnnData objects"
@@ -203,7 +203,7 @@ class LazyAnnData:
     @property
     def obs_names(self) -> pd.Index:
         """This is different from the backed anndata"""
-        return pd.RangeIndex(*self.limits)
+        return pd.Index([f"cell_{i}" for i in range(*self.limits)])
 
     @property
     def cached(self) -> bool:
