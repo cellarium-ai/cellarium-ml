@@ -18,11 +18,11 @@ from .read import read_h5ad_file
 from .schema import AnnDataSchema
 
 
-class GetattrMode:
+class getattr_mode:
     lazy = False
 
 
-_GETATTR_MODE = GetattrMode()
+_GETATTR_MODE = getattr_mode()
 
 
 @contextmanager
@@ -35,10 +35,35 @@ def lazy_getattr():
 
 
 class DistributedAnnDataCollection(AnnCollection):
-    """Distributed AnnData Collection with Lazy Attributes"""
+    r"""
+    Distributed AnnData Collection.
 
-    is_view = False
-    isbacked = False
+    This class is a wrapper around AnnCollection where adatas is a list
+    of LazyAnnData objects.
+
+    Args:
+        filenames: Names of anndata files.
+        limits: Limits of cell indices.
+        shard_size: Shard size.
+        maxsize: Max size of the cache.
+        cachesize_strict: Assert that the number of retrieved anndatas is not more than maxsize.
+        label: Column in `.obs` to place batch information in. If it's None, no column is added.
+        keys: Names for each object being added. These values are used for column values for
+            `label` or appended to the index if `index_unique` is not `None`. Defaults to filenames.
+        index_unique: Whether to make the index unique by using the keys. If provided, this
+            is the delimeter between "{orig_idx}{index_unique}{key}". When `None`,
+            the original indices are kept.
+        convert: You can pass a function or a Mapping of functions which will be applied
+            to the values of attributes (`.obs`, `.obsm`, `.layers`, `.X`) or to specific
+            keys of these attributes in the subset object.
+            Specify an attribute and a key (if needed) as keys of the passed Mapping
+            and a function to be applied as a value.
+        indices_strict: If  `True`, arrays from the subset objects will always have the same order
+            of indices as in selection used to subset.
+            This parameter can be set to `False` if the order in the returned arrays
+            is not important, for example, when using them for stochastic gradient descent.
+            In this case the performance of subsetting can be a bit better.
+    """
 
     def __init__(
         self,
@@ -100,6 +125,21 @@ class DistributedAnnDataCollection(AnnCollection):
 
         return AnnCollectionView(self, self.convert, resolved_idx)
 
+    def materialize(self, indices) -> List[AnnData]:
+        if isinstance(indices, int):
+            indices = (indices,)
+        if self.cachesize_strict:
+            assert len(indices) <= self.cache.max_size
+        adatas = [None] * len(indices)
+        for i, idx in enumerate(indices):
+            if self.adatas[idx].cached:
+                adatas[i] = self.adatas[idx].adata
+
+        for i, idx in enumerate(indices):
+            if not self.adatas[idx].cached:
+                adatas[i] = self.adatas[idx].adata
+        return adatas
+
     def __repr__(self):
         n_obs, n_vars = self.shape
         descr = f"DistributedAnnCollection object with n_obs × n_vars = {self.n_obs} × {self.n_vars}"
@@ -118,21 +158,6 @@ class DistributedAnnDataCollection(AnnCollection):
 
         return descr
 
-    def materialize(self, indices) -> List[AnnData]:
-        if isinstance(indices, int):
-            indices = (indices,)
-        if self.cachesize_strict:
-            assert len(indices) <= self.cache.max_size
-        adatas = [None] * len(indices)
-        for i, idx in enumerate(indices):
-            if self.adatas[idx].cached:
-                adatas[i] = self.adatas[idx].adata
-
-        for i, idx in enumerate(indices):
-            if not self.adatas[idx].cached:
-                adatas[i] = self.adatas[idx].adata
-        return adatas
-
 
 class LazyAnnData:
     r"""
@@ -142,7 +167,7 @@ class LazyAnnData:
 
     Args:
         filename (str): Name of anndata file.
-        limits (Tuple[int, int]): Limits of the cell indices.
+        limits (Tuple[int, int]): Limits of cell indices.
         schema (AnnDataSchema): Schema used as a reference for lazy attributes.
         cache (LRU): Shared LRU cache storing buffered anndatas.
     """
