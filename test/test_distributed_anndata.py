@@ -90,24 +90,21 @@ def test_init_dat(dat):
 )
 @pytest.mark.parametrize("vidx", [slice(0, 2), [3, 1, 0]])
 def test_indexing(adt, dat, row_select, vidx):
-    def assert_equal_attrs(adt_view, dat_view):
-        np.testing.assert_array_equal(adt_view.X, dat_view.X)
-        np.testing.assert_array_equal(adt_view.var_names, dat_view.var_names)
-        np.testing.assert_array_equal(adt_view.layers["L"], dat_view.layers["L"])
-        np.testing.assert_array_equal(adt_view.obsm["M"], dat_view.obsm["M"])
-        np.testing.assert_array_equal(adt_view.obs["A"], dat_view.obs["A"])
-
     # compare indexing single and distributed anndata
     max_cache_size = dat.max_cache_size
     cache_size_strictly_enforced = dat.cache_size_strictly_enforced
     oidx, n_adatas = row_select
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="No more than max cache size"):
-            adt_view = adt[oidx, vidx]
+        with pytest.raises(
+            AssertionError, match="Expected the number of anndata files"
+        ):
             dat_view = dat[oidx, vidx]
-            assert_equal_attrs(adt_view, dat_view)
     else:
         adt_view = adt[oidx, vidx]
         dat_view = dat[oidx, vidx]
-        assert_equal_attrs(adt_view, dat_view)
+        np.testing.assert_array_equal(adt_view.X, dat_view.X)
+        np.testing.assert_array_equal(adt_view.var_names, dat_view.var_names)
+        np.testing.assert_array_equal(adt_view.layers["L"], dat_view.layers["L"])
+        np.testing.assert_array_equal(adt_view.obsm["M"], dat_view.obsm["M"])
+        np.testing.assert_array_equal(adt_view.obs["A"], dat_view.obs["A"])

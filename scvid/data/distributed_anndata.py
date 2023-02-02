@@ -150,9 +150,10 @@ class DistributedAnnDataCollection(AnnCollection):
         if isinstance(indices, int):
             indices = (indices,)
         if self.cache_size_strictly_enforced:
-            assert (
-                len(indices) <= self.cache.max_size
-            ), "No more than max cache size anndata files should be materialized."
+            assert len(indices) <= self.max_cache_size, (
+                f"Expected the number of anndata files ({len(indices)}) to be "
+                f"no more than the max cache size ({self.max_cache_size})."
+            )
         adatas = [None] * len(indices)
         # first fetch cached anndata files
         # this ensures that they are not popped if they were lru
