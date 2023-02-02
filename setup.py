@@ -38,6 +38,7 @@ setuptools.setup(
         "anndata @ git+https://github.com/cellarium-ai/anndata.git@distributed",
         "scvi-tools @ git+https://github.com/cellarium-ai/scvi-tools.git@distributed",
         "google-cloud-storage",
+        "boltons",
         "braceexpand",
     ],
     extras_require={
