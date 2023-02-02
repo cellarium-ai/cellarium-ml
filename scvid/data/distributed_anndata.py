@@ -1,7 +1,6 @@
 from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple, Union
 
-import braceexpand
 import numpy as np
 import pandas as pd
 from anndata import AnnData
@@ -11,7 +10,8 @@ from anndata.experimental.multi_files._anncollection import (
     AnnCollectionView,
     ConvertType,
 )
-from boltons.cacheutils import LRU
+from boltons.cacheutils import LRU, cachedproperty
+from braceexpand import braceexpand
 from scvi.data._utils import get_anndata_attribute
 
 from .read import read_h5ad_file
@@ -41,12 +41,23 @@ class DistributedAnnDataCollection(AnnCollection):
     This class is a wrapper around AnnCollection where adatas is a list
     of LazyAnnData objects.
 
+    Underlying anndata files must conform to the same schema (see `AnnDataSchema.validate_anndata`)
+    The schema is inferred from the first AnnData file in the collection. Individual AnnData files may
+    otherwise vary in the number of cells, and the actual content stored in `.X`, `.layers`, `.obs` and `.obsm`.
+
+    Example::
+
+        >>> dadc = DistributedAnnDataCollection(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10000,
+        ...     max_cache_size=2)
+
     Args:
         filenames: Names of anndata files.
         limits: Limits of cell indices.
         shard_size: Shard size.
-        maxsize: Max size of the cache.
-        cachesize_strict: Assert that the number of retrieved anndatas is not more than maxsize.
+        max_cache_size: Max size of the cache.
+        cache_size_strictly_enforced: Assert that the number of retrieved anndatas is not more than maxsize.
         label: Column in `.obs` to place batch information in. If it's None, no column is added.
         keys: Names for each object being added. These values are used for column values for
             `label` or appended to the index if `index_unique` is not `None`. Defaults to filenames.
@@ -70,15 +81,17 @@ class DistributedAnnDataCollection(AnnCollection):
         filenames: Union[Sequence[str], str],
         limits: Optional[Sequence[int]] = None,
         shard_size: Optional[int] = None,
-        maxsize: Optional[int] = None,
-        cachesize_strict: bool = True,
+        max_cache_size: Optional[int] = None,
+        cache_size_strictly_enforced: bool = True,
         label: Optional[str] = None,
         keys: Optional[Sequence[str]] = None,
         index_unique: Optional[str] = None,
         convert: Optional[ConvertType] = None,
         indices_strict: bool = True,
     ):
-        self.filenames = expand_urls(filenames)
+        if isinstance(filenames, str):
+            filenames = braceexpand(filenames)
+        self.filenames = list(filenames)
         assert isinstance(self.filenames[0], str)
         if (limits is None) == (shard_size is None):
             raise ValueError(
@@ -88,20 +101,23 @@ class DistributedAnnDataCollection(AnnCollection):
             limits = [shard_size * (i + 1) for i in range(len(self.filenames))]
         else:
             limits = list(limits)
+        assert len(limits) == len(self.filenames)
         # lru cache
-        self.cache = LRU(maxsize)
-        self.cachesize_strict = cachesize_strict
+        self.cache = LRU(max_cache_size)
+        self.max_cache_size = max_cache_size
+        self.cache_size_strictly_enforced = cache_size_strictly_enforced
         # schema
         adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
         self.schema = AnnDataSchema(adata0)
         # lazy anndatas
-        limits0 = [0] + limits[:-1]
         lazy_adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
-            for start, end, filename in zip(limits0, limits, self.filenames)
+            for start, end, filename in zip([0] + limits, limits, self.filenames)
         ]
+        # use filenames as default keys
         if keys is None:
             keys = self.filenames
+        assert len(keys) == len(self.filenames)
         with lazy_getattr():
             super().__init__(
                 adatas=lazy_adatas,
@@ -125,16 +141,25 @@ class DistributedAnnDataCollection(AnnCollection):
 
         return AnnCollectionView(self, self.convert, resolved_idx)
 
-    def materialize(self, indices) -> List[AnnData]:
+    def materialize(self, indices: Union[int, Sequence[int]]) -> List[AnnData]:
+        """
+        Buffer and return anndata files at given indices from the list of lazy anndatas.
+
+        This efficiently first retrieves cached files and only then caches new files.
+        """
         if isinstance(indices, int):
             indices = (indices,)
-        if self.cachesize_strict:
-            assert len(indices) <= self.cache.max_size
+        if self.cache_size_strictly_enforced:
+            assert (
+                len(indices) <= self.cache.max_size
+            ), "No more than max cache size anndata files should be materialized."
         adatas = [None] * len(indices)
+        # first fetch cached anndata files
+        # this ensures that they are not popped if they were lru
         for i, idx in enumerate(indices):
             if self.adatas[idx].cached:
                 adatas[i] = self.adatas[idx].adata
-
+        # only then cache new anndata files
         for i, idx in enumerate(indices):
             if not self.adatas[idx].cached:
                 adatas[i] = self.adatas[idx].adata
@@ -167,12 +192,22 @@ class LazyAnnData:
 
     Args:
         filename (str): Name of anndata file.
-        limits (Tuple[int, int]): Limits of cell indices.
+        limits (Tuple[int, int]): Limits of cell indices (inclusive, exclusive).
         schema (AnnDataSchema): Schema used as a reference for lazy attributes.
         cache (LRU): Shared LRU cache storing buffered anndatas.
     """
 
-    lazy_attrs = ["obs", "obsm", "layers", "var", "varm", "varp", "var_names"]
+    _lazy_attrs = ["obs", "obsm", "layers", "var", "varm", "varp", "var_names"]
+    _all_attrs = [
+        "obs",
+        "var",
+        "uns",
+        "obsm",
+        "varm",
+        "layers",
+        "obsp",
+        "varp",
+    ]
 
     def __init__(
         self,
@@ -200,7 +235,7 @@ class LazyAnnData:
     def shape(self) -> Tuple[int, int]:
         return self.n_obs, self.n_vars
 
-    @property
+    @cachedproperty
     def obs_names(self) -> pd.Index:
         """This is different from the backed anndata"""
         return pd.Index([f"cell_{i}" for i in range(*self.limits)])
@@ -215,11 +250,11 @@ class LazyAnnData:
         if not self.cached:
             # fetch anndata
             adata = read_h5ad_file(self.filename)
-            print(f"DEBUG FETCHING {self.filename}")
             # validate anndata
-            assert (
-                self.n_obs == adata.n_obs
-            ), "n_obs of LazyAnnData object and backed anndata must match."
+            assert self.n_obs == adata.n_obs, (
+                "Expected n_obs for LazyAnnData object and backed anndata to match "
+                f"but found {self.n_obs} and {adata.n_obs}, respectively."
+            )
             self.schema.validate_anndata(adata)
             # cache anndata
             self.cache[self.filename] = adata
@@ -228,7 +263,7 @@ class LazyAnnData:
     def __getattr__(self, attr):
         if _GETATTR_MODE.lazy:
             # This is only used during the initialization of DistributedAnnDataCollection
-            if attr in self.lazy_attrs:
+            if attr in self._lazy_attrs:
                 return self.schema.attr_values[attr]
             raise AttributeError(f"Lazy AnnData object has no attribute '{attr}'")
         else:
@@ -248,16 +283,7 @@ class LazyAnnData:
         backed_at = f" backed at {str(self.filename)!r}"
         descr = f"{buffered}LazyAnnData object with n_obs × n_vars = {self.n_obs} × {self.n_vars}{backed_at}"
         if self.cached:
-            for attr in [
-                "obs",
-                "var",
-                "uns",
-                "obsm",
-                "varm",
-                "layers",
-                "obsp",
-                "varp",
-            ]:
+            for attr in self._all_attrs:
                 keys = getattr(self, attr).keys()
                 if len(keys) > 0:
                     descr += f"\n    {attr}: {str(list(keys))[1:-1]}"
@@ -271,15 +297,3 @@ def _(
     attr_key: Optional[str] = None,
 ) -> Union[np.ndarray, pd.DataFrame]:
     return adata.lazy_attr(attr_name, attr_key)
-
-
-# https://github.com/webdataset/webdataset/blob/ab8911ab3085949dce409646b96077e1c1448549/webdataset/shardlists.py#L25-L33
-def expand_urls(urls):
-    if isinstance(urls, str):
-        urllist = urls.split("::")
-        result = []
-        for url in urllist:
-            result.extend(braceexpand.braceexpand(url))
-        return result
-    else:
-        return list(urls)
