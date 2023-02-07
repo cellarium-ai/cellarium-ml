@@ -1,4 +1,5 @@
 import os
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -108,3 +109,17 @@ def test_indexing(adt, dat, row_select, vidx):
         np.testing.assert_array_equal(adt_view.layers["L"], dat_view.layers["L"])
         np.testing.assert_array_equal(adt_view.obsm["M"], dat_view.obsm["M"])
         np.testing.assert_array_equal(adt_view.obs["A"], dat_view.obs["A"])
+
+
+def test_pickle(dat):
+    new_dat = pickle.loads(pickle.dumps(dat))
+
+    assert len(new_dat.cache) == 0
+
+    new_dat_view, dat_view = new_dat[:2], dat[:2]
+
+    np.testing.assert_array_equal(new_dat_view.X, dat_view.X)
+    np.testing.assert_array_equal(new_dat_view.var_names, dat_view.var_names)
+    np.testing.assert_array_equal(new_dat_view.layers["L"], dat_view.layers["L"])
+    np.testing.assert_array_equal(new_dat_view.obsm["M"], dat_view.obsm["M"])
+    np.testing.assert_array_equal(new_dat_view.obs["A"], dat_view.obs["A"])
