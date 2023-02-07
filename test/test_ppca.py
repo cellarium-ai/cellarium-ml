@@ -1,7 +1,6 @@
 import numpy as np
 import pyro
 import pytest
-import scanpy as sc
 import torch
 from pyro import infer, optim
 

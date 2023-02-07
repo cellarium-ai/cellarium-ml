@@ -17,7 +17,7 @@ class ProbabilisticPCAPyroModel(PyroModule):
         n_vars: Number of input features.
         n_components: Number of components to model.
         mean: Mean of the input data.
-        marginalize_z: Marginalize latent variable z.
+        marginalize_z: Marginalize out latent variable z.
     """
 
     def __init__(
@@ -79,7 +79,7 @@ class ProbabilisticPCAPyroGuide(PyroModule):
         n_vars: Number of input features.
         n_components: Number of components to model.
         mean: Mean of the input data.
-        marginalize_z: Marginalize latent variable z.
+        marginalize_z: Marginalize out latent variable z.
     """
 
     def __init__(
@@ -122,7 +122,7 @@ class ProbabilisticPCAPyroModule(PyroBaseModuleClass):
         n_vars: Number of input features.
         n_components: Number of components to model.
         mean: Mean of the input data.
-        marginalize_z: Marginalize latent variable z.
+        marginalize_z: Marginalize out latent variable z.
     """
 
     def __init__(
