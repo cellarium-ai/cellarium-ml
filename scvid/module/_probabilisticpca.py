@@ -164,6 +164,12 @@ class ProbabilisticPCAPyroModule(PyroBaseModuleClass):
         """
         Return the latent representation for each cell.
         """
-        L = self._guide.L
+        if self.marginalize_z:
+            W = self._model.W
+            sigma = self._model.sigma
+            M = W @ W.T + sigma**2 * torch.eye(len(W))
+            L = W.T @ torch.linalg.inv(M)
+        else:
+            L = self._guide.L
         z_loc = (x - self.mean) @ L
         return z_loc
