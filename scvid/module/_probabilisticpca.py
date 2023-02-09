@@ -1,175 +1,146 @@
+from typing import Optional, Union
+
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro.nn import PyroModule, PyroParam
-from scvi.module.base import PyroBaseModuleClass
+from pyro.nn import PyroModule, PyroParam, pyro_method
 from torch.distributions import constraints
 
 _PROBABILISTIC_PCA_PYRO_MODULE_NAME = "probabilistic_pca"
 
 
-class ProbabilisticPCAPyroModel(PyroModule):
-    """
-    A PyroModule that serves as the model for the ProbabilisticPCAPyroModule class.
-
-    Args:
-        n_obs: Number of observations.
-        n_vars: Number of input features.
-        n_components: Number of components to model.
-        mean: Mean of the input data.
-        marginalize_z: Marginalize out latent variable z.
-    """
-
-    def __init__(
-        self,
-        n_obs: int,
-        n_vars: int,
-        n_components: int,
-        mean: torch.Tensor,
-        marginalize_z: bool,
-    ):
-        super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
-
-        self.n_obs = n_obs
-        self.n_vars = n_vars
-        self.n_components = n_components
-        self.mean = mean
-        self.marginalize_z = marginalize_z
-
-        # model parameters
-        self.W = PyroParam(lambda: torch.randn((n_components, n_vars)))
-        self.sigma = PyroParam(
-            lambda: torch.tensor(1.0), constraint=constraints.positive
-        )
-
-    def forward(self, x: torch.Tensor):
-        """Forward pass."""
-        with pyro.plate("cells", size=self.n_obs, subsample_size=x.shape[0]):
-            if self.marginalize_z:
-                pyro.sample(
-                    "counts",
-                    dist.LowRankMultivariateNormal(
-                        loc=self.mean,
-                        cov_factor=self.W.T,
-                        cov_diag=self.sigma**2
-                        * torch.ones(self.n_vars, device=x.device),
-                    ),
-                    obs=x,
-                )
-            else:
-                z = pyro.sample(
-                    "z",
-                    dist.Normal(
-                        torch.zeros(self.n_components, device=x.device), 1
-                    ).to_event(1),
-                )
-                pyro.sample(
-                    "counts",
-                    dist.Normal(self.mean + z @ self.W, self.sigma).to_event(1),
-                    obs=x,
-                )
-
-
-class ProbabilisticPCAPyroGuide(PyroModule):
-    """
-    A PyroModule that serves as the guide for the ProbabilisticPCAPyroModule class.
-
-    Args:
-        n_obs: Number of observations.
-        n_vars: Number of input features.
-        n_components: Number of components to model.
-        mean: Mean of the input data.
-        marginalize_z: Marginalize out latent variable z.
-    """
-
-    def __init__(
-        self,
-        n_obs: int,
-        n_vars: int,
-        n_components: int,
-        mean: torch.Tensor,
-        marginalize_z: bool,
-    ):
-        super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
-
-        self.n_obs = n_obs
-        self.n_vars = n_vars
-        self.n_components = n_components
-        self.mean = mean
-        self.marginalize_z = marginalize_z
-
-        # guide parameters
-        if not self.marginalize_z:
-            self.L = PyroParam(lambda: torch.randn((n_vars, n_components)))
-            self.z_scale = PyroParam(
-                lambda: torch.ones(n_components), constraint=constraints.positive
-            )
-
-    def forward(self, x: torch.Tensor):
-        """Forward pass."""
-        if not self.marginalize_z:
-            with pyro.plate("cells", size=self.n_obs, subsample_size=x.shape[0]):
-                z_loc = (x - self.mean) @ self.L
-                pyro.sample("z", dist.Normal(z_loc, self.z_scale).to_event(1))
-
-
-class ProbabilisticPCAPyroModule(PyroBaseModuleClass):
+class ProbabilisticPCAPyroModule(PyroModule):
     """
     Probabilistic PCA implemented in Pyro.
 
     Args:
-        n_obs: Number of observations.
-        n_vars: Number of input features.
-        n_components: Number of components to model.
-        mean: Mean of the input data.
-        marginalize_z: Marginalize out latent variable z.
+        n_cells: Number of cells.
+        g_genes: Number of genes.
+        k_components: Number of principal components.
+        ppca_flavor: Type of the PPCA model. Has to be one of `marginalize` or `diagonal_normal`
+            or `multivariate_normal`.
+        mean_g: Mean gene expression of the input data.
+        w: Scale of the random initialization of `W_kg` parameter.
+        s: Scale of the random initialization of `sigma` parameter.
     """
 
     def __init__(
         self,
-        n_obs: int,
-        n_vars: int,
-        n_components: int,
-        mean: torch.Tensor = 0,
-        marginalize_z: bool = True,
+        n_cells: int,
+        g_genes: int,
+        k_components: int,
+        ppca_flavor: str,
+        mean_g: Optional[Union[float, int, torch.Tensor]] = None,
+        w: Optional[float] = None,
+        s: Optional[float] = None,
     ):
-        super().__init__()
+        super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
-        self.n_obs = n_obs
-        self.n_vars = n_vars
-        self.n_components = n_components
-        self.mean = mean
-        self.marginalize_z = marginalize_z
+        self.n_cells = n_cells
+        self.g_genes = g_genes
+        self.k_components = k_components
+        self.ppca_flavor = ppca_flavor
 
-        self._model = ProbabilisticPCAPyroModel(
-            self.n_obs, self.n_vars, self.n_components, self.mean, self.marginalize_z
+        if isinstance(mean_g, torch.Tensor) and mean_g.dim():
+            assert mean_g.shape == (
+                g_genes,
+            ), "Expected meang_g to have a shape ({g_genes},) but found {mean_g.shape}."
+        if mean_g is None:
+            # make mean_g a learnable parameter
+            self.mean_g = PyroParam(lambda: torch.zeros(g_genes))
+        else:
+            self.mean_g = mean_g
+
+        torch.manual_seed(0)
+        # model parameters
+        w = 1 if w is None else w
+        s = 1 if s is None else s
+        self.W_kg = PyroParam(lambda: w * torch.randn((k_components, g_genes)))
+        self.sigma = PyroParam(
+            lambda: torch.tensor(s), constraint=constraints.positive
         )
-        self._guide = ProbabilisticPCAPyroGuide(
-            self.n_obs, self.n_vars, self.n_components, self.mean, self.marginalize_z
-        )
 
-    @property
-    def model(self):
-        return self._model
+        # guide parameters
+        if ppca_flavor == "marginalized":
+            pass
+        elif ppca_flavor == "diagonal_normal":
+            self.L_gk = PyroParam(lambda: torch.randn((g_genes, k_components)))
+            self.z_scale_k = PyroParam(
+                lambda: torch.ones(k_components), constraint=constraints.positive
+            )
+        elif ppca_flavor == "multivariate_normal":
+            self.L_gk = PyroParam(lambda: torch.randn((g_genes, k_components)))
+            self.z_scale_tril_kk = PyroParam(
+                lambda: torch.eye(k_components),
+                constraint=constraints.lower_cholesky,
+            )
+        else:
+            raise ValueError(
+                "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
+            )
 
-    @property
-    def guide(self):
-        return self._guide
+    @pyro_method
+    def model(self, x_ng: torch.Tensor):
+        with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
+            if self.ppca_flavor == "marginalized":
+                pyro.sample(
+                    "counts",
+                    dist.LowRankMultivariateNormal(
+                        loc=self.mean_g,
+                        cov_factor=self.W_kg.T,
+                        cov_diag=self.sigma**2 * torch.ones(self.g_genes),
+                    ),
+                    obs=x_ng,
+                )
+            else:
+                z_nk = pyro.sample(
+                    "z",
+                    dist.Normal(torch.zeros(self.k_components), 1).to_event(1),
+                )
+                pyro.sample(
+                    "counts",
+                    dist.Normal(self.mean_g + z_nk @ self.W_kg, self.sigma).to_event(1),
+                    obs=x_ng,
+                )
+
+    @pyro_method
+    def guide(self, x_ng: torch.Tensor):
+        if self.ppca_flavor == "marginalized":
+            return
+
+        with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
+            z_loc_nk = (x_ng - self.mean_g) @ self.L_gk
+
+            if self.ppca_flavor == "diagonal_normal":
+                pyro.sample("z", dist.Normal(z_loc_nk, self.z_scale_k).to_event(1))
+            elif self.ppca_flavor == "multivariate_normal":
+                pyro.sample(
+                    "z",
+                    dist.MultivariateNormal(z_loc_nk, scale_tril=self.z_scale_tril_kk),
+                )
+            else:
+                raise ValueError(
+                    "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
+                )
 
     @torch.inference_mode()
     def get_latent_representation(
         self,
-        x: torch.Tensor,
+        x_ng: torch.Tensor,
     ) -> torch.Tensor:
         """
         Return the latent representation for each cell.
         """
-        if self.marginalize_z:
-            W = self._model.W
-            sigma = self._model.sigma
-            M = W @ W.T + sigma**2 * torch.eye(len(W))
-            L = W.T @ torch.linalg.inv(M)
+        if self.ppca_flavor == "marginalized":
+            M_kk = self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
+                self.k_components
+            )
+            L_gk = self.W_kg.T @ torch.linalg.inv(M_kk)
+        elif self.ppca_flavor in ("diagonal_normal", "multivariate_normal"):
+            L_gk = self.L_gk
         else:
-            L = self._guide.L
-        z_loc = (x - self.mean) @ L
-        return z_loc
+            raise ValueError(
+                "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
+            )
+        z_loc_nk = (x_ng - self.mean_g) @ L_gk
+        return z_loc_nk
