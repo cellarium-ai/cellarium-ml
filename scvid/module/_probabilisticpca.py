@@ -33,6 +33,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         mean_g: Optional[Union[float, int, torch.Tensor]] = None,
         w: float = 1.0,
         s: float = 1.0,
+        seed: int = 0,
     ):
         super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
@@ -51,21 +52,28 @@ class ProbabilisticPCAPyroModule(PyroModule):
         else:
             self.mean_g = mean_g
 
-        torch.manual_seed(0)
+        rng = torch.Generator()
+        rng.manual_seed(seed)
         # model parameters
-        self.W_kg = PyroParam(lambda: w * torch.randn((k_components, g_genes)))
+        self.W_kg = PyroParam(
+            lambda: w * torch.randn((k_components, g_genes), generator=rng)
+        )
         self.sigma = PyroParam(lambda: torch.tensor(s), constraint=constraints.positive)
 
         # guide parameters
         if ppca_flavor == "marginalized":
             pass
         elif ppca_flavor == "diagonal_normal":
-            self.L_gk = PyroParam(lambda: torch.randn((g_genes, k_components)))
+            self.L_gk = PyroParam(
+                lambda: torch.randn((g_genes, k_components), generator=rng)
+            )
             self.z_scale_k = PyroParam(
                 lambda: torch.ones(k_components), constraint=constraints.positive
             )
         elif ppca_flavor == "multivariate_normal":
-            self.L_gk = PyroParam(lambda: torch.randn((g_genes, k_components)))
+            self.L_gk = PyroParam(
+                lambda: torch.randn((g_genes, k_components), generator=rng)
+            )
             self.z_scale_tril_kk = PyroParam(
                 lambda: torch.eye(k_components),
                 constraint=constraints.lower_cholesky,
