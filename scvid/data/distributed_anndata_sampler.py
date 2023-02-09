@@ -46,7 +46,6 @@ class DistributedAnnDataCollectionSampler(DistributedSampler):
         self.set_epoch(0)
 
     def __iter__(self) -> Iterator[T_co]:
-
         # (3) iterate through chunks, shuffling within each chunk if desired
         # TODO: shuffle across a set of N shards at a time
         for si in self.process_shard_indexes:
