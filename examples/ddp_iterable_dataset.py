@@ -2,11 +2,10 @@ import random
 
 import torch
 from lightning.pytorch import LightningDataModule, LightningModule, Trainer
+from scvi.data import LazyAnnData, read_h5ad_gcs
 from torch import nn, optim
 from torch.distributed import get_rank, get_world_size
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
-
-from scvi.data import LazyAnnData, read_h5ad_gcs
 
 
 # define the LightningModule
@@ -14,8 +13,12 @@ class LitAutoEncoder(LightningModule):
     def __init__(self):
         super().__init__()
         features = 36350
-        self.encoder = nn.Sequential(nn.Linear(features, 64), nn.ReLU(), nn.Linear(64, 3))
-        self.decoder = nn.Sequential(nn.Linear(3, 64), nn.ReLU(), nn.Linear(64, features))
+        self.encoder = nn.Sequential(
+            nn.Linear(features, 64), nn.ReLU(), nn.Linear(64, 3)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(3, 64), nn.ReLU(), nn.Linear(64, features)
+        )
 
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
@@ -35,7 +38,9 @@ class LitAutoEncoder(LightningModule):
 
 
 class DataParallelIterableLazyAnnDataDataset(IterableDataset):
-    def __init__(self, ladata, world_size: int, global_rank: int, epoch: int = 0, seed: int = 0):
+    def __init__(
+        self, ladata, world_size: int, global_rank: int, epoch: int = 0, seed: int = 0
+    ):
         super(DataParallelIterableLazyAnnDataDataset).__init__()
         self.ladata = ladata
         self.shard_names = ladata.shard_names
@@ -58,7 +63,9 @@ class DataParallelIterableLazyAnnDataDataset(IterableDataset):
         #
         # Handles multi-node, multi-process, multi-worker dataloading efficiently without duplicating
         print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
-        print(f"DEBUG: using rank {self.global_rank} and worker_info {get_worker_info()}")
+        print(
+            f"DEBUG: using rank {self.global_rank} and worker_info {get_worker_info()}"
+        )
         print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 
         # (1) generate fill randomized list of shards evenly divisible by world_size * num_workers
@@ -69,17 +76,23 @@ class DataParallelIterableLazyAnnDataDataset(IterableDataset):
             num_workers = worker_info.num_workers
 
         num_shards = len(self.shard_names)
-        capped_shards = (num_shards // (self.world_size * num_workers)) * (self.world_size * num_workers)
+        capped_shards = (num_shards // (self.world_size * num_workers)) * (
+            self.world_size * num_workers
+        )
 
         g = torch.Generator()
         g.manual_seed(self.seed + self.epoch)
-        all_shards_indexes = torch.randperm(num_shards, generator=g).tolist()[0:capped_shards]
+        all_shards_indexes = torch.randperm(num_shards, generator=g).tolist()[
+            0:capped_shards
+        ]
 
         print(f"All Shards: {all_shards_indexes}")
 
         # (2) partition by process (rank)
         process_shard_indexes = [
-            all_shards_indexes[i] for i in range(len(all_shards_indexes)) if (i % self.world_size) == self.global_rank
+            all_shards_indexes[i]
+            for i in range(len(all_shards_indexes))
+            if (i % self.world_size) == self.global_rank
         ]
 
         print(f"Rank: {self.global_rank} Process Chunks: {process_shard_indexes}")
@@ -88,7 +101,9 @@ class DataParallelIterableLazyAnnDataDataset(IterableDataset):
 
         if worker_info is None:  # single-process data loading, return the full iterator
             worker_shard_indexes = process_shard_indexes
-            print(f"Global Rank {self.global_rank} and no defined workers got {worker_shard_indexes}")
+            print(
+                f"Global Rank {self.global_rank} and no defined workers got {worker_shard_indexes}"
+            )
         else:  # in a worker process
             print(worker_info)
             # split workload
@@ -97,7 +112,9 @@ class DataParallelIterableLazyAnnDataDataset(IterableDataset):
                 for i in range(len(process_shard_indexes))
                 if (i % worker_info.num_workers) == worker_info.id
             ]
-            print(f"Global Rank {self.global_rank} and worker {worker_info.id} got {worker_shard_indexes}")
+            print(
+                f"Global Rank {self.global_rank} and worker {worker_info.id} got {worker_shard_indexes}"
+            )
 
         # (4) iterate through chunks (localize, load, shuffle, yield)
         for i in worker_shard_indexes:
@@ -129,18 +146,28 @@ class CustomDataModule(LightningDataModule):
     def setup(self, stage: str):
         self.world_size = get_world_size()
         self.global_rank = get_rank()
-        print(f"Initializing Data Module with world size {self.world_size} and process rank {self.global_rank}")
+        print(
+            f"Initializing Data Module with world size {self.world_size} and process rank {self.global_rank}"
+        )
 
     def train_dataloader(self):
-        train_dataset = DataParallelIterableLazyAnnDataDataset(self.ladata, self.world_size, self.global_rank)
+        train_dataset = DataParallelIterableLazyAnnDataDataset(
+            self.ladata, self.world_size, self.global_rank
+        )
         return DataLoader(
-            train_dataset, batch_size=self.batch_size, num_workers=2, persistent_workers=True, shuffle=False
+            train_dataset,
+            batch_size=self.batch_size,
+            num_workers=2,
+            persistent_workers=True,
+            shuffle=False,
         )
 
 
 def main():
     model = LitAutoEncoder()
-    url_pattern = "gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..018}.h5ad"
+    url_pattern = (
+        "gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..018}.h5ad"
+    )
     dm = CustomDataModule(url_pattern, batch_size=100)
 
     trainer = Trainer(accelerator="gpu", devices=2, replace_sampler_ddp=False)

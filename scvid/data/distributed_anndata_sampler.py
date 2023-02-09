@@ -2,15 +2,16 @@ from typing import Iterator, Optional, TypeVar
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset
 from torch.utils.data.distributed import DistributedSampler
+
 from . import DistributedAnnDataCollectionDataset
 
 T_co = TypeVar("T_co", covariant=True)
 
-#
-# TODO -- rather than take `shard_size` as a constructor parameter, it should get and 
+# TODO -- rather than take `shard_size` as a constructor parameter, it should get and
 # make use of the `limits` directly from the DistributedAnnDataCollection object
+
+
 class DistributedAnnDataCollectionSampler(DistributedSampler):
     def __init__(
         self,
@@ -31,7 +32,8 @@ class DistributedAnnDataCollectionSampler(DistributedSampler):
             rank = dist.get_rank()
         if rank >= num_replicas or rank < 0:
             raise ValueError(
-                "Invalid rank {}, rank should be in the interval" " [0, {}]".format(rank, num_replicas - 1)
+                "Invalid rank {}, rank should be in the interval"
+                " [0, {}]".format(rank, num_replicas - 1)
             )
 
         self.dataset = dataset
@@ -74,11 +76,15 @@ class DistributedAnnDataCollectionSampler(DistributedSampler):
         self.g.manual_seed(self.seed + self.epoch)
 
         # NOTE: how do we ensure the last shard is complete (same size)
-        all_shards_indexes = torch.randperm(num_shards, generator=self.g).tolist()[0:capped_shards]
+        all_shards_indexes = torch.randperm(num_shards, generator=self.g).tolist()[
+            0:capped_shards
+        ]
         print(f"All Shards: {all_shards_indexes}")
 
         # (2) partition by process (rank)
         self.process_shard_indexes = [
-            all_shards_indexes[i] for i in range(len(all_shards_indexes)) if (i % self.num_replicas) == self.rank
+            all_shards_indexes[i]
+            for i in range(len(all_shards_indexes))
+            if (i % self.num_replicas) == self.rank
         ]
         print(f"Rank: {self.rank} Process Chunks: {self.process_shard_indexes}")

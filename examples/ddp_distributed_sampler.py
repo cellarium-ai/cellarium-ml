@@ -1,7 +1,11 @@
 from lightning.pytorch import LightningDataModule, LightningModule, Trainer
 from torch import nn, optim, utils
 
-from scvid.data import DistributedAnnDataCollection, DistributedAnnDataCollectionDataset, DistributedAnnDataCollectionSampler
+from scvid.data import (
+    DistributedAnnDataCollection,
+    DistributedAnnDataCollectionDataset,
+    DistributedAnnDataCollectionSampler,
+)
 
 
 # define the LightningModule
@@ -9,8 +13,12 @@ class LitAutoEncoder(LightningModule):
     def __init__(self):
         super().__init__()
         features = 36350
-        self.encoder = nn.Sequential(nn.Linear(features, 64), nn.ReLU(), nn.Linear(64, 3))
-        self.decoder = nn.Sequential(nn.Linear(3, 64), nn.ReLU(), nn.Linear(64, features))
+        self.encoder = nn.Sequential(
+            nn.Linear(features, 64), nn.ReLU(), nn.Linear(64, 3)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(3, 64), nn.ReLU(), nn.Linear(64, features)
+        )
 
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
@@ -36,12 +44,15 @@ class CustomDataModule(LightningDataModule):
         self.batch_size = batch_size
 
     def train_dataloader(self):
-        shard_size=10000
-        dac = DistributedAnnDataCollection(self.url_pattern, shard_size=shard_size, max_cache_size=4)
+        shard_size = 10000
+        dac = DistributedAnnDataCollection(
+            self.url_pattern, shard_size=shard_size, max_cache_size=4
+        )
         dataset = DistributedAnnDataCollectionDataset(dac)
 
-        train_sampler = DistributedAnnDataCollectionSampler(dataset=dataset, 
-                                                            shard_size=shard_size)
+        train_sampler = DistributedAnnDataCollectionSampler(
+            dataset=dataset, shard_size=shard_size
+        )
 
         train_loader = utils.data.DataLoader(
             dataset,
@@ -59,16 +70,18 @@ def main():
     model = LitAutoEncoder()
 
     batch_size = 100
-    url_pattern = "gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..003}.h5ad"
+    url_pattern = (
+        "gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..003}.h5ad"
+    )
 
     dm = CustomDataModule(url_pattern, batch_size)
 
     trainer = Trainer(
-        accelerator="gpu", 
-        devices=2, 
-        replace_sampler_ddp=False, 
-        reload_dataloaders_every_n_epochs=1, 
-        max_epochs=10
+        accelerator="gpu",
+        devices=2,
+        replace_sampler_ddp=False,
+        reload_dataloaders_every_n_epochs=1,
+        max_epochs=10,
     )
     trainer.fit(model, dm)
 
