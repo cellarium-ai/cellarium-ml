@@ -20,8 +20,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
         ppca_flavor: Type of the PPCA model. Has to be one of `marginalize` or `diagonal_normal`
             or `multivariate_normal`.
         mean_g: Mean gene expression of the input data.
-        w: Scale of the random initialization of `W_kg` parameter.
-        s: Scale of the random initialization of `sigma` parameter.
+        w: Scale of the random initialization of the `W_kg` parameter.
+        s: Initialization value of the `sigma` parameter.
     """
 
     def __init__(
@@ -31,8 +31,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
         k_components: int,
         ppca_flavor: str,
         mean_g: Optional[Union[float, int, torch.Tensor]] = None,
-        w: Optional[float] = None,
-        s: Optional[float] = None,
+        w: float = 1.0,
+        s: float = 1.0,
     ):
         super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
@@ -53,12 +53,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
 
         torch.manual_seed(0)
         # model parameters
-        w = 1 if w is None else w
-        s = 1 if s is None else s
         self.W_kg = PyroParam(lambda: w * torch.randn((k_components, g_genes)))
-        self.sigma = PyroParam(
-            lambda: torch.tensor(s), constraint=constraints.positive
-        )
+        self.sigma = PyroParam(lambda: torch.tensor(s), constraint=constraints.positive)
 
         # guide parameters
         if ppca_flavor == "marginalized":
