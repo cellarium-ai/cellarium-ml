@@ -168,7 +168,7 @@ class DistributedAnnDataCollection(AnnCollection):
 
     def __repr__(self) -> str:
         n_obs, n_vars = self.shape
-        descr = f"DistributedAnnCollection object with n_obs × n_vars = {self.n_obs} × {self.n_vars}"
+        descr = f"DistributedAnnDataCollection object with n_obs × n_vars = {self.n_obs} × {self.n_vars}"
         descr += f"\n  constructed from {len(self.filenames)} AnnData objects"
         for attr, keys in self._view_attrs_keys.items():
             if len(keys) > 0:

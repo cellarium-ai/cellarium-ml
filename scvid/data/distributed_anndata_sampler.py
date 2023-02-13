@@ -68,7 +68,7 @@ class DistributedAnnDataCollectionSampler(DistributedSampler):
         print(f"DEBUG: using rank {self.rank}")
         print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 
-        num_shards = len(self.dataset.dac.filenames)
+        num_shards = len(self.dataset.dadc.filenames)
         capped_shards = (num_shards // (self.num_replicas)) * (self.num_replicas)
 
         self.g = torch.Generator()
