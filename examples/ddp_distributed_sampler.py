@@ -1,4 +1,6 @@
 from lightning.pytorch import LightningDataModule, LightningModule, Trainer
+
+# import pytorch_lightning as pl
 from torch import nn, optim, utils
 
 from scvid.data import (
@@ -23,7 +25,7 @@ class LitAutoEncoder(LightningModule):
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
         # it is independent of forward
-        x, y = batch
+        x = batch
         x = x.view(x.size(0), -1)
         z = self.encoder(x)
         x_hat = self.decoder(z)
@@ -45,10 +47,10 @@ class CustomDataModule(LightningDataModule):
 
     def train_dataloader(self):
         shard_size = 10000
-        dac = DistributedAnnDataCollection(
+        dadc = DistributedAnnDataCollection(
             self.url_pattern, shard_size=shard_size, max_cache_size=4
         )
-        dataset = DistributedAnnDataCollectionDataset(dac)
+        dataset = DistributedAnnDataCollectionDataset(dadc)
 
         train_sampler = DistributedAnnDataCollectionSampler(
             dataset=dataset, shard_size=shard_size
