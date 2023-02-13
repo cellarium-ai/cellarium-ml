@@ -1,5 +1,4 @@
-import typing as t
-
+from scipy.sparse import issparse
 from torch import Tensor
 from torch.utils.data import Dataset
 
@@ -7,22 +6,15 @@ from . import DistributedAnnDataCollection
 
 
 class DistributedAnnDataCollectionDataset(Dataset):
-    def __init__(self, dac: DistributedAnnDataCollection) -> None:
-        self.dac = dac
+    def __init__(self, dadc: DistributedAnnDataCollection) -> None:
+        self.dadc = dadc
+        convert = {"X": lambda a: a.toarray() if issparse(a) else a}  # densify .X
+        self.dadc.convert = convert
 
     def __len__(self) -> int:
-        return len(self.dac)
+        return len(self.dadc)
 
-    def __getitem__(self, index: int) -> t.Tuple[Tensor, Tensor]:
-        """
-        :return: Tuple of tensor with a cell gene counts and db index.
-        """
+    def __getitem__(self, idx: int) -> Tensor:
+        """Return gene counts for a cell at idx."""
 
-        v = self.dac[index]
-        x_i = Tensor(v.X.todense().astype(int))
-
-        # obs_names is now "cell_<int>" which we are splitting out
-        # to return the db_index tensor
-        db_index = Tensor(v.obs_names.str.split("_").str[-1].astype(int))
-
-        return x_i, db_index
+        return self.dadc[idx].X

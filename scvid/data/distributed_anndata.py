@@ -306,22 +306,6 @@ class LazyAnnData:
                     descr += f"\n    {attr}: {str(list(keys))[1:-1]}"
         return descr
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        del state["cache"]
-        del state["adatas"]
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.cache = LRU(self.max_cache_size)
-        self.adatas = [
-            LazyAnnData(filename, (start, end), self.schema, self.cache)
-            for start, end, filename in zip(
-                [0] + self.limits, self.limits, self.filenames
-            )
-        ]
-
 
 @get_anndata_attribute.register
 def _(
