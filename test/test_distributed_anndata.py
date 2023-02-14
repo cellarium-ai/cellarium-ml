@@ -6,7 +6,11 @@ import pandas as pd
 import pytest
 from anndata import AnnData
 
-from scvid.data import DistributedAnnDataCollection, read_h5ad_file
+from scvid.data import (
+    DistributedAnnDataCollection,
+    DistributedAnnDataCollectionDataset,
+    read_h5ad_file,
+)
 
 
 @pytest.fixture
@@ -123,3 +127,36 @@ def test_pickle(dat):
     np.testing.assert_array_equal(new_dat_view.layers["L"], dat_view.layers["L"])
     np.testing.assert_array_equal(new_dat_view.obsm["M"], dat_view.obsm["M"])
     np.testing.assert_array_equal(new_dat_view.obs["A"], dat_view.obs["A"])
+
+
+@pytest.mark.parametrize(
+    "row_select",
+    [(slice(0, 2), 1), (slice(1, 4), 2), ([1, 2, 4, 4], 2), ([6, 1, 3], 3)],
+    ids=["one adata", "two adatas", "sorted two adatas", "unsorted three adatas"],
+)
+def test_indexing_dataset(adt, dat, row_select):
+    # compare indexing single anndata and distributed anndata dataset
+    max_cache_size = dat.max_cache_size
+    cache_size_strictly_enforced = dat.cache_size_strictly_enforced
+    oidx, n_adatas = row_select
+
+    dataset = DistributedAnnDataCollectionDataset(dat)
+
+    if cache_size_strictly_enforced and (n_adatas > max_cache_size):
+        with pytest.raises(
+            AssertionError, match="Expected the number of anndata files"
+        ):
+            dataset_X = dataset[oidx]["X"]
+    else:
+        adt_X = adt[oidx].X
+        dataset_X = dataset[oidx]["X"]
+        np.testing.assert_array_equal(adt_X, dataset_X)
+
+
+def test_pickle_dataset(dat):
+    dataset = DistributedAnnDataCollectionDataset(dat)
+    new_dataset = pickle.loads(pickle.dumps(dataset))
+
+    assert len(new_dataset.dadc.cache) == 0
+
+    np.testing.assert_array_equal(new_dataset[:2]["X"], dataset[:2]["X"])
