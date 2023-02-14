@@ -3,8 +3,6 @@ import pyro
 import pytest
 import pytorch_lightning as pl
 import torch
-from pyro import infer, optim
-from scvi.dataloaders._ann_dataloader import BatchSampler
 from torch.utils.data import DataLoader, Dataset
 
 from scvid.module import ProbabilisticPCAPyroModule
