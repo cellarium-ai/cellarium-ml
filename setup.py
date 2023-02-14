@@ -40,6 +40,7 @@ setuptools.setup(
         "google-cloud-storage",
         "boltons",
         "braceexpand",
+        "pytorch-lightning",
     ],
     extras_require={
         "test": TEST_REQUIRE,
