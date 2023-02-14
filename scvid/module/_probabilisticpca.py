@@ -1,4 +1,4 @@
-from typing import Dict, Iterable, Optional, Union
+from typing import Dict, Iterable, Optional, Tuple, Union
 
 import pyro
 import pyro.distributions as dist
@@ -86,7 +86,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
     @staticmethod
     def _get_fn_args_from_batch(
         tensor_dict: Dict[str, torch.Tensor]
-    ) -> Union[Iterable, dict]:
+    ) -> Tuple[Iterable, dict]:
         x = tensor_dict["X"]
         return (x,), {}
 
