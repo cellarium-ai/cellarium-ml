@@ -4,7 +4,7 @@ from scipy.sparse import issparse
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from . import DistributedAnnDataCollection
+from .distributed_anndata import DistributedAnnDataCollection
 
 
 class DistributedAnnDataCollectionDataset(Dataset):
