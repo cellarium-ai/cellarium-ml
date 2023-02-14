@@ -1,13 +1,27 @@
 import numpy as np
 import pyro
 import pytest
+import pytorch_lightning as pl
 import torch
 from pyro import infer, optim
+from scvi.dataloaders._ann_dataloader import BatchSampler
+from torch.utils.data import DataLoader, Dataset
 
 from scvid.module import ProbabilisticPCAPyroModule
 from scvid.train import PyroTrainingPlan
 
 n, g, k = 1000, 10, 2
+
+
+class dataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return {"X": self.data[idx]}
 
 
 @pytest.fixture
@@ -32,22 +46,22 @@ def test_probabilistic_pca(x_ng, minibatch, ppca_flavor, learn_mean):
     else:
         x_mean_g = x_ng.mean(axis=0)
 
+    # dataloader
+    batch_size = n // 2 if minibatch else n
+    train_loader = DataLoader(
+        dataset(x_ng),
+        batch_size=batch_size,
+    )
+    # model
     pyro.clear_param_store()
     ppca = ProbabilisticPCAPyroModule(
         n_cells=n, g_genes=g, k_components=k, ppca_flavor=ppca_flavor, mean_g=x_mean_g
     )
     training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 1e-2})
-    #  elbo = infer.Trace_ELBO()
-    #  adam = optim.Adam({"lr": 1e-2})
-    #  svi = infer.SVI(ppca.model, ppca.guide, adam, elbo)
-    for i in range(5000):
-        if minibatch:
-            batch_size = n // 2
-            ind = torch.randint(n, (batch_size,))
-            x_batch = x_ng[ind]
-        else:
-            x_batch = x_ng
-        svi.step(x_batch)
+    # trainer
+    trainer = pl.Trainer(accelerator="cpu", max_epochs=4000)
+    # fit
+    trainer.fit(training_plan, train_dataloaders=train_loader)
 
     # expected var
     expected_var = torch.var(x_ng, axis=0).sum()

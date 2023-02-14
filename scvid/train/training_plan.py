@@ -31,6 +31,7 @@ class PyroTrainingPlan(pl.LightningModule):
             Scale ELBO using :class:`~pyro.poutine.scale`. Potentially useful for avoiding
             numerical inaccuracy when working with very large ELBO.
     """
+
     def __init__(
         self,
         pyro_module,
