@@ -10,33 +10,19 @@ class PyroTrainingPlan(pl.LightningModule):
     Lightning module task to train Pyro scvi-tools modules.
 
     Args:
-        pyro_module
-            An instance of :class:`~scvi.module.base.PyroBaseModuleClass`. This object
-            should have callable `model` and `guide` attributes or methods.
-        loss_fn
-            A Pyro loss. Should be a subclass of :class:`~pyro.infer.ELBO`.
+        pyro_module: A Pyro module. This object should have callable `model` and `guide` attributes or methods.
+        loss_fn: A Pyro loss. Should be a subclass of :class:`~pyro.infer.ELBO`.
             If `None`, defaults to :class:`~pyro.infer.Trace_ELBO`.
-        optim
-            A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
+        optim: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
             defaults to :class:`torch.optim.Adam`.
-        optim_kwargs
-            Keyword arguments for optimiser. If `None`, defaults to `dict(lr=1e-3)`.
-        n_steps_kl_warmup
-            Number of training steps (minibatches) to scale weight on KL divergences from 0 to 1.
-            Only activated when `n_epochs_kl_warmup` is set to None.
-        n_epochs_kl_warmup
-            Number of epochs to scale weight on KL divergences from 0 to 1.
-            Overrides `n_steps_kl_warmup` when both are not `None`.
-        scale_elbo
-            Scale ELBO using :class:`~pyro.poutine.scale`. Potentially useful for avoiding
-            numerical inaccuracy when working with very large ELBO.
+        optim_kwargs: Keyword arguments for optimiser. If `None`, defaults to `dict(lr=1e-3)`.
     """
 
     def __init__(
         self,
-        pyro_module,
+        pyro_module: pyro.nn.PyroModule,
         loss_fn: Optional[pyro.infer.ELBO] = None,
-        optim: Optional[torch.optim.Adam] = None,
+        optim: Optional[torch.optim.Optimizer] = None,
         optim_kwargs: Optional[dict] = None,
     ):
         super().__init__()
