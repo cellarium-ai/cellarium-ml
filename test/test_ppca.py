@@ -5,6 +5,7 @@ import torch
 from pyro import infer, optim
 
 from scvid.module import ProbabilisticPCAPyroModule
+from scvid.train import PyroTrainingPlan
 
 n, g, k = 1000, 10, 2
 
@@ -35,9 +36,10 @@ def test_probabilistic_pca(x_ng, minibatch, ppca_flavor, learn_mean):
     ppca = ProbabilisticPCAPyroModule(
         n_cells=n, g_genes=g, k_components=k, ppca_flavor=ppca_flavor, mean_g=x_mean_g
     )
-    elbo = infer.Trace_ELBO()
-    adam = optim.Adam({"lr": 1e-2})
-    svi = infer.SVI(ppca.model, ppca.guide, adam, elbo)
+    training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 1e-2})
+    #  elbo = infer.Trace_ELBO()
+    #  adam = optim.Adam({"lr": 1e-2})
+    #  svi = infer.SVI(ppca.model, ppca.guide, adam, elbo)
     for i in range(5000):
         if minibatch:
             batch_size = n // 2
