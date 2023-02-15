@@ -11,7 +11,7 @@ from scvid.train import PyroTrainingPlan
 n, g, k = 1000, 10, 2
 
 
-class dataset(Dataset):
+class TestDataset(Dataset):
     def __init__(self, data):
         self.data = data
 
@@ -24,11 +24,12 @@ class dataset(Dataset):
 
 @pytest.fixture
 def x_ng():
-    torch.manual_seed(1465)
-    z_nk = torch.randn(n, k)
-    w_kg = torch.randn(k, g)
+    rng = torch.Generator()
+    rng.manual_seed(1465)
+    z_nk = torch.randn((n, k), generator=rng)
+    w_kg = torch.randn((k, g), generator=rng)
     sigma = 0.6
-    noise = sigma * torch.randn(n, g)
+    noise = sigma * torch.randn((n, g), generator=rng)
     x_ng = z_nk @ w_kg + noise
     return x_ng
 
@@ -47,7 +48,7 @@ def test_probabilistic_pca(x_ng, minibatch, ppca_flavor, learn_mean):
     # dataloader
     batch_size = n // 2 if minibatch else n
     train_loader = DataLoader(
-        dataset(x_ng),
+        TestDataset(x_ng),
         batch_size=batch_size,
     )
     # model

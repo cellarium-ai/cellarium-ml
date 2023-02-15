@@ -9,6 +9,9 @@ class PyroTrainingPlan(pl.LightningModule):
     """
     Lightning module task to train Pyro scvi-tools modules.
 
+    .. note:: This is a stripped down version of the :class:`~scvi.train.LowLevelPyroTrainingPlan`.
+        https://github.com/scverse/scvi-tools/blob/bf2121975bdfc31bfb1f6feb6446c331188b47dd/scvi/train/_trainingplans.py#L745
+
     Args:
         pyro_module: A Pyro module. This object should have callable `model` and `guide` attributes or methods.
         loss_fn: A Pyro loss. Should be a subclass of :class:`~pyro.infer.ELBO`.
