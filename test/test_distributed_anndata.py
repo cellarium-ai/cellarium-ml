@@ -20,15 +20,15 @@ def adatas_path(tmp_path):
     limits = [2, 5, 10]
 
     rng = np.random.default_rng(1465)
-    X = rng.random.randint(50, size=(n_cell, n_gene))
-    L = rng.random.randint(50, size=(n_cell, n_gene))
-    M = rng.random.normal(size=(n_cell, 2))
-    V = rng.random.normal(size=(n_gene, 2))
-    P = rng.random.normal(size=(n_gene, n_gene))
+    X = rng.integers(50, size=(n_cell, n_gene))
+    L = rng.integers(50, size=(n_cell, n_gene))
+    M = rng.normal(size=(n_cell, 2))
+    V = rng.normal(size=(n_gene, 2))
+    P = rng.normal(size=(n_gene, n_gene))
     obs = pd.DataFrame(
         {
-            "A": rng.random.randint(0, 2, n_cell),
-            "B": rng.random.randint(0, 2, n_cell),
+            "A": rng.integers(0, 2, n_cell),
+            "B": rng.integers(0, 2, n_cell),
         },
         index=[f"ref_cell{i:03d}" for i in range(n_cell)],
     )
