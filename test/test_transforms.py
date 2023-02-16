@@ -22,7 +22,7 @@ def log_normalize(x_ng):
     y_ng = torch.log1p(target_count * x_ng / l_n1)
     mean_g = y_ng.mean(axis=0)
     std_g = y_ng.std(axis=0)
-    transform = ZScoreLog1pNormalize(mean_g, std_g, target_count)
+    transform = ZScoreLog1pNormalize(mean_g, std_g, True, target_count)
     return transform
 
 

@@ -10,7 +10,8 @@ class ZScoreLog1pNormalize(nn.Module):
 
     Args:
         mean_g: Means for each gene.
-        std_g: Standard deviations for each gene. If ``None`` then no scaling is applied.
+        std_g: Standard deviations for each gene.
+        perform_scaling: A boolean value that when set to ``True``, scaling by ``std_g`` is applied.
         target_count: Target gene epxression count. Default: ``10_000``
         eps: a value added to the denominator for numerical stability. Default: ``1e-6``
     """
@@ -18,24 +19,27 @@ class ZScoreLog1pNormalize(nn.Module):
     def __init__(
         self,
         mean_g: torch.Tensor,
-        std_g: Optional[torch.Tensor] = None,
+        std_g: Optional[torch.Tensor],
+        perform_scaling: bool,
         target_count: int = 10_000,
         eps: float = 1e-6,
     ):
         super().__init__()
         self.mean_g = mean_g
         self.std_g = std_g
+        self.perform_scaling = perform_scaling
         self.target_count = target_count
         self.eps = eps
 
     def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
         # Log1pNormalize
         l_n1 = x_ng.sum(axis=-1, keepdim=True)
-        y_ng = torch.log1p(self.target_count * x_ng / l_n1)
+        y_ng = torch.log1p(self.target_count * x_ng / (l_n1 + self.eps))
 
         # ZScore
         z_ng = y_ng - self.mean_g
-        if self.std_g is not None:
+        if self.perform_scaling:
+            assert self.std_g is not None, "Must provide standard deviation `std_g`"
             z_ng = z_ng / (self.std_g + self.eps)
 
         return z_ng
