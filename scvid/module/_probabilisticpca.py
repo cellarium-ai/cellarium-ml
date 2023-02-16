@@ -34,6 +34,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         w: float = 1.0,
         s: float = 1.0,
         seed: int = 0,
+        transform: Optional[torch.nn.Module] = None,
     ):
         super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
@@ -41,6 +42,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         self.g_genes = g_genes
         self.k_components = k_components
         self.ppca_flavor = ppca_flavor
+        self.transform = transform
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (
@@ -92,6 +94,9 @@ class ProbabilisticPCAPyroModule(PyroModule):
 
     @pyro_method
     def model(self, x_ng: torch.Tensor):
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
+
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
             if self.ppca_flavor == "marginalized":
                 pyro.sample(
@@ -118,6 +123,9 @@ class ProbabilisticPCAPyroModule(PyroModule):
     def guide(self, x_ng: torch.Tensor):
         if self.ppca_flavor == "marginalized":
             return
+
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
 
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
             z_loc_nk = (x_ng - self.mean_g) @ self.L_gk
