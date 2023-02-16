@@ -1,3 +1,3 @@
-from .transforms import LogNormalize
+from .transforms import ZScoreLog1pNormalize
 
-__all__ = ["LogNormalize"]
+__all__ = ["ZScoreLog1pNormalize"]
