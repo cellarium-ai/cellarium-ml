@@ -47,5 +47,5 @@ class ZScoreLog1pNormalize(nn.Module):
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(mean_g={self.mean_g}, std_g={self.std_g}, "
-            f"target_count={self.target_count}, eps={self.eps})"
+            f"perform_scaling={self.perform_scaling}, target_count={self.target_count}, eps={self.eps})"
         )
