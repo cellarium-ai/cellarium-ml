@@ -4,18 +4,15 @@ import torch
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 
-from . import DistributedAnnDataCollectionDataset
-
 T_co = TypeVar("T_co", covariant=True)
 
-# TODO -- rather than take `shard_size` as a constructor parameter, it should get and
-# make use of the `limits` directly from the DistributedAnnDataCollection object
 
-
+# TODO -- in addition to a `shard_size` we could also take the `limits`
+# TODO -- in this form, this is really a "sharded distributed sampler" not specific to DADC
 class DistributedAnnDataCollectionSampler(DistributedSampler):
     def __init__(
         self,
-        dataset: DistributedAnnDataCollectionDataset,
+        num_shards: int,
         shard_size: int,
         seed: int = 0,
         shuffle: bool = True,
@@ -35,8 +32,7 @@ class DistributedAnnDataCollectionSampler(DistributedSampler):
                 "Invalid rank {}, rank should be in the interval"
                 " [0, {}]".format(rank, num_replicas - 1)
             )
-
-        self.dataset = dataset
+        self.num_shards = num_shards
         self.shard_size = shard_size
         self.seed = seed
         self.shuffle = shuffle
@@ -67,15 +63,13 @@ class DistributedAnnDataCollectionSampler(DistributedSampler):
         print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
         print(f"DEBUG: using rank {self.rank}")
         print("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
-
-        num_shards = len(self.dataset.dadc.filenames)
-        capped_shards = (num_shards // (self.num_replicas)) * (self.num_replicas)
+        capped_shards = (self.num_shards // (self.num_replicas)) * (self.num_replicas)
 
         self.g = torch.Generator()
         self.g.manual_seed(self.seed + self.epoch)
 
         # NOTE: how do we ensure the last shard is complete (same size)
-        all_shards_indexes = torch.randperm(num_shards, generator=self.g).tolist()[
+        all_shards_indexes = torch.randperm(self.num_shards, generator=self.g).tolist()[
             0:capped_shards
         ]
         print(f"All Shards: {all_shards_indexes}")
