@@ -269,14 +269,14 @@ class LazyAnnData:
         except KeyError:
             # fetch anndata
             adata = read_h5ad_file(self.filename)
+            # validate anndata
+            assert self.n_obs == adata.n_obs, (
+                "Expected n_obs for LazyAnnData object and backed anndata to match "
+                f"but found {self.n_obs} and {adata.n_obs}, respectively."
+            )
+            self.schema.validate_anndata(adata)
             # cache anndata
             self.cache[self.filename] = adata
-        # validate anndata
-        assert self.n_obs == adata.n_obs, (
-            "Expected n_obs for LazyAnnData object and backed anndata to match "
-            f"but found {self.n_obs} and {adata.n_obs}, respectively."
-        )
-        self.schema.validate_anndata(adata)
         return adata
 
     def __getattr__(self, attr):

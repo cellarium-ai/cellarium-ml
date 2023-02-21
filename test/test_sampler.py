@@ -41,7 +41,7 @@ def dadc(tmp_path):
     limits = [2, 5, 10]
 
     rng = np.random.default_rng(1465)
-    X = rng.integers(50, size=(n_cell, g_gene))
+    X = rng.integers(10, size=(n_cell, g_gene))
     adata = AnnData(X)
     for i, limit in enumerate(zip([0] + limits, limits)):
         sliced_adata = adata[slice(*limit)]
@@ -55,6 +55,8 @@ def dadc(tmp_path):
         max_cache_size=1,
         cache_size_strictly_enforced=True,
     )
+    # clear cache
+    dadc.cache.clear()
     return dadc
 
 
@@ -72,8 +74,6 @@ def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
         collate_fn=collate_fn,
     )
 
-    # clear cache
-    dadc.cache.clear()
     # iterate through dataloader
     list(data_loader)
 

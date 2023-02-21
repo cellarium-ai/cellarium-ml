@@ -30,9 +30,11 @@ class DADCSampler(Sampler):
             rng = torch.Generator()
             rng.manual_seed(self.seed)
             iter_limits = list(zip([0] + self.limits, self.limits))
+            # shuffle shards
             limit_indices = torch.randperm(len(iter_limits), generator=rng).tolist()
             for limit_idx in limit_indices:
                 lower, upper = iter_limits[limit_idx]
+                # shuffle cells within shards
                 yield from (torch.randperm(upper - lower) + lower).tolist()
         else:
             yield from range(self.n_obs)
@@ -42,4 +44,4 @@ class DADCSampler(Sampler):
 
 
 def collate_fn(batch):
-    return {"X": torch.cat([torch.from_numpy(data["X"]) for data in batch], 0)}
+    return {"X": torch.cat([torch.from_numpy(data["X"]) for data in batch], dim=0)}
