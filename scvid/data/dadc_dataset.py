@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 from .distributed_anndata import DistributedAnnDataCollection
 
 
-class DistributedAnnDataCollectionDataset(Dataset):
+class DADCDataset(Dataset):
     def __init__(self, dadc: DistributedAnnDataCollection) -> None:
         self.dadc = dadc
 
