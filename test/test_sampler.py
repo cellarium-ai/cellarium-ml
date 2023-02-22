@@ -77,6 +77,9 @@ def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
     # iterate through dataloader
     list(data_loader)
 
+    # assert one epoch
+    assert sampler.epoch == 1
+
     if num_workers > 0:
         # workers create their own instance of the dataset
         assert dadc.cache.miss_count == 0

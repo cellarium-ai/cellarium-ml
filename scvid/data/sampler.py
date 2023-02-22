@@ -27,6 +27,9 @@ class DADCSampler(Sampler):
         self.epoch = 0
 
     def __iter__(self) -> Iterator[int]:
+        r"""
+        Shuffling is performed by first shuffling shards and then shuffling cells within shards.
+        """
         if self.shuffle:
             rng = torch.Generator()
             rng.manual_seed(self.seed + self.epoch)
