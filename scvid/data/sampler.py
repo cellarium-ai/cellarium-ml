@@ -4,9 +4,9 @@ import torch
 from torch.utils.data.sampler import Sampler
 
 
-class DADCSampler(Sampler):
+class DistributedAnnDataCollectionSingleConsumerSampler(Sampler):
     """
-    Sampler for DistributedAnnDataCollection.
+    Single consumer sampler for DistributedAnnDataCollection.
 
     Args:
         limits: Limits of cell indices for anndata files.
