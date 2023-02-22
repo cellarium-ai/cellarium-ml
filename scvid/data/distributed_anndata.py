@@ -264,7 +264,9 @@ class LazyAnnData:
     @property
     def adata(self) -> AnnData:
         """Return backed anndata from the filename"""
-        if not self.cached:
+        try:
+            adata = self.cache[self.filename]
+        except KeyError:
             # fetch anndata
             adata = read_h5ad_file(self.filename)
             # validate anndata
@@ -275,7 +277,7 @@ class LazyAnnData:
             self.schema.validate_anndata(adata)
             # cache anndata
             self.cache[self.filename] = adata
-        return self.cache[self.filename]
+        return adata
 
     def __getattr__(self, attr):
         if _GETATTR_MODE.lazy:
