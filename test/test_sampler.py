@@ -6,9 +6,9 @@ import torch
 from anndata import AnnData
 
 from scvid.data import (
-    DADCDataset,
-    DADCSampler,
     DistributedAnnDataCollection,
+    DistributedAnnDataCollectionDataset,
+    DistributedAnnDataCollectionSingleConsumerSampler,
     collate_fn,
 )
 
@@ -19,7 +19,9 @@ from scvid.data import (
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
 def test_dadc_sampler_indices(limits, shuffle, num_workers, batch_size):
     n_obs = limits[-1]
-    sampler = DADCSampler(limits=limits, shuffle=shuffle)
+    sampler = DistributedAnnDataCollectionSingleConsumerSampler(
+        limits=limits, shuffle=shuffle
+    )
     data_loader = torch.utils.data.DataLoader(
         range(n_obs),
         sampler=sampler,
@@ -64,8 +66,10 @@ def dadc(tmp_path):
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
 def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
-    dataset = DADCDataset(dadc)
-    sampler = DADCSampler(limits=dadc.limits, shuffle=shuffle)
+    dataset = DistributedAnnDataCollectionDataset(dadc)
+    sampler = DistributedAnnDataCollectionSingleConsumerSampler(
+        limits=dadc.limits, shuffle=shuffle
+    )
     data_loader = torch.utils.data.DataLoader(
         dataset,
         sampler=sampler,

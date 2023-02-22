@@ -6,7 +6,11 @@ import pandas as pd
 import pytest
 from anndata import AnnData
 
-from scvid.data import DADCDataset, DistributedAnnDataCollection, read_h5ad_file
+from scvid.data import (
+    DistributedAnnDataCollection,
+    DistributedAnnDataCollectionDataset,
+    read_h5ad_file,
+)
 
 
 @pytest.fixture
@@ -136,7 +140,7 @@ def test_indexing_dataset(adt, dat, row_select):
     cache_size_strictly_enforced = dat.cache_size_strictly_enforced
     oidx, n_adatas = row_select
 
-    dataset = DADCDataset(dat)
+    dataset = DistributedAnnDataCollectionDataset(dat)
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
         with pytest.raises(
@@ -150,7 +154,7 @@ def test_indexing_dataset(adt, dat, row_select):
 
 
 def test_pickle_dataset(dat):
-    dataset = DADCDataset(dat)
+    dataset = DistributedAnnDataCollectionDataset(dat)
     new_dataset = pickle.loads(pickle.dumps(dataset))
 
     assert len(new_dataset.dadc.cache) == 0
