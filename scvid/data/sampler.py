@@ -24,11 +24,12 @@ class DADCSampler(Sampler):
         self.n_obs = self.limits[-1]
         self.shuffle = shuffle
         self.seed = seed
+        self.epoch = 0
 
     def __iter__(self) -> Iterator[int]:
         if self.shuffle:
             rng = torch.Generator()
-            rng.manual_seed(self.seed)
+            rng.manual_seed(self.seed + self.epoch)
             iter_limits = list(zip([0] + self.limits, self.limits))
             # shuffle shards
             limit_indices = torch.randperm(len(iter_limits), generator=rng).tolist()
@@ -38,9 +39,21 @@ class DADCSampler(Sampler):
                 yield from (torch.randperm(upper - lower) + lower).tolist()
         else:
             yield from range(self.n_obs)
+        self.set_epoch(self.epoch + 1)
 
     def __len__(self):
         return self.n_obs
+
+    def set_epoch(self, epoch: int) -> None:
+        r"""
+        Sets the epoch for this sampler. When :attr:`shuffle=True`, this ensures all replicas
+        use a different random ordering for each epoch. Otherwise, the next iteration of this
+        sampler will yield the same ordering.
+
+        Args:
+            epoch (int): Epoch number.
+        """
+        self.epoch = epoch
 
 
 def collate_fn(batch):
