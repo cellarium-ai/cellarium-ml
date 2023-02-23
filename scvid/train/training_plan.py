@@ -58,6 +58,7 @@ class DummyTrainingPlan(pl.LightningModule):
     """
     Lightning module task to train OnePassMeanVarStd.
     """
+
     def __init__(self, module: torch.nn.Module):
         super().__init__()
         self.module = module

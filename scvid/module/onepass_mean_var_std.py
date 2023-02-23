@@ -1,4 +1,5 @@
 from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -8,6 +9,7 @@ class OnePassMeanVarStd(nn.Module):
     Calculate the mean, variance, and standard deviation of the data in one pass (epoch)
     using running sums and running squared sums.
     """
+
     def __init__(self, transform: Optional[nn.Module] = None) -> None:
         super().__init__()
         self.transform = transform

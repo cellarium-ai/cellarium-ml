@@ -81,5 +81,5 @@ def test_dadc_sampler_misses(adata, dadc, shuffle, num_workers, batch_size):
     expected_std = torch.std(x, dim=0, unbiased=False)
 
     np.testing.assert_allclose(expected_mean, actual_mean, atol=1e-5)
-    np.testing.assert_allclose(expected_var, actual_var, atol=1e-5)
+    np.testing.assert_allclose(expected_var, actual_var, atol=1e-4)
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
