@@ -55,7 +55,10 @@ class PyroTrainingPlan(pl.LightningModule):
 
 
 class DummyTrainingPlan(pl.LightningModule):
-    def __init__(self, module):
+    """
+    Lightning module task to train OnePassMeanVarStd.
+    """
+    def __init__(self, module: torch.nn.Module):
         super().__init__()
         self.module = module
         self.automatic_optimization = False

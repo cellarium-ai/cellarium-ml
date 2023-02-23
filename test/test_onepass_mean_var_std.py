@@ -12,7 +12,7 @@ from scvid.data import (
     DistributedAnnDataCollectionSingleConsumerSampler,
     collate_fn,
 )
-from scvid.module import OnePassMeanStd
+from scvid.module import OnePassMeanVarStd
 from scvid.train import DummyTrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
 
@@ -35,19 +35,19 @@ def dadc(adata, tmp_path):
 
     # distributed anndata
     filenames = str(os.path.join(tmp_path, "adata.{000..002}.h5ad"))
-    dadc = DistributedAnnDataCollection(
+    return DistributedAnnDataCollection(
         filenames,
         limits,
         max_cache_size=1,
         cache_size_strictly_enforced=True,
     )
-    return dadc
 
 
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
 def test_dadc_sampler_misses(adata, dadc, shuffle, num_workers, batch_size):
+    # prepare dataloader
     dataset = DistributedAnnDataCollectionDataset(dadc)
     sampler = DistributedAnnDataCollectionSingleConsumerSampler(
         limits=dadc.limits, shuffle=shuffle
@@ -64,19 +64,22 @@ def test_dadc_sampler_misses(adata, dadc, shuffle, num_workers, batch_size):
     )
 
     # fit
-    model = OnePassMeanStd(transform=transform)
+    model = OnePassMeanVarStd(transform=transform)
     training_plan = DummyTrainingPlan(model)
     trainer = pl.Trainer(accelerator="cpu", max_epochs=1)
     trainer.fit(training_plan, train_dataloaders=data_loader)
 
-    # actual mean and std
+    # actual mean, var, and std
     actual_mean = model.mean
+    actual_var = model.var
     actual_std = model.std
 
-    # expected mean and std
+    # expected mean, var, and std
     x = transform(torch.from_numpy(adata.X))
     expected_mean = torch.mean(x, dim=0)
+    expected_var = torch.var(x, dim=0, unbiased=False)
     expected_std = torch.std(x, dim=0, unbiased=False)
 
     np.testing.assert_allclose(expected_mean, actual_mean, atol=1e-5)
+    np.testing.assert_allclose(expected_var, actual_var, atol=1e-5)
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)

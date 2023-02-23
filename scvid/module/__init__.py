@@ -1,4 +1,4 @@
 from ._probabilisticpca import ProbabilisticPCAPyroModule
-from .onepass_mean_std import OnePassMeanStd
+from .onepass_mean_var_std import OnePassMeanVarStd
 
-__all__ = ["ProbabilisticPCAPyroModule", "OnePassMeanStd"]
+__all__ = ["ProbabilisticPCAPyroModule", "OnePassMeanVarStd"]

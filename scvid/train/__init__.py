@@ -1,3 +1,3 @@
 from .training_plan import DummyTrainingPlan, PyroTrainingPlan
 
-__all__ = ["PyroTrainingPlan", "DummyTrainingPlan"]
+__all__ = ["DummyTrainingPlan", "PyroTrainingPlan"]
