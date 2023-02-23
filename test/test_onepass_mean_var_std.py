@@ -46,7 +46,7 @@ def dadc(adata, tmp_path):
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
-def test_dadc_sampler_misses(adata, dadc, shuffle, num_workers, batch_size):
+def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
     # prepare dataloader
     dataset = DistributedAnnDataCollectionDataset(dadc)
     sampler = DistributedAnnDataCollectionSingleConsumerSampler(
