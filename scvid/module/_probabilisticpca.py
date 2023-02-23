@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Dict, Iterable, Optional, Tuple, Union
 
 import pyro
 import pyro.distributions as dist
@@ -34,6 +34,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         w: float = 1.0,
         s: float = 1.0,
         seed: int = 0,
+        transform: Optional[torch.nn.Module] = None,
     ):
         super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
@@ -41,6 +42,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         self.g_genes = g_genes
         self.k_components = k_components
         self.ppca_flavor = ppca_flavor
+        self.transform = transform
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (
@@ -83,8 +85,18 @@ class ProbabilisticPCAPyroModule(PyroModule):
                 "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
             )
 
+    @staticmethod
+    def _get_fn_args_from_batch(
+        tensor_dict: Dict[str, torch.Tensor]
+    ) -> Tuple[Iterable, dict]:
+        x = tensor_dict["X"]
+        return (x,), {}
+
     @pyro_method
     def model(self, x_ng: torch.Tensor):
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
+
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
             if self.ppca_flavor == "marginalized":
                 pyro.sample(
@@ -92,14 +104,14 @@ class ProbabilisticPCAPyroModule(PyroModule):
                     dist.LowRankMultivariateNormal(
                         loc=self.mean_g,
                         cov_factor=self.W_kg.T,
-                        cov_diag=self.sigma**2 * torch.ones(self.g_genes),
+                        cov_diag=self.sigma**2 * x_ng.new_ones(self.g_genes),
                     ),
                     obs=x_ng,
                 )
             else:
                 z_nk = pyro.sample(
                     "z",
-                    dist.Normal(torch.zeros(self.k_components), 1).to_event(1),
+                    dist.Normal(x_ng.new_zeros(self.k_components), 1).to_event(1),
                 )
                 pyro.sample(
                     "counts",
@@ -111,6 +123,9 @@ class ProbabilisticPCAPyroModule(PyroModule):
     def guide(self, x_ng: torch.Tensor):
         if self.ppca_flavor == "marginalized":
             return
+
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
 
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
             z_loc_nk = (x_ng - self.mean_g) @ self.L_gk
