@@ -52,3 +52,16 @@ class PyroTrainingPlan(pl.LightningModule):
     def configure_optimizers(self):
         """Configure optimizers for the model."""
         return self.optim(self.module.parameters(), **self.optim_kwargs)
+
+
+class DummyTrainingPlan(pl.LightningModule):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+        self.automatic_optimization = False
+
+    def training_step(self, batch, batch_idx):
+        self.module(batch["X"])
+
+    def configure_optimizers(self):
+        pass
