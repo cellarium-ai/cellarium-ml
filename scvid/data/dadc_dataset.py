@@ -28,12 +28,9 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
 
     def set_epoch(self, epoch: int) -> None:
         r"""
-        Sets the epoch for this sampler. When :attr:`shuffle=True`, this ensures all replicas
+        Sets the epoch for this iterator. When :attr:`shuffle=True`, this ensures all replicas
         use a different random ordering for each epoch. Otherwise, the next iteration of this
         sampler will yield the same ordering.
-
-        Args:
-            epoch (int): Epoch number.
         """
         self.epoch = epoch
 
@@ -64,15 +61,15 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
             iter_limits = list(zip([0] + self.dadc.limits, self.dadc.limits))
             # shuffle shards
             limit_indices = torch.randperm(len(iter_limits), generator=rng).tolist()
-            cell_idx = []
+            cell_indices = []
             for limit_idx in limit_indices:
                 lower, upper = iter_limits[limit_idx]
                 # shuffle cells within shards
-                cell_idx.extend(
+                cell_indices.extend(
                     (torch.randperm(upper - lower, generator=rng) + lower).tolist()
                 )
         else:
-            cell_idx = list(range(len(self)))
+            cell_indices = list(range(len(self)))
 
         worker_info = get_worker_info()
         if worker_info is None:  # single-process data loading, return the full iterator
@@ -84,5 +81,5 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
             worker_id = worker_info.id
             iter_start = worker_id * per_worker
             iter_end = min(iter_start + per_worker, len(self))
-        yield from (self[cell_idx[i]] for i in range(iter_start, iter_end))
+        yield from (self[cell_indices[i]] for i in range(iter_start, iter_end))
         self.set_epoch(self.epoch + 1)

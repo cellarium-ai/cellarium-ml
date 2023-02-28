@@ -13,7 +13,7 @@ from scvid.data import (
 )
 
 
-@pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])
+@pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])  # limits
 def dadc(tmp_path, request):
     limits = request.param
     n_cell = limits[-1]
@@ -55,13 +55,6 @@ def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
 
     miss_counts = list(int(i) for batch in data_loader for i in batch["miss_count"])
 
-    actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
-    expected_idx = list(range(n_obs))
-
-    # assert entire dataset is sampled
-    assert len(expected_idx) == len(actual_idx)
-    assert set(expected_idx) == set(actual_idx)
-
     # each anndata was loaded only once
     if num_workers > 1:
         worker_ids = list(int(i) for batch in data_loader for i in batch["worker_id"])
@@ -71,3 +64,10 @@ def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
     else:
         miss_count = max(miss_counts)
         assert miss_count == len(dadc.limits)
+
+    actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
+    expected_idx = list(range(n_obs))
+
+    # assert entire dataset is sampled
+    assert len(expected_idx) == len(actual_idx)
+    assert set(expected_idx) == set(actual_idx)
