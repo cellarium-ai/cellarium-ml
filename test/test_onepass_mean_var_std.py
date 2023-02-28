@@ -103,7 +103,6 @@ def test_onepass_mean_var_std_iterable_dataset(
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
-        batch_size=batch_size,
         collate_fn=collate_fn,
     )
     transform = ZScoreLog1pNormalize(

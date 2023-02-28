@@ -38,6 +38,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         seed: random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
         test_mode: If ``True`` enables tracking of cache and worker informations.
     """
+
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
@@ -81,8 +82,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __iter__(self):
         r"""
-        Iterate through the dataset by trying to minimize the amount of anndata files fetching
-        by multiple workers.
+        Iterate through the dataset by trying to minimize the amount of anndata files
+        fetched by each worker.
 
         Example 1:
 
