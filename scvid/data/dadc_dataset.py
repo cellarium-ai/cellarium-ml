@@ -13,11 +13,13 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
-        shuffle: bool,
+        batch_size: int,
+        shuffle: bool = False,
         seed: int = 0,
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
+        self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
         self.epoch = 0
@@ -45,8 +47,8 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
         if self.test_mode:
             worker_info = get_worker_info()
             if worker_info is not None:
-                data["worker_id"] = torch.tensor([worker_info.id])
-            data["miss_count"] = torch.tensor([self.dadc.cache.miss_count])
+                data["worker_id"] = np.array([worker_info.id])
+            data["miss_count"] = np.array([self.dadc.cache.miss_count])
 
         return data
 
@@ -77,7 +79,12 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
             iter_end = len(self)
         else:  # in a worker process
             # split workload
-            per_worker = int(math.ceil(len(self) / float(worker_info.num_workers)))
+            num_batches = int(math.ceil(len(self) / float(self.batch_size)))
+            batches_per_worker = int(
+                math.ceil(num_batches / float(worker_info.num_workers))
+            )
+            # batches_per_worker = num_batches // worker_info.num_workers
+            per_worker = batches_per_worker * self.batch_size
             worker_id = worker_info.id
             iter_start = worker_id * per_worker
             iter_end = min(iter_start + per_worker, len(self))

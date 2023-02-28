@@ -45,7 +45,9 @@ def dadc(tmp_path, request):
 )
 def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
     n_obs = len(dadc)
-    dataset = DistributedAnnDataCollectionDataset(dadc, shuffle=shuffle, test_mode=True)
+    dataset = DistributedAnnDataCollectionDataset(
+        dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True
+    )
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
