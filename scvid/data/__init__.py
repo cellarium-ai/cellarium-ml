@@ -1,4 +1,4 @@
-from .dadc_dataset import (
+from .dataset import (
     DistributedAnnDataCollectionDataset,
     IterableDistributedAnnDataCollectionDataset,
 )

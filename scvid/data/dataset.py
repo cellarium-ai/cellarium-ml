@@ -16,7 +16,7 @@ class DistributedAnnDataCollectionDataset(Dataset):
     def __len__(self) -> int:
         return len(self.dadc)
 
-    def __getitem__(self, idx: int) -> Dict[str, Tensor]:
+    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
         """Return gene counts for a cell at idx."""
         X = self.dadc[idx].X
 
@@ -67,6 +67,56 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         return data
 
     def __iter__(self):
+        r"""
+        Example 1:
+
+            indices=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+
+            n_obs=12, batch_size=2, num_workers=3
+            num_batches=6, batches_per_worker=2, per_worker=2*2=4
+
+                        batch per worker
+                          0       1
+                      +-----------------+
+                    0 | (0,1) | (2,3)   |
+                      |-------+---------+
+            worker  1 | (4,5) | (6,7)   |
+                      +-------+---------+
+                    2 | (8,9) | (10,11) |
+                      +-------+---------+
+
+
+        Example 2:
+
+            indices=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+
+            n_obs=11, batch_size=2, num_workers=2
+            num_batches=6, batches_per_worker=3, per_worker=2*3=6
+
+                          batch per worker
+                          0       1       2
+                      +-----------------------+
+                    0 | (0,1) | (2,3) | (4,5) |
+            worker    |-------+-------+-------+
+                    1 | (6,7) | (8,9) | (10,) |
+                      +-------+---------------+
+
+
+        Example 3:
+
+            indices=(0, 1, 2, 3, 4, 5, 6, 7)
+
+            n_obs=8, batch_size=3, num_workers=2
+            num_batches=3, batches_per_worker=2, per_worker=2*3=6
+
+                          batch per worker
+                          0       1       2
+                      +-------------------+
+                    0 | (0,1,2) | (3,4,5) |
+            worker    |---------+---------+
+                    1 | (6,7)   |         |
+                      +---------+---------+
+        """
         if self.test_mode:
             # clear lru cache
             self.dadc.cache.clear()
