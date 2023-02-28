@@ -1,15 +1,32 @@
 import math
-from typing import Dict
+from typing import Dict, List, Union
 
 import numpy as np
 import torch
 from scipy.sparse import issparse
-from torch.utils.data import IterableDataset, get_worker_info
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 from .distributed_anndata import DistributedAnnDataCollection
 
 
-class DistributedAnnDataCollectionDataset(IterableDataset):
+class DistributedAnnDataCollectionDataset(Dataset):
+    def __init__(self, dadc: DistributedAnnDataCollection) -> None:
+        self.dadc = dadc
+
+    def __len__(self) -> int:
+        return len(self.dadc)
+
+    def __getitem__(self, idx: int) -> Dict[str, Tensor]:
+        """Return gene counts for a cell at idx."""
+        X = self.dadc[idx].X
+
+        data = {}
+        data["X"] = X.toarray() if issparse(X) else X
+
+        return data
+
+
+class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
@@ -25,9 +42,6 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
         self.epoch = 0
         self.test_mode = test_mode
 
-    def __len__(self) -> int:
-        return len(self.dadc)
-
     def set_epoch(self, epoch: int) -> None:
         r"""
         Sets the epoch for this iterator. When :attr:`shuffle=True`, this ensures all replicas
@@ -36,7 +50,7 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
         """
         self.epoch = epoch
 
-    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
+    def __getitem__(self, idx: Union[int, List[int]]) -> Dict[str, np.ndarray]:
         """Return gene counts for a cell at idx."""
         X = self.dadc[idx].X
 
@@ -92,11 +106,4 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
             self[indices[i : i + self.batch_size]]
             for i in range(iter_start, iter_end, self.batch_size)
         )
-        #  data_iter = iter(
-        #      [
-        #          indices[idx[i : i + self.batch_size]]
-        #          for i in range(0, len(idx), self.batch_size)
-        #      ]
-        #  )
-        #  return data_iter
         self.set_epoch(self.epoch + 1)

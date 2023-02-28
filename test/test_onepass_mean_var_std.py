@@ -43,8 +43,8 @@ def dadc(adata, tmp_path):
 
 
 @pytest.mark.parametrize("shuffle", [False, True])
-@pytest.mark.parametrize("num_workers", [2, 2])
-@pytest.mark.parametrize("batch_size", [2, 2, 3])
+@pytest.mark.parametrize("num_workers", [0, 2])
+@pytest.mark.parametrize("batch_size", [1, 2, 3])
 def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
     # prepare dataloader
     dataset = DistributedAnnDataCollectionDataset(

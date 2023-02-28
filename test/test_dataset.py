@@ -8,7 +8,7 @@ from anndata import AnnData
 
 from scvid.data import (
     DistributedAnnDataCollection,
-    DistributedAnnDataCollectionDataset,
+    IterableDistributedAnnDataCollectionDataset,
     collate_fn,
 )
 
@@ -45,7 +45,7 @@ def dadc(tmp_path, request):
 )
 def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
     n_obs = len(dadc)
-    dataset = DistributedAnnDataCollectionDataset(
+    dataset = IterableDistributedAnnDataCollectionDataset(
         dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True
     )
     data_loader = torch.utils.data.DataLoader(
