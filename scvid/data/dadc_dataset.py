@@ -63,15 +63,15 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
             iter_limits = list(zip([0] + self.dadc.limits, self.dadc.limits))
             # shuffle shards
             limit_indices = torch.randperm(len(iter_limits), generator=rng).tolist()
-            cell_indices = []
+            indices = []
             for limit_idx in limit_indices:
                 lower, upper = iter_limits[limit_idx]
                 # shuffle cells within shards
-                cell_indices.extend(
+                indices.extend(
                     (torch.randperm(upper - lower, generator=rng) + lower).tolist()
                 )
         else:
-            cell_indices = list(range(len(self)))
+            indices = list(range(len(self)))
 
         worker_info = get_worker_info()
         if worker_info is None:  # single-process data loading, return the full iterator
@@ -83,10 +83,20 @@ class DistributedAnnDataCollectionDataset(IterableDataset):
             batches_per_worker = int(
                 math.ceil(num_batches / float(worker_info.num_workers))
             )
-            # batches_per_worker = num_batches // worker_info.num_workers
             per_worker = batches_per_worker * self.batch_size
             worker_id = worker_info.id
             iter_start = worker_id * per_worker
             iter_end = min(iter_start + per_worker, len(self))
-        yield from (self[cell_indices[i]] for i in range(iter_start, iter_end))
+
+        yield from (
+            self[indices[i : i + self.batch_size]]
+            for i in range(iter_start, iter_end, self.batch_size)
+        )
+        #  data_iter = iter(
+        #      [
+        #          indices[idx[i : i + self.batch_size]]
+        #          for i in range(0, len(idx), self.batch_size)
+        #      ]
+        #  )
+        #  return data_iter
         self.set_epoch(self.epoch + 1)

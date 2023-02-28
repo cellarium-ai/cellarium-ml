@@ -30,7 +30,7 @@ def dadc(tmp_path, request):
     dadc = DistributedAnnDataCollection(
         filenames,
         limits,
-        max_cache_size=1,
+        max_cache_size=2,
         cache_size_strictly_enforced=True,
     )
     return dadc
@@ -51,7 +51,6 @@ def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
-        batch_size=batch_size,
         collate_fn=collate_fn,
     )
 
