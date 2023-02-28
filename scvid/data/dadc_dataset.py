@@ -27,10 +27,21 @@ class DistributedAnnDataCollectionDataset(Dataset):
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
+    r"""
+    Iterable DistributedAnnDataCollectionDataset.
+
+    Args:
+        dadc: DistributedAnnDataCollection from which to load the data.
+        batch_size: how many samples per batch to load. Default: ``1``.
+        shuffle: set to ``True`` to have the data reshuffled
+            at every epoch. Default: ``False``.
+        seed: random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
+        test_mode: If ``True`` enables tracking of cache and worker informations.
+    """
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
-        batch_size: int,
+        batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
         test_mode: bool = False,
@@ -42,16 +53,18 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.epoch = 0
         self.test_mode = test_mode
 
+    def __len__(self) -> int:
+        return len(self.dadc)
+
     def set_epoch(self, epoch: int) -> None:
         r"""
-        Sets the epoch for this iterator. When :attr:`shuffle=True`, this ensures all replicas
-        use a different random ordering for each epoch. Otherwise, the next iteration of this
-        sampler will yield the same ordering.
+        Sets the epoch for the iterator. When :attr:`shuffle=True`, this ensures all replicas
+        use a different random ordering for each epoch.
         """
         self.epoch = epoch
 
     def __getitem__(self, idx: Union[int, List[int]]) -> Dict[str, np.ndarray]:
-        """Return gene counts for a cell at idx."""
+        """Return gene counts for cells at idx."""
         X = self.dadc[idx].X
 
         data = {}
@@ -68,6 +81,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __iter__(self):
         r"""
+        Iterate through the dataset by trying to minimize the amount of anndata files fetching
+        by multiple workers.
+
         Example 1:
 
             indices=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)

@@ -43,7 +43,7 @@ def dadc(tmp_path, request):
 @pytest.mark.parametrize(
     "batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"]
 )
-def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
+def test_iterable_dataset(dadc, shuffle, num_workers, batch_size):
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True
@@ -56,7 +56,6 @@ def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
 
     miss_counts = list(int(i) for batch in data_loader for i in batch["miss_count"])
 
-    # each anndata was loaded only once
     if num_workers > 1:
         worker_ids = list(int(i) for batch in data_loader for i in batch["worker_id"])
         for worker in range(num_workers):

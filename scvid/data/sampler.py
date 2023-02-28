@@ -39,7 +39,9 @@ class DistributedAnnDataCollectionSingleConsumerSampler(Sampler):
             for limit_idx in limit_indices:
                 lower, upper = iter_limits[limit_idx]
                 # shuffle cells within shards
-                yield from (torch.randperm(upper - lower) + lower).tolist()
+                yield from (
+                    torch.randperm(upper - lower, generator=rng) + lower
+                ).tolist()
         else:
             yield from range(self.n_obs)
         self.set_epoch(self.epoch + 1)
