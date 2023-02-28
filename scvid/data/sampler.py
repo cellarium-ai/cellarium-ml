@@ -1,5 +1,7 @@
+from functools import singledispatch
 from typing import Iterator, Sequence
 
+import numpy as np
 import torch
 from torch.utils.data.sampler import Sampler
 
@@ -59,5 +61,24 @@ class DistributedAnnDataCollectionSingleConsumerSampler(Sampler):
         self.epoch = epoch
 
 
+@singledispatch
+def map_to_tensor(x) -> torch.Tensor:
+    return x
+
+
+@map_to_tensor.register
+def _(x: np.ndarray) -> torch.Tensor:
+    return torch.from_numpy(x)
+
+
+@map_to_tensor.register
+def _(x: int) -> torch.Tensor:
+    return torch.tensor(x)
+
+
 def collate_fn(batch):
-    return {"X": torch.cat([torch.from_numpy(data["X"]) for data in batch], dim=0)}
+    keys = batch[0].keys()
+    return {
+        key: torch.cat([map_to_tensor(data[key]) for data in batch], dim=0)
+        for key in keys
+    }
