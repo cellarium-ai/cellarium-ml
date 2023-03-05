@@ -41,7 +41,7 @@ from scvid.transforms import ZScoreLog1pNormalize
 def main(args):
     # data loader
     dadc = DistributedAnnDataCollection(
-        filenames=f"gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{{045..{args.num_shards-1:03}}}.h5ad",
+        filenames=f"gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{{000..{args.num_shards-1:03}}}.h5ad",
         shard_size=10_000,
         max_cache_size=2,
     )
