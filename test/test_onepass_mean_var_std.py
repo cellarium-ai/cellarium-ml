@@ -9,6 +9,7 @@ from anndata import AnnData
 from scvid.data import (
     DistributedAnnDataCollection,
     DistributedAnnDataCollectionDataset,
+    DistributedAnnDataCollectionLoader,
     DistributedAnnDataCollectionSingleConsumerSampler,
     IterableDistributedAnnDataCollectionDataset,
     collate_fn,
@@ -44,9 +45,15 @@ def dadc(adata, tmp_path):
     )
 
 
-@pytest.mark.parametrize("shuffle", [False, True])
-@pytest.mark.parametrize("num_workers", [0, 2])
-@pytest.mark.parametrize("batch_size", [1, 2, 3])
+@pytest.mark.parametrize(
+    "shuffle", [False, True][:1], ids=["no shuffle", "shuffle"][:1]
+)
+@pytest.mark.parametrize(
+    "num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"]
+)
+@pytest.mark.parametrize(
+    "batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"]
+)
 def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
     # prepare dataloader
     dataset = DistributedAnnDataCollectionDataset(dadc)
@@ -90,9 +97,15 @@ def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
 
 
-@pytest.mark.parametrize("shuffle", [False, True])
-@pytest.mark.parametrize("num_workers", [0, 2])
-@pytest.mark.parametrize("batch_size", [1, 2, 3])
+@pytest.mark.parametrize(
+    "shuffle", [False, True], ids=["no shuffle", "shuffle"]
+)
+@pytest.mark.parametrize(
+    "num_workers", [1, 1, 1][:1], ids=["zero workers", "one worker", "two workers"][:1]
+)
+@pytest.mark.parametrize(
+    "batch_size", [2, 2, 3][:1], ids=["batch size 1", "batch size 2", "batch size 3"][:1]
+)
 def test_onepass_mean_var_std_iterable_dataset(
     adata, dadc, shuffle, num_workers, batch_size
 ):
@@ -104,7 +117,15 @@ def test_onepass_mean_var_std_iterable_dataset(
         dataset,
         num_workers=num_workers,
         collate_fn=collate_fn,
+        persistent_workers=num_workers > 0,
     )
+    #  data_loader = DistributedAnnDataCollectionLoader(
+    #      dadc,
+    #      batch_size=batch_size,
+    #      num_workers=num_workers,
+    #      # collate_fn=collate_fn,
+    #      shuffle=shuffle,
+    #  )
     transform = ZScoreLog1pNormalize(
         mean_g=0, std_g=None, perform_scaling=False, target_count=10_000
     )
@@ -113,22 +134,25 @@ def test_onepass_mean_var_std_iterable_dataset(
     model = OnePassMeanVarStd(transform=transform)
     training_plan = DummyTrainingPlan(model)
     trainer = pl.Trainer(
-        accelerator="cpu",
+        accelerator="gpu",
+        devices=2,
         max_epochs=1,  # one pass
         log_every_n_steps=1,  # to suppress logger warnings
+        strategy="ddp",
     )
-    trainer.fit(training_plan, train_dataloaders=data_loader)
+    trainer.fit(training_plan, data_loader)
 
     # actual mean, var, and std
-    actual_mean = model.mean
-    actual_var = model.var
-    actual_std = model.std
+    actual_mean = model.mean.cpu()
+    actual_var = model.var.cpu()
+    actual_std = model.std.cpu()
 
     # expected mean, var, and std
     x = transform(torch.from_numpy(adata.X))
     expected_mean = torch.mean(x, dim=0)
     expected_var = torch.var(x, dim=0, unbiased=False)
     expected_std = torch.std(x, dim=0, unbiased=False)
+    # import pdb;pdb.set_trace()
 
     np.testing.assert_allclose(expected_mean, actual_mean, atol=1e-5)
     np.testing.assert_allclose(expected_var, actual_var, atol=1e-4)

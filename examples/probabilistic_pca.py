@@ -41,7 +41,7 @@ from scvid.transforms import ZScoreLog1pNormalize
 def main(args):
     # data loader
     dadc = DistributedAnnDataCollection(
-        filenames=f"gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{{000..{args.num_shards-1:03}}}.h5ad",
+        filenames=f"gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{{045..{args.num_shards-1:03}}}.h5ad",
         shard_size=10_000,
         max_cache_size=2,
     )
@@ -79,10 +79,10 @@ if __name__ == "__main__":
     """ """
     parser = argparse.ArgumentParser(description="Probabilistic PCA example")
     parser.add_argument(
-        "--num_shards", default=50, type=int, help="number of anndata files"
+        "--num_shards", default=325, type=int, help="number of anndata files"
     )
     parser.add_argument("--batch_size", default=10_000, type=int, help="batch size")
-    parser.add_argument("--num_workers", default=0, type=int, help="number of workers")
+    parser.add_argument("--num_workers", default=4, type=int, help="number of workers")
     parser.add_argument(
         "-lr", "--learning_rate", default=0.1, type=float, help="learning rate"
     )

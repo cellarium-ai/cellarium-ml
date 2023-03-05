@@ -1,8 +1,9 @@
 import math
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from scipy.sparse import issparse
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
@@ -42,15 +43,17 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
-        batch_size: int = 1,
+        batch_size: Optional[int] = None,
         shuffle: bool = False,
         seed: int = 0,
+        drop_last: bool = False,
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
+        self.drop_last = drop_last
         self.epoch = 0
         self.test_mode = test_mode
 
@@ -138,6 +141,47 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # clear lru cache
             self.dadc.cache.clear()
 
+        # gpu nodes
+        if not dist.is_available():
+            num_replicas = 1
+            rank = 0
+        else:
+            try:
+                num_replicas = dist.get_world_size()
+                rank = dist.get_rank()
+            except RuntimeError:
+                num_replicas = 1
+                rank = 0
+        if rank >= num_replicas or rank < 0:
+            raise ValueError(
+                f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas-1}]"
+            )
+
+        if self.drop_last and len(self) % num_replicas != 0:
+            # Split to nearest available length that is evenly divisible.
+            # This is to ensure each rank receives the same amount of data when
+            # using this Sampler.
+            num_samples = math.ceil((len(self) - num_replicas) / num_replicas)
+        else:
+            num_samples = math.ceil(len(self) / num_replicas)
+        total_size = num_samples * num_replicas
+
+        # workers
+        worker_info = get_worker_info()
+        if worker_info is None:  # single-process data loading, return the full iterator
+            worker_id = 0
+            num_workers = 1
+        else:  # in a worker process
+            # split workload
+            worker_id = worker_info.id
+            num_workers = worker_info.num_workers
+        num_batches = math.ceil(num_samples / float(self.batch_size))
+        batches_per_worker = math.ceil(num_batches / float(num_workers))
+        per_worker = batches_per_worker * self.batch_size
+        iter_start = worker_id * per_worker + rank * num_samples
+        iter_end = min(iter_start + per_worker, (rank + 1) * num_samples)
+
+        # indices
         if self.shuffle:
             rng = torch.Generator()
             rng.manual_seed(self.seed + self.epoch)
@@ -154,20 +198,19 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             indices = list(range(len(self)))
 
-        worker_info = get_worker_info()
-        if worker_info is None:  # single-process data loading, return the full iterator
-            iter_start = 0
-            iter_end = len(self)
-        else:  # in a worker process
-            # split workload
-            num_batches = int(math.ceil(len(self) / float(self.batch_size)))
-            batches_per_worker = int(
-                math.ceil(num_batches / float(worker_info.num_workers))
-            )
-            per_worker = batches_per_worker * self.batch_size
-            worker_id = worker_info.id
-            iter_start = worker_id * per_worker
-            iter_end = min(iter_start + per_worker, len(self))
+        if not self.drop_last:
+            # add extra samples to make it evenly divisible
+            padding_size = total_size - len(indices)
+            if padding_size <= len(indices):
+                indices += indices[:padding_size]
+            else:
+                indices += (indices * math.ceil(padding_size / len(indices)))[
+                    :padding_size
+                ]
+        else:
+            # remove tail of data to make it evenly divisible.
+            indices = indices[:total_size]
+        assert len(indices) == total_size
 
         yield from (
             self[indices[i : i + self.batch_size]]

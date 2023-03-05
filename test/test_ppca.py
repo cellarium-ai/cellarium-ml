@@ -1,25 +1,15 @@
+from test.common import TestDataset
+
 import numpy as np
 import pyro
 import pytest
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Dataset
 
 from scvid.module import ProbabilisticPCAPyroModule
 from scvid.train import PyroTrainingPlan
 
 n, g, k = 1000, 10, 2
-
-
-class TestDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return {"X": self.data[idx]}
 
 
 @pytest.fixture
@@ -47,7 +37,7 @@ def test_probabilistic_pca(x_ng, minibatch, ppca_flavor, learn_mean):
 
     # dataloader
     batch_size = n // 2 if minibatch else n
-    train_loader = DataLoader(
+    train_loader = torch.utils.data.DataLoader(
         TestDataset(x_ng),
         batch_size=batch_size,
     )

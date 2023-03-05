@@ -2,6 +2,7 @@ from .dadc_dataset import (
     DistributedAnnDataCollectionDataset,
     IterableDistributedAnnDataCollectionDataset,
 )
+from .dataloader import DistributedAnnDataCollectionLoader
 from .distributed_anndata import DistributedAnnDataCollection
 from .read import read_h5ad_file, read_h5ad_gcs, read_h5ad_local
 from .sampler import DistributedAnnDataCollectionSingleConsumerSampler, collate_fn
@@ -12,6 +13,7 @@ __all__ = [
     "collate_fn",
     "DistributedAnnDataCollection",
     "DistributedAnnDataCollectionDataset",
+    "DistributedAnnDataCollectionLoader",
     "DistributedAnnDataCollectionSingleConsumerSampler",
     "IterableDistributedAnnDataCollectionDataset",
     "read_h5ad_file",
