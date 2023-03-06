@@ -10,6 +10,13 @@ from .distributed_anndata import DistributedAnnDataCollection
 
 
 class DistributedAnnDataCollectionDataset(Dataset):
+    r"""
+    DistributedAnnDataCollection Dataset.
+
+    Args:
+        dadc: DistributedAnnDataCollection from which to load the data.
+    """
+
     def __init__(self, dadc: DistributedAnnDataCollection) -> None:
         self.dadc = dadc
 
@@ -17,7 +24,11 @@ class DistributedAnnDataCollectionDataset(Dataset):
         return len(self.dadc)
 
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
-        """Return gene counts for a cell at idx."""
+        r"""
+        Return feature counts for cells at idx.
+
+        If the count data ``X`` is sparse then it is densified.
+        """
         X = self.dadc[idx].X
 
         data = {}
@@ -28,7 +39,7 @@ class DistributedAnnDataCollectionDataset(Dataset):
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     r"""
-    Iterable DistributedAnnDataCollectionDataset.
+    Iterable DistributedAnnDataCollection Dataset.
 
     Args:
         dadc: DistributedAnnDataCollection from which to load the data.
@@ -65,7 +76,11 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.epoch = epoch
 
     def __getitem__(self, idx: Union[int, List[int]]) -> Dict[str, np.ndarray]:
-        """Return gene counts for cells at idx."""
+        r"""
+        Return feature counts for cells at idx.
+
+        If the count data ``X`` is sparse then it is densified.
+        """
         X = self.dadc[idx].X
 
         data = {}
@@ -85,54 +100,69 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         Iterate through the dataset by trying to minimize the amount of anndata files
         fetched by each worker.
 
-        Example 1:
+        .. note::
+            Returned iterator is determined by the ``torch.utils.data.get_worker_info()``
+            context. If single worker, then we iterate over entire dataset. If multiple
+            workers, we iterate over a subset of cells in a manner that minimizes
+            the overlap between the data chunks loaded by each worker.
 
-            indices=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+        Example 1::
 
-            n_obs=12, batch_size=2, num_workers=3
-            num_batches=6, batches_per_worker=2, per_worker=2*2=4
+            indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            n_obs=12
+            batch_size=2
+            num_workers=3
+            num_batches=6
+            batches_per_worker=2
+            per_worker=4
 
-                        batch per worker
-                          0       1
-                      +-----------------+
-                    0 | (0,1) | (2,3)   |
-                      |-------+---------+
-            worker  1 | (4,5) | (6,7)   |
-                      +-------+---------+
-                    2 | (8,9) | (10,11) |
-                      +-------+---------+
-
-
-        Example 2:
-
-            indices=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-
-            n_obs=11, batch_size=2, num_workers=2
-            num_batches=6, batches_per_worker=3, per_worker=2*3=6
-
-                          batch per worker
-                          0       1       2
-                      +-----------------------+
-                    0 | (0,1) | (2,3) | (4,5) |
-            worker    |-------+-------+-------+
-                    1 | (6,7) | (8,9) | (10,) |
-                      +-------+---------------+
+        +----------+-------+---------+
+        |          |batch 0| batch 1 |
+        +==========+=======+=========+
+        | worker 0 | (0,1) | (2,3)   |
+        +----------+-------+---------+
+        | worker 1 | (4,5) | (6,7)   |
+        +----------+-------+---------+
+        | worker 2 | (8,9) | (10,11) |
+        +----------+-------+---------+
 
 
-        Example 3:
+        Example 2::
 
-            indices=(0, 1, 2, 3, 4, 5, 6, 7)
+            indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            n_obs=11
+            batch_size=2
+            num_workers=2
+            num_batches=6
+            batches_per_worker=3
+            per_worker=6
 
-            n_obs=8, batch_size=3, num_workers=2
-            num_batches=3, batches_per_worker=2, per_worker=2*3=6
+        +----------+-------+-------+-------+
+        |          |batch 0|batch 1|batch 2|
+        +==========+=======+=======+=======+
+        | worker 0 | (0,1) | (2,3) | (4,5) |
+        +----------+-------+-------+-------+
+        | worker 1 | (6,7) | (8,9) | (10,) |
+        +----------+-------+-------+-------+
 
-                          batch per worker
-                          0       1       2
-                      +-------------------+
-                    0 | (0,1,2) | (3,4,5) |
-            worker    |---------+---------+
-                    1 | (6,7)   |         |
-                      +---------+---------+
+
+        Example 3::
+
+            indices=[0, 1, 2, 3, 4, 5, 6, 7]
+            n_obs=8
+            batch_size=3
+            num_workers=2
+            num_batches=3
+            batches_per_worker=2
+            per_worker=6
+
+        +----------+---------+---------+
+        |          | batch 0 | batch 1 |
+        +==========+=========+=========+
+        | worker 0 | (0,1,2) | (3,4,5) |
+        +----------+---------+---------+
+        | worker 1 | (6,7)   |         |
+        +----------+---------+---------+
         """
         if self.test_mode:
             # clear lru cache
