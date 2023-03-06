@@ -79,10 +79,10 @@ if __name__ == "__main__":
     """ """
     parser = argparse.ArgumentParser(description="Probabilistic PCA example")
     parser.add_argument(
-        "--num_shards", default=50, type=int, help="number of anndata files"
+        "--num_shards", default=325, type=int, help="number of anndata files"
     )
     parser.add_argument("--batch_size", default=10_000, type=int, help="batch size")
-    parser.add_argument("--num_workers", default=0, type=int, help="number of workers")
+    parser.add_argument("--num_workers", default=4, type=int, help="number of workers")
     parser.add_argument(
         "-lr", "--learning_rate", default=0.1, type=float, help="learning rate"
     )
