@@ -2,7 +2,7 @@
 Example: One Pass Mean Var Std
 ==============================
 
-This example shows how to run calculate mean, variance, and standard deviation of log normalized
+This example shows how to calculate mean, variance, and standard deviation of log normalized
 gene expression count data in one pass.
 
 Example run::
@@ -58,6 +58,7 @@ def main(args):
         accelerator=args.accelerator,
         devices=1,
         max_epochs=1,  # one pass
+        default_root_dir=args.default_root_dir,
     )
     trainer.fit(plan, train_dataloaders=data_loader)
 
@@ -71,6 +72,12 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", default=4, type=int, help="number of workers")
     parser.add_argument(
         "--accelerator", default="cpu", type=str, help="accelerator device"
+    )
+    parser.add_argument(
+        "--default_root_dir",
+        default="runs/onepass",
+        type=str,
+        help="default path for logs and weights",
     )
     args = parser.parse_args()
 
