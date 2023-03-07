@@ -3,7 +3,7 @@ Example: One Pass Mean Var Std
 ==============================
 
 This example shows how to calculate mean, variance, and standard deviation of log normalized
-gene expression count data in one pass.
+gene expression count data in one pass [1].
 
 Example run::
     python examples/onepass_mean_var_std.py --accelerator gpu --num_workers 4 \

@@ -83,7 +83,7 @@ if __name__ == "__main__":
         "-lr", "--learning_rate", default=0.1, type=float, help="learning rate"
     )
     parser.add_argument(
-        "--num_comps", default=256, type=int, help="number of PCA components"
+        "--num_components", default=256, type=int, help="number of PCA components"
     )
     parser.add_argument(
         "--ckpt_path",
