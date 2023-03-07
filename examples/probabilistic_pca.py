@@ -24,7 +24,6 @@ Example run::
 
 import argparse
 
-import pyro
 import pytorch_lightning as pl
 import torch
 
@@ -68,15 +67,12 @@ def main(args):
     )
     plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": args.learning_rate})
 
-    # clear param store
-    pyro.clear_param_store()
     # train
     trainer = pl.Trainer.from_argparse_args(args)
     trainer.fit(plan, train_dataloaders=data_loader, ckpt_path=args.ckpt_path)
 
 
 if __name__ == "__main__":
-    """ """
     parser = argparse.ArgumentParser(description="Probabilistic PCA example")
     parser.add_argument(
         "--num_shards", default=325, type=int, help="number of anndata files"
