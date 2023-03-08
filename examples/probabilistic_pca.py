@@ -24,7 +24,6 @@ Example run::
 
 import argparse
 
-import pyro
 import pytorch_lightning as pl
 import torch
 
@@ -61,22 +60,19 @@ def main(args):
     ppca = ProbabilisticPCAPyroModule(
         n_cells=dadc.n_obs,
         g_genes=dadc.n_vars,
-        k_components=args.num_comps,
+        k_components=args.num_components,
         ppca_flavor=args.ppca_flavor,
         mean_g=None,  # learned
         transform=transform,
     )
     plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": args.learning_rate})
 
-    # clear param store
-    pyro.clear_param_store()
     # train
     trainer = pl.Trainer.from_argparse_args(args)
     trainer.fit(plan, train_dataloaders=data_loader, ckpt_path=args.ckpt_path)
 
 
 if __name__ == "__main__":
-    """ """
     parser = argparse.ArgumentParser(description="Probabilistic PCA example")
     parser.add_argument(
         "--num_shards", default=325, type=int, help="number of anndata files"
@@ -87,7 +83,7 @@ if __name__ == "__main__":
         "-lr", "--learning_rate", default=0.1, type=float, help="learning rate"
     )
     parser.add_argument(
-        "--num_comps", default=256, type=int, help="number of PCA components"
+        "--num_components", default=256, type=int, help="number of PCA components"
     )
     parser.add_argument(
         "--ckpt_path",
