@@ -23,7 +23,7 @@ def adata():
     n_cell, g_gene = (10, 5)
     rng = np.random.default_rng(1465)
     X = rng.integers(10, size=(n_cell, g_gene))
-    return AnnData(X, dtype=X.float32)
+    return AnnData(X, dtype=X.dtype)
 
 
 @pytest.fixture
