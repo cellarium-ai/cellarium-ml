@@ -40,6 +40,7 @@ setuptools.setup(
         "boltons",
         "braceexpand",
         "pyro-ppl",
+        "pytorch_lightning",
         "torch",
     ],
     extras_require={
