@@ -35,8 +35,7 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     include_package_data=True,
     install_requires=[
-        "anndata @ git+https://github.com/cellarium-ai/anndata.git@distributed",
-        "scvi-tools @ git+https://github.com/cellarium-ai/scvi-tools.git@distributed",
+        "anndata",
         "google-cloud-storage",
         "boltons",
         "braceexpand",
