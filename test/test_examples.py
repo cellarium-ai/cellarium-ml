@@ -13,7 +13,7 @@ EXAMPLES = [
 ]
 
 
-@pytest.mark.skipif(os.environ.get("CI") is True, reason="GCS keys are not available")
+@pytest.mark.skipif("CI" in os.environ, reason="GCS keys are not available")
 @pytest.mark.parametrize("example", EXAMPLES)
 def test_cpu(example):
     print(f"Running:\npython examples/{example}")
