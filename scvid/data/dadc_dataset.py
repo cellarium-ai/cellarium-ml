@@ -5,7 +5,6 @@ import numpy as np
 import torch
 from scipy.sparse import issparse
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
-import gc
 
 from .distributed_anndata import DistributedAnnDataCollection
 
@@ -94,7 +93,6 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 data["worker_id"] = np.array([worker_info.id])
             data["miss_count"] = np.array([self.dadc.cache.miss_count])
 
-        gc.collect()
         return data
 
     def __iter__(self):
