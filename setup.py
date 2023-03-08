@@ -39,6 +39,7 @@ setuptools.setup(
         "google-cloud-storage",
         "boltons",
         "braceexpand",
+        "pyro-ppl",
         "torch",
     ],
     extras_require={
