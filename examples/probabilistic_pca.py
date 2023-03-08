@@ -60,7 +60,7 @@ def main(args):
     ppca = ProbabilisticPCAPyroModule(
         n_cells=dadc.n_obs,
         g_genes=dadc.n_vars,
-        k_components=args.num_comps,
+        k_components=args.num_components,
         ppca_flavor=args.ppca_flavor,
         mean_g=None,  # learned
         transform=transform,
