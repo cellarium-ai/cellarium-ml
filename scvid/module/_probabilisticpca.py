@@ -17,7 +17,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         n_cells: Number of cells.
         g_genes: Number of genes.
         k_components: Number of principal components.
-        ppca_flavor: Type of the PPCA model. Has to be one of `marginalize` or `diagonal_normal`
+        ppca_flavor: Type of the PPCA model. Has to be one of `marginalized` or `diagonal_normal`
             or `multivariate_normal`.
         mean_g: Mean gene expression of the input data.
         w: Scale of the random initialization of the `W_kg` parameter.
