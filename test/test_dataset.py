@@ -1,12 +1,12 @@
 import math
 import os
 
-import common
 import numpy as np
 import pytest
 import pytorch_lightning as pl
 import torch
 from anndata import AnnData
+from typing import Dict, Iterable, Tuple
 
 from scvid.data import (
     DistributedAnnDataCollection,
@@ -19,22 +19,23 @@ from scvid.train import DummyTrainingPlan
 class TestModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.idx_sum = torch.nn.Parameter(torch.tensor(0.0))
         self.iter_data = []
-        self.idx = torch.nn.Parameter(torch.tensor(0.0))
 
     @staticmethod
     def _get_fn_args_from_batch(
         tensor_dict: Dict[str, torch.Tensor]
     ) -> Tuple[Iterable, dict]:
-        return (), tensor_dict
+        x = tensor_dict["X"]
+        return (x,), {}
 
-    def forward(self, **batch):
-        self.iter_data.append(batch)
-        loss = batch["X"].sum() * self.idx
+    def forward(self, idx):
+        loss = -self.idx_sum * idx.sum()
+        self.iter_data.append(idx)
         return loss
 
 
-@pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]][:1])  # limits
+@pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])  # limits
 def dadc(tmp_path, request):
     limits = request.param
     n_cell = limits[-1]
@@ -103,7 +104,10 @@ def test_iterable_dataset(dadc, shuffle, num_workers, batch_size):
 @pytest.mark.parametrize(
     "batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"]
 )
-def test_iterable_dataset_multigpu(dadc, shuffle, num_workers, batch_size):
+@pytest.mark.parametrize(
+    "devices", [1, 2], ids=["one device", "two devices"]
+)
+def test_iterable_dataset_multi_device(dadc, shuffle, num_workers, batch_size, devices):
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True
@@ -115,21 +119,23 @@ def test_iterable_dataset_multigpu(dadc, shuffle, num_workers, batch_size):
     )
 
     # fit
-    model = common.TestModule()
+    model = TestModule()
     training_plan = DummyTrainingPlan(model)
     trainer = pl.Trainer(
-        accelerator="gpu",
-        devices=2,
+        accelerator="cpu",
+        devices=devices,
         max_epochs=1,  # one pass
         log_every_n_steps=1,  # to suppress logger warnings
         strategy="ddp",
     )
     trainer.fit(training_plan, train_dataloaders=data_loader)
-    # print("MODULE")
-    #  print("MODULE: ", model.iter_data)
-    #  print("PLAN: ", training_plan.iter_data)
-    # print("PARAM: ", model.idx)
-    assert model.idx.item() == -33.0
+
+    print(model.iter_data)
+
+    expected_idx_sum = n_obs * (n_obs - 1) / 2
+    actual_idx_sum = model.idx_sum.item() * devices
+
+    assert expected_idx_sum == actual_idx_sum
     #
     #  data_loader = model.iter_data
     #
@@ -149,7 +155,6 @@ def test_iterable_dataset_multigpu(dadc, shuffle, num_workers, batch_size):
 
     #  breakpoint()
     #  actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
-    #  expected_idx = list(range(n_obs))
     #
     #  # assert entire dataset is sampled
     #  assert len(expected_idx) == (len(actual_idx) + 2) // 2
