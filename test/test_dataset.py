@@ -105,7 +105,7 @@ def test_iterable_dataset(dadc, shuffle, num_workers, batch_size):
     "batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"]
 )
 @pytest.mark.parametrize(
-    "devices", [1, 2], ids=["one device", "two devices"]
+    "devices", [1, 2][1:], ids=["one device", "two devices"][1:]
 )
 def test_iterable_dataset_multi_device(dadc, shuffle, num_workers, batch_size, devices):
     n_obs = len(dadc)

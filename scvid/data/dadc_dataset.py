@@ -253,6 +253,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             indices = indices[:total_size]
         assert len(indices) == total_size
         print("RANK: ", rank)
+        print("NUM REPLICAS: ", num_replicas)
         print("iter: ", range(iter_start, iter_end))
 
         yield from (
