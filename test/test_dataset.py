@@ -16,6 +16,24 @@ from scvid.data import (
 from scvid.train import DummyTrainingPlan
 
 
+class TestModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.iter_data = []
+        self.idx = torch.nn.Parameter(torch.tensor(0.0))
+
+    @staticmethod
+    def _get_fn_args_from_batch(
+        tensor_dict: Dict[str, torch.Tensor]
+    ) -> Tuple[Iterable, dict]:
+        return (), tensor_dict
+
+    def forward(self, **batch):
+        self.iter_data.append(batch)
+        loss = batch["X"].sum() * self.idx
+        return loss
+
+
 @pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]][:1])  # limits
 def dadc(tmp_path, request):
     limits = request.param
