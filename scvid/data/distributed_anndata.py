@@ -1,7 +1,6 @@
 from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple, Union
 
-import numpy as np
 import pandas as pd
 from anndata import AnnData
 from anndata._core.index import Index, _normalize_indices
@@ -12,7 +11,6 @@ from anndata.experimental.multi_files._anncollection import (
 )
 from boltons.cacheutils import LRU, cachedproperty
 from braceexpand import braceexpand
-from scvi.data._utils import get_anndata_attribute
 
 from .read import read_h5ad_file
 from .schema import AnnDataSchema
@@ -307,12 +305,3 @@ class LazyAnnData:
                 if len(keys) > 0:
                     descr += f"\n    {attr}: {str(list(keys))[1:-1]}"
         return descr
-
-
-@get_anndata_attribute.register
-def _(
-    adata: AnnCollection,
-    attr_name: str,
-    attr_key: Optional[str] = None,
-) -> Union[np.ndarray, pd.DataFrame]:
-    return adata.lazy_attr(attr_name, attr_key)
