@@ -44,7 +44,7 @@ def dadc(tmp_path):
 
     rng = np.random.default_rng(1465)
     X = rng.integers(10, size=(n_cell, g_gene))
-    adata = AnnData(X)
+    adata = AnnData(X, dtype=X.dtype)
     for i, limit in enumerate(zip([0] + limits, limits)):
         sliced_adata = adata[slice(*limit)]
         sliced_adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))

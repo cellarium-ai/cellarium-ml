@@ -2,7 +2,7 @@
 Example: Probabilistic PCA
 ==========================
 
-This example shows how to fit gene expression count data to probabilistic PCA
+This example shows how to fit feature count data to probabilistic PCA
 model [1].
 
 There are three flavors of probabilistic PCA model that are available:
