@@ -1,5 +1,5 @@
 import math
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Union
 
 import numpy as np
 import torch
@@ -54,7 +54,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
-        batch_size: Optional[int] = None,
+        batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
         drop_last: bool = False,
@@ -91,6 +91,17 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         # for testing purposes
         if self.test_mode:
+            if not dist.is_available():
+                num_replicas = 1
+                rank = 0
+            else:
+                try:
+                    num_replicas = dist.get_world_size()
+                    rank = dist.get_rank()
+                except RuntimeError:
+                    num_replicas = 1
+                    rank = 0
+            data["rank"] = np.array([rank])
             worker_info = get_worker_info()
             if worker_info is not None:
                 data["worker_id"] = np.array([worker_info.id])
@@ -241,6 +252,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
         assert len(indices) == total_size
+        print("RANK: ", rank)
+        print("iter: ", range(iter_start, iter_end))
 
         yield from (
             self[indices[i : i + self.batch_size]]

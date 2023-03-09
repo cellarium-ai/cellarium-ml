@@ -63,14 +63,15 @@ class DummyTrainingPlan(pl.LightningModule):
         super().__init__()
         self.module = module
         # self.automatic_optimization = False
-        self._dummy_param = torch.nn.Parameter(torch.Tensor([0.0]))
+        self._dummy_param = torch.nn.Parameter(torch.tensor([0.0]))
         self.iter_data = []
 
     def training_step(self, batch, batch_idx):
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         loss = self.module(*args, **kwargs)
-        self.iter_data.append(batch_idx)
+        self.iter_data.append(batch)
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.SGD([self._dummy_param], lr=1.0)
+        return torch.optim.SGD(self.module.parameters(), lr=1.0)
+        # return torch.optim.SGD([self._dummy_param], lr=1.0)
