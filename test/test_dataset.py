@@ -20,7 +20,7 @@ def dadc(tmp_path, request):
     g_gene = 1
 
     X = np.arange(n_cell).reshape(n_cell, g_gene)
-    adata = AnnData(X)
+    adata = AnnData(X, dtype=X.dtype)
     for i, limit in enumerate(zip([0] + limits, limits)):
         sliced_adata = adata[slice(*limit)]
         sliced_adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))
