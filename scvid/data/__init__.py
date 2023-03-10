@@ -1,6 +1,7 @@
 from .dadc_dataset import (
     DistributedAnnDataCollectionDataset,
     IterableDistributedAnnDataCollectionDataset,
+    get_rank_and_num_replicas,
 )
 from .distributed_anndata import DistributedAnnDataCollection
 from .read import read_h5ad_file, read_h5ad_gcs, read_h5ad_local
@@ -14,6 +15,7 @@ __all__ = [
     "DistributedAnnDataCollectionDataset",
     "DistributedAnnDataCollectionSingleConsumerSampler",
     "IterableDistributedAnnDataCollectionDataset",
+    "get_rank_and_num_replicas",
     "read_h5ad_file",
     "read_h5ad_gcs",
     "read_h5ad_local",

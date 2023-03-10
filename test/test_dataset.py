@@ -1,38 +1,41 @@
 import math
 import os
+from typing import Dict, Iterable, Tuple
 
 import numpy as np
 import pytest
 import pytorch_lightning as pl
 import torch
+import torch.distributed as dist
 from anndata import AnnData
-from typing import Dict, Iterable, Tuple
 
 from scvid.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
     collate_fn,
+    get_rank_and_num_replicas,
 )
+from scvid.module import GatherLayer
 from scvid.train import DummyTrainingPlan
 
 
 class TestModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.idx_sum = torch.nn.Parameter(torch.tensor(0.0))
         self.iter_data = []
 
     @staticmethod
     def _get_fn_args_from_batch(
         tensor_dict: Dict[str, torch.Tensor]
     ) -> Tuple[Iterable, dict]:
-        x = tensor_dict["X"]
-        return (x,), {}
+        return (), tensor_dict
 
-    def forward(self, idx):
-        loss = -self.idx_sum * idx.sum()
-        self.iter_data.append(idx)
-        return loss
+    def forward(self, **batch):
+        _, num_replicas = get_rank_and_num_replicas()
+        if num_replicas > 1:
+            for key, value in batch.items():
+                batch[key] = torch.cat(GatherLayer.apply(value), dim=0)
+        self.iter_data.append(batch)
 
 
 @pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])  # limits
@@ -95,22 +98,25 @@ def test_iterable_dataset(dadc, shuffle, num_workers, batch_size):
     assert set(expected_idx) == set(actual_idx)
 
 
-@pytest.mark.parametrize(
-    "shuffle", [False, True], ids=["no shuffle", "shuffle"]
-)
+@pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
 @pytest.mark.parametrize(
     "num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"]
 )
 @pytest.mark.parametrize(
     "batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"]
 )
-@pytest.mark.parametrize(
-    "devices", [1, 2][1:], ids=["one device", "two devices"][1:]
-)
-def test_iterable_dataset_multi_device(dadc, shuffle, num_workers, batch_size, devices):
+@pytest.mark.parametrize("drop_last", [False, True], ids=["no drop last", "drop last"])
+def test_iterable_dataset_multi_device(
+    dadc, shuffle, num_workers, batch_size, drop_last
+):
     n_obs = len(dadc)
+    devices = 2
     dataset = IterableDistributedAnnDataCollectionDataset(
-        dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True
+        dadc,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        test_mode=True,
     )
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -126,36 +132,21 @@ def test_iterable_dataset_multi_device(dadc, shuffle, num_workers, batch_size, d
         devices=devices,
         max_epochs=1,  # one pass
         log_every_n_steps=1,  # to suppress logger warnings
-        strategy="ddp",
+        strategy="ddp" if devices > 1 else None,
     )
     trainer.fit(training_plan, train_dataloaders=data_loader)
 
-    print(model.iter_data)
+    data_loader = model.iter_data
 
-    expected_idx_sum = n_obs * (n_obs - 1) / 2
-    actual_idx_sum = model.idx_sum.item() * devices
+    actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
+    expected_idx = list(range(n_obs))
 
-    assert expected_idx_sum == actual_idx_sum
-    #
-    #  data_loader = model.iter_data
-    #
-    #  rank = data_loader[0]["rank"].item()
-    #  print("RANK: ", rank)
-    #  assert rank in [0, 1]
-    #  miss_counts = list(int(i) for batch in data_loader for i in batch["miss_count"])
-
-    #  if num_workers > 1:
-    #      worker_ids = list(int(i) for batch in data_loader for i in batch["worker_id"])
-    #      for worker in range(num_workers):
-    #          miss_count = max(c for c, w in zip(miss_counts, worker_ids) if w == worker)
-    #          assert miss_count == math.ceil(len(dadc.limits) / (num_workers * 2))
-    #  else:
-    #      miss_count = max(miss_counts)
-    #      assert miss_count == math.ceil(len(dadc.limits) / 2)
-
-    #  breakpoint()
-    #  actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
-    #
-    #  # assert entire dataset is sampled
-    #  assert len(expected_idx) == (len(actual_idx) + 2) // 2
-    #  assert set(expected_idx) == set(actual_idx)
+    # assert entire dataset is sampled
+    if drop_last and n_obs % devices != 0:
+        expected_len = (n_obs // devices) * devices
+        assert expected_len == len(actual_idx)
+        assert set(actual_idx).issubset(expected_idx)
+    else:
+        expected_len = math.ceil(n_obs / devices) * devices
+        assert expected_len == len(actual_idx)
+        assert set(expected_idx) == set(actual_idx)

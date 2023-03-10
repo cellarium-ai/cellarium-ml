@@ -102,6 +102,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                     num_replicas = 1
                     rank = 0
             data["rank"] = np.array([rank])
+            data["num_replicas"] = np.array([num_replicas])
             worker_info = get_worker_info()
             if worker_info is not None:
                 data["worker_id"] = np.array([worker_info.id])
@@ -183,26 +184,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             self.dadc.cache.clear()
 
         # gpu nodes
-        if not dist.is_available():
-            num_replicas = 1
-            rank = 0
-        else:
-            try:
-                num_replicas = dist.get_world_size()
-                rank = dist.get_rank()
-            except RuntimeError:
-                num_replicas = 1
-                rank = 0
-        if rank >= num_replicas or rank < 0:
-            raise ValueError(
-                f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas-1}]"
-            )
+        rank, num_replicas = get_rank_and_num_replicas()
 
         if self.drop_last and len(self) % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data when
             # using this Sampler.
-            num_samples = math.ceil((len(self) - num_replicas) / num_replicas)
+            num_samples = len(self) // num_replicas
         else:
             num_samples = math.ceil(len(self) / num_replicas)
         total_size = num_samples * num_replicas
@@ -219,8 +207,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         num_batches = math.ceil(num_samples / float(self.batch_size))
         batches_per_worker = math.ceil(num_batches / float(num_workers))
         per_worker = batches_per_worker * self.batch_size
-        iter_start = worker_id * per_worker + rank * num_samples
-        iter_end = min(iter_start + per_worker, (rank + 1) * num_samples)
+        iter_start = worker_id * per_worker
+        iter_end = min(iter_start + per_worker, num_samples)
 
         # indices
         if self.shuffle:
@@ -251,13 +239,33 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
-        assert len(indices) == total_size
-        print("RANK: ", rank)
+        indices = indices[rank * num_samples : (rank + 1) * num_samples]
+        assert len(indices) == num_samples
+        # print("RANK: ", rank)
         print("NUM REPLICAS: ", num_replicas)
-        print("iter: ", range(iter_start, iter_end))
+        # print("iter: ", range(iter_start, iter_end))
+        print("RANK: ", rank, "INDICES: ", indices[iter_start:iter_end])
 
         yield from (
             self[indices[i : i + self.batch_size]]
             for i in range(iter_start, iter_end, self.batch_size)
         )
         self.set_epoch(self.epoch + 1)
+
+
+def get_rank_and_num_replicas() -> Tuple[int, int]:
+    if not dist.is_available():
+        num_replicas = 1
+        rank = 0
+    else:
+        try:
+            num_replicas = dist.get_world_size()
+            rank = dist.get_rank()
+        except RuntimeError:
+            num_replicas = 1
+            rank = 0
+    if rank >= num_replicas or rank < 0:
+        raise ValueError(
+            f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas-1}]"
+        )
+    return rank, num_replicas
