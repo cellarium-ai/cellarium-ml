@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 import pytorch_lightning as pl
 import torch
-import torch.distributed as dist
 from anndata import AnnData
 
 from scvid.data import (

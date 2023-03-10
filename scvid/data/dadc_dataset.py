@@ -1,11 +1,12 @@
 import math
-from typing import Dict, List, Union
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from scipy.sparse import issparse
-from torch.utils.data import Dataset, IterableDataset, get_worker_info
+from torch.utils.data import Dataset, IterableDataset
+from torch.utils.data import get_worker_info as _get_worker_info
 
 from .distributed_anndata import DistributedAnnDataCollection
 
@@ -91,21 +92,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         # for testing purposes
         if self.test_mode:
-            if not dist.is_available():
-                num_replicas = 1
-                rank = 0
-            else:
-                try:
-                    num_replicas = dist.get_world_size()
-                    rank = dist.get_rank()
-                except RuntimeError:
-                    num_replicas = 1
-                    rank = 0
+            rank, num_replicas = get_rank_and_num_replicas()
+            worker_id, num_workers = get_worker_info()
             data["rank"] = np.array([rank])
             data["num_replicas"] = np.array([num_replicas])
-            worker_info = get_worker_info()
-            if worker_info is not None:
-                data["worker_id"] = np.array([worker_info.id])
+            data["worker_id"] = np.array([worker_id])
+            data["num_workers"] = np.array([num_workers])
             data["miss_count"] = np.array([self.dadc.cache.miss_count])
 
         return data
@@ -183,32 +175,28 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # clear lru cache
             self.dadc.cache.clear()
 
-        # gpu nodes
+        # devices
         rank, num_replicas = get_rank_and_num_replicas()
 
         if self.drop_last and len(self) % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data when
             # using this Sampler.
-            num_samples = len(self) // num_replicas
+            per_replica = len(self) // num_replicas
         else:
-            num_samples = math.ceil(len(self) / num_replicas)
-        total_size = num_samples * num_replicas
+            per_replica = math.ceil(len(self) / num_replicas)
+        total_size = per_replica * num_replicas
+        batches_per_replica = math.ceil(per_replica / float(self.batch_size))
 
         # workers
-        worker_info = get_worker_info()
-        if worker_info is None:  # single-process data loading, return the full iterator
-            worker_id = 0
-            num_workers = 1
-        else:  # in a worker process
-            # split workload
-            worker_id = worker_info.id
-            num_workers = worker_info.num_workers
-        num_batches = math.ceil(num_samples / float(self.batch_size))
-        batches_per_worker = math.ceil(num_batches / float(num_workers))
+        worker_id, num_workers = get_worker_info()
+
+        batches_per_worker = math.ceil(batches_per_replica / float(num_workers))
         per_worker = batches_per_worker * self.batch_size
+
+        # split workload
         iter_start = worker_id * per_worker
-        iter_end = min(iter_start + per_worker, num_samples)
+        iter_end = min(iter_start + per_worker, per_replica)
 
         # indices
         if self.shuffle:
@@ -239,12 +227,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
-        indices = indices[rank * num_samples : (rank + 1) * num_samples]
-        assert len(indices) == num_samples
-        # print("RANK: ", rank)
-        print("NUM REPLICAS: ", num_replicas)
-        # print("iter: ", range(iter_start, iter_end))
-        print("RANK: ", rank, "INDICES: ", indices[iter_start:iter_end])
+        indices = indices[rank * per_replica : (rank + 1) * per_replica]
+        assert len(indices) == per_replica
 
         yield from (
             self[indices[i : i + self.batch_size]]
@@ -269,3 +253,14 @@ def get_rank_and_num_replicas() -> Tuple[int, int]:
             f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas-1}]"
         )
     return rank, num_replicas
+
+
+def get_worker_info() -> Tuple[int, int]:
+    worker_info = _get_worker_info()
+    if worker_info is None:
+        worker_id = 0
+        num_workers = 1
+    else:
+        worker_id = worker_info.id
+        num_workers = worker_info.num_workers
+    return worker_id, num_workers
