@@ -179,13 +179,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # clear lru cache
             self.dadc.cache.clear()
 
-        # devices
+        # replicas
         rank, num_replicas = get_rank_and_num_replicas()
 
         if self.drop_last and len(self) % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
-            # This is to ensure each rank receives the same amount of data when
-            # using this Sampler.
+            # This is to ensure each rank receives the same amount of data.
             per_replica = len(self) // num_replicas
         else:
             per_replica = math.ceil(len(self) / num_replicas)

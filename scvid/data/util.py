@@ -22,8 +22,8 @@ def get_rank_and_num_replicas() -> Tuple[int, int]:
             rank = dist.get_rank()
         except RuntimeError:
             warnings.warn(
-                "Default process group has not been initialized. "
-                "Falling back to a single device setting.",
+                "Distributed package is available but the default process group has not been initialized. "
+                "Falling back to ``rank=0`` and ``num_replicas=1``.",
                 UserWarning,
             )
             num_replicas = 1
