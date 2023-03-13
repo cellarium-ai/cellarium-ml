@@ -34,7 +34,7 @@ class TestModule(torch.nn.Module):
         return (), tensor_dict
 
     def forward(self, **batch):
-        _, num_replicas = get_rank_and_num_replicas()
+        num_replicas = get_rank_and_num_replicas()[1]
         if num_replicas > 1:
             for key, value in batch.items():
                 batch[key] = torch.cat(GatherLayer.apply(value), dim=0)
@@ -139,18 +139,21 @@ def test_iterable_dataset_multi_device(
     )
     trainer.fit(training_plan, data_loader)
 
-    if trainer.global_rank == 0:
-        data_loader = model.iter_data
+    # run tests only for rank 0
+    if trainer.global_rank != 0:
+        return
 
-        actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
-        expected_idx = list(range(n_obs))
+    data_loader = model.iter_data
 
-        # assert entire dataset is sampled
-        if drop_last and n_obs % devices != 0:
-            expected_len = (n_obs // devices) * devices
-            assert expected_len == len(actual_idx)
-            assert set(actual_idx).issubset(expected_idx)
-        else:
-            expected_len = math.ceil(n_obs / devices) * devices
-            assert expected_len == len(actual_idx)
-            assert set(expected_idx) == set(actual_idx)
+    actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
+    expected_idx = list(range(n_obs))
+
+    # assert entire dataset is sampled
+    if drop_last and n_obs % devices != 0:
+        expected_len = (n_obs // devices) * devices
+        assert expected_len == len(actual_idx)
+        assert set(actual_idx).issubset(expected_idx)
+    else:
+        expected_len = math.ceil(n_obs / devices) * devices
+        assert expected_len == len(actual_idx)
+        assert set(expected_idx) == set(actual_idx)

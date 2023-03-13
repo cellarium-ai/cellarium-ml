@@ -15,12 +15,12 @@ format: FORCE
 	black .
 	isort .
 
-test: lint FORCE
+test: FORCE
 ifeq (${TEST_DEVICES}, 2)
-		pytest test -k multi_device
-else
-		# default
-		pytest test
+	pytest -v -n auto -k multi_device
+else (${TEST_DEVICES}, 1)
+	# default
+	pytest -v -n auto
 endif
 
 FORCE:

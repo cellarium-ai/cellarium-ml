@@ -3,6 +3,9 @@ from typing import Dict, Iterable, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from scvid.data.util import get_rank_and_num_replicas
+from scvid.module import GatherLayer
+
 
 class OnePassMeanVarStd(nn.Module):
     """
@@ -27,6 +30,9 @@ class OnePassMeanVarStd(nn.Module):
     def forward(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)
+        num_replicas = get_rank_and_num_replicas()[1]
+        if num_replicas > 1:
+            x_ng = torch.cat(GatherLayer.apply(x_ng), dim=0)
         self.x_sums += x_ng.sum(dim=0)
         self.x_squared_sums += (x_ng**2).sum(dim=0)
         self.x_size += x_ng.shape[0]

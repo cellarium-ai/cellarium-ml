@@ -9,8 +9,8 @@ from scvid.data import (
     DistributedAnnDataCollection,
     DistributedAnnDataCollectionDataset,
     DistributedAnnDataCollectionSingleConsumerSampler,
-    collate_fn,
 )
+from scvid.data.util import collate_fn
 
 
 @pytest.mark.parametrize("limits", [(4, 10), (2, 5, 10)])

@@ -10,7 +10,7 @@ on:
     branches: [ main ]
 
 jobs:
-  default:
+  build:
 
     runs-on: ubuntu-latest
     strategy:
@@ -18,7 +18,7 @@ jobs:
         python-version: ["3.8"]
 
     env:
-      TEST_DEVICES: 1
+      TEST_DEVICES: [1, 2]
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python 3.8
@@ -31,27 +31,5 @@ jobs:
         pip install .[test]
     - name: Lint and test with pytest
       run: |
-        make test
-
-  multi-device:
-
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.8"]
-
-    env:
-      TEST_DEVICES: 2
-    steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python 3.8
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install .[test]
-    - name: Lint and test with pytest
-      run: |
+        make lint
         make test

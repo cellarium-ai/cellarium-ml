@@ -19,6 +19,7 @@ TEST_REQUIRE = [
     "flake8",
     "isort",
     "pytest",
+    "pytest-xdist",
 ]
 
 setuptools.setup(
