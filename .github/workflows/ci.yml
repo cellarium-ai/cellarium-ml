@@ -32,5 +32,4 @@ jobs:
         pip install .[test]
     - name: Lint and test with pytest
       run: |
-        make lint
         make test

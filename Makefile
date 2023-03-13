@@ -15,9 +15,9 @@ format: FORCE
 	black .
 	isort .
 
-test: FORCE
+test: lint FORCE
 ifeq (${TEST_DEVICES}, 2)
-	pytest -v -n auto -k multi_device
+	pytest -v -k multi_device
 else (${TEST_DEVICES}, 1)
 	# default
 	pytest -v -n auto

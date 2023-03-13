@@ -1,3 +1,4 @@
+import warnings
 from typing import Tuple
 
 import torch
@@ -6,6 +7,12 @@ from torch.utils.data import get_worker_info as _get_worker_info
 
 
 def get_rank_and_num_replicas() -> Tuple[int, int]:
+    """
+    This helper function returns the rank of the current process and
+    the number of processes in the default process group. If distributed
+    package is not available or default process group has not been initialized
+    then it returns ``rank=0`` and ``num_replicas=1``.
+    """
     if not dist.is_available():
         num_replicas = 1
         rank = 0
@@ -14,7 +21,11 @@ def get_rank_and_num_replicas() -> Tuple[int, int]:
             num_replicas = dist.get_world_size()
             rank = dist.get_rank()
         except RuntimeError:
-            print("WARNING")
+            warnings.warn(
+                "Default process group has not been initialized. "
+                "Falling back to a single device setting.",
+                UserWarning,
+            )
             num_replicas = 1
             rank = 0
     if rank >= num_replicas or rank < 0:
@@ -25,6 +36,10 @@ def get_rank_and_num_replicas() -> Tuple[int, int]:
 
 
 def get_worker_info() -> Tuple[int, int]:
+    """
+    This helper function always returns ``worker_id`` and ``num_workers``
+    even if ``worker_info`` is ``None``.
+    """
     worker_info = _get_worker_info()
     if worker_info is None:
         worker_id = 0
