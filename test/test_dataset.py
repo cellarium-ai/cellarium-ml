@@ -112,7 +112,7 @@ def test_iterable_dataset(dadc, shuffle, num_workers, batch_size):
 def test_iterable_dataset_multi_device(
     dadc, shuffle, num_workers, batch_size, drop_last
 ):
-    devices = int(os.environ.get("TEST_DEVICES", 1))
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,

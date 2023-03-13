@@ -96,7 +96,7 @@ def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
 def test_onepass_mean_var_std_iterable_dataset_multi_device(
     adata, dadc, shuffle, num_workers, batch_size
 ):
-    devices = int(os.environ.get("TEST_DEVICES", 1))
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc, batch_size=batch_size, shuffle=shuffle
