@@ -59,11 +59,3 @@ class DistributedAnnDataCollectionSingleConsumerSampler(Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
-
-
-def collate_fn(batch):
-    keys = batch[0].keys()
-    return {
-        key: torch.cat([torch.from_numpy(data[key]) for data in batch], dim=0)
-        for key in keys
-    }

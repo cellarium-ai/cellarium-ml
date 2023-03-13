@@ -16,6 +16,11 @@ format: FORCE
 	isort .
 
 test: lint FORCE
-	pytest test
+ifeq (${TEST_DEVICES}, 2)
+		pytest test -k multi_device
+else
+		# default
+		pytest test
+endif
 
 FORCE:

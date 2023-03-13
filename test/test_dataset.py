@@ -11,11 +11,15 @@ from anndata import AnnData
 from scvid.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
-    collate_fn,
-    get_rank_and_num_replicas,
 )
+from scvid.data.util import collate_fn, get_rank_and_num_replicas
 from scvid.module import GatherLayer
 from scvid.train import DummyTrainingPlan
+
+# RuntimeError: Too many open files. Communication with the workers is no longer possible.
+# Please increase the limit using `ulimit -n` in the shell or change the sharing strategy
+# by calling `torch.multiprocessing.set_sharing_strategy('file_system')` at the beginning of your code
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 class TestModule(torch.nn.Module):
@@ -108,8 +112,8 @@ def test_iterable_dataset(dadc, shuffle, num_workers, batch_size):
 def test_iterable_dataset_multi_device(
     dadc, shuffle, num_workers, batch_size, drop_last
 ):
+    devices = int(os.environ.get("TEST_DEVICES", 1))
     n_obs = len(dadc)
-    devices = 2
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
         batch_size=batch_size,
@@ -131,21 +135,22 @@ def test_iterable_dataset_multi_device(
         devices=devices,
         max_epochs=1,  # one pass
         log_every_n_steps=1,  # to suppress logger warnings
-        strategy="ddp" if devices > 1 else None,
+        strategy="ddp",
     )
-    trainer.fit(training_plan, train_dataloaders=data_loader)
+    trainer.fit(training_plan, data_loader)
 
-    data_loader = model.iter_data
+    if trainer.global_rank == 0:
+        data_loader = model.iter_data
 
-    actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
-    expected_idx = list(range(n_obs))
+        actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
+        expected_idx = list(range(n_obs))
 
-    # assert entire dataset is sampled
-    if drop_last and n_obs % devices != 0:
-        expected_len = (n_obs // devices) * devices
-        assert expected_len == len(actual_idx)
-        assert set(actual_idx).issubset(expected_idx)
-    else:
-        expected_len = math.ceil(n_obs / devices) * devices
-        assert expected_len == len(actual_idx)
-        assert set(expected_idx) == set(actual_idx)
+        # assert entire dataset is sampled
+        if drop_last and n_obs % devices != 0:
+            expected_len = (n_obs // devices) * devices
+            assert expected_len == len(actual_idx)
+            assert set(actual_idx).issubset(expected_idx)
+        else:
+            expected_len = math.ceil(n_obs / devices) * devices
+            assert expected_len == len(actual_idx)
+            assert set(expected_idx) == set(actual_idx)

@@ -1,14 +1,13 @@
 import math
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Union
 
 import numpy as np
 import torch
-import torch.distributed as dist
 from scipy.sparse import issparse
 from torch.utils.data import Dataset, IterableDataset
-from torch.utils.data import get_worker_info as _get_worker_info
 
 from .distributed_anndata import DistributedAnnDataCollection
+from .util import get_rank_and_num_replicas, get_worker_info
 
 
 class DistributedAnnDataCollectionDataset(Dataset):
@@ -235,32 +234,3 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             for i in range(iter_start, iter_end, self.batch_size)
         )
         self.set_epoch(self.epoch + 1)
-
-
-def get_rank_and_num_replicas() -> Tuple[int, int]:
-    if not dist.is_available():
-        num_replicas = 1
-        rank = 0
-    else:
-        try:
-            num_replicas = dist.get_world_size()
-            rank = dist.get_rank()
-        except RuntimeError:
-            num_replicas = 1
-            rank = 0
-    if rank >= num_replicas or rank < 0:
-        raise ValueError(
-            f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas-1}]"
-        )
-    return rank, num_replicas
-
-
-def get_worker_info() -> Tuple[int, int]:
-    worker_info = _get_worker_info()
-    if worker_info is None:
-        worker_id = 0
-        num_workers = 1
-    else:
-        worker_id = worker_info.id
-        num_workers = worker_info.num_workers
-    return worker_id, num_workers
