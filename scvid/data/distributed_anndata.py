@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple, Union
 

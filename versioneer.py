@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Version: 0.28
 
 """The Versioneer - like a rocketeer, but for versions.
