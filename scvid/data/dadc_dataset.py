@@ -48,6 +48,10 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         shuffle: set to ``True`` to have the data reshuffled
             at every epoch. Default: ``False``.
         seed: random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
+        drop_last: If ``True``, then the sampler will drop the tail of the data
+            to make it evenly divisible across the number of replicas. If ``False``,
+            the sampler will add extra indices to make the data evenly divisible across
+            the replicas. Default: ``False``.
         test_mode: If ``True`` enables tracking of cache and worker informations.
     """
 
@@ -108,8 +112,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         .. note::
             Returned iterator is determined by the ``torch.utils.data.get_worker_info()``
-            context. If single worker, then we iterate over entire dataset. If multiple
-            workers, we iterate over a subset of cells in a manner that minimizes
+            and ``torch.distributed`` contexts. Indices are evenly divided between replicas
+            (see :attr:`drop_last`). If single worker, then we iterate over entire replica.
+            If multiple workers, we iterate over a subset of replica in a manner that minimizes
             the overlap between the data chunks loaded by each worker.
 
         Example 1::
