@@ -54,6 +54,7 @@ class DistributedAnnDataCollection(AnnCollection):
         filenames: Names of anndata files.
         limits: Limits of cell indices.
         shard_size: Shard size.
+        last_shard_size: Last shard size.
         max_cache_size: Max size of the cache.
         cache_size_strictly_enforced: Assert that the number of retrieved anndatas is not more than maxsize.
         label: Column in `.obs` to place batch information in. If it's None, no column is added.
@@ -79,6 +80,7 @@ class DistributedAnnDataCollection(AnnCollection):
         filenames: Union[Sequence[str], str],
         limits: Optional[Sequence[int]] = None,
         shard_size: Optional[int] = None,
+        last_shard_size: Optional[int] = None,
         max_cache_size: Optional[int] = None,
         cache_size_strictly_enforced: bool = True,
         label: Optional[str] = None,
@@ -91,12 +93,18 @@ class DistributedAnnDataCollection(AnnCollection):
             filenames = braceexpand(filenames)
         self.filenames = list(filenames)
         assert isinstance(self.filenames[0], str)
-        if (limits is None) == (shard_size is None):
+        if (limits is None) is (shard_size is None):
             raise ValueError(
                 "Either `limits` or `shard_size` must be specified, but not both."
             )
+        elif (shard_size is None) and (last_shard_size is not None):
+            raise ValueError(
+                "If `last_shard_size` is specified then `shard_size` must also be specified."
+            )
         if shard_size is not None:
             limits = [shard_size * (i + 1) for i in range(len(self.filenames))]
+            if last_shard_size is not None:
+                limits[-1] = limits[-1] - shard_size + last_shard_size
         else:
             limits = list(limits)
         assert len(limits) == len(self.filenames)

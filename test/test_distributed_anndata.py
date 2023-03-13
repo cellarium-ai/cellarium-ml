@@ -88,6 +88,26 @@ def test_init_dat(dat):
         dat.schema.validate_anndata(adata)
 
 
+@pytest.mark.parametrize("num_shards", [3, 4, 10])
+@pytest.mark.parametrize("last_shard_size", [1, 2, 3, None])
+def test_init_shard_size(adatas_path, num_shards, last_shard_size):
+    shard_size = 2
+    filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards-1:03}}}.h5ad"))
+    dadc = DistributedAnnDataCollection(
+        filenames,
+        shard_size=shard_size,
+        last_shard_size=last_shard_size,
+        max_cache_size=1,
+    )
+
+    actual_len = len(dadc)
+    expected_len = num_shards * shard_size
+    if last_shard_size is not None:
+        expected_len = expected_len + last_shard_size - shard_size
+
+    assert actual_len == expected_len
+
+
 @pytest.mark.parametrize(
     "row_select",
     [(slice(0, 2), 1), (slice(1, 4), 2), ([1, 2, 4, 4], 2), ([6, 1, 3], 3)],
