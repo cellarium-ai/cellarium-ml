@@ -21,7 +21,7 @@ format: license FORCE
 test: lint FORCE
 ifeq (${TEST_DEVICES}, 2)
 	pytest -v -k multi_device
-else (${TEST_DEVICES}, 1)
+else ifeq (${TEST_DEVICES}, 1)
 	# default
 	pytest -v -n auto
 endif
