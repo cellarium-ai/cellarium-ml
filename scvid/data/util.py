@@ -40,8 +40,8 @@ def get_rank_and_num_replicas() -> Tuple[int, int]:
 
 def get_worker_info() -> Tuple[int, int]:
     """
-    This helper function always returns ``worker_id`` and ``num_workers``
-    even if ``worker_info`` is ``None``.
+    This helper function returns ``worker_id`` and ``num_workers``. If it is running
+    in the main process then it returns ``worker_id=0`` and ``num_workers=1``.
     """
     worker_info = _get_worker_info()
     if worker_info is None:
