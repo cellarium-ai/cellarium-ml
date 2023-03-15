@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 from typing import Optional
 
 import pyro
