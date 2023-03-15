@@ -1,4 +1,4 @@
-.PHONY: install lint format test FORCE
+.PHONY: install lint license format test FORCE
 
 install: FORCE
 	pip install -e .[dev]
@@ -11,7 +11,10 @@ lint: FORCE
 	black --check .
 	isort --check .
 
-format: FORCE
+license: FORCE
+	python scripts/update_headers.py
+
+format: license FORCE
 	black .
 	isort .
 

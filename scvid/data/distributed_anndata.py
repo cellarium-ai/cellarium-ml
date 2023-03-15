@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -244,7 +247,7 @@ class LazyAnnData:
 
     @property
     def n_vars(self) -> int:
-        return len(self.var_names)
+        return len(self.schema.attr_values["var_names"])
 
     @property
     def shape(self) -> Tuple[int, int]:

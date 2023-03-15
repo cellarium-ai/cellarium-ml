@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import math
 from typing import Dict, List, Union
 
