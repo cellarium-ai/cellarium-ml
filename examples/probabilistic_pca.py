@@ -30,8 +30,8 @@ import torch
 from scvid.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
-    collate_fn,
 )
+from scvid.data.util import collate_fn
 from scvid.module import ProbabilisticPCAPyroModule
 from scvid.train import PyroTrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize

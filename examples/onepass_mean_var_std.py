@@ -23,8 +23,8 @@ import torch
 from scvid.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
-    collate_fn,
 )
+from scvid.data.util import collate_fn
 from scvid.module.onepass_mean_var_std import OnePassMeanVarStd
 from scvid.train.training_plan import DummyTrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
@@ -56,8 +56,9 @@ def main(args):
     # train
     trainer = pl.Trainer(
         accelerator=args.accelerator,
-        devices=1,
+        devices=args.devices,
         max_epochs=1,  # one pass
+        strategy=args.strategy,
         default_root_dir=args.default_root_dir,
     )
     trainer.fit(plan, train_dataloaders=data_loader)
@@ -73,6 +74,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--accelerator", default="cpu", type=str, help="accelerator device"
     )
+    parser.add_argument(
+        "--devices", default=1, type=int, help="number or a list of devices"
+    )
+    parser.add_argument("--strategy", default="ddp", type=str, help="strategy")
     parser.add_argument(
         "--default_root_dir",
         default="runs/onepass",
