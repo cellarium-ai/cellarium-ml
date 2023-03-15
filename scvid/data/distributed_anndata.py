@@ -46,11 +46,26 @@ class DistributedAnnDataCollection(AnnCollection):
     The schema is inferred from the first AnnData file in the collection. Individual AnnData files may
     otherwise vary in the number of cells, and the actual content stored in `.X`, `.layers`, `.obs` and `.obsm`.
 
-    Example::
+    Example 1::
+
+        >>> dadc = DistributedAnnDataCollection(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10000,  # use if shards are sized evenly
+        ...     max_cache_size=2)
+
+    Example 2::
 
         >>> dadc = DistributedAnnDataCollection(
         ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
         ...     shard_size=10000,
+        ...     last_shard_size=6000,  # use if the size of the last shard is different
+        ...     max_cache_size=2)
+
+    Example 3::
+
+        >>> dadc = DistributedAnnDataCollection(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     limits=[500, 1000, 2000, 2500, 3000, 4000],  # use if shards are sized unevenly
         ...     max_cache_size=2)
 
     Args:
