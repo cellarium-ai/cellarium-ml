@@ -244,7 +244,7 @@ class LazyAnnData:
 
     @property
     def n_vars(self) -> int:
-        return len(self.var_names)
+        return len(self.schema.attr_values["var_names"])
 
     @property
     def shape(self) -> Tuple[int, int]:

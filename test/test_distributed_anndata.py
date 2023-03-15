@@ -83,7 +83,15 @@ def test_init_dat(dat):
     # check that only one anndata was loaded during initialization
     assert len(dat.cache) == 1
 
-    for ladata in dat.adatas:
+    for i, ladata in enumerate(dat.adatas):
+        # check that calling repr doesn't load anndata
+        repr(ladata)
+        if i == 0:
+            assert ladata.cached is True
+        else:
+            assert ladata.cached is False
+
+        # validate anndata
         adata = ladata.adata
         dat.schema.validate_anndata(adata)
 
