@@ -3,6 +3,7 @@
 
 import os
 import pickle
+import tracemalloc
 
 import numpy as np
 import pandas as pd
@@ -191,3 +192,49 @@ def test_pickle_dataset(dat):
     assert len(new_dataset.dadc.cache) == 0
 
     np.testing.assert_array_equal(new_dataset[:2]["X"], dataset[:2]["X"])
+
+
+@pytest.fixture
+def large_dadc(tmp_path):
+    X = np.ones((10_000, 1000))
+    adata = AnnData(X, dtype=X.dtype)
+    for i in range(4):
+        adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))
+    # distributed anndata
+    filenames = str(os.path.join(tmp_path, "adata.{000..003}.h5ad"))
+    dadc = DistributedAnnDataCollection(
+        filenames,
+        shard_size=10_000,
+        max_cache_size=1,
+        cache_size_strictly_enforced=True,
+    )
+    return dadc
+
+
+def test_lru_cache(large_dadc):
+
+    large_dadc.adatas[0].adata
+    #  size, _ = tracemalloc.get_traced_memory()
+    #  size = size / (1024 * 1024)  # in MB
+    #  # assert size < 1
+    #  print(size)
+
+    large_dadc.adatas[1].adata
+    #  size, _ = tracemalloc.get_traced_memory()
+    #  size = size / (1024 * 1024)  # in MB
+    #  # assert size < 1
+    #  print(size)
+
+
+    tracemalloc.start()
+    large_dadc.adatas[2].adata
+    size, _ = tracemalloc.get_traced_memory()
+    size = size / (1024 * 1024)  # in MB
+    # assert size < 1
+    print(size)
+
+    large_dadc.adatas[3].adata
+    size, _ = tracemalloc.get_traced_memory()
+    size = size / (1024 * 1024)  # in MB
+    # assert size < 1
+    print(size)

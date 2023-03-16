@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import gc
 from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -301,7 +302,14 @@ class LazyAnnData:
             )
             self.schema.validate_anndata(adata)
             # cache anndata
-            self.cache[self.filename] = adata
+            if len(self.cache) < self.cache.max_size:
+                self.cache[self.filename] = adata
+            else:
+                self.cache[self.filename] = adata
+                # garbage collection of AnnData is not reliable
+                # therefore we call garbage collection manually to free up the memory
+                # https://github.com/scverse/anndata/issues/360
+                gc.collect()
         return adata
 
     def __getattr__(self, attr):

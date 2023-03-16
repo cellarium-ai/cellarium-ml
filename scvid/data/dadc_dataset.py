@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import gc
 import math
 from typing import Dict, List, Union
 
@@ -96,11 +95,6 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             if worker_info is not None:
                 data["worker_id"] = np.array([worker_info.id])
             data["miss_count"] = np.array([self.dadc.cache.miss_count])
-
-        # garbage collection of AnnData is not reliable
-        # therefore we call garbage collection manually to free up the memory
-        # https://github.com/scverse/anndata/issues/360
-        gc.collect()
 
         return data
 
