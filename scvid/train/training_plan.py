@@ -59,7 +59,9 @@ class PyroTrainingPlan(pl.LightningModule):
 
 class DummyTrainingPlan(pl.LightningModule):
     """
-    Lightning module task to train OnePassMeanVarStd.
+    Lightning module task that does not perform any actual optimization (no gradient updates).
+    It can be used for cases where only the forward pass is required (e.g., for calculating
+    sufficient statistics, EM algorithms, etc.).
     """
 
     def __init__(self, module: torch.nn.Module):

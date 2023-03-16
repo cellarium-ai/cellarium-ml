@@ -33,7 +33,7 @@ class OnePassMeanVarStd(nn.Module):
     def forward(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)
-        num_replicas = get_rank_and_num_replicas()[1]
+        _, num_replicas = get_rank_and_num_replicas()
         if num_replicas > 1:
             x_ng = torch.cat(GatherLayer.apply(x_ng), dim=0)
         self.x_sums += x_ng.sum(dim=0)

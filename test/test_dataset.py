@@ -26,6 +26,13 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 class TestModule(torch.nn.Module):
+    """
+    This module appends a batch input to an :attr:`iter_data` list at each iteration.
+    Its intended use is for testing purposes where batch inputs can be inspected after
+    iteration over the dataset with ``Trainer.fit()``. Batch input would typically  contain
+    feature counts, worker info, torch.distributed info, cache info, etc.
+    """
+
     def __init__(self):
         super().__init__()
         self.iter_data = []
@@ -37,7 +44,7 @@ class TestModule(torch.nn.Module):
         return (), tensor_dict
 
     def forward(self, **batch):
-        num_replicas = get_rank_and_num_replicas()[1]
+        _, num_replicas = get_rank_and_num_replicas()
         if num_replicas > 1:
             for key, value in batch.items():
                 batch[key] = torch.cat(GatherLayer.apply(value), dim=0)

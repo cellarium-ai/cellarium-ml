@@ -45,12 +45,22 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     r"""
     Iterable DistributedAnnDataCollection Dataset.
 
+    When :attr:`shuffle` is set to ``True`` then the iterator yields datapoints that are
+    uniformly sampled from the entire dataset. Typical use cases include training variational
+    models using the stochastic gradient descent algorithm.
+
+    In order to maximize buffer usage, we only shuffle shards and datapoints within individual
+    shards (and not across shards). Therefore, to achieve unbiased pseudo-random uniform sampling,
+    it is imperative that the shards themselves contain datapoints that are uniformly sampled
+    from the entire dataset. If correlations exist between datapoints in a given shard (e.g. all
+    cells coming from the same tissue or experiment), then this assumption is violated. It is
+    the user's responsibility to prepare appropriately shuffled data shards.
+
     Args:
         dadc: DistributedAnnDataCollection from which to load the data.
-        batch_size: how many samples per batch to load. Default: ``1``.
-        shuffle: set to ``True`` to have the data reshuffled
-            at every epoch. Default: ``False``.
-        seed: random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
+        batch_size: How many samples per batch to load. Default: ``1``.
+        shuffle: Set to ``True`` to have the data reshuffled at every epoch. Default: ``False``.
+        seed: Random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
         drop_last: If ``True``, then the sampler will drop the tail of the data
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
@@ -115,15 +125,17 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         .. note::
             Returned iterator is determined by the ``torch.utils.data.get_worker_info()``
-            and ``torch.distributed`` contexts. Indices are evenly divided between replicas
-            (see :attr:`drop_last`). If single worker, then we iterate over entire replica.
-            If multiple workers, we iterate over a subset of replica in a manner that minimizes
-            the overlap between the data chunks loaded by each worker.
+            and ``torch.distributed`` contexts. Iterated indices are evenly divided between replicas
+            (see :attr:`drop_last`). If multiple workers per replica, then indices are further
+            divided between workers (last worker might contain less indices than other workers, see
+            examples below). Indices are shuffled and iterated in a manner that minimizes the overlap
+            between the data chunks loaded by each worker.
 
         Example 1::
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
             n_obs=12
+            num_replicas=1
             batch_size=2
             num_workers=3
             num_batches=6
@@ -145,6 +157,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             n_obs=11
+            num_replicas=1
             batch_size=2
             num_workers=2
             num_batches=6
@@ -164,6 +177,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7]
             n_obs=8
+            num_replicas=1
             batch_size=3
             num_workers=2
             num_batches=3
@@ -177,6 +191,88 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +----------+---------+---------+
         | worker 1 | (6,7)   |         |
         +----------+---------+---------+
+
+
+        Example 4::
+
+            indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            n_obs=11
+            num_replicas=2
+            drop_last=True
+
+            truncated_indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+            total_size=10
+
+            first_replica=[0, 1, 2, 3, 4]
+            batch_size=2
+            num_workers=1
+            num_batches=3
+            batches_per_worker=3
+            per_worker=6
+
+            second_replica=[5, 6, 7, 8, 9]
+            batch_size=2
+            num_workers=1
+            num_batches=3
+            batches_per_worker=3
+            per_worker=6
+
+        *Replica 1*
+
+        +----------+-------+-------+-------+
+        |          |batch 0|batch 1|batch 2|
+        +==========+=======+=======+=======+
+        | worker 0 | (0,1) | (2,3) | (4,)  |
+        +----------+-------+-------+-------+
+
+        *Replica 2*
+
+        +----------+-------+-------+-------+
+        |          |batch 0|batch 1|batch 2|
+        +==========+=======+=======+=======+
+        | worker 0 | (5,6) | (7,8) | (9,)  |
+        +----------+-------+-------+-------+
+
+
+        Example 5::
+
+            indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            n_obs=11
+            num_replicas=2
+            drop_last=False
+
+            padded_indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0]
+            total_size=12
+
+            first_replica=[0, 1, 2, 3, 4, 5]
+            batch_size=2
+            num_workers=1
+            num_batches=3
+            batches_per_worker=3
+            per_worker=6
+
+            second_replica=[6, 7, 8, 9, 10, 0]
+            batch_size=2
+            num_workers=1
+            num_batches=3
+            batches_per_worker=3
+            per_worker=6
+
+        *Replica 1*
+
+        +----------+-------+-------+-------+
+        |          |batch 0|batch 1|batch 2|
+        +==========+=======+=======+=======+
+        | worker 0 | (0,1) | (2,3) | (4,5) |
+        +----------+-------+-------+-------+
+
+        *Replica 2*
+
+        +----------+-------+-------+--------+
+        |          |batch 0|batch 1|batch 2 |
+        +==========+=======+=======+========+
+        | worker 0 | (6,7) | (8,9) | (10,0) |
+        +----------+-------+-------+--------+
         """
         if self.test_mode:
             # clear lru cache
