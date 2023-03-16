@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import os
 import pickle
 
@@ -83,9 +86,37 @@ def test_init_dat(dat):
     # check that only one anndata was loaded during initialization
     assert len(dat.cache) == 1
 
-    for ladata in dat.adatas:
+    for i, ladata in enumerate(dat.adatas):
+        # check that calling repr doesn't load anndata
+        repr(ladata)
+        if i == 0:
+            assert ladata.cached is True
+        else:
+            assert ladata.cached is False
+
+        # validate anndata
         adata = ladata.adata
         dat.schema.validate_anndata(adata)
+
+
+@pytest.mark.parametrize("num_shards", [3, 4, 10])
+@pytest.mark.parametrize("last_shard_size", [1, 2, 3, None])
+def test_init_shard_size(adatas_path, num_shards, last_shard_size):
+    shard_size = 2
+    filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards-1:03}}}.h5ad"))
+    dadc = DistributedAnnDataCollection(
+        filenames,
+        shard_size=shard_size,
+        last_shard_size=last_shard_size,
+        max_cache_size=1,
+    )
+
+    actual_len = len(dadc)
+    expected_len = num_shards * shard_size
+    if last_shard_size is not None:
+        expected_len = expected_len + last_shard_size - shard_size
+
+    assert actual_len == expected_len
 
 
 @pytest.mark.parametrize(

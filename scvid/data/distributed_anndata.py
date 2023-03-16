@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -43,17 +46,33 @@ class DistributedAnnDataCollection(AnnCollection):
     The schema is inferred from the first AnnData file in the collection. Individual AnnData files may
     otherwise vary in the number of cells, and the actual content stored in `.X`, `.layers`, `.obs` and `.obsm`.
 
-    Example::
+    Example 1::
+
+        >>> dadc = DistributedAnnDataCollection(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10000,  # use if shards are sized evenly
+        ...     max_cache_size=2)
+
+    Example 2::
 
         >>> dadc = DistributedAnnDataCollection(
         ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
         ...     shard_size=10000,
+        ...     last_shard_size=6000,  # use if the size of the last shard is different
+        ...     max_cache_size=2)
+
+    Example 3::
+
+        >>> dadc = DistributedAnnDataCollection(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     limits=[500, 1000, 2000, 2500, 3000, 4000],  # use if shards are sized unevenly
         ...     max_cache_size=2)
 
     Args:
         filenames: Names of anndata files.
         limits: Limits of cell indices.
         shard_size: Shard size.
+        last_shard_size: Last shard size.
         max_cache_size: Max size of the cache.
         cache_size_strictly_enforced: Assert that the number of retrieved anndatas is not more than maxsize.
         label: Column in `.obs` to place batch information in. If it's None, no column is added.
@@ -79,6 +98,7 @@ class DistributedAnnDataCollection(AnnCollection):
         filenames: Union[Sequence[str], str],
         limits: Optional[Sequence[int]] = None,
         shard_size: Optional[int] = None,
+        last_shard_size: Optional[int] = None,
         max_cache_size: Optional[int] = None,
         cache_size_strictly_enforced: bool = True,
         label: Optional[str] = None,
@@ -91,12 +111,18 @@ class DistributedAnnDataCollection(AnnCollection):
             filenames = braceexpand(filenames)
         self.filenames = list(filenames)
         assert isinstance(self.filenames[0], str)
-        if (limits is None) == (shard_size is None):
+        if (limits is None) is (shard_size is None):
             raise ValueError(
                 "Either `limits` or `shard_size` must be specified, but not both."
             )
+        elif (shard_size is None) and (last_shard_size is not None):
+            raise ValueError(
+                "If `last_shard_size` is specified then `shard_size` must also be specified."
+            )
         if shard_size is not None:
             limits = [shard_size * (i + 1) for i in range(len(self.filenames))]
+            if last_shard_size is not None:
+                limits[-1] = limits[-1] - shard_size + last_shard_size
         else:
             limits = list(limits)
         assert len(limits) == len(self.filenames)
@@ -106,6 +132,7 @@ class DistributedAnnDataCollection(AnnCollection):
         self.cache_size_strictly_enforced = cache_size_strictly_enforced
         # schema
         adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
+        assert len(adata0) == limits[0]
         self.schema = AnnDataSchema(adata0)
         # lazy anndatas
         lazy_adatas = [
@@ -244,7 +271,7 @@ class LazyAnnData:
 
     @property
     def n_vars(self) -> int:
-        return len(self.var_names)
+        return len(self.schema.attr_values["var_names"])
 
     @property
     def shape(self) -> Tuple[int, int]:
