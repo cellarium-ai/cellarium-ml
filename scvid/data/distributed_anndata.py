@@ -4,6 +4,7 @@
 from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple, Union
 
+import gc
 import pandas as pd
 from anndata import AnnData
 from anndata._core.index import Index, _normalize_indices
@@ -301,7 +302,11 @@ class LazyAnnData:
             )
             self.schema.validate_anndata(adata)
             # cache anndata
-            self.cache[self.filename] = adata
+            if len(self.cache) < self.cache.max_size:
+                self.cache[self.filename] = adata
+            else:
+                self.cache[self.filename] = adata
+                gc.collect()
         return adata
 
     def __getattr__(self, attr):

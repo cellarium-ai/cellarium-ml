@@ -56,6 +56,10 @@ class PyroTrainingPlan(pl.LightningModule):
         """Configure optimizers for the model."""
         return self.optim(self.module.parameters(), **self.optim_kwargs)
 
+    def on_train_epoch_start(self):
+        breakpoint()
+        pass
+
 
 class DummyTrainingPlan(pl.LightningModule):
     """
