@@ -61,7 +61,7 @@ def test_probabilistic_pca(x_ng, minibatch, ppca_flavor, learn_mean):
     )
     training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 5e-2})
     # trainer
-    trainer = pl.Trainer(accelerator="cpu", max_steps=1500)
+    trainer = pl.Trainer(barebones=True, accelerator="cpu", max_steps=1500)
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
 
