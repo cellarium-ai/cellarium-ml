@@ -29,7 +29,7 @@ class TestModule(torch.nn.Module):
     """
     This module appends a batch input to an :attr:`iter_data` list at each iteration.
     Its intended use is for testing purposes where batch inputs can be inspected after
-    iteration over the dataset with ``Trainer.fit()``. Batch input would typically  contain
+    iteration over the dataset with ``Trainer.fit()``. Batch input would typically contain
     feature counts, worker info, torch.distributed info, cache info, etc.
     """
 
