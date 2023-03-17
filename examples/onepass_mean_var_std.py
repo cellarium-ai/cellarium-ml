@@ -76,11 +76,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", default=4, type=int, help="number of workers")
     # Trainer args
     parser.add_argument("--accelerator", type=str, default="cpu")
-    parser.add_argument(
-        "--devices", type=int, default=1
-    )
-    parser.add_argument("--default_root_dir", type=str, default="runs/onepass")
+    parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--strategy", type=str, default="ddp")
+    parser.add_argument("--default_root_dir", type=str, default="runs/onepass")
     args = parser.parse_args()
 
     main(args)
