@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+
 import numpy as np
 import pyro
 import pytest
@@ -42,7 +44,8 @@ def x_ng():
 )
 @pytest.mark.parametrize("learn_mean", [False, True])
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
-def test_probabilistic_pca(x_ng, minibatch, ppca_flavor, learn_mean):
+def test_probabilistic_pca_multi_device(x_ng, minibatch, ppca_flavor, learn_mean):
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
     if learn_mean:
         x_mean_g = None
     else:
@@ -61,7 +64,13 @@ def test_probabilistic_pca(x_ng, minibatch, ppca_flavor, learn_mean):
     )
     training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 5e-2})
     # trainer
-    trainer = pl.Trainer(barebones=True, accelerator="cpu", max_steps=1500)
+    trainer = pl.Trainer(
+        barebones=True,
+        accelerator="cpu",
+        devices=devices,
+        max_steps=1500,
+        strategy="ddp",
+    )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
 
