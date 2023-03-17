@@ -74,19 +74,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch_size", default=10_000, type=int, help="batch size")
     parser.add_argument("--num-workers", default=4, type=int, help="number of workers")
-    parser.add_argument(
-        "--accelerator", default="cpu", type=str, help="accelerator device"
-    )
-    parser.add_argument(
-        "--devices", default=1, type=int, help="number or a list of devices"
-    )
-    parser.add_argument("--strategy", default="ddp", type=str, help="strategy")
-    parser.add_argument(
-        "--default_root_dir",
-        default="runs/onepass",
-        type=str,
-        help="default path for logs and weights",
-    )
+    # Trainer args
+    parser.add_argument("--accelerator", type=str, default="cpu")
+    parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument("--strategy", type=str, default="ddp")
+    parser.add_argument("--default_root_dir", type=str, default="runs/onepass")
     args = parser.parse_args()
 
     main(args)

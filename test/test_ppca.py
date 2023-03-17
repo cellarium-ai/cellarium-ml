@@ -65,10 +65,10 @@ def test_probabilistic_pca_multi_device(x_ng, minibatch, ppca_flavor, learn_mean
     training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 5e-2})
     # trainer
     trainer = pl.Trainer(
+        barebones=True,
         accelerator="cpu",
         devices=devices,
         max_steps=1500,
-        log_every_n_steps=1,  # to suppress logger warnings
         strategy="ddp",
     )
     # fit
