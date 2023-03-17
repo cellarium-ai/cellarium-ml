@@ -141,10 +141,10 @@ def test_iterable_dataset_multi_device(
     model = TestModule()
     training_plan = DummyTrainingPlan(model)
     trainer = pl.Trainer(
+        barebones=True,
         accelerator="cpu",
         devices=devices,
         max_epochs=1,  # one pass
-        log_every_n_steps=1,  # to suppress logger warnings
         strategy="ddp",
     )
     trainer.fit(training_plan, data_loader)
