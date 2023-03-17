@@ -70,11 +70,7 @@ def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
     # fit
     model = OnePassMeanVarStd(transform=transform)
     training_plan = DummyTrainingPlan(model)
-    trainer = pl.Trainer(
-        accelerator="cpu",
-        max_epochs=1,  # one pass
-        log_every_n_steps=1,  # to suppress logger warnings
-    )
+    trainer = pl.Trainer(barebones=True, accelerator="cpu", max_epochs=1)  # one pass
     trainer.fit(training_plan, train_dataloaders=data_loader)
 
     # actual mean, var, and std
@@ -117,10 +113,10 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
     model = OnePassMeanVarStd(transform=transform)
     training_plan = DummyTrainingPlan(model)
     trainer = pl.Trainer(
+        barebones=True,
         accelerator="cpu",
         devices=devices,
         max_epochs=1,  # one pass
-        log_every_n_steps=1,  # to suppress logger warnings
         strategy="ddp",
     )
     trainer.fit(training_plan, train_dataloaders=data_loader)

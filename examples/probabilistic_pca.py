@@ -71,7 +71,13 @@ def main(args):
     plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": args.learning_rate})
 
     # train
-    trainer = pl.Trainer.from_argparse_args(args)
+    trainer = pl.Trainer(
+        accelerator=args.accelerator,
+        devices=args.devices,
+        max_steps=args.max_steps,
+        log_every_n_steps=args.log_every_n_steps,
+        default_root_dir=args.default_root_dir,
+    )
     trainer.fit(plan, train_dataloaders=data_loader, ckpt_path=args.ckpt_path)
 
 
@@ -100,7 +106,12 @@ if __name__ == "__main__":
         choices=["marginalized", "diagonal_normal", "multivariate_normal"],
         help="probabilistic PCA flavor",
     )
-    parser = pl.Trainer.add_argparse_args(parser)
+    # Trainer args
+    parser.add_argument("--accelerator", type=str, default="gpu")
+    parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument("--max_steps", type=int, default=1000)
+    parser.add_argument("--log_every_n_steps", type=int, default=1)
+    parser.add_argument("--default_root_dir", type=str, default="runs/ppca")
     args = parser.parse_args()
 
     main(args)
