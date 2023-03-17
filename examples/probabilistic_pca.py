@@ -73,7 +73,7 @@ def main(args):
     # train
     trainer = pl.Trainer(
         accelerator=args.accelerator,
-        devcies=args.devices,
+        devices=args.devices,
         max_steps=args.max_steps,
         log_every_n_steps=args.log_every_n_steps,
         default_root_dir=args.default_root_dir,
