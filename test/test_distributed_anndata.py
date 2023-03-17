@@ -191,20 +191,3 @@ def test_pickle_dataset(dat):
     assert len(new_dataset.dadc.cache) == 0
 
     np.testing.assert_array_equal(new_dataset[:2]["X"], dataset[:2]["X"])
-
-
-@pytest.fixture
-def large_dadc(tmp_path):
-    X = np.ones((10_000, 1000))
-    adata = AnnData(X, dtype=X.dtype)
-    for i in range(4):
-        adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))
-    # distributed anndata
-    filenames = str(os.path.join(tmp_path, "adata.{000..003}.h5ad"))
-    dadc = DistributedAnnDataCollection(
-        filenames,
-        shard_size=10_000,
-        max_cache_size=1,
-        cache_size_strictly_enforced=True,
-    )
-    return dadc
