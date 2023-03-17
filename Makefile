@@ -19,6 +19,11 @@ format: license FORCE
 	isort .
 
 test: lint FORCE
-	pytest test
+ifeq (${TEST_DEVICES}, 2)
+	pytest -v -k multi_device
+else ifeq (${TEST_DEVICES}, 1)
+	# default
+	pytest -v -n auto
+endif
 
 FORCE:

@@ -16,7 +16,10 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.8"]
+        devices: ["1", "2"]
 
+    env:
+      TEST_DEVICES: ${{ matrix.devices }}
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python 3.8
