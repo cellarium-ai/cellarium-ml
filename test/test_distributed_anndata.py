@@ -3,7 +3,6 @@
 
 import os
 import pickle
-import tracemalloc
 
 import numpy as np
 import pandas as pd
@@ -209,32 +208,3 @@ def large_dadc(tmp_path):
         cache_size_strictly_enforced=True,
     )
     return dadc
-
-
-def test_lru_cache(large_dadc):
-
-    large_dadc.adatas[0].adata
-    #  size, _ = tracemalloc.get_traced_memory()
-    #  size = size / (1024 * 1024)  # in MB
-    #  # assert size < 1
-    #  print(size)
-
-    large_dadc.adatas[1].adata
-    #  size, _ = tracemalloc.get_traced_memory()
-    #  size = size / (1024 * 1024)  # in MB
-    #  # assert size < 1
-    #  print(size)
-
-
-    tracemalloc.start()
-    large_dadc.adatas[2].adata
-    size, _ = tracemalloc.get_traced_memory()
-    size = size / (1024 * 1024)  # in MB
-    # assert size < 1
-    print(size)
-
-    large_dadc.adatas[3].adata
-    size, _ = tracemalloc.get_traced_memory()
-    size = size / (1024 * 1024)  # in MB
-    # assert size < 1
-    print(size)
