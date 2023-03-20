@@ -14,8 +14,8 @@ from scvid.data import (
     DistributedAnnDataCollectionDataset,
     DistributedAnnDataCollectionSingleConsumerSampler,
     IterableDistributedAnnDataCollectionDataset,
-    collate_fn,
 )
+from scvid.data.util import collate_fn
 from scvid.module import OnePassMeanVarStd
 from scvid.train import DummyTrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
@@ -70,11 +70,7 @@ def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
     # fit
     model = OnePassMeanVarStd(transform=transform)
     training_plan = DummyTrainingPlan(model)
-    trainer = pl.Trainer(
-        accelerator="cpu",
-        max_epochs=1,  # one pass
-        log_every_n_steps=1,  # to suppress logger warnings
-    )
+    trainer = pl.Trainer(barebones=True, accelerator="cpu", max_epochs=1)  # one pass
     trainer.fit(training_plan, train_dataloaders=data_loader)
 
     # actual mean, var, and std
@@ -96,9 +92,10 @@ def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
-def test_onepass_mean_var_std_iterable_dataset(
+def test_onepass_mean_var_std_iterable_dataset_multi_device(
     adata, dadc, shuffle, num_workers, batch_size
 ):
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc, batch_size=batch_size, shuffle=shuffle
@@ -116,11 +113,17 @@ def test_onepass_mean_var_std_iterable_dataset(
     model = OnePassMeanVarStd(transform=transform)
     training_plan = DummyTrainingPlan(model)
     trainer = pl.Trainer(
+        barebones=True,
         accelerator="cpu",
+        devices=devices,
         max_epochs=1,  # one pass
-        log_every_n_steps=1,  # to suppress logger warnings
+        strategy="ddp",
     )
     trainer.fit(training_plan, train_dataloaders=data_loader)
+
+    # run tests only for rank 0
+    if trainer.global_rank != 0:
+        return
 
     # actual mean, var, and std
     actual_mean = model.mean

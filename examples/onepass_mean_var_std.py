@@ -26,8 +26,8 @@ import torch
 from scvid.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
-    collate_fn,
 )
+from scvid.data.util import collate_fn
 from scvid.module.onepass_mean_var_std import OnePassMeanVarStd
 from scvid.train.training_plan import DummyTrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
@@ -59,8 +59,9 @@ def main(args):
     # train
     trainer = pl.Trainer(
         accelerator=args.accelerator,
-        devices=1,
+        devices=args.devices,
         max_epochs=1,  # one pass
+        strategy=args.strategy,
         default_root_dir=args.default_root_dir,
     )
     trainer.fit(plan, train_dataloaders=data_loader)
@@ -73,15 +74,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch_size", default=10_000, type=int, help="batch size")
     parser.add_argument("--num-workers", default=4, type=int, help="number of workers")
-    parser.add_argument(
-        "--accelerator", default="cpu", type=str, help="accelerator device"
-    )
-    parser.add_argument(
-        "--default_root_dir",
-        default="runs/onepass",
-        type=str,
-        help="default path for logs and weights",
-    )
+    # Trainer args
+    parser.add_argument("--accelerator", type=str, default="cpu")
+    parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument("--strategy", type=str, default="ddp")
+    parser.add_argument("--default_root_dir", type=str, default="runs/onepass")
     args = parser.parse_args()
 
     main(args)

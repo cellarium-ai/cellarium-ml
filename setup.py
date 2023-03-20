@@ -22,6 +22,7 @@ TEST_REQUIRE = [
     "flake8",
     "isort",
     "pytest",
+    "pytest-xdist",
 ]
 
 setuptools.setup(
@@ -43,7 +44,7 @@ setuptools.setup(
         "boltons",
         "braceexpand",
         "pyro-ppl",
-        "pytorch_lightning",
+        "pytorch_lightning>=2.0.0",
         "torch",
     ],
     extras_require={

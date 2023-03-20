@@ -31,6 +31,8 @@ class AnnDataSchema:
     def __init__(self, adata: AnnData) -> None:
         self.attr_values = {}
         for attr in self.attrs:
+            # FIXME: some of the attributes have a reference to the anndata object itself.
+            # This results in anndata object not being garbage collected.
             self.attr_values[attr] = getattr(adata, attr)
 
     def validate_anndata(self, adata: AnnData) -> None:

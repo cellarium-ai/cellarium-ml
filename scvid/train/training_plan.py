@@ -57,22 +57,35 @@ class PyroTrainingPlan(pl.LightningModule):
         return self.optim(self.module.parameters(), **self.optim_kwargs)
 
     def on_train_epoch_start(self):
-        breakpoint()
-        pass
+        """
+        Calls the ``set_epoch`` method on the iterable dataset of the given dataloader.
+
+        If the dataset is ``IterableDataset`` and has ``set_epoch`` method defined, then
+        ``set_epoch`` must be called at the beginning of every epoch to ensure shuffling
+        applies a new ordering. This has no effect if shuffling is off.
+        """
+        train_dataloader = self.trainer.train_dataloader
+        dataset = train_dataloader.dataset
+        set_epoch = getattr(dataset, "set_epoch", None)
+        if callable(set_epoch):
+            set_epoch(self.current_epoch)
 
 
 class DummyTrainingPlan(pl.LightningModule):
     """
-    Lightning module task to train OnePassMeanVarStd.
+    Lightning module task that does not perform any actual optimization (no gradient updates).
+    It can be used for cases where only the forward pass is required (e.g., for calculating
+    sufficient statistics, EM algorithms, etc.).
     """
 
     def __init__(self, module: torch.nn.Module):
         super().__init__()
         self.module = module
-        self.automatic_optimization = False
+        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
     def training_step(self, batch, batch_idx):
-        self.module(batch["X"])
+        args, kwargs = self.module._get_fn_args_from_batch(batch)
+        self.module(*args, **kwargs)
 
     def configure_optimizers(self):
-        pass
+        return torch.optim.SGD([self._dummy_param], lr=1.0)
