@@ -51,7 +51,7 @@ class TestModule(torch.nn.Module):
         self.iter_data.append(batch)
 
 
-@pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]][2:])  # limits
+@pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])  # limits
 def dadc(tmp_path, request):
     limits = request.param
     n_cell = limits[-1]
@@ -68,7 +68,7 @@ def dadc(tmp_path, request):
     dadc = DistributedAnnDataCollection(
         filenames,
         limits,
-        max_cache_size=3,
+        max_cache_size=2,
         cache_size_strictly_enforced=True,
     )
     return dadc
@@ -171,14 +171,14 @@ def test_iterable_dataset_multi_device(
 
 @pytest.mark.parametrize(
     "num_workers,persistent_workers",
-    [(0, False), (1, False), (1, True), (2, False), (2, True)][2:3],
+    [(0, False), (1, False), (1, True), (2, False), (2, True)],
     ids=[
         "zero workers",
         "one not persistent worker",
         "one persistent worker",
         "two not persistent workers",
         "two persistent workers",
-    ][2:3],
+    ],
 )
 @pytest.mark.parametrize("epochs", [2, 3], ids=["two epochs", "three epochs"])
 def test_iterable_dataset_set_epoch_multi_device(
