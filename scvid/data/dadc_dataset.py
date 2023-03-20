@@ -115,6 +115,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             data["worker_id"] = np.array([worker_id])
             data["num_workers"] = np.array([num_workers])
             data["miss_count"] = np.array([self.dadc.cache.miss_count])
+            data["epoch"] = np.array([self.epoch])
 
         return data
 
@@ -336,3 +337,5 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             self[indices[i : i + self.batch_size]]
             for i in range(iter_start, iter_end, self.batch_size)
         )
+        # Sets epoch for persistent workers
+        self.set_epoch(self.epoch + 1)

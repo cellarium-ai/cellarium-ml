@@ -89,3 +89,18 @@ class DummyTrainingPlan(pl.LightningModule):
 
     def configure_optimizers(self):
         return torch.optim.SGD([self._dummy_param], lr=1.0)
+
+    def on_train_epoch_start(self):
+        """
+        Calls the ``set_epoch`` method on the iterable dataset of the given dataloader.
+
+        If the dataset is ``IterableDataset`` and has ``set_epoch`` method defined, then
+        ``set_epoch`` must be called at the beginning of every epoch to ensure shuffling
+        applies a new ordering. This has no effect if shuffling is off.
+        """
+        dataloaders = self.trainer.fit_loop._combined_loader.flattened
+        for dataloader in dataloaders:
+            dataset = dataloader.dataset
+            set_epoch = getattr(dataset, "set_epoch", None)
+            if callable(set_epoch):
+                set_epoch(self.current_epoch)
