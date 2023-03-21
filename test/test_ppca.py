@@ -42,7 +42,7 @@ def x_ng():
 @pytest.mark.parametrize(
         "ppca_flavor", ["marginalized", "diagonal_normal", "multivariate_normal"][1:]
 )
-@pytest.mark.parametrize("learn_mean", [False, True][:1])
+@pytest.mark.parametrize("learn_mean", [False, True][1:])
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
 def test_probabilistic_pca_multi_device(x_ng, minibatch, ppca_flavor, learn_mean):
     devices = int(os.environ.get("TEST_DEVICES", "1"))

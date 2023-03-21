@@ -193,7 +193,7 @@ class ProbabilisticPCA(ELBOModule):
         s: float = 1.0,
         seed: int = 0,
         transform: Optional[torch.nn.Module] = None,
-        elbo: Optional[pyro.infer.elbo.ELBO] = None,
+        elbo: pyro.infer.elbo.ELBO = pyro.infer.elbo.Trace_ELBO(),
     ):
         self.n_cells = n_cells
         self.g_genes = g_genes
@@ -232,9 +232,6 @@ class ProbabilisticPCA(ELBOModule):
             seed,
             transform,
         )
-
-        if elbo is None:
-            elbo = pyro.infer.Trace_ELBO()
 
         super().__init__(model, guide, elbo)
 
