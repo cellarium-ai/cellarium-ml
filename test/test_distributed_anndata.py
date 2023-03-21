@@ -103,8 +103,9 @@ def test_init_dat(dat):
 @pytest.mark.parametrize("last_shard_size", [1, 2, 3, None])
 def test_init_shard_size(adatas_path, num_shards, last_shard_size):
     shard_size = 2
+    filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards-1:03}}}.h5ad"))
     dadc = DistributedAnnDataCollection(
-        "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad",
+        filenames,
         shard_size=shard_size,
         last_shard_size=last_shard_size,
         max_cache_size=1,
