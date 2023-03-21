@@ -11,7 +11,7 @@ feature count data in one pass [1].
 Example run::
     python examples/onepass_mean_var_std.py \
             --filenames gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..324}.h5ad \
-            --accelerator gpu --num_workers 4 \
+            --accelerator gpu --devices 1 --num_workers 4 \
             --default_root_dir runs/onepass
 
 **References:**
