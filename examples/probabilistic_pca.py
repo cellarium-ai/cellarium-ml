@@ -15,7 +15,9 @@ There are three flavors of probabilistic PCA model that are available:
 3. "diagonal_normal" - latent variable ``z`` has a diagonal Gaussian distribution.
 
 Example run::
-    python examples/probabilistic_pca.py --accelerator gpu --devices 1 --max_steps 1000 --num_workers 4 \
+    python examples/probabilistic_pca.py \
+            --filenames gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..324}.h5ad \
+            --accelerator gpu --devices 1 --max_steps 1000 --num_workers 4 \
             --ppca_flavor marginalized --log_every_n_steps 1 --default_root_dir runs/ppca
 
 **References:**
@@ -43,7 +45,7 @@ from scvid.transforms import ZScoreLog1pNormalize
 def main(args):
     # data loader
     dadc = DistributedAnnDataCollection(
-        filenames=f"gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{{000..{args.num_shards-1:03}}}.h5ad",
+        filenames=args.filenames,
         shard_size=10_000,
         max_cache_size=2,
     )
@@ -76,6 +78,7 @@ def main(args):
         devices=args.devices,
         max_steps=args.max_steps,
         log_every_n_steps=args.log_every_n_steps,
+        strategy=args.strategy,
         default_root_dir=args.default_root_dir,
     )
     trainer.fit(plan, train_dataloaders=data_loader, ckpt_path=args.ckpt_path)
@@ -83,9 +86,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Probabilistic PCA example")
-    parser.add_argument(
-        "--num_shards", default=325, type=int, help="number of anndata files"
-    )
+    parser.add_argument("--filenames", type=str, help="path to anndata files")
     parser.add_argument("--batch_size", default=10_000, type=int, help="batch size")
     parser.add_argument("--num_workers", default=4, type=int, help="number of workers")
     parser.add_argument(
@@ -111,6 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--max_steps", type=int, default=1000)
     parser.add_argument("--log_every_n_steps", type=int, default=1)
+    parser.add_argument("--strategy", type=str, default="ddp")
     parser.add_argument("--default_root_dir", type=str, default="runs/ppca")
     args = parser.parse_args()
 

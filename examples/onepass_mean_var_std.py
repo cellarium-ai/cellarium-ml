@@ -9,7 +9,9 @@ This example shows how to calculate mean, variance, and standard deviation of lo
 feature count data in one pass [1].
 
 Example run::
-    python examples/onepass_mean_var_std.py --accelerator gpu --num_workers 4 \
+    python examples/onepass_mean_var_std.py \
+            --filenames gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..324}.h5ad \
+            --accelerator gpu --num_workers 4 \
             --default_root_dir runs/onepass
 
 **References:**
@@ -69,9 +71,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OnePassMeanVarStd example")
-    parser.add_argument(
-        "--num_shards", default=325, type=int, help="number of anndata files"
-    )
+    parser.add_argument("--filenames", type=str, help="path to anndata files")
     parser.add_argument("--batch_size", default=10_000, type=int, help="batch size")
     parser.add_argument("--num-workers", default=4, type=int, help="number of workers")
     # Trainer args
