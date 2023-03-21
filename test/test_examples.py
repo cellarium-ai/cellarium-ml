@@ -13,12 +13,12 @@ EXAMPLES_DIR = os.path.join(os.path.dirname(TESTS_DIR), "examples")
 EXAMPLES = [
     (
         "probabilistic_pca.py "
-        "--filenames gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
+        "--filenames https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
         "--batch_size 5000 --accelerator cpu --max_steps 4 --strategy ddp"
     ),
     (
         "onepass_mean_var_std.py "
-        "--filenames gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
+        "--filenames https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
         " --batch_size 5000 --accelerator cpu --strategy ddp"
     ),
 ]

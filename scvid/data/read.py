@@ -46,7 +46,7 @@ def read_h5ad_url(filename: str) -> AnnData:
     Example::
 
         >>> adata = read_h5ad_url(
-        ...     "https://storage.cloud.google.com/dsp-cell-annotation-service/benchmark_v1/benchmark_v1.000.h5ad"
+        ...     "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.000.h5ad"
         ... )
 
     Args:
