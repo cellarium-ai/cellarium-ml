@@ -112,7 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--max_steps", type=int, default=1000)
     parser.add_argument("--log_every_n_steps", type=int, default=1)
-    parser.add_argument("--strategy", type=str, default="ddp")
+    parser.add_argument("--strategy", type=str, default="auto")
     parser.add_argument("--default_root_dir", type=str, default="runs/ppca")
     args = parser.parse_args()
 

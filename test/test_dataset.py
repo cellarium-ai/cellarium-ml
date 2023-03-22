@@ -145,7 +145,6 @@ def test_iterable_dataset_multi_device(
         accelerator="cpu",
         devices=devices,
         max_epochs=1,  # one pass
-        strategy="ddp",
     )
     trainer.fit(training_plan, data_loader)
 
