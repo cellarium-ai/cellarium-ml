@@ -68,8 +68,7 @@ def test_probabilistic_pca_multi_device(x_ng, minibatch, ppca_flavor, learn_mean
         barebones=True,
         accelerator="cpu",
         devices=devices,
-        max_steps=1500,
-        strategy="ddp",
+        max_steps=200,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
@@ -82,9 +81,9 @@ def test_probabilistic_pca_multi_device(x_ng, minibatch, ppca_flavor, learn_mean
     sigma = ppca.sigma.data
     actual_var = (torch.diag(W_kg.T @ W_kg) + sigma**2).sum()
 
-    np.testing.assert_allclose(expected_var, actual_var, rtol=0.05)
+    np.testing.assert_allclose(expected_var, actual_var, rtol=0.02)
 
     # check that the inferred z has std of 1
     z = ppca.get_latent_representation(x_ng)
 
-    np.testing.assert_allclose(z.std(), 1, rtol=0.04)
+    np.testing.assert_allclose(z.std(), 1, rtol=0.02)
