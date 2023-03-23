@@ -16,6 +16,12 @@ class ProbabilisticPCAPyroModule(PyroModule):
     """
     Probabilistic PCA implemented in Pyro.
 
+    **Reference:**
+
+        1. *Probabilistic Principal Component Analysis*,
+           Tipping, Michael E., and Christopher M. Bishop. 1999.
+           (https://www.robots.ox.ac.uk/~cvrg/hilary2006/ppca.pdf)
+
     Args:
         n_cells: Number of cells.
         g_genes: Number of genes.
@@ -44,6 +50,11 @@ class ProbabilisticPCAPyroModule(PyroModule):
         self.n_cells = n_cells
         self.g_genes = g_genes
         self.k_components = k_components
+        assert ppca_flavor in [
+            "marginalized",
+            "diagonal_normal",
+            "multivariate_normal",
+        ], "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
         self.ppca_flavor = ppca_flavor
         self.transform = transform
 
@@ -66,27 +77,18 @@ class ProbabilisticPCAPyroModule(PyroModule):
         self.sigma = PyroParam(lambda: torch.tensor(s), constraint=constraints.positive)
 
         # guide parameters
-        if ppca_flavor == "marginalized":
-            pass
-        elif ppca_flavor == "diagonal_normal":
-            self.L_gk = PyroParam(
-                lambda: torch.randn((g_genes, k_components), generator=rng)
-            )
+        if ppca_flavor == "diagonal_normal":
+            M_inv_kk = torch.linalg.inv(self.M_kk)
+            z_scale_k_init = torch.sqrt(torch.diag(self.sigma**2 * M_inv_kk)).detach()
             self.z_scale_k = PyroParam(
-                lambda: torch.ones(k_components), constraint=constraints.positive
+                lambda: z_scale_k_init, constraint=constraints.positive
             )
-        elif ppca_flavor == "multivariate_normal":
-            self.L_gk = PyroParam(
-                lambda: torch.randn((g_genes, k_components), generator=rng)
-            )
-            self.z_scale_tril_kk = PyroParam(
-                lambda: torch.eye(k_components),
-                constraint=constraints.lower_cholesky,
-            )
-        else:
-            raise ValueError(
-                "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
-            )
+
+    @property
+    def M_kk(self):
+        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
+            self.k_components, device=self.sigma.device
+        )
 
     @staticmethod
     def _get_fn_args_from_batch(
@@ -131,14 +133,17 @@ class ProbabilisticPCAPyroModule(PyroModule):
             x_ng = self.transform(x_ng)
 
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
-            z_loc_nk = (x_ng - self.mean_g) @ self.L_gk
+            M_inv_kk = torch.linalg.inv(self.M_kk)
+            L_gk = (M_inv_kk @ self.W_kg).T
+            z_loc_nk = (x_ng - self.mean_g) @ L_gk
 
             if self.ppca_flavor == "diagonal_normal":
                 pyro.sample("z", dist.Normal(z_loc_nk, self.z_scale_k).to_event(1))
             elif self.ppca_flavor == "multivariate_normal":
+                z_scale_tril_kk = torch.linalg.cholesky(self.sigma**2 * M_inv_kk)
                 pyro.sample(
                     "z",
-                    dist.MultivariateNormal(z_loc_nk, scale_tril=self.z_scale_tril_kk),
+                    dist.MultivariateNormal(z_loc_nk, scale_tril=z_scale_tril_kk),
                 )
             else:
                 raise ValueError(
@@ -153,16 +158,6 @@ class ProbabilisticPCAPyroModule(PyroModule):
         """
         Return the latent representation for each cell.
         """
-        if self.ppca_flavor == "marginalized":
-            M_kk = self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
-                self.k_components
-            )
-            L_gk = self.W_kg.T @ torch.linalg.inv(M_kk)
-        elif self.ppca_flavor in ("diagonal_normal", "multivariate_normal"):
-            L_gk = self.L_gk
-        else:
-            raise ValueError(
-                "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
-            )
+        L_gk = (torch.linalg.inv(self.M_kk) @ self.W_kg).T
         z_loc_nk = (x_ng - self.mean_g) @ L_gk
         return z_loc_nk
