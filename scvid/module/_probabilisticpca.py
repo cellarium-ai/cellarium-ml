@@ -5,6 +5,7 @@ from typing import Dict, Iterable, Optional, Tuple, Union
 
 import pyro
 import pyro.distributions as dist
+import pytorch_lightning as pl
 import torch
 from pyro.nn import PyroModule, PyroParam, pyro_method
 from torch.distributions import constraints
@@ -98,7 +99,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         return (x,), {}
 
     @pyro_method
-    def model(self, x_ng: torch.Tensor):
+    def model(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)
 
@@ -125,7 +126,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
                 )
 
     @pyro_method
-    def guide(self, x_ng: torch.Tensor):
+    def guide(self, x_ng: torch.Tensor) -> None:
         if self.ppca_flavor == "marginalized":
             return
 
@@ -133,14 +134,19 @@ class ProbabilisticPCAPyroModule(PyroModule):
             x_ng = self.transform(x_ng)
 
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
-            M_inv_kk = torch.linalg.inv(self.M_kk)
-            L_gk = (M_inv_kk @ self.W_kg).T
-            z_loc_nk = (x_ng - self.mean_g) @ L_gk
+            WX_kn = self.W_kg @ (x_ng - self.mean_g).T
+            z_loc_nk = torch.linalg.solve(self.M_kk, WX_kn).T
 
             if self.ppca_flavor == "diagonal_normal":
                 pyro.sample("z", dist.Normal(z_loc_nk, self.z_scale_k).to_event(1))
             elif self.ppca_flavor == "multivariate_normal":
-                z_scale_tril_kk = torch.linalg.cholesky(self.sigma**2 * M_inv_kk)
+                M_inv_kk = torch.linalg.inv(self.M_kk)
+                # This function skips the (slow) error checking and error message construction
+                # of torch.linalg.cholesky(), instead directly returning the LAPACK error codes
+                # as part of a named tuple (L, info).
+                z_scale_tril_kk, _ = torch.linalg.cholesky_ex(
+                    self.sigma**2 * M_inv_kk
+                )
                 pyro.sample(
                     "z",
                     dist.MultivariateNormal(z_loc_nk, scale_tril=z_scale_tril_kk),
@@ -161,3 +167,9 @@ class ProbabilisticPCAPyroModule(PyroModule):
         L_gk = (torch.linalg.inv(self.M_kk) @ self.W_kg).T
         z_loc_nk = (x_ng - self.mean_g) @ L_gk
         return z_loc_nk
+
+    def log(self, plan: pl.LightningModule) -> None:
+        W_kg = self.W_kg.detach()
+        sigma = self.sigma.detach()
+        var_explained = torch.sum(torch.diag(W_kg.T @ W_kg) + sigma**2)
+        plan.log("var_explained", var_explained)

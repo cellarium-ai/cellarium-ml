@@ -50,6 +50,7 @@ class PyroTrainingPlan(pl.LightningModule):
         loss = self.loss_fn(self.module.model, self.module.guide, *args, **kwargs)
         # Logging to TensorBoard by default
         self.log("train_loss", loss)
+        self.module.log(self)
         return loss
 
     def configure_optimizers(self):
