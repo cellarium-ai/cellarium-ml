@@ -164,8 +164,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
         """
         Return the latent representation for each cell.
         """
-        L_gk = (torch.linalg.inv(self.M_kk) @ self.W_kg).T
-        z_loc_nk = (x_ng - self.mean_g) @ L_gk
+        WX_kn = self.W_kg @ (x_ng - self.mean_g).T
+        z_loc_nk = torch.linalg.solve(self.M_kk, WX_kn).T
         return z_loc_nk
 
     def log(self, plan: pl.LightningModule) -> None:
