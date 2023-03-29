@@ -2,10 +2,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import re
+import shutil
+import tempfile
+import urllib.request
 from typing import Optional
 
 from anndata import AnnData, read_h5ad
 from google.cloud.storage import Client
+
+url_schemes = ("http:", "https:", "ftp:")
 
 
 def read_h5ad_gcs(filename: str, storage_client: Optional[Client] = None) -> AnnData:
@@ -34,6 +39,26 @@ def read_h5ad_gcs(filename: str, storage_client: Optional[Client] = None) -> Ann
         return read_h5ad(f)
 
 
+def read_h5ad_url(filename: str) -> AnnData:
+    r"""
+    Read `.h5ad`-formatted hdf5 file from the URL.
+
+    Example::
+
+        >>> adata = read_h5ad_url(
+        ...     "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.000.h5ad"
+        ... )
+
+    Args:
+        filename (str): URL of the data file.
+    """
+    assert any(filename.startswith(scheme) for scheme in url_schemes)
+    with urllib.request.urlopen(filename) as response:
+        with tempfile.TemporaryFile() as tmp_file:
+            shutil.copyfileobj(response, tmp_file)
+            return read_h5ad(tmp_file)
+
+
 def read_h5ad_local(filename: str) -> AnnData:
     r"""
     Read `.h5ad`-formatted hdf5 file from the local disk.
@@ -58,5 +83,8 @@ def read_h5ad_file(filename: str, **kwargs) -> AnnData:
 
     if filename.startswith("file:"):
         return read_h5ad_local(filename)
+
+    if any(filename.startswith(scheme) for scheme in url_schemes):
+        return read_h5ad_url(filename)
 
     return read_h5ad(filename)
