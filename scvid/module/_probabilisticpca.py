@@ -168,8 +168,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
         z_loc_nk = torch.linalg.solve(self.M_kk, WX_kn).T
         return z_loc_nk
 
+    @torch.inference_mode()
     def log(self, plan: pl.LightningModule) -> None:
-        W_kg = self.W_kg.detach()
-        sigma = self.sigma.detach()
-        var_explained = torch.sum(torch.diag(W_kg.T @ W_kg) + sigma**2)
+        """Logging to TensorBoard by default"""
+        var_explained = torch.sum(torch.diag(self.W_kg.T @ self.W_kg) + self.sigma**2)
         plan.log("var_explained", var_explained)
