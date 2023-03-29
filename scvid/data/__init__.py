@@ -6,7 +6,7 @@ from .dadc_dataset import (
     IterableDistributedAnnDataCollectionDataset,
 )
 from .distributed_anndata import DistributedAnnDataCollection
-from .read import read_h5ad_file, read_h5ad_gcs, read_h5ad_local
+from .read import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url
 from .sampler import DistributedAnnDataCollectionSingleConsumerSampler
 from .schema import AnnDataSchema
 
@@ -19,4 +19,5 @@ __all__ = [
     "read_h5ad_file",
     "read_h5ad_gcs",
     "read_h5ad_local",
+    "read_h5ad_url",
 ]
