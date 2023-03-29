@@ -167,3 +167,56 @@ def test_iterable_dataset_multi_device(
         expected_len = math.ceil(n_obs / devices) * devices
         assert expected_len == len(actual_idx)
         assert set(expected_idx) == set(actual_idx)
+
+
+@pytest.mark.parametrize(
+    "num_workers,persistent_workers",
+    [(0, False), (1, False), (1, True), (2, False), (2, True)],
+    ids=[
+        "zero workers",
+        "one not persistent worker",
+        "one persistent worker",
+        "two not persistent workers",
+        "two persistent workers",
+    ],
+)
+@pytest.mark.parametrize("epochs", [2, 3], ids=["two epochs", "three epochs"])
+def test_iterable_dataset_set_epoch_multi_device(
+    dadc, num_workers, persistent_workers, epochs
+):
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
+    dataset = IterableDistributedAnnDataCollectionDataset(
+        dadc,
+        batch_size=1,
+        shuffle=True,
+        test_mode=True,
+    )
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        persistent_workers=persistent_workers,
+    )
+
+    # fit
+    model = TestModule()
+    training_plan = DummyTrainingPlan(model)
+    trainer = pl.Trainer(
+        barebones=True,
+        accelerator="cpu",
+        devices=devices,
+        max_epochs=epochs,
+        strategy="ddp",
+    )
+    trainer.fit(training_plan, data_loader)
+
+    # run tests only for rank 0
+    if trainer.global_rank != 0:
+        return
+
+    data_loader = model.iter_data
+
+    actual_epochs = set(int(i) for batch in data_loader for i in batch["epoch"])
+    expected_epochs = set(range(epochs))
+
+    assert set(expected_epochs) == set(actual_epochs)
