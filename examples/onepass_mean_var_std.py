@@ -9,7 +9,9 @@ This example shows how to calculate mean, variance, and standard deviation of lo
 feature count data in one pass [1].
 
 Example run::
-    python examples/onepass_mean_var_std.py --accelerator gpu --num_workers 4 \
+    python examples/onepass_mean_var_std.py \
+            --filenames gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..324}.h5ad \
+            --accelerator gpu --devices 1 --num_workers 4 \
             --default_root_dir runs/onepass
 
 **References:**
@@ -36,7 +38,7 @@ from scvid.transforms import ZScoreLog1pNormalize
 def main(args):
     # data loader
     dadc = DistributedAnnDataCollection(
-        filenames=f"gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{{000..{args.num_shards-1:03}}}.h5ad",
+        filenames=args.filenames,
         shard_size=10_000,
         max_cache_size=2,
     )
@@ -69,15 +71,13 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OnePassMeanVarStd example")
-    parser.add_argument(
-        "--num_shards", default=325, type=int, help="number of anndata files"
-    )
+    parser.add_argument("--filenames", type=str, help="path to anndata files")
     parser.add_argument("--batch_size", default=10_000, type=int, help="batch size")
     parser.add_argument("--num-workers", default=4, type=int, help="number of workers")
     # Trainer args
     parser.add_argument("--accelerator", type=str, default="cpu")
     parser.add_argument("--devices", type=int, default=1)
-    parser.add_argument("--strategy", type=str, default="ddp")
+    parser.add_argument("--strategy", type=str, default="auto")
     parser.add_argument("--default_root_dir", type=str, default="runs/onepass")
     args = parser.parse_args()
 

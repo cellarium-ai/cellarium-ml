@@ -69,7 +69,6 @@ def test_probabilistic_pca_multi_device(x_ng, minibatch, ppca_flavor, learn_mean
         accelerator="cpu",
         devices=devices,
         max_steps=1500,
-        strategy="ddp",
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
