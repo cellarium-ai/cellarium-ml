@@ -31,6 +31,7 @@ import argparse
 
 import pytorch_lightning as pl
 import torch
+from torch.nn.utils.parametrizations import orthogonal
 
 from scvid.data import (
     DistributedAnnDataCollection,
@@ -62,15 +63,25 @@ def main(args):
     transform = ZScoreLog1pNormalize(
         mean_g=0, std_g=None, perform_scaling=False, target_count=10_000
     )
+    onepass = torch.load("onepass.pt")
+    # w = torch.sqrt(0.5 * onepass["var"].sum() / (dadc.n_vars * args.num_components)).item()
+    w = 0.5 * onepass["var"].sum().item() / args.num_components
+    s = torch.sqrt(0.5 * onepass["var"].sum() / dadc.n_vars).item()
     ppca = ProbabilisticPCAPyroModule(
         n_cells=dadc.n_obs,
         g_genes=dadc.n_vars,
         k_components=args.num_components,
         ppca_flavor=args.ppca_flavor,
-        mean_g=None,  # learned
+        # mean_g=None,  # learned
+        mean_g=onepass["mean"],
+        w=w,
+        s=s,
         transform=transform,
+        total_variance=onepass["var"].sum(),
     )
-    plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": args.learning_rate})
+    orth_ppca = orthogonal(ppca, "U_gk")
+    breakpoint()
+    plan = PyroTrainingPlan(orth_ppca, optim_kwargs={"lr": args.learning_rate})
 
     # train
     trainer = pl.Trainer(
