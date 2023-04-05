@@ -10,7 +10,7 @@ from scvid.module import ProbabilisticPCAPyroModule
 
 class VarianceMonitor(pl.Callback):
     r"""
-    Automatically monitors and logs explained variance by the model  during training.
+    Automatically monitors and logs explained variance by the model during training.
 
     Args:
         total_variance: Total variance of the data. Used to calculate the explained variance ratio.
@@ -26,7 +26,7 @@ class VarianceMonitor(pl.Callback):
         Called when the train begins.
 
         Raises:
-            AssertionError: If ``module`` is not ``ProbabilisticPCAPyroModule``.
+            AssertionError: If ``pl_module.module`` is not a ``ProbabilisticPCAPyroModule`` instance.
             MisconfigurationException: If ``Trainer`` has no ``logger``.
         """
         assert isinstance(
@@ -50,11 +50,11 @@ class VarianceMonitor(pl.Callback):
         sigma_variance = pl_module.module.sigma_variance
 
         variance_stats = {}
-        variance_stats["total_variance"] = W_variance + sigma_variance
+        variance_stats["total_explained_variance"] = W_variance + sigma_variance
         variance_stats["W_variance"] = W_variance
         variance_stats["sigma_variance"] = sigma_variance
         if self.total_variance is not None:
-            variance_stats["total_variance_ratio"] = (
+            variance_stats["total_explained_variance_ratio"] = (
                 W_variance + sigma_variance
             ) / self.total_variance
             variance_stats["W_variance_ratio"] = W_variance / self.total_variance
