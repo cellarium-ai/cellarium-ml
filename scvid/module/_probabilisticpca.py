@@ -38,7 +38,6 @@ class ProbabilisticPCAPyroModule(PyroModule):
         sigma_init_scale: Initialization value of the `sigma` parameter.
         seed: Random seed used to initialize parameters. Default: ``0``.
         transform: If not ``None`` is used to transform the input data.
-        total_variance: Total variance of the data. Used to calculate the explained variance ratio.
     """
 
     def __init__(
@@ -52,7 +51,6 @@ class ProbabilisticPCAPyroModule(PyroModule):
         sigma_init_scale: float = 1.0,
         seed: int = 0,
         transform: Optional[torch.nn.Module] = None,
-        total_variance: Optional[float] = None,
     ):
         super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
@@ -65,7 +63,6 @@ class ProbabilisticPCAPyroModule(PyroModule):
         ], "ppca_flavor must be one of 'marginalized' or 'linear_vae'"
         self.ppca_flavor = ppca_flavor
         self.transform = transform
-        self.total_variance = total_variance
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (
