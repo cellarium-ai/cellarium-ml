@@ -139,8 +139,11 @@ class ProbabilisticPCAPyroModule(PyroModule):
         self,
         x_ng: torch.Tensor,
     ) -> torch.Tensor:
-        """
+        r"""
         Return the latent representation for each cell.
+
+        .. note::
+           Gradients are disabled, used for inference only.
         """
         V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
         return (x_ng - self.mean_g) @ V_gk
@@ -154,8 +157,11 @@ class ProbabilisticPCAPyroModule(PyroModule):
     @property
     @torch.inference_mode()
     def L_k(self) -> torch.Tensor:
-        """
+        r"""
         Vector with elements given by the PC eigenvalues.
+
+        .. note::
+           Gradients are disabled, used for inference only.
         """
         S_k = torch.linalg.svdvals(self.W_kg.T)
         return S_k**2 + self.sigma**2
@@ -163,17 +169,28 @@ class ProbabilisticPCAPyroModule(PyroModule):
     @property
     @torch.inference_mode()
     def U_gk(self) -> torch.Tensor:
-        """
+        r"""
         Principal components corresponding to eigenvalues ``L_k``.
+
+        .. note::
+           Gradients are disabled, used for inference only.
         """
         return torch.linalg.svd(self.W_kg.T, full_matrices=False).U
 
     @property
     @torch.inference_mode()
     def W_variance(self):
+        r"""
+        .. note::
+           Gradients are disabled, used for inference only.
+        """
         return torch.trace(self.W_kg.T @ self.W_kg)
 
     @property
     @torch.inference_mode()
     def sigma_variance(self):
+        r"""
+        .. note::
+           Gradients are disabled, used for inference only.
+        """
         return self.g_genes * self.sigma**2
