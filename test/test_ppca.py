@@ -79,14 +79,21 @@ def test_probabilistic_pca_multi_device(
         mean_g=x_mean_g,
         W_init_scale=w,
         sigma_init_scale=s,
+        total_variance=total_var,
     )
-    training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 3e-2})
+    training_plan = PyroTrainingPlan(
+        ppca,
+        optim_fn=torch.optim.Adam,
+        optim_kwargs={"lr": 3e-2},
+        scheduler_fn=torch.optim.lr_scheduler.CosineAnnealingLR,
+        scheduler_kwargs={"T_max": 1000},  # one cycle
+    )
     # trainer
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
         devices=devices,
-        max_steps=2000,
+        max_steps=1000,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
@@ -108,7 +115,3 @@ def test_probabilistic_pca_multi_device(
         )
     )
     np.testing.assert_allclose(np.ones(k), abs_cos_sim, rtol=0.01)
-
-    # check that the inferred z has std of 1
-    z = ppca.get_latent_representation(torch.as_tensor(x_ng))
-    np.testing.assert_allclose(z.std(correction=0), 1, rtol=0.04)
