@@ -124,7 +124,7 @@ def test_variance_monitor(x_ng):
     ppca = ProbabilisticPCAPyroModule(n, g, k, "marginalized")
     training_plan = PyroTrainingPlan(ppca)
     # trainer
-    var_monitor = VarianceMonitor(total_var=np.var(x_ng, axis=0).sum())
+    var_monitor = VarianceMonitor(total_variance=np.var(x_ng, axis=0).sum())
     trainer = pl.Trainer(
         accelerator="cpu",
         devices=1,
