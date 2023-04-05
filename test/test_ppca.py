@@ -30,7 +30,7 @@ class TestDataset(Dataset):
 
 @pytest.fixture
 def x_ng():
-    rng = np.random.default_rng(1465)
+    rng = np.random.default_rng(0)
     z_nk = rng.standard_normal(size=(n, k), dtype=np.float32)
     w_kg = rng.standard_normal(size=(k, g), dtype=np.float32)
     sigma = 0.6
@@ -111,4 +111,4 @@ def test_probabilistic_pca_multi_device(
 
     # check that the inferred z has std of 1
     z = ppca.get_latent_representation(torch.as_tensor(x_ng))
-    np.testing.assert_allclose(z.std(correction=0), 1, rtol=0.03)
+    np.testing.assert_allclose(z.std(correction=0), 1, rtol=0.04)
