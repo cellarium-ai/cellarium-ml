@@ -6,7 +6,6 @@ from typing import Optional
 import pyro
 import pytorch_lightning as pl
 import torch
-import math
 
 
 class PyroTrainingPlan(pl.LightningModule):
@@ -57,16 +56,7 @@ class PyroTrainingPlan(pl.LightningModule):
 
     def configure_optimizers(self):
         """Configure optimizers for the model."""
-        optimizer = self.optim(self.module.parameters(), **self.optim_kwargs)
-        # return optimizer
-        # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=1.01)
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=5000, eta_min=1e-3)
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=50_000, T_mult=1)
-        # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.optim_kwargs["lr"], total_steps=15000)
-        # scheduler = OneCycleLR(optimizer, max_lr=self.optim_kwargs["lr"], total_steps=16500, pct_start=0.1, anneal_strategy="linear")
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, anneal_fn)
-        # scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-2, total_iters=10000)
-        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+        return self.optim(self.module.parameters(), **self.optim_kwargs)
 
     def on_train_epoch_start(self):
         """
@@ -117,34 +107,3 @@ class DummyTrainingPlan(pl.LightningModule):
             set_epoch = getattr(dataset, "set_epoch", None)
             if callable(set_epoch):
                 set_epoch(self.current_epoch)
-
-
-class OneCycleLR(torch.optim.lr_scheduler.OneCycleLR):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.anneal_strategy = kwargs.get("anneal_strategy", "cos")
-
-    def state_dict(self):
-        state = super().state_dict()
-        # We are dropping the `_scale_fn_ref` attribute because it is a `weakref.WeakMethod` and can't be pickled
-        state.pop("anneal_func")
-        return state
-
-    def load_state_dict(self, state_dict):
-        super().load_state_dict(state_dict)
-        # Validate anneal_strategy
-        anneal_strategy = state_dict["anneal_strategy"]
-        if anneal_strategy not in ['cos', 'linear']:
-            raise ValueError("anneal_strategy must by one of 'cos' or 'linear', instead got {}".format(anneal_strategy))
-        elif anneal_strategy == 'cos':
-            self.anneal_func = self._annealing_cos
-        elif anneal_strategy == 'linear':
-            self.anneal_func = self._annealing_linear
-
-def anneal_fn(step):
-    f = 1
-    lr_max = 1
-    lr_min = 0
-    T = 50000
-    e, step = divmod(step, T)
-    return lr_min + f**e * 0.5 * (lr_max - lr_min) * (1 + math.cos(step / T * math.pi))

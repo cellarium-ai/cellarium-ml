@@ -85,16 +85,6 @@ class ProbabilisticPCAPyroModule(PyroModule):
             lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive
         )
 
-        # guide parameters
-        if ppca_flavor == "linear_vae":
-            M_inv_kk = torch.linalg.inv(self.M_kk)
-            D_k_init = torch.sqrt(torch.diag(self.sigma**2 * M_inv_kk)).detach()
-            self.D_k = PyroParam(
-                lambda: D_k_init,
-                constraint=constraints.positive
-                # lambda: 0.01 * torch.ones(k_components), constraint=constraints.positive
-            )
-
     @property
     def M_kk(self):
         return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
@@ -107,8 +97,16 @@ class ProbabilisticPCAPyroModule(PyroModule):
         """
         Vector with elements given by the PC eigenvalues.
         """
-        _, S_k, __ = torch.linalg.svd(self.W_kg.T)
+        S_k = torch.linalg.svdvals(self.W_kg.T)
         return S_k**2 + self.sigma**2
+
+    @property
+    @torch.inference_mode()
+    def U_gk(self) -> torch.Tensor:
+        """
+        Principal components corresponding to eigenvalues ``L_k``.
+        """
+        return torch.linalg.svd(self.W_kg.T, full_matrices=False).U
 
     @staticmethod
     def _get_fn_args_from_batch(
@@ -154,9 +152,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
 
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
             V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
-            z_loc_nk = (x_ng - self.mean_g) @ V_gk
-
-            pyro.sample("z", dist.Normal(z_loc_nk, self.D_k).to_event(1))
+            D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
+            pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
     @torch.inference_mode()
     def get_latent_representation(
