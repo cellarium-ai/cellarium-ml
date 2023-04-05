@@ -149,7 +149,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         return (x_ng - self.mean_g) @ V_gk
 
     @property
-    def M_kk(self):
+    def M_kk(self) -> torch.Tensor:
         return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
             self.k_components, device=self.sigma.device
         )
@@ -179,7 +179,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
 
     @property
     @torch.inference_mode()
-    def W_variance(self):
+    def W_variance(self) -> torch.Tensor:
         r"""
         .. note::
            Gradients are disabled, used for inference only.
@@ -188,7 +188,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
 
     @property
     @torch.inference_mode()
-    def sigma_variance(self):
+    def sigma_variance(self) -> torch.Tensor:
         r"""
         .. note::
            Gradients are disabled, used for inference only.

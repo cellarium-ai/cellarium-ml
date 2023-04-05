@@ -19,10 +19,10 @@ class PyroTrainingPlan(pl.LightningModule):
         pyro_module: A Pyro module. This object should have callable `model` and `guide` attributes or methods.
         loss_fn: A Pyro loss. Should be a subclass of :class:`~pyro.infer.ELBO`.
             If `None`, defaults to :class:`~pyro.infer.Trace_ELBO`.
-        optim: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
+        optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
             defaults to :class:`torch.optim.Adam`.
         optim_kwargs: Keyword arguments for optimiser. If `None`, defaults to `dict(lr=1e-3)`.
-        scheduler: A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
+        scheduler_fn: A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
         scheduler_kwargs: Keyword arguments for lr scheduler.
     """
 
