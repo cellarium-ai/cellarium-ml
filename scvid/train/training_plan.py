@@ -19,30 +19,36 @@ class PyroTrainingPlan(pl.LightningModule):
         pyro_module: A Pyro module. This object should have callable `model` and `guide` attributes or methods.
         loss_fn: A Pyro loss. Should be a subclass of :class:`~pyro.infer.ELBO`.
             If `None`, defaults to :class:`~pyro.infer.Trace_ELBO`.
-        optim: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
+        optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
             defaults to :class:`torch.optim.Adam`.
         optim_kwargs: Keyword arguments for optimiser. If `None`, defaults to `dict(lr=1e-3)`.
+        scheduler_fn: A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
+        scheduler_kwargs: Keyword arguments for lr scheduler.
     """
 
     def __init__(
         self,
         pyro_module: pyro.nn.PyroModule,
         loss_fn: Optional[pyro.infer.ELBO] = None,
-        optim: Optional[torch.optim.Optimizer] = None,
+        optim_fn: Optional[callable] = None,
         optim_kwargs: Optional[dict] = None,
+        scheduler_fn: Optional[callable] = None,
+        scheduler_kwargs: Optional[dict] = None,
     ):
         super().__init__()
         self.module = pyro_module
 
-        optim_kwargs = optim_kwargs if isinstance(optim_kwargs, dict) else dict()
-        if "lr" not in optim_kwargs.keys():
-            optim_kwargs.update({"lr": 1e-3})
+        self.optim_fn = torch.optim.Adam if optim_fn is None else optim_fn
+        optim_kwargs = {} if optim_kwargs is None else optim_kwargs
+        if "lr" not in optim_kwargs:
+            optim_kwargs["lr"] = 1e-3
         self.optim_kwargs = optim_kwargs
+        self.scheduler_fn = scheduler_fn
+        self.scheduler_kwargs = scheduler_kwargs
 
         self.loss_fn = (
             pyro.infer.Trace_ELBO().differentiable_loss if loss_fn is None else loss_fn
         )
-        self.optim = torch.optim.Adam if optim is None else optim
 
     def training_step(self, batch, batch_idx):
         """Training step for Pyro training."""
@@ -54,7 +60,16 @@ class PyroTrainingPlan(pl.LightningModule):
 
     def configure_optimizers(self):
         """Configure optimizers for the model."""
-        return self.optim(self.module.parameters(), **self.optim_kwargs)
+        optim_config = {}
+        optim_config["optimizer"] = self.optim_fn(
+            self.module.parameters(), **self.optim_kwargs
+        )
+        if self.scheduler_fn is not None:
+            scheduler = self.scheduler_fn(
+                optim_config["optimizer"], **self.scheduler_kwargs
+            )
+            optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
+        return optim_config
 
     def on_train_epoch_start(self):
         """

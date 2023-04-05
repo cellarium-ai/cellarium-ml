@@ -23,6 +23,7 @@ TEST_REQUIRE = [
     "isort",
     "pytest",
     "pytest-xdist",
+    "scikit-learn",
 ]
 
 setuptools.setup(
