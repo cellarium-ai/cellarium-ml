@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 from scvid.module import ProbabilisticPCAPyroModule
 from scvid.train import PyroTrainingPlan
 
-n, g, k = 1000, 10, 2
+n, g, k = 1000, 10, 3
 
 
 class TestDataset(Dataset):
@@ -80,13 +80,13 @@ def test_probabilistic_pca_multi_device(
         W_init_scale=w,
         sigma_init_scale=s,
     )
-    training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 5e-2})
+    training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 3e-2})
     # trainer
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
         devices=devices,
-        max_steps=1500,
+        max_steps=2000,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)

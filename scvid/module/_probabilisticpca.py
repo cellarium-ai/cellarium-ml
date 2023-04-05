@@ -16,6 +16,9 @@ class ProbabilisticPCAPyroModule(PyroModule):
     """
     Probabilistic PCA implemented in Pyro.
 
+    Two flavors of probabilistic PCA are available - marginalized pPCA [1]
+    and linear VAE [2].
+
     **Reference:**
 
     1. *Probabilistic Principal Component Analysis*,
