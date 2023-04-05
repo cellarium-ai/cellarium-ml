@@ -16,15 +16,29 @@ class ProbabilisticPCAPyroModule(PyroModule):
     """
     Probabilistic PCA implemented in Pyro.
 
+    Two flavors of probabilistic PCA are available - marginalized pPCA [1]
+    and linear VAE [2].
+
+    **Reference:**
+
+    1. *Probabilistic Principal Component Analysis*,
+       Tipping, Michael E., and Christopher M. Bishop. 1999.
+       (https://www.robots.ox.ac.uk/~cvrg/hilary2006/ppca.pdf)
+    2. *Understanding Posterior Collapse in Generative Latent Variable Models*,
+       James Lucas, George Tucker, Roger Grosse, Mohammad Norouzi. 2019.
+       (https://openreview.net/pdf?id=r1xaVLUYuE)
+
     Args:
         n_cells: Number of cells.
         g_genes: Number of genes.
         k_components: Number of principal components.
-        ppca_flavor: Type of the PPCA model. Has to be one of `marginalized` or `diagonal_normal`
-            or `multivariate_normal`.
+        ppca_flavor: Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
         mean_g: Mean gene expression of the input data.
-        w: Scale of the random initialization of the `W_kg` parameter.
-        s: Initialization value of the `sigma` parameter.
+        W_init_scale: Scale of the random initialization of the `W_kg` parameter.
+        sigma_init_scale: Initialization value of the `sigma` parameter.
+        seed: Random seed used to initialize parameters. Default: ``0``.
+        transform: If not ``None`` is used to transform the input data.
+        total_variance: Total variance of the data. Used to calculate the explained variance ratio.
     """
 
     def __init__(
@@ -34,18 +48,24 @@ class ProbabilisticPCAPyroModule(PyroModule):
         k_components: int,
         ppca_flavor: str,
         mean_g: Optional[Union[float, int, torch.Tensor]] = None,
-        w: float = 1.0,
-        s: float = 1.0,
+        W_init_scale: float = 1.0,
+        sigma_init_scale: float = 1.0,
         seed: int = 0,
         transform: Optional[torch.nn.Module] = None,
+        total_variance: Optional[float] = None,
     ):
         super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
         self.n_cells = n_cells
         self.g_genes = g_genes
         self.k_components = k_components
+        assert ppca_flavor in [
+            "marginalized",
+            "linear_vae",
+        ], "ppca_flavor must be one of 'marginalized' or 'linear_vae'"
         self.ppca_flavor = ppca_flavor
         self.transform = transform
+        self.total_variance = total_variance
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (
@@ -61,32 +81,11 @@ class ProbabilisticPCAPyroModule(PyroModule):
         rng.manual_seed(seed)
         # model parameters
         self.W_kg = PyroParam(
-            lambda: w * torch.randn((k_components, g_genes), generator=rng)
+            lambda: W_init_scale * torch.randn((k_components, g_genes), generator=rng)
         )
-        self.sigma = PyroParam(lambda: torch.tensor(s), constraint=constraints.positive)
-
-        # guide parameters
-        if ppca_flavor == "marginalized":
-            pass
-        elif ppca_flavor == "diagonal_normal":
-            self.L_gk = PyroParam(
-                lambda: torch.randn((g_genes, k_components), generator=rng)
-            )
-            self.z_scale_k = PyroParam(
-                lambda: torch.ones(k_components), constraint=constraints.positive
-            )
-        elif ppca_flavor == "multivariate_normal":
-            self.L_gk = PyroParam(
-                lambda: torch.randn((g_genes, k_components), generator=rng)
-            )
-            self.z_scale_tril_kk = PyroParam(
-                lambda: torch.eye(k_components),
-                constraint=constraints.lower_cholesky,
-            )
-        else:
-            raise ValueError(
-                "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
-            )
+        self.sigma = PyroParam(
+            lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive
+        )
 
     @staticmethod
     def _get_fn_args_from_batch(
@@ -96,7 +95,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         return (x,), {}
 
     @pyro_method
-    def model(self, x_ng: torch.Tensor):
+    def model(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)
 
@@ -123,7 +122,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
                 )
 
     @pyro_method
-    def guide(self, x_ng: torch.Tensor):
+    def guide(self, x_ng: torch.Tensor) -> None:
         if self.ppca_flavor == "marginalized":
             return
 
@@ -131,38 +130,67 @@ class ProbabilisticPCAPyroModule(PyroModule):
             x_ng = self.transform(x_ng)
 
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
-            z_loc_nk = (x_ng - self.mean_g) @ self.L_gk
-
-            if self.ppca_flavor == "diagonal_normal":
-                pyro.sample("z", dist.Normal(z_loc_nk, self.z_scale_k).to_event(1))
-            elif self.ppca_flavor == "multivariate_normal":
-                pyro.sample(
-                    "z",
-                    dist.MultivariateNormal(z_loc_nk, scale_tril=self.z_scale_tril_kk),
-                )
-            else:
-                raise ValueError(
-                    "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
-                )
+            V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
+            D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
+            pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
     @torch.inference_mode()
     def get_latent_representation(
         self,
         x_ng: torch.Tensor,
     ) -> torch.Tensor:
-        """
+        r"""
         Return the latent representation for each cell.
+
+        .. note::
+           Gradients are disabled, used for inference only.
         """
-        if self.ppca_flavor == "marginalized":
-            M_kk = self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
-                self.k_components
-            )
-            L_gk = self.W_kg.T @ torch.linalg.inv(M_kk)
-        elif self.ppca_flavor in ("diagonal_normal", "multivariate_normal"):
-            L_gk = self.L_gk
-        else:
-            raise ValueError(
-                "ppca_flavor must be one of 'marginalized' or 'diagonal_normal' or 'multivariate_normal'"
-            )
-        z_loc_nk = (x_ng - self.mean_g) @ L_gk
-        return z_loc_nk
+        V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
+        return (x_ng - self.mean_g) @ V_gk
+
+    @property
+    def M_kk(self) -> torch.Tensor:
+        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
+            self.k_components, device=self.sigma.device
+        )
+
+    @property
+    @torch.inference_mode()
+    def L_k(self) -> torch.Tensor:
+        r"""
+        Vector with elements given by the PC eigenvalues.
+
+        .. note::
+           Gradients are disabled, used for inference only.
+        """
+        S_k = torch.linalg.svdvals(self.W_kg.T)
+        return S_k**2 + self.sigma**2
+
+    @property
+    @torch.inference_mode()
+    def U_gk(self) -> torch.Tensor:
+        r"""
+        Principal components corresponding to eigenvalues ``L_k``.
+
+        .. note::
+           Gradients are disabled, used for inference only.
+        """
+        return torch.linalg.svd(self.W_kg.T, full_matrices=False).U
+
+    @property
+    @torch.inference_mode()
+    def W_variance(self) -> torch.Tensor:
+        r"""
+        .. note::
+           Gradients are disabled, used for inference only.
+        """
+        return torch.trace(self.W_kg.T @ self.W_kg)
+
+    @property
+    @torch.inference_mode()
+    def sigma_variance(self) -> torch.Tensor:
+        r"""
+        .. note::
+           Gradients are disabled, used for inference only.
+        """
+        return self.g_genes * self.sigma**2
