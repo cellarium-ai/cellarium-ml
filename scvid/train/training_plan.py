@@ -43,7 +43,6 @@ class PyroTrainingPlan(pl.LightningModule):
             pyro.infer.Trace_ELBO().differentiable_loss if loss_fn is None else loss_fn
         )
         self.optim = torch.optim.Adam if optim is None else optim
-        # self.save_hyperparameters()
 
     def training_step(self, batch, batch_idx):
         """Training step for Pyro training."""
@@ -51,7 +50,6 @@ class PyroTrainingPlan(pl.LightningModule):
         loss = self.loss_fn(self.module.model, self.module.guide, *args, **kwargs)
         # Logging to TensorBoard by default
         self.log("train_loss", loss)
-        self.module.log(self)
         return loss
 
     def configure_optimizers(self):

@@ -5,7 +5,6 @@ from typing import Dict, Iterable, Optional, Tuple, Union
 
 import pyro
 import pyro.distributions as dist
-import pytorch_lightning as pl
 import torch
 from pyro.nn import PyroModule, PyroParam, pyro_method
 from torch.distributions import constraints
@@ -85,29 +84,6 @@ class ProbabilisticPCAPyroModule(PyroModule):
             lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive
         )
 
-    @property
-    def M_kk(self):
-        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
-            self.k_components, device=self.sigma.device
-        )
-
-    @property
-    @torch.inference_mode()
-    def L_k(self) -> torch.Tensor:
-        """
-        Vector with elements given by the PC eigenvalues.
-        """
-        S_k = torch.linalg.svdvals(self.W_kg.T)
-        return S_k**2 + self.sigma**2
-
-    @property
-    @torch.inference_mode()
-    def U_gk(self) -> torch.Tensor:
-        """
-        Principal components corresponding to eigenvalues ``L_k``.
-        """
-        return torch.linalg.svd(self.W_kg.T, full_matrices=False).U
-
     @staticmethod
     def _get_fn_args_from_batch(
         tensor_dict: Dict[str, torch.Tensor]
@@ -168,28 +144,34 @@ class ProbabilisticPCAPyroModule(PyroModule):
         return z_loc_nk
 
     @property
+    def M_kk(self):
+        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
+            self.k_components, device=self.sigma.device
+        )
+
+    @property
     @torch.inference_mode()
-    def var_explained_W(self):
+    def L_k(self) -> torch.Tensor:
+        """
+        Vector with elements given by the PC eigenvalues.
+        """
+        S_k = torch.linalg.svdvals(self.W_kg.T)
+        return S_k**2 + self.sigma**2
+
+    @property
+    @torch.inference_mode()
+    def U_gk(self) -> torch.Tensor:
+        """
+        Principal components corresponding to eigenvalues ``L_k``.
+        """
+        return torch.linalg.svd(self.W_kg.T, full_matrices=False).U
+
+    @property
+    @torch.inference_mode()
+    def W_variance(self):
         return torch.trace(self.W_kg.T @ self.W_kg)
 
     @property
     @torch.inference_mode()
-    def var_explained_sigma(self):
+    def sigma_variance(self):
         return self.g_genes * self.sigma**2
-
-    def log(self, plan: pl.LightningModule) -> None:
-        """Logging to TensorBoard by default"""
-        var_explained_W = self.var_explained_W
-        var_explained_sigma = self.var_explained_sigma
-        plan.log("var_explained", var_explained_W + var_explained_sigma)
-        plan.log("var_explained_W", self.var_explained_W)
-        plan.log("var_explained_sigma", self.var_explained_sigma)
-        if self.total_variance is not None:
-            plan.log(
-                "var_explained_ratio",
-                (var_explained_W + var_explained_sigma) / self.total_variance,
-            )
-            plan.log("var_explained_ratio_W", var_explained_W / self.total_variance)
-            plan.log(
-                "var_explained_ratio_sigma", var_explained_sigma / self.total_variance
-            )

@@ -80,7 +80,7 @@ def test_probabilistic_pca_multi_device(
         W_init_scale=w,
         sigma_init_scale=s,
     )
-    training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 0.05})
+    training_plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": 5e-2})
     # trainer
     trainer = pl.Trainer(
         barebones=True,
@@ -93,7 +93,7 @@ def test_probabilistic_pca_multi_device(
 
     # total variance
     expected_total_var = np.var(x_ng, axis=0).sum()
-    actual_total_var = ppca.var_explained_W + ppca.var_explained_sigma
+    actual_total_var = ppca.W_variance + ppca.sigma_variance
     np.testing.assert_allclose(expected_total_var, actual_total_var, rtol=0.01)
 
     # variance explained be each PC
@@ -102,12 +102,12 @@ def test_probabilistic_pca_multi_device(
     np.testing.assert_allclose(expected_explained_var, actual_explained_var, rtol=0.01)
 
     # absolute cosine similarity between expected and actual PCs
-    cos_sim = torch.abs(
+    abs_cos_sim = torch.abs(
         torch.nn.functional.cosine_similarity(
             ppca.U_gk.T, torch.as_tensor(pca_fit.components_)
         )
     )
-    np.testing.assert_allclose(np.ones(k), cos_sim, rtol=0.01)
+    np.testing.assert_allclose(np.ones(k), abs_cos_sim, rtol=0.01)
 
     # check that the inferred z has std of 1
     z = ppca.get_latent_representation(torch.as_tensor(x_ng))
