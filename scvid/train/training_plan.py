@@ -3,8 +3,8 @@
 
 from typing import Optional
 
+import lightning.pytorch as pl
 import pyro
-import pytorch_lightning as pl
 import torch
 
 

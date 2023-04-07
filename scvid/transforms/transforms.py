@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -21,7 +21,7 @@ class ZScoreLog1pNormalize(nn.Module):
 
     def __init__(
         self,
-        mean_g: torch.Tensor,
+        mean_g: Union[torch.Tensor, float],
         std_g: Optional[torch.Tensor],
         perform_scaling: bool,
         target_count: int = 10_000,
