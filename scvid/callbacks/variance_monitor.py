@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import lightning.pytorch as pl
-import torch
 
 from scvid.module import ProbabilisticPCAPyroModule
 

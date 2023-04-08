@@ -3,8 +3,8 @@
 
 from collections.abc import Callable
 
+import lightning.pytorch as pl
 import pyro
-import pytorch_lightning as pl
 import torch
 
 

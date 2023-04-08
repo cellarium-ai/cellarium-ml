@@ -5,9 +5,9 @@ import math
 import os
 from collections.abc import Iterable
 
+import lightning.pytorch as pl
 import numpy as np
 import pytest
-import pytorch_lightning as pl
 import torch
 from anndata import AnnData
 
