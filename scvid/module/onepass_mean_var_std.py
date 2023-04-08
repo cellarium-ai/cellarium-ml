@@ -36,9 +36,9 @@ class OnePassMeanVarStd(nn.Module):
         _, num_replicas = get_rank_and_num_replicas()
         if num_replicas > 1:
             x_ng = torch.cat(GatherLayer.apply(x_ng), dim=0)
-        self.x_sums += x_ng.sum(dim=0)
-        self.x_squared_sums += (x_ng**2).sum(dim=0)
-        self.x_size += x_ng.shape[0]
+        self.x_sums = self.x_sums + x_ng.sum(dim=0)
+        self.x_squared_sums = self.x_squared_sums + (x_ng**2).sum(dim=0)
+        self.x_size = self.x_size + x_ng.shape[0]
 
     @property
     def mean(self) -> torch.Tensor:
