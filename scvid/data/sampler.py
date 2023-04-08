@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Iterator, Sequence
+from collections.abc import Iterator, Sequence
 
 import torch
 from torch.utils.data.sampler import Sampler

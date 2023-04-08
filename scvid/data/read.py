@@ -5,7 +5,6 @@ import re
 import shutil
 import tempfile
 import urllib.request
-from typing import Optional
 
 from anndata import AnnData, read_h5ad
 from google.cloud.storage import Client
@@ -13,7 +12,7 @@ from google.cloud.storage import Client
 url_schemes = ("http:", "https:", "ftp:")
 
 
-def read_h5ad_gcs(filename: str, storage_client: Optional[Client] = None) -> AnnData:
+def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnData:
     r"""
     Read `.h5ad`-formatted hdf5 file from the Google Cloud Storage.
 
