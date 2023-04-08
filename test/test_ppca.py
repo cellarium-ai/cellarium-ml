@@ -3,10 +3,10 @@
 
 import os
 
+import lightning.pytorch as pl
 import numpy as np
 import pyro
 import pytest
-import pytorch_lightning as pl
 import torch
 from sklearn.decomposition import PCA
 from torch.utils.data import DataLoader, Dataset

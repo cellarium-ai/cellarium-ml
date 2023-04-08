@@ -17,10 +17,15 @@ with open("README.rst", "r") as fh:
     long_description = fh.read()
 
 # tests
-TEST_REQUIRE = [
+LINT_REQUIRE = [
     "black[jupyter]",
     "flake8",
     "isort",
+]
+MYPY_REQUIRE = [
+    "mypy",
+]
+TEST_REQUIRE = [
     "pytest",
     "pytest-xdist",
     "scikit-learn",
@@ -45,12 +50,14 @@ setuptools.setup(
         "boltons",
         "braceexpand",
         "pyro-ppl",
-        "pytorch_lightning>=2.0.0",
+        "lightning>=2.0.0",
         "torch",
     ],
     extras_require={
+        "lint": LINT_REQUIRE,
+        "mypy": MYPY_REQUIRE,
         "test": TEST_REQUIRE,
-        "dev": TEST_REQUIRE,
+        "dev": LINT_REQUIRE + MYPY_REQUIRE + TEST_REQUIRE,
     },
     keywords="scvi-tools anndata distributed",
     license="Apache 2.0",

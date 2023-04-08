@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import gc
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
-from typing import List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 from anndata import AnnData
@@ -74,7 +74,7 @@ class DistributedAnnDataCollection(AnnCollection):
         limits: Limits of cell indices.
         shard_size: Shard size.
         last_shard_size: Last shard size.
-        max_cache_size: Max size of the cache.
+        max_cache_size: Max size of the cache. Default: ``1``.
         cache_size_strictly_enforced: Assert that the number of retrieved anndatas is not more than maxsize.
         label: Column in `.obs` to place batch information in. If it's None, no column is added.
         keys: Names for each object being added. These values are used for column values for
@@ -96,31 +96,29 @@ class DistributedAnnDataCollection(AnnCollection):
 
     def __init__(
         self,
-        filenames: Union[Sequence[str], str],
-        limits: Optional[Sequence[int]] = None,
-        shard_size: Optional[int] = None,
-        last_shard_size: Optional[int] = None,
-        max_cache_size: Optional[int] = None,
+        filenames: Sequence[str] | str,
+        limits: Iterable[int] | None = None,
+        shard_size: int | None = None,
+        last_shard_size: int | None = None,
+        max_cache_size: int = 1,
         cache_size_strictly_enforced: bool = True,
-        label: Optional[str] = None,
-        keys: Optional[Sequence[str]] = None,
-        index_unique: Optional[str] = None,
-        convert: Optional[ConvertType] = None,
+        label: str | None = None,
+        keys: Sequence[str] | None = None,
+        index_unique: str | None = None,
+        convert: ConvertType | None = None,
         indices_strict: bool = True,
     ):
-        if isinstance(filenames, str):
-            filenames = braceexpand(filenames)
-        self.filenames = list(filenames)
-        assert isinstance(self.filenames[0], str)
-        if (limits is None) is (shard_size is None):
-            raise ValueError(
-                "Either `limits` or `shard_size` must be specified, but not both."
-            )
-        elif (shard_size is None) and (last_shard_size is not None):
+        self.filenames = list(
+            braceexpand(filenames) if isinstance(filenames, str) else filenames
+        )
+        if (shard_size is None) and (last_shard_size is not None):
             raise ValueError(
                 "If `last_shard_size` is specified then `shard_size` must also be specified."
             )
-        if shard_size is not None:
+        if limits is None:
+            assert (
+                shard_size is not None
+            ), "If `limits` is `None` then `shard_size` must be specified`"
             limits = [shard_size * (i + 1) for i in range(len(self.filenames))]
             if last_shard_size is not None:
                 limits[-1] = limits[-1] - shard_size + last_shard_size
@@ -167,7 +165,7 @@ class DistributedAnnDataCollection(AnnCollection):
 
         return AnnCollectionView(self, self.convert, resolved_idx)
 
-    def materialize(self, indices: Union[int, Sequence[int]]) -> List[AnnData]:
+    def materialize(self, indices: int | Sequence[int]) -> list[AnnData]:
         """
         Buffer and return anndata files at given indices from the list of lazy anndatas.
 
@@ -235,7 +233,7 @@ class LazyAnnData:
 
     Args:
         filename (str): Name of anndata file.
-        limits (Tuple[int, int]): Limits of cell indices (inclusive, exclusive).
+        limits (tuple[int, int]): Limits of cell indices (inclusive, exclusive).
         schema (AnnDataSchema): Schema used as a reference for lazy attributes.
         cache (LRU): Shared LRU cache storing buffered anndatas.
     """
@@ -255,9 +253,9 @@ class LazyAnnData:
     def __init__(
         self,
         filename: str,
-        limits: Tuple[int, int],
+        limits: tuple[int, int],
         schema: AnnDataSchema,
-        cache: Optional[LRU] = None,
+        cache: LRU | None = None,
     ):
         self.filename = filename
         self.limits = limits
@@ -275,7 +273,7 @@ class LazyAnnData:
         return len(self.schema.attr_values["var_names"])
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> tuple[int, int]:
         return self.n_obs, self.n_vars
 
     @cachedproperty

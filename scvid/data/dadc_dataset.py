@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-from typing import Dict, List, Union
 
 import numpy as np
 import torch
@@ -27,7 +26,7 @@ class DistributedAnnDataCollectionDataset(Dataset):
     def __len__(self) -> int:
         return len(self.dadc)
 
-    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
+    def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         r"""
         Return feature counts for cells at idx.
 
@@ -95,7 +94,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
         self.epoch = epoch
 
-    def __getitem__(self, idx: Union[int, List[int]]) -> Dict[str, np.ndarray]:
+    def __getitem__(self, idx: int | list[int]) -> dict[str, np.ndarray]:
         r"""
         Return feature counts for cells at idx.
 

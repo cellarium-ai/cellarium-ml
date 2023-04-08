@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Tuple
-
 import torch
 import torch.distributed as dist
 
@@ -11,7 +9,7 @@ class GatherLayer(torch.autograd.Function):
     """Gather tensors from all process, supporting backward propagation."""
 
     @staticmethod
-    def forward(ctx, input: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+    def forward(ctx, input: torch.Tensor) -> tuple[torch.Tensor, ...]:  # type: ignore
         ctx.save_for_backward(input)
         output = [torch.zeros_like(input) for _ in range(dist.get_world_size())]
         dist.all_gather(output, input)

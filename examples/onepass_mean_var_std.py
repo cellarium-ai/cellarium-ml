@@ -22,7 +22,7 @@ Example run::
 
 import argparse
 
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import torch
 
 from scvid.data import (

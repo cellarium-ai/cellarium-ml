@@ -18,7 +18,10 @@ format: license FORCE
 	black .
 	isort .
 
-test: lint FORCE
+typecheck: FORCE
+	mypy scvid test examples
+
+test: FORCE
 ifeq (${TEST_DEVICES}, 2)
 	pytest -v -k multi_device
 else ifeq (${TEST_DEVICES}, 1)
