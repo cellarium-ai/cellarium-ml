@@ -19,7 +19,7 @@ format: license FORCE
 	isort .
 
 typecheck: FORCE
-	mypy .
+	mypy scvid test examples
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)

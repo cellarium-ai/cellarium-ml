@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Any
+
 import lightning.pytorch as pl
 
 from scvid.module import ProbabilisticPCAPyroModule
@@ -40,8 +42,8 @@ class VarianceMonitor(pl.Callback):
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
         """Called when the train batch ends."""
         W_variance = pl_module.module.W_variance
