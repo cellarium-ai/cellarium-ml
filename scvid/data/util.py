@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import warnings
-from typing import Tuple
 
 import torch
 import torch.distributed as dist
 from torch.utils.data import get_worker_info as _get_worker_info
 
 
-def get_rank_and_num_replicas() -> Tuple[int, int]:
+def get_rank_and_num_replicas() -> tuple[int, int]:
     """
     This helper function returns the rank of the current process and
     the number of processes in the default process group. If distributed
@@ -38,7 +37,7 @@ def get_rank_and_num_replicas() -> Tuple[int, int]:
     return rank, num_replicas
 
 
-def get_worker_info() -> Tuple[int, int]:
+def get_worker_info() -> tuple[int, int]:
     """
     This helper function returns ``worker_id`` and ``num_workers``. If it is running
     in the main process then it returns ``worker_id=0`` and ``num_workers=1``.
