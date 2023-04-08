@@ -1,9 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any, Optional
-
-import pytorch_lightning as pl
+import lightning.pytorch as pl
+import torch
 
 from scvid.module import ProbabilisticPCAPyroModule
 
@@ -16,7 +15,7 @@ class VarianceMonitor(pl.Callback):
         total_variance: Total variance of the data. Used to calculate the explained variance ratio.
     """
 
-    def __init__(self, total_variance: Optional[float] = None):
+    def __init__(self, total_variance: float | None = None):
         self.total_variance = total_variance
 
     def on_train_start(
@@ -42,8 +41,8 @@ class VarianceMonitor(pl.Callback):
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        *args: Any,
-        **kwargs: Any,
+        *args,
+        **kwargs,
     ) -> None:
         """Called when the train batch ends."""
         W_variance = pl_module.module.W_variance

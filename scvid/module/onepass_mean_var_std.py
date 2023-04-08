@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Dict, Iterable, Optional, Tuple
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -16,17 +16,17 @@ class OnePassMeanVarStd(nn.Module):
     using running sums and running squared sums.
     """
 
-    def __init__(self, transform: Optional[nn.Module] = None) -> None:
+    def __init__(self, transform: nn.Module | None = None) -> None:
         super().__init__()
         self.transform = transform
-        self.x_sums = 0
-        self.x_squared_sums = 0
+        self.x_sums = torch.tensor(0)
+        self.x_squared_sums = torch.tensor(0)
         self.x_size = 0
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: Dict[str, torch.Tensor]
-    ) -> Tuple[Iterable, dict]:
+        tensor_dict: dict[str, torch.Tensor]
+    ) -> tuple[Iterable, dict]:
         x = tensor_dict["X"]
         return (x,), {}
 

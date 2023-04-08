@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Optional
+from collections.abc import Callable
 
 import pyro
 import pytorch_lightning as pl
@@ -29,11 +29,11 @@ class PyroTrainingPlan(pl.LightningModule):
     def __init__(
         self,
         pyro_module: pyro.nn.PyroModule,
-        loss_fn: Optional[pyro.infer.ELBO] = None,
-        optim_fn: Optional[callable] = None,
-        optim_kwargs: Optional[dict] = None,
-        scheduler_fn: Optional[callable] = None,
-        scheduler_kwargs: Optional[dict] = None,
+        loss_fn: pyro.infer.ELBO | None = None,
+        optim_fn: Callable | None = None,
+        optim_kwargs: dict | None = None,
+        scheduler_fn: Callable | None = None,
+        scheduler_kwargs: dict | None = None,
     ):
         super().__init__()
         self.module = pyro_module

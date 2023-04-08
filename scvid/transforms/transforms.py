@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Optional
-
 import torch
 from torch import nn
 
@@ -22,7 +20,7 @@ class ZScoreLog1pNormalize(nn.Module):
     def __init__(
         self,
         mean_g: torch.Tensor,
-        std_g: Optional[torch.Tensor],
+        std_g: torch.Tensor | None,
         perform_scaling: bool,
         target_count: int = 10_000,
         eps: float = 1e-6,
@@ -36,7 +34,7 @@ class ZScoreLog1pNormalize(nn.Module):
 
     def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
         # Log1pNormalize
-        l_n1 = x_ng.sum(axis=-1, keepdim=True)
+        l_n1 = x_ng.sum(dim=-1, keepdim=True)
         y_ng = torch.log1p(self.target_count * x_ng / (l_n1 + self.eps))
 
         # ZScore

@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Dict, Iterable, Optional, Tuple, Union
+from collections.abc import Iterable
 
 import pyro
 import pyro.distributions as dist
@@ -46,11 +46,11 @@ class ProbabilisticPCAPyroModule(PyroModule):
         g_genes: int,
         k_components: int,
         ppca_flavor: str,
-        mean_g: Optional[Union[float, int, torch.Tensor]] = None,
+        mean_g: float | int | torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
         seed: int = 0,
-        transform: Optional[torch.nn.Module] = None,
+        transform: torch.nn.Module | None = None,
     ):
         super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
@@ -86,8 +86,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: Dict[str, torch.Tensor]
-    ) -> Tuple[Iterable, dict]:
+        tensor_dict: dict[str, torch.Tensor]
+    ) -> tuple[Iterable, dict]:
         x = tensor_dict["X"]
         return (x,), {}
 

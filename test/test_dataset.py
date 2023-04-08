@@ -3,7 +3,7 @@
 
 import math
 import os
-from typing import Dict, Iterable, Tuple
+from collections.abc import Iterable
 
 import numpy as np
 import pytest
@@ -39,8 +39,8 @@ class TestModule(torch.nn.Module):
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: Dict[str, torch.Tensor]
-    ) -> Tuple[Iterable, dict]:
+        tensor_dict: dict[str, torch.Tensor]
+    ) -> tuple[Iterable, dict]:
         return (), tensor_dict
 
     def forward(self, **batch):
