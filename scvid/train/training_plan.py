@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from collections.abc import Callable
+from typing import Any
 
 import lightning.pytorch as pl
 import pyro
@@ -28,15 +29,16 @@ class PyroTrainingPlan(pl.LightningModule):
 
     def __init__(
         self,
-        pyro_module: pyro.nn.PyroModule,
+        module: pyro.nn.PyroModule,
         loss_fn: pyro.infer.ELBO | None = None,
         optim_fn: Callable | None = None,
         optim_kwargs: dict | None = None,
         scheduler_fn: Callable | None = None,
         scheduler_kwargs: dict | None = None,
-    ):
+    ) -> None:
         super().__init__()
-        self.module = pyro_module
+        self.save_hyperparameters()
+        self.module = module
 
         self.optim_fn = torch.optim.Adam if optim_fn is None else optim_fn
         optim_kwargs = {} if optim_kwargs is None else optim_kwargs
@@ -50,7 +52,9 @@ class PyroTrainingPlan(pl.LightningModule):
             pyro.infer.Trace_ELBO().differentiable_loss if loss_fn is None else loss_fn
         )
 
-    def training_step(self, batch, batch_idx):
+    def training_step(
+        self, batch: dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         """Training step for Pyro training."""
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         loss = self.loss_fn(self.module.model, self.module.guide, *args, **kwargs)
@@ -58,7 +62,7 @@ class PyroTrainingPlan(pl.LightningModule):
         self.log("train_loss", loss)
         return loss
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizers for the model."""
         optim_config = {}
         optim_config["optimizer"] = self.optim_fn(
@@ -71,7 +75,7 @@ class PyroTrainingPlan(pl.LightningModule):
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
         return optim_config
 
-    def on_train_epoch_start(self):
+    def on_train_epoch_start(self) -> None:
         """
         Calls the ``set_epoch`` method on the iterable dataset of the given dataloader.
 
@@ -94,19 +98,20 @@ class DummyTrainingPlan(pl.LightningModule):
     sufficient statistics, EM algorithms, etc.).
     """
 
-    def __init__(self, module: torch.nn.Module):
+    def __init__(self, module: torch.nn.Module) -> None:
         super().__init__()
+        self.save_hyperparameters()
         self.module = module
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         self.module(*args, **kwargs)
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> torch.optim.Optimizer:
         return torch.optim.SGD([self._dummy_param], lr=1.0)
 
-    def on_train_epoch_start(self):
+    def on_train_epoch_start(self) -> None:
         """
         Calls the ``set_epoch`` method on the iterable dataset of the given dataloader.
 

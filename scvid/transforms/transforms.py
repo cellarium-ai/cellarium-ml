@@ -1,11 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-<<<<<<< HEAD
-from typing import Optional, Union
-
-=======
->>>>>>> main
 import torch
 from torch import nn
 

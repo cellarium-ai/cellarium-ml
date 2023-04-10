@@ -42,10 +42,10 @@ class ProbabilisticPCAPyroModule(PyroModule):
 
     def __init__(
         self,
-        n_cells: int,
-        g_genes: int,
-        k_components: int,
-        ppca_flavor: str,
+        n_cells: int = 40000,
+        g_genes: int = 36350,
+        k_components: int = 256,
+        ppca_flavor: str = "marginalized",
         mean_g: float | int | torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
@@ -67,7 +67,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (
                 g_genes,
-            ), "Expected meang_g to have a shape ({g_genes},) but found {mean_g.shape}."
+            ), f"Expected meang_g to have a shape ({g_genes},) but found {mean_g.shape}."
         if mean_g is None:
             # make mean_g a learnable parameter
             self.mean_g = PyroParam(lambda: torch.zeros(g_genes))

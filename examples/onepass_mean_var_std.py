@@ -9,8 +9,10 @@ This example shows how to calculate mean, variance, and standard deviation of lo
 feature count data in one pass [1].
 
 Example run::
-    python examples/onepass_mean_var_std.py \
-            --data.filenames gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..324}.h5ad \
+    python examples/onepass_mean_var_std.py fit \
+            --model.module scvid.module.OnePassMeanVarStdWithDefaults \
+            --data.filenames \
+            "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
             --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
             --data.shuffle true --data.num_workers 4 \
             --trainer.accelerator gpu --trainer.devices 1 --trainer.default_root_dir runs/onepass
@@ -24,19 +26,7 @@ Example run::
 from lightning.pytorch.cli import LightningCLI
 
 from scvid.data import DistributedAnnDataCollectionDataModule
-from scvid.module import OnePassMeanVarStd
 from scvid.train.training_plan import DummyTrainingPlan
-from scvid.transforms import ZScoreLog1pNormalize
-
-
-class OnePassMeanVarStdWithDefaults(OnePassMeanVarStd):
-    """Preset default values for the CLI."""
-
-    def __init__(self, target_count: int = 10_000) -> None:
-        transform = ZScoreLog1pNormalize(
-            mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
-        )
-        super().__init__(transform=transform)
 
 
 def main():

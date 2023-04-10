@@ -39,7 +39,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         test_mode: bool = False,
         # DataLoader args
         num_workers: int = 0,
-    ):
+    ) -> None:
         super().__init__()
         # DistributedAnnDataCollection args
         self.filenames = filenames
@@ -61,8 +61,21 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
+        # DistributedAnnDataCollection
+        #  self.n_obs = self.dadc.n_obs
+        #  self.n_vars = self.dadc.n_vars
+        self.n_obs = 40000
+        self.n_vars = 36350
 
-    def setup(self, stage: Optional[str] = None):
+    #  @property
+    #  def n_obs(self) -> int:
+    #      return self.dadc.n_obs
+    #
+    #  @property
+    #  def n_vars(self) -> int:
+    #      return self.dadc.n_vars
+
+    def setup(self, stage: str | None = None) -> None:
         """
         .. note::
            setup is called from every process across all the nodes. Setting state here is recommended.
@@ -89,7 +102,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
             test_mode=self.test_mode,
         )
 
-    def train_dataloader(self):
+    def train_dataloader(self) -> torch.utils.data.DataLoader:
         return torch.utils.data.DataLoader(
             self.dataset,
             num_workers=self.num_workers,
