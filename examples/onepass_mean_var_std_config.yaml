@@ -1,16 +1,16 @@
 # lightning.pytorch==2.0.0rc1
 seed_everything: true
 trainer:
-  accelerator: auto
+  accelerator: gpu
   strategy: auto
-  devices: auto
+  devices: 1
   num_nodes: 1
   precision: 32-true
   logger: null
   callbacks: null
   fast_dev_run: false
-  max_epochs: null
-  min_epochs: 1  # one pass
+  max_epochs: 1  # one pass
+  min_epochs: null
   max_steps: -1
   min_steps: null
   max_time: null
@@ -39,21 +39,14 @@ trainer:
   plugins: null
   sync_batchnorm: false
   reload_dataloaders_every_n_epochs: 0
-  default_root_dir: onepass_mean_var_std
+  default_root_dir: runs/onepass
 model:
   module:
-    class_path: scvid.module.OnePassMeanVarStd
+    class_path: __main__.OnePassMeanVarStdWithDefaults
     init_args:
-      transform:
-        class_path: scvid.transforms.ZScoreLog1pNormalize
-        init_args:
-          mean_g: 0
-          std_g: null
-          perform_scaling: false
-          target_count: 10_000
-          eps: 1.0e-06
+      target_count: 10_000
 data:
-  filenames: gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..002}.h5ad
+  filenames: gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.{000..007}.h5ad
   limits: null
   shard_size: 10_000
   last_shard_size: null
