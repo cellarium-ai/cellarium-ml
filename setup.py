@@ -26,6 +26,7 @@ MYPY_REQUIRE = [
     "mypy",
 ]
 TEST_REQUIRE = [
+    "jsonargparse[signatures]",
     "pytest",
     "pytest-xdist",
     "scikit-learn",

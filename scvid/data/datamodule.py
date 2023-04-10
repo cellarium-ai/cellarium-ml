@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Optional, Sequence, Union
+from collections.abc import Iterable, Sequence
 
 import lightning.pytorch as pl
 import torch
@@ -20,16 +20,16 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
     def __init__(
         self,
         # DistributedAnnDataCollection args
-        filenames: Union[Sequence[str], str],
-        limits: Optional[Sequence[int]] = None,
-        shard_size: Optional[int] = None,
-        last_shard_size: Optional[int] = None,
-        max_cache_size: Optional[int] = None,
+        filenames: Sequence[str] | str,
+        limits: Iterable[int] | None = None,
+        shard_size: int | None = None,
+        last_shard_size: int | None = None,
+        max_cache_size: int = 1,
         cache_size_strictly_enforced: bool = True,
-        label: Optional[str] = None,
-        keys: Optional[Sequence[str]] = None,
-        index_unique: Optional[str] = None,
-        convert: Optional[ConvertType] = None,
+        label: str | None = None,
+        keys: Sequence[str] | None = None,
+        index_unique: str | None = None,
+        convert: ConvertType | None = None,
         indices_strict: bool = True,
         # IterableDistributedAnnDataCollectionDataset args
         batch_size: int = 1,
@@ -40,6 +40,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         # DataLoader args
         num_workers: int = 0,
     ):
+        super().__init__()
         # DistributedAnnDataCollection args
         self.filenames = filenames
         self.limits = limits
@@ -80,6 +81,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
             indices_strict=self.indices_strict,
         )
         self.dataset = IterableDistributedAnnDataCollectionDataset(
+            dadc=self.dadc,
             batch_size=self.batch_size,
             shuffle=self.shuffle,
             seed=self.seed,
