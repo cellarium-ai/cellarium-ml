@@ -3,7 +3,6 @@
 
 import math
 import os
-from collections.abc import Iterable
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -41,10 +40,10 @@ class TestModule(torch.nn.Module):
     @staticmethod
     def _get_fn_args_from_batch(
         tensor_dict: dict[str, torch.Tensor]
-    ) -> tuple[Iterable, dict]:
+    ) -> tuple[tuple, dict]:
         return (), tensor_dict
 
-    def forward(self, **batch) -> None:
+    def forward(self, **batch: torch.Tensor) -> None:
         _, num_replicas = get_rank_and_num_replicas()
         if num_replicas > 1:
             for key, value in batch.items():
@@ -159,9 +158,7 @@ def test_iterable_dataset_multi_device(
     if trainer.global_rank != 0:
         return
 
-    iter_data = model.iter_data
-
-    actual_idx = list(int(i) for batch in iter_data for i in batch["X"])
+    actual_idx = list(int(i) for batch in model.iter_data for i in batch["X"])
     expected_idx = list(range(n_obs))
 
     # assert entire dataset is sampled
