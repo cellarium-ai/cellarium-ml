@@ -138,3 +138,33 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
     np.testing.assert_allclose(expected_mean, actual_mean, atol=1e-5)
     np.testing.assert_allclose(expected_var, actual_var, atol=1e-4)
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
+
+
+# write a test for ModuleCheckpoint for OnePassMeanVarStd
+# assert that the checkpoint is saved correctly
+# and that file exists
+# and that the checkpoint is loaded correctly
+def test_module_checkpoint(tmp_path):
+    # dataloader
+    train_loader = torch.utils.data.DataLoader(TestDataset(x_ng), batch_size=n // 2)
+    # model
+    model = OnePassMeanVarStd()
+    training_plan = DummyTrainingPlan(model)
+    # trainer
+    module_checkpoint = ModuleCheckpoint(
+        filepath=tmp_path, save_on_train_epoch_end=True
+    )
+    trainer = pl.Trainer(
+        barebones=True,
+        max_epochs=1,
+        accelerator="cpu",
+        callbacks=[module_checkpoint],
+    )
+    # fit
+    trainer.fit(training_plan, train_dataloaders=train_loader)
+    loaded_model = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    # assert
+    assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
+    np.testing.assert_allclose(model.mean, loaded_model.mean)
+    np.testing.assert_allclose(model.var, loaded_model.var)
+    np.testing.assert_allclose(model.std, loaded_model.std)
