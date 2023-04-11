@@ -9,6 +9,7 @@ import pytest
 import torch
 from anndata import AnnData
 
+from scvid.callbacks import ModuleCheckpoint
 from scvid.data import (
     DistributedAnnDataCollection,
     DistributedAnnDataCollectionDataset,
@@ -19,6 +20,8 @@ from scvid.data.util import collate_fn
 from scvid.module import OnePassMeanVarStd
 from scvid.train import DummyTrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
+
+from .common import TestDataset
 
 
 @pytest.fixture
@@ -140,20 +143,14 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
 
 
-# write a test for ModuleCheckpoint for OnePassMeanVarStd
-# assert that the checkpoint is saved correctly
-# and that file exists
-# and that the checkpoint is loaded correctly
 def test_module_checkpoint(tmp_path):
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(x_ng), batch_size=n // 2)
+    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(5)))
     # model
     model = OnePassMeanVarStd()
     training_plan = DummyTrainingPlan(model)
     # trainer
-    module_checkpoint = ModuleCheckpoint(
-        filepath=tmp_path, save_on_train_epoch_end=True
-    )
+    module_checkpoint = ModuleCheckpoint(dirpath=tmp_path, save_on_train_end=True)
     trainer = pl.Trainer(
         barebones=True,
         max_epochs=1,
