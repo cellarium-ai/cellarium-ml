@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from pathlib import Path
 
 import lightning.pytorch as pl
 import numpy as np
@@ -143,14 +144,35 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
 
 
-def test_module_checkpoint(tmp_path):
+@pytest.mark.parametrize(
+    "checkpoint_kwargs",
+    [
+        {
+            "save_on_train_end": True,
+            "save_on_train_epoch_end": False,
+            "save_on_train_batch_end": False,
+        },
+        {
+            "save_on_train_end": False,
+            "save_on_train_epoch_end": True,
+            "save_on_train_batch_end": False,
+        },
+        {
+            "save_on_train_end": False,
+            "save_on_train_epoch_end": False,
+            "save_on_train_batch_end": True,
+        },
+    ],
+)
+def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(5)))
+    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
     # model
     model = OnePassMeanVarStd()
     training_plan = DummyTrainingPlan(model)
     # trainer
-    module_checkpoint = ModuleCheckpoint(dirpath=tmp_path, save_on_train_end=True)
+    checkpoint_kwargs["dirpath"] = tmp_path
+    module_checkpoint = ModuleCheckpoint(**checkpoint_kwargs)
     trainer = pl.Trainer(
         barebones=True,
         max_epochs=1,
@@ -159,9 +181,10 @@ def test_module_checkpoint(tmp_path):
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
+    # load model from checkpoint
+    assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
     loaded_model = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
-    assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
     np.testing.assert_allclose(model.mean, loaded_model.mean)
     np.testing.assert_allclose(model.var, loaded_model.var)
     np.testing.assert_allclose(model.std, loaded_model.std)

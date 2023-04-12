@@ -19,24 +19,21 @@ class ModuleCheckpoint(pl.Callback):
             specified by :class:`~lightning.pytorch.trainer.trainer.Trainer`'s
             :paramref:`~lightning.pytorch.trainer.trainer.Trainer.default_root_dir` argument,
             and if the Trainer uses a logger, the path will also contain logger name and version.
-        filename: Filename to save the module checkpoint.
-            By default, filename is ``None`` and will be set to ``module_checkpoint.pt``.
-        save_on_train_batch_end: Whether to save the module on train batch end.
-        save_on_train_epoch_end: Whether to save the module on train epoch end.
-        save_on_train_end: Whether to save the module on train end.
+        filename: Filename to save the module checkpoint. Default: ``"module_checkpoint.pt"``.
+        save_on_train_batch_end: Whether to save the module on train batch end. Default: ``False``.
+        save_on_train_epoch_end: Whether to save the module on train epoch end. Default: ``False``.
+        save_on_train_end: Whether to save the module on train end. Default: ``True``.
     """
 
     def __init__(
         self,
         dirpath: Path | str | None = None,
-        filename: str | None = None,
+        filename: str = "module_checkpoint.pt",
         save_on_train_batch_end: bool = False,
         save_on_train_epoch_end: bool = False,
         save_on_train_end: bool = True,
     ):
         self.dirpath = dirpath
-        if filename is None:
-            filename = "module_checkpoint.pt"
         self.filename = filename
         self.save_on_train_batch_end = save_on_train_batch_end
         self.save_on_train_epoch_end = save_on_train_epoch_end

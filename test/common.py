@@ -5,6 +5,8 @@ import torch
 
 
 class TestDataset(torch.utils.data.Dataset):
+    """A simple dataset for testing purposes."""
+
     def __init__(self, data):
         self.data = data
 
