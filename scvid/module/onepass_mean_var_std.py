@@ -17,9 +17,9 @@ class OnePassMeanVarStd(nn.Module):
     def __init__(self, transform: nn.Module | None = None) -> None:
         super().__init__()
         self.transform = transform
-        self.x_sums = torch.tensor(0)
-        self.x_squared_sums = torch.tensor(0)
-        self.x_size = 0
+        self.register_buffer("x_sums", torch.tensor(0))
+        self.register_buffer("x_squared_sums", torch.tensor(0))
+        self.register_buffer("x_size", torch.tensor(0))
 
     @staticmethod
     def _get_fn_args_from_batch(

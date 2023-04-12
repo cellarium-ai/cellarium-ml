@@ -108,6 +108,7 @@ class DistributedAnnDataCollection(AnnCollection):
         convert: ConvertType | None = None,
         indices_strict: bool = True,
     ):
+        print("TTTTTTTTTTTTTTTTTTTTTTTTTTTTTT")
         self.filenames = list(
             braceexpand(filenames) if isinstance(filenames, str) else filenames
         )

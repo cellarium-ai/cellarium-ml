@@ -61,6 +61,20 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
+        # DistributedAnnDataCollection
+        self.dadc = DistributedAnnDataCollection(
+            filenames=self.filenames,
+            limits=self.limits,
+            shard_size=self.shard_size,
+            last_shard_size=self.last_shard_size,
+            max_cache_size=self.max_cache_size,
+            cache_size_strictly_enforced=self.cache_size_strictly_enforced,
+            label=self.label,
+            keys=self.keys,
+            index_unique=self.index_unique,
+            convert=self.convert,
+            indices_strict=self.indices_strict,
+        )
 
     @property
     def n_obs(self) -> int:
@@ -75,19 +89,6 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         .. note::
            setup is called from every process across all the nodes. Setting state here is recommended.
         """
-        self.dadc = DistributedAnnDataCollection(
-            filenames=self.filenames,
-            limits=self.limits,
-            shard_size=self.shard_size,
-            last_shard_size=self.last_shard_size,
-            max_cache_size=self.max_cache_size,
-            cache_size_strictly_enforced=self.cache_size_strictly_enforced,
-            label=self.label,
-            keys=self.keys,
-            index_unique=self.index_unique,
-            convert=self.convert,
-            indices_strict=self.indices_strict,
-        )
         self.dataset = IterableDistributedAnnDataCollectionDataset(
             dadc=self.dadc,
             batch_size=self.batch_size,

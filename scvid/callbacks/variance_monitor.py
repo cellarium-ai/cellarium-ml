@@ -28,7 +28,7 @@ class VarianceMonitor(pl.Callback):
                 total_variance is None
             ), "total_variance should be None if mean_var_std_ckpt_path is provided"
             onepass = torch.load(mean_var_std_ckpt_path)
-            total_variance = onepass.var_g.sum()
+            total_variance = onepass.var_g.sum().item()
         self.total_variance = total_variance
 
     def on_train_start(

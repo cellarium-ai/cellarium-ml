@@ -46,7 +46,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         g_genes: int,
         k_components: int,
         ppca_flavor: str,
-        mean_g: float | int | torch.Tensor | None = None,
+        mean_g: float | torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
         seed: int = 0,
@@ -72,7 +72,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
             # make mean_g a learnable parameter
             self.mean_g = PyroParam(lambda: torch.zeros(g_genes))
         else:
-            self.mean_g = mean_g
+            self.register_buffer("mean_g", torch.as_tensor(mean_g))
 
         rng = torch.Generator()
         rng.manual_seed(seed)
