@@ -61,8 +61,4 @@ def main():
 
 
 if __name__ == "__main__":
-    #  parser.add_argument(
-    #      "-lr", "--learning_rate", default=0.1, type=float, help="learning rate"
-    #  )
-    #  parser.add_argument("--log_every_n_steps", type=int, default=1)
     main()

@@ -62,7 +62,6 @@ class ProbabilisticPCAWithDefaults(ProbabilisticPCAPyroModule):
         else:
             # load OnePassMeanVarStd from checkpoint
             onepass = torch.load(mean_var_std_ckpt_path)
-            import pdb;pdb.set_trace()
             # compute W_init_scale and sigma_init_scale
             W_init_scale = torch.sqrt(
                 W_init_variance_ratio * onepass.var_g.sum() / (g_genes * k_components)

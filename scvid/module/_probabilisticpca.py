@@ -42,10 +42,10 @@ class ProbabilisticPCAPyroModule(PyroModule):
 
     def __init__(
         self,
-        n_cells: int = 40000,
-        g_genes: int = 36350,
-        k_components: int = 256,
-        ppca_flavor: str = "marginalized",
+        n_cells: int,
+        g_genes: int,
+        k_components: int,
+        ppca_flavor: str,
         mean_g: float | int | torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,

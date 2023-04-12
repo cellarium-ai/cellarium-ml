@@ -4,6 +4,7 @@
 from typing import Any
 
 import lightning.pytorch as pl
+import torch
 
 from scvid.module import ProbabilisticPCAPyroModule
 
@@ -14,9 +15,20 @@ class VarianceMonitor(pl.Callback):
 
     Args:
         total_variance: Total variance of the data. Used to calculate the explained variance ratio.
+        mean_var_std_ckpt_path: Path to checkpoint containing OnePassMeanVarStd.
     """
 
-    def __init__(self, total_variance: float | None = None):
+    def __init__(
+        self,
+        total_variance: float | None = None,
+        mean_var_std_ckpt_path: str | None = None,
+    ):
+        if mean_var_std_ckpt_path is not None:
+            assert (
+                total_variance is None
+            ), "total_variance should be None if mean_var_std_ckpt_path is provided"
+            onepass = torch.load(mean_var_std_ckpt_path)
+            total_variance = onepass.var_g.sum()
         self.total_variance = total_variance
 
     def on_train_start(

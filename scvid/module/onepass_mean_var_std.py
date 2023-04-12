@@ -44,8 +44,8 @@ class OnePassMeanVarStd(nn.Module):
 
     @property
     def var_g(self) -> torch.Tensor:
-        return self.x_squared_sums / self.x_size - self.mean**2
+        return self.x_squared_sums / self.x_size - self.mean_g**2
 
     @property
     def std_g(self) -> torch.Tensor:
-        return torch.sqrt(self.var)
+        return torch.sqrt(self.var_g)
