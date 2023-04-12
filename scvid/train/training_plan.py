@@ -29,7 +29,7 @@ class PyroTrainingPlan(pl.LightningModule):
 
     def __init__(
         self,
-        module: pyro.nn.PyroModule,
+        module: torch.nn.Module,
         loss_fn: pyro.infer.ELBO | None = None,
         optim_fn: Callable | None = None,
         optim_kwargs: dict | None = None,

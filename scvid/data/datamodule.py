@@ -14,7 +14,7 @@ from .util import collate_fn
 
 class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
     """
-    LightningDataModule to manage dataloader creation.
+    DataModule for DistributedAnnDataCollection and IterableDistributedAnnDataCollectionDataset.
     """
 
     def __init__(
@@ -61,19 +61,14 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
-        # DistributedAnnDataCollection
-        #  self.n_obs = self.dadc.n_obs
-        #  self.n_vars = self.dadc.n_vars
-        self.n_obs = 40000
-        self.n_vars = 36350
 
-    #  @property
-    #  def n_obs(self) -> int:
-    #      return self.dadc.n_obs
-    #
-    #  @property
-    #  def n_vars(self) -> int:
-    #      return self.dadc.n_vars
+    @property
+    def n_obs(self) -> int:
+        return self.dadc.n_obs
+
+    @property
+    def n_vars(self) -> int:
+        return self.dadc.n_vars
 
     def setup(self, stage: str | None = None) -> None:
         """
