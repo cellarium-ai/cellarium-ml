@@ -9,24 +9,14 @@ import pyro
 import pytest
 import torch
 from sklearn.decomposition import PCA
-from torch.utils.data import DataLoader, Dataset
 
 from scvid.callbacks import VarianceMonitor
 from scvid.module import ProbabilisticPCAPyroModule
 from scvid.train import PyroTrainingPlan
 
+from .common import TestDataset
+
 n, g, k = 1000, 10, 3
-
-
-class TestDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return {"X": self.data[idx]}
 
 
 @pytest.fixture
@@ -62,7 +52,7 @@ def test_probabilistic_pca_multi_device(
 
     # dataloader
     batch_size = n // 2 if minibatch else n
-    train_loader = DataLoader(
+    train_loader = torch.utils.data.DataLoader(
         TestDataset(x_ng),
         batch_size=batch_size,
         shuffle=True,
@@ -119,7 +109,7 @@ def test_probabilistic_pca_multi_device(
 
 def test_variance_monitor(x_ng):
     # dataloader
-    train_loader = DataLoader(TestDataset(x_ng), batch_size=n // 2)
+    train_loader = torch.utils.data.DataLoader(TestDataset(x_ng), batch_size=n // 2)
     # model
     ppca = ProbabilisticPCAPyroModule(n, g, k, "marginalized")
     training_plan = PyroTrainingPlan(ppca)
