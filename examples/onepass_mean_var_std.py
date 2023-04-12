@@ -10,12 +10,12 @@ feature count data in one pass [1].
 
 Example run::
     python examples/onepass_mean_var_std.py fit \
-            --model.module scvid.module.OnePassMeanVarStdWithDefaults \
-            --data.filenames \
-            "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
-            --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
-            --data.shuffle true --data.num_workers 4 \
-            --trainer.accelerator gpu --trainer.devices 1 --trainer.default_root_dir runs/onepass
+        --model.module scvid.module.OnePassMeanVarStdWithDefaults \
+        --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
+        --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
+        --data.num_workers 4 \
+        --trainer.accelerator gpu --trainer.devices 1 --trainer.default_root_dir runs/onepass \
+        --trainer.callbacks scvid.callbacks.ModuleCheckpoint
 
 **References:**
 
@@ -34,7 +34,6 @@ def main():
         DummyTrainingPlan,
         DistributedAnnDataCollectionDataModule,
         trainer_defaults={"max_epochs": 1},  # one pass
-        save_config_kwargs={"overwrite": True},
     )
 
 

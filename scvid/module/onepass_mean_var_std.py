@@ -39,13 +39,13 @@ class OnePassMeanVarStd(nn.Module):
         self.x_size = self.x_size + x_ng.shape[0]
 
     @property
-    def mean(self) -> torch.Tensor:
+    def mean_g(self) -> torch.Tensor:
         return self.x_sums / self.x_size
 
     @property
-    def var(self) -> torch.Tensor:
+    def var_g(self) -> torch.Tensor:
         return self.x_squared_sums / self.x_size - self.mean**2
 
     @property
-    def std(self) -> torch.Tensor:
+    def std_g(self) -> torch.Tensor:
         return torch.sqrt(self.var)

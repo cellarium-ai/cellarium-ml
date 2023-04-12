@@ -8,7 +8,12 @@ from scvid.transforms import ZScoreLog1pNormalize
 
 
 class OnePassMeanVarStdWithDefaults(OnePassMeanVarStd):
-    """Preset default values for the CLI."""
+    """
+    Preset default values for the LightningCLI.
+
+    Args:
+        target_count: Target gene epxression count. Default: ``10_000
+    """
 
     def __init__(self, target_count: int = 10_000) -> None:
         transform = ZScoreLog1pNormalize(
@@ -18,7 +23,21 @@ class OnePassMeanVarStdWithDefaults(OnePassMeanVarStd):
 
 
 class ProbabilisticPCAWithDefaults(ProbabilisticPCAPyroModule):
-    """Preset default values for the CLI."""
+    """
+    Preset default values for the LightningCLI.
+
+    Args:
+        n_cells: Number of cells.
+        g_genes: Number of genes.
+        k_components: Number of principcal components.
+        ppca_flavor: Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
+        W_init_variance_ratio: Ratio of variance of W_init_scale to variance of data.
+        sigma_init_variance_ratio: Ratio of variance of sigma_init_scale to variance of data.
+        seed: Random seed used to initialize parameters. Default: ``0``.
+        target_count: Target gene epxression count. Default: ``10_000``
+        mean_var_std_ckpt_path: Path to checkpoint containing OnePassMeanVarStd.
+    """
+
     def __init__(
         self,
         n_cells: int,
@@ -42,16 +61,16 @@ class ProbabilisticPCAWithDefaults(ProbabilisticPCAPyroModule):
             )
         else:
             # load OnePassMeanVarStd from checkpoint
-            ckpt = torch.load(mean_var_std_ckpt_path)
-            onepass = ckpt["hyper_parameters"]["module"]
+            onepass = torch.load(mean_var_std_ckpt_path)
+            import pdb;pdb.set_trace()
             # compute W_init_scale and sigma_init_scale
             W_init_scale = torch.sqrt(
-                W_init_variance_ratio * onepass.var.sum() / (g_genes * k_components)
+                W_init_variance_ratio * onepass.var_g.sum() / (g_genes * k_components)
             ).item()
             sigma_init_scale = torch.sqrt(
-                sigma_init_variance_ratio * onepass.var.sum() / g_genes
+                sigma_init_variance_ratio * onepass.var_g.sum() / g_genes
             ).item()
-            mean_g = onepass.mean
+            mean_g = onepass.mean_g
             # create transform
             transform = ZScoreLog1pNormalize(
                 mean_g=0, std_g=None, perform_scaling=False, target_count=target_count

@@ -37,7 +37,6 @@ class PyroTrainingPlan(pl.LightningModule):
         scheduler_kwargs: dict | None = None,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters()
         self.module = module
 
         self.optim_fn = torch.optim.Adam if optim_fn is None else optim_fn

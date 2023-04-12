@@ -78,9 +78,9 @@ def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
     trainer.fit(training_plan, train_dataloaders=data_loader)
 
     # actual mean, var, and std
-    actual_mean = model.mean
-    actual_var = model.var
-    actual_std = model.std
+    actual_mean = model.mean_g
+    actual_var = model.var_g
+    actual_std = model.std_g
 
     # expected mean, var, and std
     x = transform(torch.from_numpy(adata.X))
@@ -129,9 +129,9 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
         return
 
     # actual mean, var, and std
-    actual_mean = model.mean
-    actual_var = model.var
-    actual_std = model.std
+    actual_mean = model.mean_g
+    actual_var = model.var_g
+    actual_std = model.std_g
 
     # expected mean, var, and std
     x = transform(torch.from_numpy(adata.X))
@@ -185,6 +185,6 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
     loaded_model = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
-    np.testing.assert_allclose(model.mean, loaded_model.mean)
-    np.testing.assert_allclose(model.var, loaded_model.var)
-    np.testing.assert_allclose(model.std, loaded_model.std)
+    np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
+    np.testing.assert_allclose(model.var_g, loaded_model.var_g)
+    np.testing.assert_allclose(model.std_g, loaded_model.std_g)
