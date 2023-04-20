@@ -45,7 +45,8 @@ class VarianceMonitor(pl.Callback):
         # attempt to get the total variance from the checkpoint
         if (
             self.total_variance is None
-            and pl_module.module.get("mean_var_std_ckpt_path") is not None
+            and hasattr(pl_module.module, "mean_var_std_ckpt_path")
+            and pl_module.module.mean_var_std_ckpt_path is not None
         ):
             mean_var_std_ckpt_path = pl_module.module.mean_var_std_ckpt_path
             onepass = torch.load(mean_var_std_ckpt_path)
