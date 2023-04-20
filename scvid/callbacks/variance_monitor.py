@@ -21,14 +21,7 @@ class VarianceMonitor(pl.Callback):
     def __init__(
         self,
         total_variance: float | None = None,
-        mean_var_std_ckpt_path: str | None = None,
     ):
-        if mean_var_std_ckpt_path is not None:
-            assert (
-                total_variance is None
-            ), "total_variance should be None if mean_var_std_ckpt_path is provided"
-            onepass = torch.load(mean_var_std_ckpt_path)
-            total_variance = onepass.var_g.sum().item()
         self.total_variance = total_variance
 
     def on_train_start(
@@ -49,6 +42,14 @@ class VarianceMonitor(pl.Callback):
             raise pl.utilities.exceptions.MisconfigurationException(
                 "Cannot use `LearningRateMonitor` callback with `Trainer` that has no logger."
             )
+        # attempt to get the total variance from the checkpoint
+        if (
+            self.total_variance is None
+            and pl_module.module.get("mean_var_std_ckpt_path") is not None
+        ):
+            mean_var_std_ckpt_path = pl_module.module.mean_var_std_ckpt_path
+            onepass = torch.load(mean_var_std_ckpt_path)
+            self.total_variance = onepass.var_g.sum().item()
 
     def on_train_batch_end(
         self,
@@ -78,3 +79,30 @@ class VarianceMonitor(pl.Callback):
             logger.log_metrics(
                 variance_stats, step=trainer.fit_loop.epoch_loop._batches_that_stepped
             )
+
+        if hasattr(pl_module, "average_module"):
+            W_variance = pl_module.average_module.W_variance
+            sigma_variance = pl_module.average_module.sigma_variance
+
+            variance_stats = {}
+            variance_stats["total_explained_variance_average"] = (
+                W_variance + sigma_variance
+            )
+            variance_stats["W_variance_average"] = W_variance
+            variance_stats["sigma_variance_average"] = sigma_variance
+            if self.total_variance is not None:
+                variance_stats["total_explained_variance_ratio_average"] = (
+                    W_variance + sigma_variance
+                ) / self.total_variance
+                variance_stats["W_variance_ratio_average"] = (
+                    W_variance / self.total_variance
+                )
+                variance_stats["sigma_variance_ratio_average"] = (
+                    sigma_variance / self.total_variance
+                )
+
+            for logger in trainer.loggers:
+                logger.log_metrics(
+                    variance_stats,
+                    step=trainer.fit_loop.epoch_loop._batches_that_stepped,
+                )

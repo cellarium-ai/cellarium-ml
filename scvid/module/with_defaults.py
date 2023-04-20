@@ -78,6 +78,7 @@ class ProbabilisticPCAWithDefaults(ProbabilisticPCAPyroModule):
             transform = ZScoreLog1pNormalize(
                 mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
             )
+        self.mean_var_std_ckpt_path = mean_var_std_ckpt_path
         super().__init__(
             n_cells=n_cells,
             g_genes=g_genes,

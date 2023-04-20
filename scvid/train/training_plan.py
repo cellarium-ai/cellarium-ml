@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from collections.abc import Callable
+from importlib import import_module
 from typing import Any
 
 import lightning.pytorch as pl
@@ -31,14 +32,25 @@ class PyroTrainingPlan(pl.LightningModule):
         self,
         module: torch.nn.Module,
         loss_fn: pyro.infer.ELBO | None = None,
-        optim_fn: Callable | None = None,
+        optim_fn: Callable | str | None = None,
         optim_kwargs: dict | None = None,
-        scheduler_fn: Callable | None = None,
+        scheduler_fn: Callable | str | None = None,
         scheduler_kwargs: dict | None = None,
     ) -> None:
         super().__init__()
         self.module = module
 
+        # import optimizer and scheduler if they are passed as strings
+        if isinstance(optim_fn, str):
+            class_module, class_name = optim_fn.rsplit(".", 1)
+            module = import_module(class_module)
+            optim_fn = getattr(module, class_name)
+        if isinstance(scheduler_fn, str):
+            class_module, class_name = scheduler_fn.rsplit(".", 1)
+            module = import_module(class_module)
+            scheduler_fn = getattr(module, class_name)
+
+        # set up optimizer and scheduler
         self.optim_fn = torch.optim.Adam if optim_fn is None else optim_fn
         optim_kwargs = {} if optim_kwargs is None else optim_kwargs
         if "lr" not in optim_kwargs:
@@ -99,7 +111,6 @@ class DummyTrainingPlan(pl.LightningModule):
 
     def __init__(self, module: torch.nn.Module) -> None:
         super().__init__()
-        self.save_hyperparameters()
         self.module = module
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
