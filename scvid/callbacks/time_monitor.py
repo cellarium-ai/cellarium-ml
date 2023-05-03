@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from typing import Any
-from datetime import timedelta
 
 import lightning.pytorch as pl
 
@@ -14,6 +13,7 @@ class TimeMonitor(pl.callbacks.Timer):
     At the end of training, the number of batches per second is calculated and
     logged to the logger(s).
     """
+
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.num_batches = 0
