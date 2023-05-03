@@ -3,6 +3,7 @@
 
 import os
 import pickle
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,7 @@ from scvid.data import (
 
 
 @pytest.fixture
-def adatas_path(tmp_path):
+def adatas_path(tmp_path: Path):
     n_cell, n_gene = (10, 5)
     # adata0.n_obs == 2, adata1.n_obs == 3, adata2.n_obs == 5
     limits = [2, 5, 10]
@@ -61,14 +62,14 @@ def adatas_path(tmp_path):
 
 
 @pytest.fixture
-def adt(adatas_path):
+def adt(adatas_path: Path):
     # single anndata
     adt = read_h5ad_file(str(os.path.join(adatas_path, "adata.h5ad")))
     return adt
 
 
 @pytest.fixture(params=[(i, j) for i in (1, 2, 3) for j in (True, False)])
-def dat(adatas_path, request):
+def dat(adatas_path: Path, request: pytest.FixtureRequest):
     # distributed anndata
     filenames = str(os.path.join(adatas_path, "adata.{000..002}.h5ad"))
     limits = [2, 5, 10]
@@ -82,7 +83,7 @@ def dat(adatas_path, request):
     return dat
 
 
-def test_init_dat(dat):
+def test_init_dat(dat: DistributedAnnDataCollection):
     # check that only one anndata was loaded during initialization
     assert len(dat.cache) == 1
 
@@ -101,7 +102,9 @@ def test_init_dat(dat):
 
 @pytest.mark.parametrize("num_shards", [3, 4, 10])
 @pytest.mark.parametrize("last_shard_size", [1, 2, 3, None])
-def test_init_shard_size(adatas_path, num_shards, last_shard_size):
+def test_init_shard_size(
+    adatas_path: Path, num_shards: int, last_shard_size: int | None
+):
     shard_size = 2
     filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards-1:03}}}.h5ad"))
     dadc = DistributedAnnDataCollection(
@@ -125,7 +128,12 @@ def test_init_shard_size(adatas_path, num_shards, last_shard_size):
     ids=["one adata", "two adatas", "sorted two adatas", "unsorted three adatas"],
 )
 @pytest.mark.parametrize("vidx", [slice(0, 2), [3, 1, 0]])
-def test_indexing(adt, dat, row_select, vidx):
+def test_indexing(
+    adt: AnnData,
+    dat: DistributedAnnDataCollection,
+    row_select: tuple[slice | list, int],
+    vidx: slice | list,
+):
     # compare indexing single and distributed anndata
     max_cache_size = dat.max_cache_size
     cache_size_strictly_enforced = dat.cache_size_strictly_enforced
@@ -146,7 +154,7 @@ def test_indexing(adt, dat, row_select, vidx):
         np.testing.assert_array_equal(adt_view.obs["A"], dat_view.obs["A"])
 
 
-def test_pickle(dat):
+def test_pickle(dat: DistributedAnnDataCollection):
     new_dat = pickle.loads(pickle.dumps(dat))
 
     assert len(new_dat.cache) == 0
@@ -165,7 +173,11 @@ def test_pickle(dat):
     [(slice(0, 2), 1), (slice(1, 4), 2), ([1, 2, 4, 4], 2), ([6, 1, 3], 3)],
     ids=["one adata", "two adatas", "sorted two adatas", "unsorted three adatas"],
 )
-def test_indexing_dataset(adt, dat, row_select):
+def test_indexing_dataset(
+    adt: AnnData,
+    dat: DistributedAnnDataCollection,
+    row_select: tuple[slice | list, int],
+):
     # compare indexing single anndata and distributed anndata dataset
     max_cache_size = dat.max_cache_size
     cache_size_strictly_enforced = dat.cache_size_strictly_enforced
@@ -184,7 +196,7 @@ def test_indexing_dataset(adt, dat, row_select):
         np.testing.assert_array_equal(adt_X, dataset_X)
 
 
-def test_pickle_dataset(dat):
+def test_pickle_dataset(dat: DistributedAnnDataCollection):
     dataset = DistributedAnnDataCollectionDataset(dat)
     new_dataset = pickle.loads(pickle.dumps(dataset))
 

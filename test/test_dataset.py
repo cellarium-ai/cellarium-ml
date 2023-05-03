@@ -3,7 +3,7 @@
 
 import math
 import os
-from collections.abc import Iterable
+from pathlib import Path
 
 import lightning.pytorch as pl
 import numpy as np
@@ -33,17 +33,17 @@ class TestModule(torch.nn.Module):
     feature counts, worker info, torch.distributed info, cache info, etc.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.iter_data = []
+        self.iter_data: list = []
 
     @staticmethod
     def _get_fn_args_from_batch(
         tensor_dict: dict[str, torch.Tensor]
-    ) -> tuple[Iterable, dict]:
+    ) -> tuple[tuple, dict]:
         return (), tensor_dict
 
-    def forward(self, **batch):
+    def forward(self, **batch: torch.Tensor) -> None:
         _, num_replicas = get_rank_and_num_replicas()
         if num_replicas > 1:
             for key, value in batch.items():
@@ -52,7 +52,7 @@ class TestModule(torch.nn.Module):
 
 
 @pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])  # limits
-def dadc(tmp_path, request):
+def dadc(tmp_path: Path, request: pytest.FixtureRequest):
     limits = request.param
     n_cell = limits[-1]
     g_gene = 1
@@ -81,7 +81,9 @@ def dadc(tmp_path, request):
 @pytest.mark.parametrize(
     "batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"]
 )
-def test_iterable_dataset(dadc, shuffle, num_workers, batch_size):
+def test_iterable_dataset(
+    dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int
+):
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True
@@ -120,7 +122,11 @@ def test_iterable_dataset(dadc, shuffle, num_workers, batch_size):
 )
 @pytest.mark.parametrize("drop_last", [False, True], ids=["no drop last", "drop last"])
 def test_iterable_dataset_multi_device(
-    dadc, shuffle, num_workers, batch_size, drop_last
+    dadc: DistributedAnnDataCollection,
+    shuffle: bool,
+    num_workers: int,
+    batch_size: int,
+    drop_last: bool,
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     n_obs = len(dadc)
@@ -152,9 +158,7 @@ def test_iterable_dataset_multi_device(
     if trainer.global_rank != 0:
         return
 
-    data_loader = model.iter_data
-
-    actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
+    actual_idx = list(int(i) for batch in model.iter_data for i in batch["X"])
     expected_idx = list(range(n_obs))
 
     # assert entire dataset is sampled
@@ -181,7 +185,10 @@ def test_iterable_dataset_multi_device(
 )
 @pytest.mark.parametrize("epochs", [2, 3], ids=["two epochs", "three epochs"])
 def test_iterable_dataset_set_epoch_multi_device(
-    dadc, num_workers, persistent_workers, epochs
+    dadc: DistributedAnnDataCollection,
+    num_workers: int,
+    persistent_workers: bool,
+    epochs: int,
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     dataset = IterableDistributedAnnDataCollectionDataset(
@@ -213,9 +220,9 @@ def test_iterable_dataset_set_epoch_multi_device(
     if trainer.global_rank != 0:
         return
 
-    data_loader = model.iter_data
+    iter_data = model.iter_data
 
-    actual_epochs = set(int(i) for batch in data_loader for i in batch["epoch"])
+    actual_epochs = set(int(i) for batch in iter_data for i in batch["epoch"])
     expected_epochs = set(range(epochs))
 
     assert set(expected_epochs) == set(actual_epochs)
