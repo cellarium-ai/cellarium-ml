@@ -19,8 +19,8 @@ class ZScoreLog1pNormalize(nn.Module):
 
     def __init__(
         self,
-        mean_g: torch.Tensor,
-        std_g: torch.Tensor | None,
+        mean_g: torch.Tensor | float,
+        std_g: torch.Tensor | float | None,
         perform_scaling: bool,
         target_count: int = 10_000,
         eps: float = 1e-6,

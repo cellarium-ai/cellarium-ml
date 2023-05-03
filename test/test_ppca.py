@@ -9,24 +9,14 @@ import pyro
 import pytest
 import torch
 from sklearn.decomposition import PCA
-from torch.utils.data import DataLoader, Dataset
 
 from scvid.callbacks import VarianceMonitor
 from scvid.module import ProbabilisticPCAPyroModule
 from scvid.train import PyroTrainingPlan
 
+from .common import TestDataset
+
 n, g, k = 1000, 10, 3
-
-
-class TestDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return {"X": self.data[idx]}
 
 
 @pytest.fixture
@@ -41,7 +31,7 @@ def x_ng():
 
 
 @pytest.fixture
-def pca_fit(x_ng):
+def pca_fit(x_ng: np.ndarray):
     pca = PCA(n_components=k)
     pca.fit(x_ng)
     return pca
@@ -51,7 +41,7 @@ def pca_fit(x_ng):
 @pytest.mark.parametrize("learn_mean", [False, True])
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
 def test_probabilistic_pca_multi_device(
-    x_ng, pca_fit, minibatch, ppca_flavor, learn_mean
+    x_ng: np.ndarray, pca_fit: PCA, minibatch: bool, ppca_flavor: str, learn_mean: bool
 ):
     n, g = x_ng.shape
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -62,7 +52,7 @@ def test_probabilistic_pca_multi_device(
 
     # dataloader
     batch_size = n // 2 if minibatch else n
-    train_loader = DataLoader(
+    train_loader = torch.utils.data.DataLoader(
         TestDataset(x_ng),
         batch_size=batch_size,
         shuffle=True,
@@ -117,9 +107,9 @@ def test_probabilistic_pca_multi_device(
     np.testing.assert_allclose(np.ones(k), abs_cos_sim, rtol=0.01)
 
 
-def test_variance_monitor(x_ng):
+def test_variance_monitor(x_ng: np.ndarray):
     # dataloader
-    train_loader = DataLoader(TestDataset(x_ng), batch_size=n // 2)
+    train_loader = torch.utils.data.DataLoader(TestDataset(x_ng), batch_size=n // 2)
     # model
     ppca = ProbabilisticPCAPyroModule(n, g, k, "marginalized")
     training_plan = PyroTrainingPlan(ppca)

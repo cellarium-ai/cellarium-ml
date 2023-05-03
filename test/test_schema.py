@@ -88,12 +88,12 @@ def adata():
 
 
 @pytest.fixture
-def schema(ref_adata):
+def schema(ref_adata: AnnData):
     return AnnDataSchema(ref_adata)
 
 
 @pytest.mark.parametrize("delete_ref", [False, True])
-def test_validate_adata(ref_adata, adata, delete_ref):
+def test_validate_adata(ref_adata: AnnData, adata: AnnData, delete_ref: bool):
     schema = AnnDataSchema(ref_adata)
     if delete_ref:
         del ref_adata
@@ -109,7 +109,7 @@ def test_validate_adata(ref_adata, adata, delete_ref):
         "change_obs_categories",
     ]
 )
-def change_adata(adata, request):
+def change_adata(adata: AnnData, request: pytest.FixtureRequest):
     if request.param == "permute_obs_columns":
         adata.obs = adata.obs.iloc[:, [1, 0, 2]]
         err_msg = ".obs attribute columns for anndata passed in"
@@ -137,7 +137,7 @@ def change_adata(adata, request):
     return err_msg
 
 
-def test_changed_adata(schema, adata, change_adata):
+def test_changed_adata(schema: AnnDataSchema, adata: AnnData, change_adata: str):
     err_msg = change_adata
     with pytest.raises(ValueError, match=err_msg):
         schema.validate_anndata(adata)

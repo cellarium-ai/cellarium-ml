@@ -25,9 +25,9 @@ EXAMPLES = [
 
 
 @pytest.mark.parametrize("example", EXAMPLES)
-def test_cpu(example):
+def test_cpu(example: str):
     print(f"Running:\npython examples/{example}")
-    example = example.split()
-    filename, args = example[0], example[1:]
+    example_list = example.split()
+    filename, args = example_list[0], example_list[1:]
     filename = os.path.join(EXAMPLES_DIR, filename)
     check_call([sys.executable, filename] + args)

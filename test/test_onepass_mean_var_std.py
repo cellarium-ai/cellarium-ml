@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from pathlib import Path
 
 import lightning.pytorch as pl
 import numpy as np
@@ -9,6 +10,7 @@ import pytest
 import torch
 from anndata import AnnData
 
+from scvid.callbacks import ModuleCheckpoint
 from scvid.data import (
     DistributedAnnDataCollection,
     DistributedAnnDataCollectionDataset,
@@ -20,6 +22,8 @@ from scvid.module import OnePassMeanVarStd
 from scvid.train import DummyTrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
 
+from .common import TestDataset
+
 
 @pytest.fixture
 def adata():
@@ -30,7 +34,7 @@ def adata():
 
 
 @pytest.fixture
-def dadc(adata, tmp_path):
+def dadc(adata: AnnData, tmp_path: Path):
     # save anndata files
     limits = [2, 5, 10]
     for i, limit in enumerate(zip([0] + limits, limits)):
@@ -50,7 +54,13 @@ def dadc(adata, tmp_path):
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
-def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
+def test_onepass_mean_var_std(
+    adata: AnnData,
+    dadc: DistributedAnnDataCollection,
+    shuffle: bool,
+    num_workers: int,
+    batch_size: int,
+):
     # prepare dataloader
     dataset = DistributedAnnDataCollectionDataset(dadc)
     sampler = DistributedAnnDataCollectionSingleConsumerSampler(
@@ -93,7 +103,11 @@ def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
 def test_onepass_mean_var_std_iterable_dataset_multi_device(
-    adata, dadc, shuffle, num_workers, batch_size
+    adata: AnnData,
+    dadc: DistributedAnnDataCollection,
+    shuffle: bool,
+    num_workers: int,
+    batch_size: int,
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
@@ -138,3 +152,49 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
     np.testing.assert_allclose(expected_mean, actual_mean, atol=1e-5)
     np.testing.assert_allclose(expected_var, actual_var, atol=1e-4)
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_kwargs",
+    [
+        {
+            "save_on_train_end": True,
+            "save_on_train_epoch_end": False,
+            "save_on_train_batch_end": False,
+        },
+        {
+            "save_on_train_end": False,
+            "save_on_train_epoch_end": True,
+            "save_on_train_batch_end": False,
+        },
+        {
+            "save_on_train_end": False,
+            "save_on_train_epoch_end": False,
+            "save_on_train_batch_end": True,
+        },
+    ],
+)
+def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
+    # dataloader
+    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
+    # model
+    model = OnePassMeanVarStd()
+    training_plan = DummyTrainingPlan(model)
+    # trainer
+    checkpoint_kwargs["dirpath"] = tmp_path
+    module_checkpoint = ModuleCheckpoint(**checkpoint_kwargs)
+    trainer = pl.Trainer(
+        barebones=True,
+        max_epochs=1,
+        accelerator="cpu",
+        callbacks=[module_checkpoint],
+    )
+    # fit
+    trainer.fit(training_plan, train_dataloaders=train_loader)
+    # load model from checkpoint
+    assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
+    loaded_model = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    # assert
+    np.testing.assert_allclose(model.mean, loaded_model.mean)
+    np.testing.assert_allclose(model.var, loaded_model.var)
+    np.testing.assert_allclose(model.std, loaded_model.std)
