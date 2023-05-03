@@ -34,8 +34,9 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
-    with blob.open("rb") as f:
-        return read_h5ad(f)
+    with tempfile.TemporaryFile() as tmp_file:
+        blob.download_to_file(tmp_file)
+        return read_h5ad(tmp_file)
 
 
 def read_h5ad_url(filename: str) -> AnnData:
