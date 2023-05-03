@@ -5,7 +5,6 @@ from importlib import import_module
 from typing import Any
 
 import lightning.pytorch as pl
-import pyro
 import torch
 
 

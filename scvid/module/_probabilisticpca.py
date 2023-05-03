@@ -1,10 +1,12 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Any
+
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro.nn import PyroModule, PyroParam, pyro_method
+from pyro.nn import PyroModule, PyroParam
 from torch.distributions import constraints
 
 _PROBABILISTIC_PCA_PYRO_MODULE_NAME = "probabilistic_pca"
@@ -96,7 +98,6 @@ class ProbabilisticPCA(PyroModule):
     def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         return self.elbo.differentiable_loss(self.model, self.guide, *args, **kwargs)
 
-    @pyro_method
     def model(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)
@@ -123,7 +124,6 @@ class ProbabilisticPCA(PyroModule):
                     obs=x_ng,
                 )
 
-    @pyro_method
     def guide(self, x_ng: torch.Tensor) -> None:
         if self.ppca_flavor == "marginalized":
             return

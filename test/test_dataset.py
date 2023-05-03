@@ -146,7 +146,7 @@ def test_iterable_dataset_multi_device(
 
     # fit
     model = TestModule()
-    training_plan = DummyTrainingPlan(model)
+    training_plan = TrainingPlan(model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
