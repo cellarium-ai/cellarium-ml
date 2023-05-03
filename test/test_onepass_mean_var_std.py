@@ -34,7 +34,7 @@ def adata():
 
 
 @pytest.fixture
-def dadc(adata, tmp_path):
+def dadc(adata: AnnData, tmp_path: Path):
     # save anndata files
     limits = [2, 5, 10]
     for i, limit in enumerate(zip([0] + limits, limits)):
@@ -54,7 +54,13 @@ def dadc(adata, tmp_path):
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
-def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
+def test_onepass_mean_var_std(
+    adata: AnnData,
+    dadc: DistributedAnnDataCollection,
+    shuffle: bool,
+    num_workers: int,
+    batch_size: int,
+):
     # prepare dataloader
     dataset = DistributedAnnDataCollectionDataset(dadc)
     sampler = DistributedAnnDataCollectionSingleConsumerSampler(
@@ -97,7 +103,11 @@ def test_onepass_mean_var_std(adata, dadc, shuffle, num_workers, batch_size):
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
 def test_onepass_mean_var_std_iterable_dataset_multi_device(
-    adata, dadc, shuffle, num_workers, batch_size
+    adata: AnnData,
+    dadc: DistributedAnnDataCollection,
+    shuffle: bool,
+    num_workers: int,
+    batch_size: int,
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -20,13 +22,16 @@ from scvid.data.util import collate_fn
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 1, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
-def test_dadc_sampler_indices(limits, shuffle, num_workers, batch_size):
+def test_dadc_sampler_indices(
+    limits: tuple[int, ...], shuffle: bool, num_workers: int, batch_size: int
+):
     n_obs = limits[-1]
     sampler = DistributedAnnDataCollectionSingleConsumerSampler(
         limits=limits, shuffle=shuffle
     )
+    dataset = cast(torch.utils.data.Dataset, range(n_obs))
     data_loader = torch.utils.data.DataLoader(
-        range(n_obs),
+        dataset,
         sampler=sampler,
         num_workers=num_workers,
         batch_size=batch_size,
@@ -41,7 +46,7 @@ def test_dadc_sampler_indices(limits, shuffle, num_workers, batch_size):
 
 
 @pytest.fixture
-def dadc(tmp_path):
+def dadc(tmp_path: Path):
     n_cell, g_gene = (10, 5)
     limits = [2, 5, 10]
 
@@ -68,7 +73,9 @@ def dadc(tmp_path):
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
-def test_dadc_sampler_misses(dadc, shuffle, num_workers, batch_size):
+def test_dadc_sampler_misses(
+    dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int
+):
     dataset = DistributedAnnDataCollectionDataset(dadc)
     sampler = DistributedAnnDataCollectionSingleConsumerSampler(
         limits=dadc.limits, shuffle=shuffle

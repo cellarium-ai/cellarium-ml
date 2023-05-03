@@ -31,7 +31,7 @@ def x_ng():
 
 
 @pytest.fixture
-def pca_fit(x_ng):
+def pca_fit(x_ng: np.ndarray):
     pca = PCA(n_components=k)
     pca.fit(x_ng)
     return pca
@@ -41,7 +41,7 @@ def pca_fit(x_ng):
 @pytest.mark.parametrize("learn_mean", [False, True])
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
 def test_probabilistic_pca_multi_device(
-    x_ng, pca_fit, minibatch, ppca_flavor, learn_mean
+    x_ng: np.ndarray, pca_fit: PCA, minibatch: bool, ppca_flavor: str, learn_mean: bool
 ):
     n, g = x_ng.shape
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -107,7 +107,7 @@ def test_probabilistic_pca_multi_device(
     np.testing.assert_allclose(np.ones(k), abs_cos_sim, rtol=0.01)
 
 
-def test_variance_monitor(x_ng):
+def test_variance_monitor(x_ng: np.ndarray):
     # dataloader
     train_loader = torch.utils.data.DataLoader(TestDataset(x_ng), batch_size=n // 2)
     # model
