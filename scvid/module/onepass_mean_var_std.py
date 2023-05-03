@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Iterable
-
 import torch
 import torch.nn as nn
 
@@ -26,7 +24,7 @@ class OnePassMeanVarStd(nn.Module):
     @staticmethod
     def _get_fn_args_from_batch(
         tensor_dict: dict[str, torch.Tensor]
-    ) -> tuple[Iterable, dict]:
+    ) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}
 
