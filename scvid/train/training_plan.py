@@ -1,24 +1,20 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Callable
+from importlib import import_module
+from typing import Any
 
 import lightning.pytorch as pl
 import pyro
 import torch
 
 
-class PyroTrainingPlan(pl.LightningModule):
+class TrainingPlan(pl.LightningModule):
     """
-    Lightning module task to train Pyro scvi-tools modules.
-
-    .. note:: This is a stripped down version of the :class:`~scvi.train.LowLevelPyroTrainingPlan`.
-        https://github.com/scverse/scvi-tools/blob/bf2121975bdfc31bfb1f6feb6446c331188b47dd/scvi/train/_trainingplans.py#L745
+    Lightning module task to train scvi-distributed modules.
 
     Args:
-        pyro_module: A Pyro module. This object should have callable `model` and `guide` attributes or methods.
-        loss_fn: A Pyro loss. Should be a subclass of :class:`~pyro.infer.ELBO`.
-            If `None`, defaults to :class:`~pyro.infer.Trace_ELBO`.
+        module: torch.nn.Module to train.
         optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
             defaults to :class:`torch.optim.Adam`.
         optim_kwargs: Keyword arguments for optimiser. If `None`, defaults to `dict(lr=1e-3)`.
@@ -28,16 +24,26 @@ class PyroTrainingPlan(pl.LightningModule):
 
     def __init__(
         self,
-        pyro_module: pyro.nn.PyroModule,
-        loss_fn: pyro.infer.ELBO | None = None,
-        optim_fn: Callable | None = None,
+        module: torch.nn.Module,
+        optim_fn: type[torch.optim.Optimizer] | str | None = None,
         optim_kwargs: dict | None = None,
-        scheduler_fn: Callable | None = None,
+        scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
         scheduler_kwargs: dict | None = None,
-    ):
+    ) -> None:
         super().__init__()
-        self.module = pyro_module
+        self.module = module
 
+        # import optimizer and scheduler if they are passed as strings
+        if isinstance(optim_fn, str):
+            class_module, class_name = optim_fn.rsplit(".", 1)
+            module = import_module(class_module)
+            optim_fn = getattr(module, class_name)
+        if isinstance(scheduler_fn, str):
+            class_module, class_name = scheduler_fn.rsplit(".", 1)
+            module = import_module(class_module)
+            scheduler_fn = getattr(module, class_name)
+
+        # set up optimizer and scheduler
         self.optim_fn = torch.optim.Adam if optim_fn is None else optim_fn
         optim_kwargs = {} if optim_kwargs is None else optim_kwargs
         if "lr" not in optim_kwargs:
@@ -46,19 +52,18 @@ class PyroTrainingPlan(pl.LightningModule):
         self.scheduler_fn = scheduler_fn
         self.scheduler_kwargs = scheduler_kwargs
 
-        self.loss_fn = (
-            pyro.infer.Trace_ELBO().differentiable_loss if loss_fn is None else loss_fn
-        )
-
-    def training_step(self, batch, batch_idx):
+    def training_step(
+        self, batch: dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         """Training step for Pyro training."""
         args, kwargs = self.module._get_fn_args_from_batch(batch)
-        loss = self.loss_fn(self.module.model, self.module.guide, *args, **kwargs)
-        # Logging to TensorBoard by default
-        self.log("train_loss", loss)
+        loss = self.module(*args, **kwargs)
+        if loss is not None:
+            # Logging to TensorBoard by default
+            self.log("train_loss", loss)
         return loss
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizers for the model."""
         optim_config = {}
         optim_config["optimizer"] = self.optim_fn(
@@ -98,25 +103,3 @@ class DummyTrainingPlan(pl.LightningModule):
         super().__init__()
         self.module = module
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
-
-    def training_step(self, batch, batch_idx):
-        args, kwargs = self.module._get_fn_args_from_batch(batch)
-        self.module(*args, **kwargs)
-
-    def configure_optimizers(self):
-        return torch.optim.SGD([self._dummy_param], lr=1.0)
-
-    def on_train_epoch_start(self):
-        """
-        Calls the ``set_epoch`` method on the iterable dataset of the given dataloader.
-
-        If the dataset is ``IterableDataset`` and has ``set_epoch`` method defined, then
-        ``set_epoch`` must be called at the beginning of every epoch to ensure shuffling
-        applies a new ordering. This has no effect if shuffling is off.
-        """
-        dataloaders = self.trainer.fit_loop._combined_loader.flattened
-        for dataloader in dataloaders:
-            dataset = dataloader.dataset
-            set_epoch = getattr(dataset, "set_epoch", None)
-            if callable(set_epoch):
-                set_epoch(self.current_epoch)

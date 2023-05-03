@@ -5,7 +5,7 @@ from typing import Any
 
 import lightning.pytorch as pl
 
-from scvid.module import ProbabilisticPCAPyroModule
+from scvid.module import ProbabilisticPCA
 
 
 class VarianceMonitor(pl.Callback):
@@ -26,12 +26,12 @@ class VarianceMonitor(pl.Callback):
         Called when the train begins.
 
         Raises:
-            AssertionError: If ``pl_module.module`` is not a ``ProbabilisticPCAPyroModule`` instance.
+            AssertionError: If ``pl_module.module`` is not a ``ProbabilisticPCA`` instance.
             MisconfigurationException: If ``Trainer`` has no ``logger``.
         """
         assert isinstance(
-            pl_module.module, ProbabilisticPCAPyroModule
-        ), "VarianceMonitor callback should only be used in conjunction with ProbabilisticPCAPyroModule"
+            pl_module.module, ProbabilisticPCA
+        ), "VarianceMonitor callback should only be used in conjunction with ProbabilisticPCA"
 
         if not trainer.loggers:
             raise pl.utilities.exceptions.MisconfigurationException(

@@ -19,7 +19,7 @@ from scvid.data import (
 )
 from scvid.data.util import collate_fn
 from scvid.module import OnePassMeanVarStd
-from scvid.train import DummyTrainingPlan
+from scvid.train import TrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
 
 from .common import TestDataset
@@ -79,14 +79,14 @@ def test_onepass_mean_var_std(
 
     # fit
     model = OnePassMeanVarStd(transform=transform)
-    training_plan = DummyTrainingPlan(model)
+    training_plan = TrainingPlan(model)
     trainer = pl.Trainer(barebones=True, accelerator="cpu", max_epochs=1)  # one pass
     trainer.fit(training_plan, train_dataloaders=data_loader)
 
     # actual mean, var, and std
-    actual_mean = model.mean
-    actual_var = model.var
-    actual_std = model.std
+    actual_mean = model.mean_g
+    actual_var = model.var_g
+    actual_std = model.std_g
 
     # expected mean, var, and std
     x = transform(torch.from_numpy(adata.X))
@@ -125,7 +125,7 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
 
     # fit
     model = OnePassMeanVarStd(transform=transform)
-    training_plan = DummyTrainingPlan(model)
+    training_plan = TrainingPlan(model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
@@ -139,9 +139,9 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
         return
 
     # actual mean, var, and std
-    actual_mean = model.mean
-    actual_var = model.var
-    actual_std = model.std
+    actual_mean = model.mean_g
+    actual_var = model.var_g
+    actual_std = model.std_g
 
     # expected mean, var, and std
     x = transform(torch.from_numpy(adata.X))
@@ -179,7 +179,7 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
     # model
     model = OnePassMeanVarStd()
-    training_plan = DummyTrainingPlan(model)
+    training_plan = TrainingPlan(model)
     # trainer
     checkpoint_kwargs["dirpath"] = tmp_path
     module_checkpoint = ModuleCheckpoint(**checkpoint_kwargs)
@@ -195,6 +195,6 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
     loaded_model = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
-    np.testing.assert_allclose(model.mean, loaded_model.mean)
-    np.testing.assert_allclose(model.var, loaded_model.var)
-    np.testing.assert_allclose(model.std, loaded_model.std)
+    np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
+    np.testing.assert_allclose(model.var_g, loaded_model.var_g)
+    np.testing.assert_allclose(model.std_g, loaded_model.std_g)

@@ -17,7 +17,7 @@ from scvid.data import (
 )
 from scvid.data.util import collate_fn, get_rank_and_num_replicas
 from scvid.module import GatherLayer
-from scvid.train import DummyTrainingPlan
+from scvid.train import TrainingPlan
 
 # RuntimeError: Too many open files. Communication with the workers is no longer possible.
 # Please increase the limit using `ulimit -n` in the shell or change the sharing strategy
@@ -36,6 +36,7 @@ class TestModule(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.iter_data: list = []
+        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
     @staticmethod
     def _get_fn_args_from_batch(
@@ -206,7 +207,7 @@ def test_iterable_dataset_set_epoch_multi_device(
 
     # fit
     model = TestModule()
-    training_plan = DummyTrainingPlan(model)
+    training_plan = TrainingPlan(model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",

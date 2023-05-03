@@ -10,7 +10,7 @@ from torch.distributions import constraints
 _PROBABILISTIC_PCA_PYRO_MODULE_NAME = "probabilistic_pca"
 
 
-class ProbabilisticPCAPyroModule(PyroModule):
+class ProbabilisticPCA(PyroModule):
     """
     Probabilistic PCA implemented in Pyro.
 
@@ -36,6 +36,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
         sigma_init_scale: Initialization value of the `sigma` parameter.
         seed: Random seed used to initialize parameters. Default: ``0``.
         transform: If not ``None`` is used to transform the input data.
+        elbo: ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
+            If `None`, defaults to :class:`~pyro.infer.Trace_ELBO`.
     """
 
     def __init__(
@@ -44,11 +46,12 @@ class ProbabilisticPCAPyroModule(PyroModule):
         g_genes: int,
         k_components: int,
         ppca_flavor: str,
-        mean_g: float | int | torch.Tensor | None = None,
+        mean_g: float | torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
         seed: int = 0,
         transform: torch.nn.Module | None = None,
+        elbo: pyro.infer.ELBO | None = None,
     ):
         super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
 
@@ -61,16 +64,17 @@ class ProbabilisticPCAPyroModule(PyroModule):
         ], "ppca_flavor must be one of 'marginalized' or 'linear_vae'"
         self.ppca_flavor = ppca_flavor
         self.transform = transform
+        self.elbo = elbo or pyro.infer.Trace_ELBO()
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (
                 g_genes,
-            ), "Expected meang_g to have a shape ({g_genes},) but found {mean_g.shape}."
+            ), f"Expected meang_g to have a shape ({g_genes},) but found {mean_g.shape}."
         if mean_g is None:
             # make mean_g a learnable parameter
             self.mean_g = PyroParam(lambda: torch.zeros(g_genes))
         else:
-            self.mean_g = mean_g
+            self.register_buffer("mean_g", torch.as_tensor(mean_g))
 
         rng = torch.Generator()
         rng.manual_seed(seed)
@@ -88,6 +92,9 @@ class ProbabilisticPCAPyroModule(PyroModule):
     ) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}
+
+    def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return self.elbo.differentiable_loss(self.model, self.guide, *args, **kwargs)
 
     @pyro_method
     def model(self, x_ng: torch.Tensor) -> None:
