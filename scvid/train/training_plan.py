@@ -7,13 +7,15 @@ from typing import Any
 import lightning.pytorch as pl
 import torch
 
+from scvid.module import BaseModule
+
 
 class TrainingPlan(pl.LightningModule):
     """
     Lightning module task to train scvi-distributed modules.
 
     Args:
-        module: torch.nn.Module to train.
+        module: A scvid module to train.
         optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
             defaults to :class:`torch.optim.Adam`.
         optim_kwargs: Keyword arguments for optimiser. If `None`, defaults to `dict(lr=1e-3)`.
@@ -23,7 +25,7 @@ class TrainingPlan(pl.LightningModule):
 
     def __init__(
         self,
-        module: torch.nn.Module,
+        module: BaseModule,
         optim_fn: type[torch.optim.Optimizer] | str | None = None,
         optim_kwargs: dict | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
@@ -32,18 +34,23 @@ class TrainingPlan(pl.LightningModule):
         super().__init__()
         self.module = module
 
-        # import optimizer and scheduler if they are passed as strings
+        # set up optimizer and scheduler
         if isinstance(optim_fn, str):
             class_module, class_name = optim_fn.rsplit(".", 1)
-            module = import_module(class_module)
-            optim_fn = getattr(module, class_name)
+            optim_module = import_module(class_module)
+            self.optim_fn = getattr(optim_module, class_name)
+        elif optim_fn is None:
+            self.optim_fn = torch.optim.Adam
+        else:
+            self.optim_fn = optim_fn
+
         if isinstance(scheduler_fn, str):
             class_module, class_name = scheduler_fn.rsplit(".", 1)
-            module = import_module(class_module)
-            scheduler_fn = getattr(module, class_name)
+            scheduler_module = import_module(class_module)
+            self.scheduler_fn = getattr(scheduler_module, class_name)
+        else:
+            self.scheduler_fn = scheduler_fn
 
-        # set up optimizer and scheduler
-        self.optim_fn = torch.optim.Adam if optim_fn is None else optim_fn
         optim_kwargs = {} if optim_kwargs is None else optim_kwargs
         if "lr" not in optim_kwargs:
             optim_kwargs["lr"] = 1e-3
@@ -54,7 +61,6 @@ class TrainingPlan(pl.LightningModule):
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
-        """Training step for Pyro training."""
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         loss = self.module(*args, **kwargs)
         if loss is not None:
@@ -69,6 +75,7 @@ class TrainingPlan(pl.LightningModule):
             self.module.parameters(), **self.optim_kwargs
         )
         if self.scheduler_fn is not None:
+            assert self.scheduler_kwargs is not None
             scheduler = self.scheduler_fn(
                 optim_config["optimizer"], **self.scheduler_kwargs
             )

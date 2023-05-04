@@ -16,7 +16,7 @@ from scvid.data import (
     IterableDistributedAnnDataCollectionDataset,
 )
 from scvid.data.util import collate_fn, get_rank_and_num_replicas
-from scvid.module import GatherLayer
+from scvid.module import BaseModule, GatherLayer
 from scvid.train import TrainingPlan
 
 # RuntimeError: Too many open files. Communication with the workers is no longer possible.
@@ -25,7 +25,7 @@ from scvid.train import TrainingPlan
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 
-class TestModule(torch.nn.Module):
+class TestModule(BaseModule):
     """
     This module appends a batch input to an :attr:`iter_data` list at each iteration.
     Its intended use is for testing purposes where batch inputs can be inspected after

@@ -9,10 +9,12 @@ import torch
 from pyro.nn import PyroModule, PyroParam
 from torch.distributions import constraints
 
+from .base_module import BaseModule
+
 _PROBABILISTIC_PCA_PYRO_MODULE_NAME = "probabilistic_pca"
 
 
-class ProbabilisticPCA(PyroModule):
+class ProbabilisticPCA(BaseModule, PyroModule):
     """
     Probabilistic PCA implemented in Pyro.
 
