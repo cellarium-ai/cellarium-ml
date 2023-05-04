@@ -47,7 +47,7 @@ def test_probabilistic_pca_multi_device(
     train_loader = torch.utils.data.DataLoader(
         TestDataset(x_ng),
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
     )
     # model
     pyro.clear_param_store()
