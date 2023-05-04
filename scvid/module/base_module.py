@@ -1,12 +1,13 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from abc import ABC, abstractmethod
+from abc import ABCMeta, abstractmethod
 
+import pyro
 import torch
 
 
-class BaseModule(torch.nn.Module, ABC):
+class BaseModule(torch.nn.Module, metaclass=ABCMeta):
     """
     Base module for all scvi-distributed modules.
     """
@@ -19,3 +20,15 @@ class BaseModule(torch.nn.Module, ABC):
         """
         Get forward method arguments from batch.
         """
+
+
+class PyroABCMeta(ABCMeta, type(pyro.nn.PyroModule)):
+    """
+    Metaclass for Pyro modules.
+    """
+
+
+class BasePyroModule(pyro.nn.PyroModule, BaseModule, metaclass=PyroABCMeta):
+    """
+    Base module for all scvi-distributed Pyro modules.
+    """

@@ -60,7 +60,7 @@ class TrainingPlan(pl.LightningModule):
 
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         loss = self.module(*args, **kwargs)
         if loss is not None:
