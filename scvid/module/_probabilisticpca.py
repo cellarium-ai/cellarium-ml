@@ -6,7 +6,7 @@ from typing import Any
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro.nn import PyroModule, PyroParam
+from pyro.nn import PyroParam
 from torch.distributions import constraints
 
 from .base_module import BasePyroModule
