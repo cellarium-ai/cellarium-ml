@@ -22,7 +22,7 @@ class BaseModule(torch.nn.Module, metaclass=ABCMeta):
         """
 
 
-class PyroABCMeta(ABCMeta, type(pyro.nn.PyroModule)):
+class PyroABCMeta(pyro.nn.module._PyroModuleMeta, ABCMeta):
     """
     Metaclass for Pyro modules.
     """
