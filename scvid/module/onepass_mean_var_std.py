@@ -23,7 +23,7 @@ class OnePassMeanVarStd(BaseModule):
         self.register_buffer("x_sums", torch.tensor(0))
         self.register_buffer("x_squared_sums", torch.tensor(0))
         self.register_buffer("x_size", torch.tensor(0))
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0), requires_grad=False)
 
     @staticmethod
     def _get_fn_args_from_batch(

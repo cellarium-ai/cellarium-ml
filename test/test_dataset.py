@@ -36,7 +36,7 @@ class TestModule(BaseModule):
     def __init__(self) -> None:
         super().__init__()
         self.iter_data: list = []
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0), requires_grad=False)
 
     @staticmethod
     def _get_fn_args_from_batch(
