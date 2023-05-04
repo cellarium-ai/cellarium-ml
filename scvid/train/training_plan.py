@@ -96,16 +96,3 @@ class TrainingPlan(pl.LightningModule):
             set_epoch = getattr(dataset, "set_epoch", None)
             if callable(set_epoch):
                 set_epoch(self.current_epoch)
-
-
-class DummyTrainingPlan(pl.LightningModule):
-    """
-    Lightning module task that does not perform any actual optimization (no gradient updates).
-    It can be used for cases where only the forward pass is required (e.g., for calculating
-    sufficient statistics, EM algorithms, etc.).
-    """
-
-    def __init__(self, module: torch.nn.Module):
-        super().__init__()
-        self.module = module
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
