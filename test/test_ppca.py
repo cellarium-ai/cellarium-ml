@@ -11,8 +11,8 @@ import torch
 from sklearn.decomposition import PCA
 
 from scvid.callbacks import VarianceMonitor
-from scvid.module import ProbabilisticPCAPyroModule
-from scvid.train import PyroTrainingPlan
+from scvid.module import ProbabilisticPCA
+from scvid.train import TrainingPlan
 
 from .common import TestDataset
 
@@ -62,7 +62,7 @@ def test_probabilistic_pca_multi_device(
     total_var = np.var(x_ng, axis=0).sum()
     w = np.sqrt(0.5 * total_var / (g * k))
     s = np.sqrt(0.5 * total_var / g)
-    ppca = ProbabilisticPCAPyroModule(
+    ppca = ProbabilisticPCA(
         n_cells=n,
         g_genes=g,
         k_components=k,
@@ -71,7 +71,7 @@ def test_probabilistic_pca_multi_device(
         W_init_scale=w,
         sigma_init_scale=s,
     )
-    training_plan = PyroTrainingPlan(
+    training_plan = TrainingPlan(
         ppca,
         optim_fn=torch.optim.Adam,
         optim_kwargs={"lr": 3e-2},
@@ -111,8 +111,8 @@ def test_variance_monitor(x_ng: np.ndarray):
     # dataloader
     train_loader = torch.utils.data.DataLoader(TestDataset(x_ng), batch_size=n // 2)
     # model
-    ppca = ProbabilisticPCAPyroModule(n, g, k, "marginalized")
-    training_plan = PyroTrainingPlan(ppca)
+    ppca = ProbabilisticPCA(n, g, k, "marginalized")
+    training_plan = TrainingPlan(ppca)
     # trainer
     var_monitor = VarianceMonitor(total_variance=np.var(x_ng, axis=0).sum())
     trainer = pl.Trainer(

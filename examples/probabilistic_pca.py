@@ -40,7 +40,7 @@ Example run::
 from lightning.pytorch.cli import LightningCLI
 
 from scvid.data import DistributedAnnDataCollectionDataModule
-from scvid.train import PyroTrainingPlan
+from scvid.train import TrainingPlan
 
 
 class PPCALightningCLI(LightningCLI):
@@ -57,7 +57,7 @@ class PPCALightningCLI(LightningCLI):
 
 def main():
     PPCALightningCLI(
-        PyroTrainingPlan,
+        TrainingPlan,
         DistributedAnnDataCollectionDataModule,
     )
 

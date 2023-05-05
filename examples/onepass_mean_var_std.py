@@ -26,12 +26,12 @@ Example run::
 from lightning.pytorch.cli import LightningCLI
 
 from scvid.data import DistributedAnnDataCollectionDataModule
-from scvid.train.training_plan import DummyTrainingPlan
+from scvid.train.training_plan import TrainingPlan
 
 
 def main():
     LightningCLI(
-        DummyTrainingPlan,
+        TrainingPlan,
         DistributedAnnDataCollectionDataModule,
         trainer_defaults={"max_epochs": 1},  # one pass
     )

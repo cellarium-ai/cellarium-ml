@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 
 from scvid.data.util import get_rank_and_num_replicas
-from scvid.module import GatherLayer
+from scvid.module import BaseModule, GatherLayer
 
 
-class OnePassMeanVarStd(nn.Module):
+class OnePassMeanVarStd(BaseModule):
     """
     Calculate the mean, variance, and standard deviation of the data in one pass (epoch)
     using running sums and running squared sums.
@@ -17,9 +17,13 @@ class OnePassMeanVarStd(nn.Module):
     def __init__(self, transform: nn.Module | None = None) -> None:
         super().__init__()
         self.transform = transform
+        self.x_sums: torch.Tensor
+        self.x_squared_sums: torch.Tensor
+        self.x_size: torch.Tensor
         self.register_buffer("x_sums", torch.tensor(0))
         self.register_buffer("x_squared_sums", torch.tensor(0))
         self.register_buffer("x_size", torch.tensor(0))
+        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
     @staticmethod
     def _get_fn_args_from_batch(

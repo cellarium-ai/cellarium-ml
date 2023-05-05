@@ -1,16 +1,18 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Any
+
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro.nn import PyroModule, PyroParam, pyro_method
+from pyro.nn import PyroParam
 from torch.distributions import constraints
 
-_PROBABILISTIC_PCA_PYRO_MODULE_NAME = "probabilistic_pca"
+from .base_module import BasePyroModule
 
 
-class ProbabilisticPCAPyroModule(PyroModule):
+class ProbabilisticPCA(BasePyroModule):
     """
     Probabilistic PCA implemented in Pyro.
 
@@ -36,6 +38,8 @@ class ProbabilisticPCAPyroModule(PyroModule):
         sigma_init_scale: Initialization value of the `sigma` parameter.
         seed: Random seed used to initialize parameters. Default: ``0``.
         transform: If not ``None`` is used to transform the input data.
+        elbo: ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
+            If `None`, defaults to :class:`~pyro.infer.Trace_ELBO`.
     """
 
     def __init__(
@@ -49,8 +53,9 @@ class ProbabilisticPCAPyroModule(PyroModule):
         sigma_init_scale: float = 1.0,
         seed: int = 0,
         transform: torch.nn.Module | None = None,
+        elbo: pyro.infer.ELBO | None = None,
     ):
-        super().__init__(_PROBABILISTIC_PCA_PYRO_MODULE_NAME)
+        super().__init__(self.__class__.__name__)
 
         self.n_cells = n_cells
         self.g_genes = g_genes
@@ -61,6 +66,7 @@ class ProbabilisticPCAPyroModule(PyroModule):
         ], "ppca_flavor must be one of 'marginalized' or 'linear_vae'"
         self.ppca_flavor = ppca_flavor
         self.transform = transform
+        self.elbo = elbo or pyro.infer.Trace_ELBO()
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (
@@ -139,7 +145,9 @@ class ProbabilisticPCAPyroModule(PyroModule):
         x = tensor_dict["X"]
         return (x,), {}
 
-    @pyro_method
+    def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return self.elbo.differentiable_loss(self.model, self.guide, *args, **kwargs)
+
     def model(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)
@@ -166,7 +174,6 @@ class ProbabilisticPCAPyroModule(PyroModule):
                     obs=x_ng,
                 )
 
-    @pyro_method
     def guide(self, x_ng: torch.Tensor) -> None:
         if self.ppca_flavor == "marginalized":
             return
