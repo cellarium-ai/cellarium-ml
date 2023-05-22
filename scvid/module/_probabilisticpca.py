@@ -8,6 +8,7 @@ import pyro.distributions as dist
 import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
+from scvid.distributions import LowRankMultivariateNormalDiag
 
 from .base_module import BasePyroModule
 
@@ -87,6 +88,9 @@ class ProbabilisticPCA(BasePyroModule):
         self.sigma = PyroParam(
             lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive
         )
+        #  if ppca_flavor == "linear_vae":
+        #      D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
+        #      self.D_k = PyroParam(lambda: D_k, constraint=constraints.positive)
 
     @classmethod
     def with_defaults(
@@ -147,6 +151,11 @@ class ProbabilisticPCA(BasePyroModule):
 
     def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         return self.elbo.differentiable_loss(self.model, self.guide, *args, **kwargs)
+        #  M = torch.tril(self.M_kk, diagonal=-1)
+        #  M_norm = M.norm()
+        #  return elbo + 100 * M_norm
+        # return elbo + M_norm - M_norm.detach()
+
 
     def model(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
@@ -157,6 +166,7 @@ class ProbabilisticPCA(BasePyroModule):
                 pyro.sample(
                     "counts",
                     dist.LowRankMultivariateNormal(
+                    # LowRankMultivariateNormalDiag(
                         loc=self.mean_g,
                         cov_factor=self.W_kg.T,
                         cov_diag=self.sigma**2 * x_ng.new_ones(self.g_genes),
@@ -184,6 +194,7 @@ class ProbabilisticPCA(BasePyroModule):
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
             V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
+            # D_k = self.sigma / torch.sqrt(torch.sum(self.M_kk, dim=-1))
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
     @torch.inference_mode()
@@ -228,6 +239,18 @@ class ProbabilisticPCA(BasePyroModule):
            Gradients are disabled, used for inference only.
         """
         return torch.linalg.svd(self.W_kg.T, full_matrices=False).U
+
+    @property
+    @torch.inference_mode()
+    def W_gk(self) -> torch.Tensor:
+        r"""
+        Principal components corresponding to eigenvalues ``L_k``.
+
+        .. note::
+           Gradients are disabled, used for inference only.
+        """
+        U, S, _ = torch.linalg.svd(self.W_kg.T, full_matrices=False)
+        return U @ torch.diag(S)
 
     @property
     @torch.inference_mode()

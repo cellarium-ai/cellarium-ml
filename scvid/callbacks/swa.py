@@ -9,7 +9,7 @@ import torch
 
 
 class StochasticWeightAveraging(pl.Callback):
-    def __init__(self, swa_start: int):
+    def __init__(self, swa_start: int, ckpt_path: str = None):
         r"""
 
         Implements the Stochastic Weight Averaging (SWA) Callback to average a model.
@@ -31,11 +31,14 @@ class StochasticWeightAveraging(pl.Callback):
 
         self.n_averaged: int = 0
         self.swa_start = swa_start
+        self.ckpt_path = ckpt_path
 
     def setup(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str
     ) -> None:
         # copy the model before moving it to accelerator device.
+        if self.ckpt_path is not None:
+            pl_module.module.load_state_dict(torch.load(self.ckpt_path))
         pl_module.average_module = deepcopy(pl_module.module)
 
     def on_train_batch_start(

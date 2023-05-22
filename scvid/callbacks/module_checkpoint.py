@@ -32,12 +32,14 @@ class ModuleCheckpoint(pl.Callback):
         save_on_train_batch_end: bool = False,
         save_on_train_epoch_end: bool = False,
         save_on_train_end: bool = True,
+        ckpt_path: Path | str | None = None,
     ):
         self.dirpath = dirpath
         self.filename = filename
         self.save_on_train_batch_end = save_on_train_batch_end
         self.save_on_train_epoch_end = save_on_train_epoch_end
         self.save_on_train_end = save_on_train_end
+        self.ckpt_path = ckpt_path
 
     def setup(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str
@@ -46,7 +48,12 @@ class ModuleCheckpoint(pl.Callback):
         assert isinstance(pl_module.module, torch.nn.Module)
         # resolve dirpath at runtime
         dirpath = self._resolve_ckpt_dir(trainer)
+        if not os.path.exists(dirpath):
+            os.makedirs(dirpath, exist_ok=True)
         self.dirpath = dirpath
+        # copy the model before moving it to accelerator device.
+        if self.ckpt_path is not None:
+            pl_module.module.load_state_dict(torch.load(self.ckpt_path))
 
     def on_train_batch_end(
         self,
@@ -55,8 +62,9 @@ class ModuleCheckpoint(pl.Callback):
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        if self.save_on_train_batch_end:
-            torch.save(pl_module.module, self.filepath)
+        step = trainer.fit_loop.epoch_loop._batches_that_stepped
+        if self.save_on_train_batch_end and step % trainer.log_every_n_steps == 0:
+            torch.save(pl_module.module.state_dict(), self.filepath)
 
     def on_train_epoch_end(
         self,
@@ -66,7 +74,7 @@ class ModuleCheckpoint(pl.Callback):
         **kwargs: Any,
     ) -> None:
         if self.save_on_train_epoch_end:
-            torch.save(pl_module.module, self.filepath)
+            torch.save(pl_module.module.state_dict(), self.filepath)
 
     def on_train_end(
         self,
@@ -76,7 +84,7 @@ class ModuleCheckpoint(pl.Callback):
         **kwargs: Any,
     ) -> None:
         if self.save_on_train_end:
-            torch.save(pl_module.module, self.filepath)
+            torch.save(pl_module.module.state_dict(), self.filepath)
 
     @property
     def filepath(self) -> Path:

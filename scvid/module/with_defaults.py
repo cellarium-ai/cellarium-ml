@@ -3,7 +3,7 @@
 
 import torch
 
-from scvid.module import OnePassMeanVarStd, ProbabilisticPCAPyroModule
+from scvid.module import OnePassMeanVarStd, ProbabilisticPCA
 from scvid.transforms import ZScoreLog1pNormalize
 
 
@@ -22,7 +22,7 @@ class OnePassMeanVarStdWithDefaults(OnePassMeanVarStd):
         super().__init__(transform=transform)
 
 
-class ProbabilisticPCAWithDefaults(ProbabilisticPCAPyroModule):
+class ProbabilisticPCAWithDefaults(ProbabilisticPCA):
     """
     Preset default values for the LightningCLI.
 
@@ -65,7 +65,13 @@ class ProbabilisticPCAWithDefaults(ProbabilisticPCAPyroModule):
             )
         else:
             # load OnePassMeanVarStd from checkpoint
-            onepass = torch.load(mean_var_std_ckpt_path)
+            state_dict = torch.load(mean_var_std_ckpt_path)
+            onepass = OnePassMeanVarStd(target_count)
+            # onepass.load_state_dict(state_dict)
+            onepass.x_sums = state_dict["x_sums"]
+            onepass.x_squared_sums = state_dict["x_squared_sums"]
+            onepass.x_size = state_dict["x_size"]
+            # onepass = torch.load(mean_var_std_ckpt_path)
             # compute W_init_scale and sigma_init_scale
             W_init_scale = torch.sqrt(
                 W_init_variance_ratio * onepass.var_g.sum() / (g_genes * k_components)
@@ -73,7 +79,7 @@ class ProbabilisticPCAWithDefaults(ProbabilisticPCAPyroModule):
             sigma_init_scale = torch.sqrt(
                 sigma_init_variance_ratio * onepass.var_g.sum() / g_genes
             ).item()
-            mean_g = onepass.mean_g
+            mean_g = onepass.mean_g.float()
             # create transform
             transform = ZScoreLog1pNormalize(
                 mean_g=0, std_g=None, perform_scaling=False, target_count=target_count

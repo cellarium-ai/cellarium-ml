@@ -74,6 +74,16 @@ class TrainingPlan(pl.LightningModule):
         optim_config["optimizer"] = self.optim_fn(
             self.module.parameters(), **self.optim_kwargs
         )
+        #  optim_config["optimizer"] = self.optim_fn(
+        #      [
+        #          {"params": self.module.W_kg_unconstrained, "lr": self.optim_kwargs["lr"]},
+        #          {
+        #              "params": self.module.sigma_unconstrained,
+        #              "lr": self.optim_kwargs["lr"] / self.module.W_kg.numel(),
+        #          },
+        #      ],
+        #      **self.optim_kwargs
+        #  )
         if self.scheduler_fn is not None:
             assert self.scheduler_kwargs is not None
             scheduler = self.scheduler_fn(
@@ -96,3 +106,25 @@ class TrainingPlan(pl.LightningModule):
             set_epoch = getattr(dataset, "set_epoch", None)
             if callable(set_epoch):
                 set_epoch(self.current_epoch)
+
+
+# make a picklable version of OneCycleLR
+class OneCycleLR(torch.optim.lr_scheduler.OneCycleLR):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.anneal_strategy = kwargs.get("anneal_strategy", "cos")
+
+    # remove anneal_func from state dict
+    def state_dict(self):
+        state_dict = super().state_dict()
+        state_dict.pop("anneal_func")
+        return state_dict
+
+    # add anneal_func back to state dict
+    def load_state_dict(self, state_dict):
+        state_dict["anneal_func"] = self.anneal_func
+        if state_dict["anneal_strategy"] == "cos":
+            state_dict["anneal_func"] = self._annealing_cos
+        if state_dict["anneal_strategy"] == "linear":
+            state_dict["anneal_func"] = self._annealing_linear
+        super().load_state_dict(state_dict)
