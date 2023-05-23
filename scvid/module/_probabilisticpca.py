@@ -8,7 +8,6 @@ import pyro.distributions as dist
 import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
-from scvid.distributions import LowRankMultivariateNormalDiag
 
 from .base_module import BasePyroModule
 
@@ -166,7 +165,6 @@ class ProbabilisticPCA(BasePyroModule):
                 pyro.sample(
                     "counts",
                     dist.LowRankMultivariateNormal(
-                    # LowRankMultivariateNormalDiag(
                         loc=self.mean_g,
                         cov_factor=self.W_kg.T,
                         cov_diag=self.sigma**2 * x_ng.new_ones(self.g_genes),
