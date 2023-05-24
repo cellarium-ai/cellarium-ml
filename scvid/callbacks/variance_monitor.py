@@ -5,8 +5,9 @@ from typing import Any
 
 import lightning.pytorch as pl
 import torch
+from lightning.fabric.utilities.rank_zero import rank_zero_only
 
-from scvid.module import ProbabilisticPCA, OnePassMeanVarStd
+from scvid.module import OnePassMeanVarStd, ProbabilisticPCA
 
 
 class VarianceMonitor(pl.Callback):
@@ -59,6 +60,7 @@ class VarianceMonitor(pl.Callback):
             onepass.x_size = state_dict["x_size"]
             self.total_variance = onepass.var_g.sum().item()
 
+    @rank_zero_only
     def on_train_batch_end(
         self,
         trainer: pl.Trainer,
@@ -87,7 +89,8 @@ class VarianceMonitor(pl.Callback):
 
             for logger in trainer.loggers:
                 logger.log_metrics(
-                    variance_stats, step=trainer.fit_loop.epoch_loop._batches_that_stepped
+                    variance_stats,
+                    step=trainer.fit_loop.epoch_loop._batches_that_stepped,
                 )
 
             L_k = pl_module.module.L_k
@@ -95,11 +98,15 @@ class VarianceMonitor(pl.Callback):
             for logger in trainer.loggers:
                 for i, l_i in enumerate(L_k[:3]):
                     logger.experiment.add_scalar(
-                        f"L_k_{i}", l_i.item(), trainer.fit_loop.epoch_loop._batches_that_stepped
+                        f"L_k_{i}",
+                        l_i.item(),
+                        trainer.fit_loop.epoch_loop._batches_that_stepped,
                     )
                 for i, g_i in enumerate(pl_module.module.W_kg.reshape(-1)[:3]):
                     logger.experiment.add_scalar(
-                        f"W_kg_{i}", g_i.item(), trainer.fit_loop.epoch_loop._batches_that_stepped
+                        f"W_kg_{i}",
+                        g_i.item(),
+                        trainer.fit_loop.epoch_loop._batches_that_stepped,
                     )
 
             #  # if hasattr(pl_module, "average_module"):

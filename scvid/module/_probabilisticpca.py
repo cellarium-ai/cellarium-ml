@@ -155,7 +155,6 @@ class ProbabilisticPCA(BasePyroModule):
         #  return elbo + 100 * M_norm
         # return elbo + M_norm - M_norm.detach()
 
-
     def model(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)

@@ -7,6 +7,7 @@ from typing import Any
 
 import lightning.pytorch as pl
 import torch
+from lightning.fabric.utilities.rank_zero import rank_zero_only
 
 
 class ModuleCheckpoint(pl.Callback):
@@ -55,6 +56,7 @@ class ModuleCheckpoint(pl.Callback):
         if self.ckpt_path is not None:
             pl_module.module.load_state_dict(torch.load(self.ckpt_path))
 
+    @rank_zero_only
     def on_train_batch_end(
         self,
         trainer: pl.Trainer,
@@ -63,9 +65,14 @@ class ModuleCheckpoint(pl.Callback):
         **kwargs: Any,
     ) -> None:
         step = trainer.fit_loop.epoch_loop._batches_that_stepped
-        if self.save_on_train_batch_end and step % trainer.log_every_n_steps == 0:
+        if (
+            self.save_on_train_batch_end
+            and step % trainer.log_every_n_steps == 0
+            and step != 0
+        ):
             torch.save(pl_module.module.state_dict(), self.filepath)
 
+    @rank_zero_only
     def on_train_epoch_end(
         self,
         trainer: pl.Trainer,
@@ -76,6 +83,7 @@ class ModuleCheckpoint(pl.Callback):
         if self.save_on_train_epoch_end:
             torch.save(pl_module.module.state_dict(), self.filepath)
 
+    @rank_zero_only
     def on_train_end(
         self,
         trainer: pl.Trainer,
