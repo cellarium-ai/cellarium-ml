@@ -17,7 +17,7 @@ class GradientNormMonitor(pl.Callback):
         batch_idx,
     ) -> None:
         step = trainer.fit_loop.epoch_loop._batches_that_stepped
-        if step % trainer.log_every_n_steps == 0 and step != 0:
+        if step % trainer.log_every_n_steps == 0:
             for name, value in pl_module.module.named_parameters():
                 for logger in trainer.loggers:
                     logger.log_metrics({name: value.norm().item()}, step=step)

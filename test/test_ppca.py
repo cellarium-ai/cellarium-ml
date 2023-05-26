@@ -13,7 +13,6 @@ from sklearn.decomposition import PCA
 from scvid.callbacks import VarianceMonitor
 from scvid.module import ProbabilisticPCA
 from scvid.train import TrainingPlan
-from scvid.callbacks.swa import StochasticWeightAveraging
 
 from .common import TestDataset
 
