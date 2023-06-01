@@ -69,7 +69,7 @@ class VarianceMonitor(pl.Callback):
         **kwargs: Any,
     ) -> None:
         """Called when the train batch ends."""
-        step = trainer.fit_loop.epoch_loop._batches_that_stepped
+        step = trainer.global_step
         if step % trainer.log_every_n_steps == 0:
             W_variance = pl_module.module.W_variance
             sigma_variance = pl_module.module.sigma_variance
@@ -90,7 +90,7 @@ class VarianceMonitor(pl.Callback):
             for logger in trainer.loggers:
                 logger.log_metrics(
                     variance_stats,
-                    step=trainer.fit_loop.epoch_loop._batches_that_stepped,
+                    step=step,
                 )
 
             L_k = pl_module.module.L_k
@@ -100,11 +100,11 @@ class VarianceMonitor(pl.Callback):
                     logger.experiment.add_scalar(
                         f"L_k_{i}",
                         l_i.item(),
-                        trainer.fit_loop.epoch_loop._batches_that_stepped,
+                        step,
                     )
                 for i, g_i in enumerate(pl_module.module.W_kg.reshape(-1)[:3]):
                     logger.experiment.add_scalar(
                         f"W_kg_{i}",
                         g_i.item(),
-                        trainer.fit_loop.epoch_loop._batches_that_stepped,
+                        step,
                     )
