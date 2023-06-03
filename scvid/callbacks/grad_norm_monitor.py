@@ -11,13 +11,6 @@ from lightning.fabric.utilities.rank_zero import rank_zero_only
 class GradientNormMonitor(pl.Callback):
     @rank_zero_only
     def on_before_optimizer_step(self, trainer, pl_module, optimizer):
-        print('MASTER_ADDR: ', os.environ.get('MASTER_ADDR'))
-        #  print('MASTER_PORT: ', os.environ.get('MASTER_PORT'))
-        #  print('NODE_RANK: ', os.environ.get('NODE_RANK'))
-        #  print('LOCAL_RANK: ', os.environ.get('LOCAL_RANK'))
-        #  print('WORLD_SIZE: ', os.environ.get('WORLD_SIZE'))
-        print('WORLD_SIZE: ', dict(os.environ).keys())
-        # example to inspect gradient information in tensorboard
         if trainer.global_step % trainer.log_every_n_steps == 0:
             for name, value in pl_module.module.named_parameters():
                 #  self.logger.experiment.add_histogram(

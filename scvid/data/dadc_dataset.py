@@ -331,7 +331,6 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             indices = indices[:total_size]
         indices = indices[rank * per_replica : (rank + 1) * per_replica]
         assert len(indices) == per_replica
-        print(f"rank: {rank}, num replicas {num_replicas}, indices: {indices}")
 
         yield from (
             self[indices[i : i + self.batch_size]]
