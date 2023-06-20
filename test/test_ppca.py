@@ -8,7 +8,6 @@ import numpy as np
 import pyro
 import pytest
 import torch
-from sklearn.decomposition import PCA
 
 from scvid.callbacks import VarianceMonitor
 from scvid.module import ProbabilisticPCAPyroModule
@@ -30,18 +29,11 @@ def x_ng():
     return x_ng
 
 
-@pytest.fixture
-def pca_fit(x_ng: np.ndarray):
-    pca = PCA(n_components=k)
-    pca.fit(x_ng)
-    return pca
-
-
 @pytest.mark.parametrize("ppca_flavor", ["marginalized", "linear_vae"])
 @pytest.mark.parametrize("learn_mean", [False, True])
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
 def test_probabilistic_pca_multi_device(
-    x_ng: np.ndarray, pca_fit: PCA, minibatch: bool, ppca_flavor: str, learn_mean: bool
+    x_ng: np.ndarray, minibatch: bool, ppca_flavor: str, learn_mean: bool
 ):
     n, g = x_ng.shape
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -55,7 +47,7 @@ def test_probabilistic_pca_multi_device(
     train_loader = torch.utils.data.DataLoader(
         TestDataset(x_ng),
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
     )
     # model
     pyro.clear_param_store()
@@ -88,23 +80,30 @@ def test_probabilistic_pca_multi_device(
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
 
+    # pca fit
+    x_ng_centered = x_ng - x_ng.mean(axis=0)
+    x_cov_gg = x_ng_centered.T @ x_ng_centered / n
+    L_g, U_gg = np.linalg.eig(x_cov_gg)
+
     # total variance
     expected_total_var = np.var(x_ng, axis=0).sum()
     actual_total_var = ppca.W_variance + ppca.sigma_variance
-    np.testing.assert_allclose(expected_total_var, actual_total_var, rtol=0.01)
+    np.testing.assert_allclose(expected_total_var, actual_total_var, rtol=1e-3)
 
     # variance explained be each PC
-    expected_explained_var = pca_fit.explained_variance_
+    expected_explained_var = L_g[:k]
     actual_explained_var = ppca.L_k
-    np.testing.assert_allclose(expected_explained_var, actual_explained_var, rtol=0.01)
+    np.testing.assert_allclose(expected_explained_var, actual_explained_var, rtol=1e-3)
 
     # absolute cosine similarity between expected and actual PCs
     abs_cos_sim = torch.abs(
         torch.nn.functional.cosine_similarity(
-            ppca.U_gk.T, torch.as_tensor(pca_fit.components_)
+            ppca.U_gk,
+            torch.as_tensor(U_gg[:, :k]),
+            dim=0,
         )
     )
-    np.testing.assert_allclose(np.ones(k), abs_cos_sim, rtol=0.01)
+    np.testing.assert_allclose(np.ones(k), abs_cos_sim, rtol=1e-3)
 
 
 def test_variance_monitor(x_ng: np.ndarray):
