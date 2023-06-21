@@ -16,11 +16,12 @@ class TrainingPlan(pl.LightningModule):
 
     Args:
         module: A scvid module to train.
-        optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If `None`,
+        optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
-        optim_kwargs: Keyword arguments for optimiser. If `None`, defaults to `dict(lr=1e-3)`.
+        optim_kwargs: Keyword arguments for optimiser. If ``None``, defaults to ``default_lr``.
         scheduler_fn: A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
         scheduler_kwargs: Keyword arguments for lr scheduler.
+        default_lr: Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
     """
 
     def __init__(
@@ -30,6 +31,7 @@ class TrainingPlan(pl.LightningModule):
         optim_kwargs: dict | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
         scheduler_kwargs: dict | None = None,
+        default_lr: float = 1e-3,
     ) -> None:
         super().__init__()
         self.module = module
@@ -53,12 +55,12 @@ class TrainingPlan(pl.LightningModule):
 
         optim_kwargs = {} if optim_kwargs is None else optim_kwargs
         if "lr" not in optim_kwargs:
-            optim_kwargs["lr"] = 1e-3
+            optim_kwargs["lr"] = default_lr
         self.optim_kwargs = optim_kwargs
         self.scheduler_fn = scheduler_fn
         self.scheduler_kwargs = scheduler_kwargs
 
-    def training_step(
+    def training_step(  # type: ignore[override]
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
         args, kwargs = self.module._get_fn_args_from_batch(batch)

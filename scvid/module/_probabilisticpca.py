@@ -55,7 +55,7 @@ class ProbabilisticPCA(BasePyroModule):
         transform: torch.nn.Module | None = None,
         elbo: pyro.infer.ELBO | None = None,
     ):
-        super().__init__(self.__class__.__name__)
+        super().__init__(type(self).__name__)
 
         self.n_cells = n_cells
         self.g_genes = g_genes
@@ -239,30 +239,18 @@ class ProbabilisticPCA(BasePyroModule):
 
     @property
     @torch.inference_mode()
-    def W_gk(self) -> torch.Tensor:
+    def W_variance(self) -> float:
         r"""
-        Principal components corresponding to eigenvalues ``L_k``.
-
         .. note::
            Gradients are disabled, used for inference only.
         """
-        U, S, _ = torch.linalg.svd(self.W_kg.T, full_matrices=False)
-        return U @ torch.diag(S)
+        return torch.trace(self.W_kg.T @ self.W_kg).item()
 
     @property
     @torch.inference_mode()
-    def W_variance(self) -> torch.Tensor:
+    def sigma_variance(self) -> float:
         r"""
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return torch.trace(self.W_kg.T @ self.W_kg)
-
-    @property
-    @torch.inference_mode()
-    def sigma_variance(self) -> torch.Tensor:
-        r"""
-        .. note::
-           Gradients are disabled, used for inference only.
-        """
-        return self.g_genes * self.sigma**2
+        return (self.g_genes * self.sigma**2).item()

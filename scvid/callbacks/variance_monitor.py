@@ -69,6 +69,7 @@ class VarianceMonitor(pl.Callback):
         **kwargs: Any,
     ) -> None:
         """Called when the train batch ends."""
+        assert isinstance(pl_module.module, ProbabilisticPCA)  # make mypy happy
         step = trainer.global_step
         if step % trainer.log_every_n_steps == 0:
             W_variance = pl_module.module.W_variance
