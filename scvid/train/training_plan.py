@@ -60,7 +60,7 @@ class TrainingPlan(pl.LightningModule):
         self.scheduler_fn = scheduler_fn
         self.scheduler_kwargs = scheduler_kwargs
 
-    def training_step(
+    def training_step(  # type: ignore[override]
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
         args, kwargs = self.module._get_fn_args_from_batch(batch)
