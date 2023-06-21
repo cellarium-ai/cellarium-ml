@@ -87,59 +87,6 @@ class ProbabilisticPCA(BasePyroModule):
         self.sigma = PyroParam(
             lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive
         )
-        #  if ppca_flavor == "linear_vae":
-        #      D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
-        #      self.D_k = PyroParam(lambda: D_k, constraint=constraints.positive)
-
-    @classmethod
-    def with_defaults(
-        cls,
-        n_cells: int,
-        g_genes: int,
-        k_components: int = 256,
-        ppca_flavor: str = "marginalized",
-        W_init_variance_ratio: float = 0.5,
-        sigma_init_variance_ratio: float = 0.5,
-        seed: int = 0,
-        target_count: int = 10_000,
-        mean_var_std_ckpt_path: str | None = None,
-    ) -> torch.nn.Module:
-        if mean_var_std_ckpt_path is None:
-            # compute W_init_scale and sigma_init_scale
-            W_init_scale = W_init_variance_ratio
-            sigma_init_scale = sigma_init_variance_ratio
-            mean_g = None
-            # create transform
-            transform = ZScoreLog1pNormalize(
-                mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
-            )
-        else:
-            # load OnePassMeanVarStd from checkpoint
-            onepass = torch.load(mean_var_std_ckpt_path)
-            # compute W_init_scale and sigma_init_scale
-            W_init_scale = torch.sqrt(
-                W_init_variance_ratio * onepass.var_g.sum() / (g_genes * k_components)
-            ).item()
-            sigma_init_scale = torch.sqrt(
-                sigma_init_variance_ratio * onepass.var_g.sum() / g_genes
-            ).item()
-            mean_g = onepass.mean_g
-            # create transform
-            transform = ZScoreLog1pNormalize(
-                mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
-            )
-        # self.mean_var_std_ckpt_path = mean_var_std_ckpt_path
-        return cls(
-            n_cells=n_cells,
-            g_genes=g_genes,
-            k_components=k_components,
-            ppca_flavor=ppca_flavor,
-            mean_g=mean_g,
-            W_init_scale=W_init_scale,
-            sigma_init_scale=sigma_init_scale,
-            seed=seed,
-            transform=transform,
-        )
 
     @staticmethod
     def _get_fn_args_from_batch(
@@ -150,10 +97,6 @@ class ProbabilisticPCA(BasePyroModule):
 
     def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         return self.elbo.differentiable_loss(self.model, self.guide, *args, **kwargs)
-        #  M = torch.tril(self.M_kk, diagonal=-1)
-        #  M_norm = M.norm()
-        #  return elbo + 100 * M_norm
-        # return elbo + M_norm - M_norm.detach()
 
     def model(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
@@ -191,7 +134,6 @@ class ProbabilisticPCA(BasePyroModule):
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
             V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
-            # D_k = self.sigma / torch.sqrt(torch.sum(self.M_kk, dim=-1))
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
     @torch.inference_mode()
