@@ -55,7 +55,7 @@ class ProbabilisticPCA(BasePyroModule):
         transform: torch.nn.Module | None = None,
         elbo: pyro.infer.ELBO | None = None,
     ):
-        super().__init__(self.__class__.__name__)
+        super().__init__(type(self).__name__)
 
         self.n_cells = n_cells
         self.g_genes = g_genes
