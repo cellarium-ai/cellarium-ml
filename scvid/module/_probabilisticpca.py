@@ -181,18 +181,18 @@ class ProbabilisticPCA(BasePyroModule):
 
     @property
     @torch.inference_mode()
-    def W_variance(self) -> torch.Tensor:
+    def W_variance(self) -> float:
         r"""
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return torch.trace(self.W_kg.T @ self.W_kg)
+        return torch.trace(self.W_kg.T @ self.W_kg).item()
 
     @property
     @torch.inference_mode()
-    def sigma_variance(self) -> torch.Tensor:
+    def sigma_variance(self) -> float:
         r"""
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return self.g_genes * self.sigma**2
+        return (self.g_genes * self.sigma**2).item()

@@ -46,6 +46,7 @@ class VarianceMonitor(pl.Callback):
         **kwargs: Any,
     ) -> None:
         """Called when the train batch ends."""
+        assert isinstance(pl_module.module, ProbabilisticPCA)  # make mypy happy
         W_variance = pl_module.module.W_variance
         sigma_variance = pl_module.module.sigma_variance
 
