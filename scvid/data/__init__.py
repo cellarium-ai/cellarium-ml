@@ -5,7 +5,7 @@ from .dadc_dataset import (
     DistributedAnnDataCollectionDataset,
     IterableDistributedAnnDataCollectionDataset,
 )
-from .datamodule import DistributedAnnDataCollectionDataModule
+from .dadc_datamodule import DistributedAnnDataCollectionDataModule
 from .distributed_anndata import DistributedAnnDataCollection
 from .read import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url
 from .sampler import DistributedAnnDataCollectionSingleConsumerSampler

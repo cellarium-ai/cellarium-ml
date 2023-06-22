@@ -15,7 +15,7 @@ from scvid.train import TrainingPlan
 
 from .common import TestDataset
 
-n, g, k = 10000, 10, 3
+n, g, k = 1000, 10, 3
 
 
 @pytest.fixture
@@ -43,8 +43,7 @@ def test_probabilistic_pca_multi_device(
         x_mean_g = torch.as_tensor(x_ng.mean(axis=0))
 
     # dataloader
-    # batch_size = n // 2 if minibatch else n
-    batch_size = 1000
+    batch_size = n // 2 if minibatch else n
     train_loader = torch.utils.data.DataLoader(
         TestDataset(x_ng),
         batch_size=batch_size,
@@ -67,19 +66,16 @@ def test_probabilistic_pca_multi_device(
     training_plan = TrainingPlan(
         ppca,
         optim_fn=torch.optim.Adam,
-        optim_kwargs={"lr": 0.03},
+        optim_kwargs={"lr": 3e-2},
         scheduler_fn=torch.optim.lr_scheduler.CosineAnnealingLR,
-        scheduler_kwargs={"T_max": 10000},  # one cycle
+        scheduler_kwargs={"T_max": 1000},  # one cycle
     )
     # trainer
     trainer = pl.Trainer(
-        # barebones=True,
+        barebones=True,
         accelerator="cpu",
         devices=devices,
-        max_steps=10000,
-        log_every_n_steps=1,
-        callbacks=[var_monitor, lr_monitor],
-        default_root_dir=f"tests/results/{ppca_flavor}_cos10000_lr0.03_bs{batch_size}",
+        max_steps=1000,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
