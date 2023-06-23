@@ -61,7 +61,7 @@ class ModuleCheckpoint(pl.Callback):
     ) -> None:
         if (
             self.save_on_train_batch_end
-            and trainer.log_every_n_steps != 0
+            and trainer.log_every_n_steps != 0  # type: ignore[attr-defined]
             and trainer.global_step % trainer.log_every_n_steps == 0  # type: ignore[attr-defined]
         ):
             assert isinstance(pl_module.module, torch.nn.Module)
