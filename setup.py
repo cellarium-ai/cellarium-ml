@@ -29,6 +29,7 @@ TEST_REQUIRE = [
     "pytest",
     "pytest-xdist",
     "scikit-learn",
+    "tensorboard",
 ]
 
 setuptools.setup(
