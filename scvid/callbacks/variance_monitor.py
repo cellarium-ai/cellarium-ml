@@ -40,21 +40,14 @@ class VarianceMonitor(pl.Callback):
                 "Cannot use `LearningRateMonitor` callback with `Trainer` that has no logger."
             )
         # attempt to get the total variance from the checkpoint
-        if (
-            self.total_variance is None
-            and hasattr(pl_module.module, "mean_var_std_ckpt_path")
-            and pl_module.module.mean_var_std_ckpt_path is not None
-        ):
-            mean_var_std_ckpt_path = pl_module.module.mean_var_std_ckpt_path
+        mean_var_std_ckpt_path = pl_module.module.getattr("mean_var_std_ckpt_path")
+        if self.total_variance is None and mean_var_std_ckpt_path is not None:
             state_dict = torch.load(mean_var_std_ckpt_path)
             onepass = OnePassMeanVarStdFromCli(
                 pl_module.module.g_genes,
                 target_count=pl_module.module.transform.target_count,
             )
             onepass.load_state_dict(state_dict)
-            #  onepass.x_sums = state_dict["x_sums"]
-            #  onepass.x_squared_sums = state_dict["x_squared_sums"]
-            #  onepass.x_size = state_dict["x_size"]
             self.total_variance = onepass.var_g.sum().item()
 
     @rank_zero_only
