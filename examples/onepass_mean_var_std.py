@@ -31,7 +31,7 @@ from scvid.data import (
 )
 from scvid.data.util import collate_fn
 from scvid.module.onepass_mean_var_std import OnePassMeanVarStd
-from scvid.train.training_plan import DummyTrainingPlan
+from scvid.train.training_plan import TrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
 
 
@@ -56,7 +56,7 @@ def main(args):
         mean_g=0, std_g=None, perform_scaling=False, target_count=10_000
     )
     onepass = OnePassMeanVarStd(transform=transform)
-    plan = DummyTrainingPlan(onepass)
+    plan = TrainingPlan(onepass)
 
     # train
     trainer = pl.Trainer(

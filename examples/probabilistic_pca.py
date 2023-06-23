@@ -37,8 +37,8 @@ from scvid.data import (
     IterableDistributedAnnDataCollectionDataset,
 )
 from scvid.data.util import collate_fn
-from scvid.module import ProbabilisticPCAPyroModule
-from scvid.train import PyroTrainingPlan
+from scvid.module import ProbabilisticPCA
+from scvid.train import TrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
 
 
@@ -62,7 +62,7 @@ def main(args):
     transform = ZScoreLog1pNormalize(
         mean_g=0, std_g=None, perform_scaling=False, target_count=10_000
     )
-    ppca = ProbabilisticPCAPyroModule(
+    ppca = ProbabilisticPCA(
         n_cells=dadc.n_obs,
         g_genes=dadc.n_vars,
         k_components=args.num_components,
@@ -70,7 +70,7 @@ def main(args):
         mean_g=None,  # learned
         transform=transform,
     )
-    plan = PyroTrainingPlan(ppca, optim_kwargs={"lr": args.learning_rate})
+    plan = TrainingPlan(ppca, optim_kwargs={"lr": args.learning_rate})
 
     # train
     trainer = pl.Trainer(
