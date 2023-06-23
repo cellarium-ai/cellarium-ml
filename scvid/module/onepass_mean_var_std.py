@@ -5,7 +5,9 @@ import torch
 import torch.nn as nn
 
 from scvid.data.util import get_rank_and_num_replicas
-from scvid.module import BaseModule, GatherLayer
+
+from .base_module import BaseModule
+from .gather import GatherLayer
 
 
 class OnePassMeanVarStd(BaseModule):
