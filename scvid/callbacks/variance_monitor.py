@@ -4,8 +4,10 @@
 from typing import Any
 
 import lightning.pytorch as pl
+import torch
+from lightning.fabric.utilities.rank_zero import rank_zero_only
 
-from scvid.module import ProbabilisticPCA
+from scvid.module import OnePassMeanVarStdFromCli, ProbabilisticPCA
 
 
 class VarianceMonitor(pl.Callback):
@@ -37,7 +39,25 @@ class VarianceMonitor(pl.Callback):
             raise pl.utilities.exceptions.MisconfigurationException(
                 "Cannot use `LearningRateMonitor` callback with `Trainer` that has no logger."
             )
+        # attempt to get the total variance from the checkpoint
+        if (
+            self.total_variance is None
+            and hasattr(pl_module.module, "mean_var_std_ckpt_path")
+            and pl_module.module.mean_var_std_ckpt_path is not None
+        ):
+            mean_var_std_ckpt_path = pl_module.module.mean_var_std_ckpt_path
+            state_dict = torch.load(mean_var_std_ckpt_path)
+            onepass = OnePassMeanVarStdFromCli(
+                pl_module.module.g_genes,
+                target_count=pl_module.module.transform.target_count,
+            )
+            onepass.load_state_dict(state_dict)
+            #  onepass.x_sums = state_dict["x_sums"]
+            #  onepass.x_squared_sums = state_dict["x_squared_sums"]
+            #  onepass.x_size = state_dict["x_size"]
+            self.total_variance = onepass.var_g.sum().item()
 
+    @rank_zero_only
     def on_train_batch_end(
         self,
         trainer: pl.Trainer,

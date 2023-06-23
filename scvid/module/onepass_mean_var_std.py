@@ -14,14 +14,15 @@ class OnePassMeanVarStd(BaseModule):
     using running sums and running squared sums.
     """
 
-    def __init__(self, transform: nn.Module | None = None) -> None:
+    def __init__(self, g_genes: int, transform: nn.Module | None = None) -> None:
         super().__init__()
+        self.g_genes = g_genes
         self.transform = transform
         self.x_sums: torch.Tensor
         self.x_squared_sums: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("x_sums", torch.tensor(0))
-        self.register_buffer("x_squared_sums", torch.tensor(0))
+        self.register_buffer("x_sums", torch.zeros(g_genes))
+        self.register_buffer("x_squared_sums", torch.zeros(g_genes))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 

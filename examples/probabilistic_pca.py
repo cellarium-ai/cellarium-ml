@@ -43,7 +43,7 @@ from scvid.data import DistributedAnnDataCollectionDataModule
 from scvid.train import TrainingPlan
 
 
-class PPCALightningCLI(LightningCLI):
+class ProbabilisticPCACLI(LightningCLI):
     """LightningCLI with custom argument linking."""
 
     def add_arguments_to_parser(self, parser):
@@ -56,7 +56,7 @@ class PPCALightningCLI(LightningCLI):
 
 
 def main():
-    PPCALightningCLI(
+    ProbabilisticPCACLI(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,
     )

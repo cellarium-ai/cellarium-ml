@@ -29,8 +29,17 @@ from scvid.data import DistributedAnnDataCollectionDataModule
 from scvid.train.training_plan import TrainingPlan
 
 
+class OnePassMeanVarStdCLI(LightningCLI):
+    """LightningCLI with custom argument linking."""
+
+    def add_arguments_to_parser(self, parser):
+        parser.link_arguments(
+            "data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate"
+        )
+
+
 def main():
-    LightningCLI(
+    OnePassMeanVarStdCLI(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,
         trainer_defaults={"max_epochs": 1},  # one pass

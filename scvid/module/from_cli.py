@@ -7,7 +7,7 @@ from scvid.module import OnePassMeanVarStd, ProbabilisticPCA
 from scvid.transforms import ZScoreLog1pNormalize
 
 
-class OnePassMeanVarStdWithDefaults(OnePassMeanVarStd):
+class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
     """
     Preset default values for the LightningCLI.
 
@@ -15,14 +15,14 @@ class OnePassMeanVarStdWithDefaults(OnePassMeanVarStd):
         target_count: Target gene epxression count. Default: ``10_000
     """
 
-    def __init__(self, target_count: int = 10_000) -> None:
+    def __init__(self, g_genes, target_count: int = 10_000) -> None:
         transform = ZScoreLog1pNormalize(
             mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
         )
-        super().__init__(transform=transform)
+        super().__init__(g_genes, transform=transform)
 
 
-class ProbabilisticPCAWithDefaults(ProbabilisticPCA):
+class ProbabilisticPCAFromCli(ProbabilisticPCA):
     """
     Preset default values for the LightningCLI.
 
@@ -66,12 +66,8 @@ class ProbabilisticPCAWithDefaults(ProbabilisticPCA):
         else:
             # load OnePassMeanVarStd from checkpoint
             state_dict = torch.load(mean_var_std_ckpt_path)
-            onepass = OnePassMeanVarStd(target_count)
-            # onepass.load_state_dict(state_dict)
-            onepass.x_sums = state_dict["x_sums"]
-            onepass.x_squared_sums = state_dict["x_squared_sums"]
-            onepass.x_size = state_dict["x_size"]
-            # onepass = torch.load(mean_var_std_ckpt_path)
+            onepass = OnePassMeanVarStdFromCli(g_genes, target_count)
+            onepass.load_state_dict(state_dict)
             # compute W_init_scale and sigma_init_scale
             W_init_scale = torch.sqrt(
                 W_init_variance_ratio * onepass.var_g.sum() / (g_genes * k_components)
@@ -79,7 +75,7 @@ class ProbabilisticPCAWithDefaults(ProbabilisticPCA):
             sigma_init_scale = torch.sqrt(
                 sigma_init_variance_ratio * onepass.var_g.sum() / g_genes
             ).item()
-            mean_g = onepass.mean_g.float()
+            mean_g = onepass.mean_g
             # create transform
             transform = ZScoreLog1pNormalize(
                 mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
