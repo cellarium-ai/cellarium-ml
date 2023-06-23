@@ -184,16 +184,18 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     checkpoint_kwargs["dirpath"] = tmp_path
     module_checkpoint = ModuleCheckpoint(**checkpoint_kwargs)
     trainer = pl.Trainer(
-        barebones=True,
         max_epochs=1,
         accelerator="cpu",
         callbacks=[module_checkpoint],
+        log_every_n_steps=1,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    state_dict = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    loaded_model = OnePassMeanVarStd(g_genes=1)
+    loaded_model.load_state_dict(state_dict)
     # assert
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g)
