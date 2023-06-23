@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import math
+
 import torch
 
 from scvid.transforms import ZScoreLog1pNormalize
@@ -14,6 +16,7 @@ class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
     Preset default values for the LightningCLI.
 
     Args:
+        g_genes: Number of genes.
         target_count: Target gene epxression count. Default: ``10_000
     """
 
@@ -55,33 +58,30 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
         seed: int = 0,
         target_count: int = 10_000,
         mean_var_std_ckpt_path: str | None = None,
-    ):
+    ) -> None:
         if mean_var_std_ckpt_path is None:
             # compute W_init_scale and sigma_init_scale
             W_init_scale = W_init_variance_ratio
             sigma_init_scale = sigma_init_variance_ratio
             mean_g = None
-            # create transform
-            transform = ZScoreLog1pNormalize(
-                mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
-            )
         else:
             # load OnePassMeanVarStd from checkpoint
             state_dict = torch.load(mean_var_std_ckpt_path)
             onepass = OnePassMeanVarStdFromCli(g_genes, target_count)
             onepass.load_state_dict(state_dict)
             # compute W_init_scale and sigma_init_scale
-            W_init_scale = torch.sqrt(
-                W_init_variance_ratio * onepass.var_g.sum() / (g_genes * k_components)
-            ).item()
-            sigma_init_scale = torch.sqrt(
-                sigma_init_variance_ratio * onepass.var_g.sum() / g_genes
-            ).item()
-            mean_g = onepass.mean_g
-            # create transform
-            transform = ZScoreLog1pNormalize(
-                mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
+            total_variance = onepass.var_g.sum().item()
+            W_init_scale = math.sqrt(
+                W_init_variance_ratio * total_variance / (g_genes * k_components)
             )
+            sigma_init_scale = math.sqrt(
+                sigma_init_variance_ratio * total_variance / g_genes
+            )
+            mean_g = onepass.mean_g
+        # create transform
+        transform = ZScoreLog1pNormalize(
+            mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
+        )
         self.mean_var_std_ckpt_path = mean_var_std_ckpt_path
         super().__init__(
             n_cells=n_cells,
