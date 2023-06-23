@@ -10,7 +10,7 @@ feature count data in one pass [1].
 
 Example run::
     python examples/onepass_mean_var_std.py fit \
-        --model.module scvid.module.OnePassMeanVarStdWithDefaults \
+        --model.module scvid.module.OnePassMeanVarStdFromCli \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
         --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
         --data.num_workers 4 \
