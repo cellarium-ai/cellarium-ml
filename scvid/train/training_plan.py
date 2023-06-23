@@ -92,6 +92,7 @@ class TrainingPlan(pl.LightningModule):
         ``set_epoch`` must be called at the beginning of every epoch to ensure shuffling
         applies a new ordering. This has no effect if shuffling is off.
         """
+        assert self.trainer.fit_loop._combined_loader is not None
         dataloaders = self.trainer.fit_loop._combined_loader.flattened
         for dataloader in dataloaders:
             dataset = dataloader.dataset

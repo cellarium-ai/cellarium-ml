@@ -78,7 +78,7 @@ def test_onepass_mean_var_std(
     )
 
     # fit
-    model = OnePassMeanVarStd(transform=transform)
+    model = OnePassMeanVarStd(g_genes=dadc.n_vars, transform=transform)
     training_plan = TrainingPlan(model)
     trainer = pl.Trainer(barebones=True, accelerator="cpu", max_epochs=1)  # one pass
     trainer.fit(training_plan, train_dataloaders=data_loader)
@@ -124,7 +124,7 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
     )
 
     # fit
-    model = OnePassMeanVarStd(transform=transform)
+    model = OnePassMeanVarStd(g_genes=dadc.n_vars, transform=transform)
     training_plan = TrainingPlan(model)
     trainer = pl.Trainer(
         barebones=True,
@@ -178,7 +178,7 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     # dataloader
     train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
     # model
-    model = OnePassMeanVarStd()
+    model = OnePassMeanVarStd(g_genes=1)
     training_plan = TrainingPlan(model)
     # trainer
     checkpoint_kwargs["dirpath"] = tmp_path

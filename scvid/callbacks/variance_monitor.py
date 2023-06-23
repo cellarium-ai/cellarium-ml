@@ -8,6 +8,7 @@ import torch
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 
 from scvid.module import OnePassMeanVarStdFromCli, ProbabilisticPCA
+from scvid.transforms import ZScoreLog1pNormalize
 
 
 class VarianceMonitor(pl.Callback):
@@ -44,11 +45,13 @@ class VarianceMonitor(pl.Callback):
             pl_module.module.getattr, "mean_var_std_ckpt_path"
         )
         if self.total_variance is None and mean_var_std_ckpt_path is not None:
-            state_dict = torch.load(mean_var_std_ckpt_path)
+            ppca = pl_module.module
+            assert isinstance(ppca.transform, ZScoreLog1pNormalize)
             onepass = OnePassMeanVarStdFromCli(
-                pl_module.module.g_genes,
-                target_count=pl_module.module.transform.target_count,
+                ppca.g_genes,
+                target_count=ppca.transform.target_count,
             )
+            state_dict = torch.load(mean_var_std_ckpt_path)
             onepass.load_state_dict(state_dict)
             self.total_variance = onepass.var_g.sum().item()
 
