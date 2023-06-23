@@ -3,8 +3,10 @@
 
 import torch
 
-from scvid.module import OnePassMeanVarStd, ProbabilisticPCA
 from scvid.transforms import ZScoreLog1pNormalize
+
+from ._probabilisticpca import ProbabilisticPCA
+from .onepass_mean_var_std import OnePassMeanVarStd
 
 
 class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
