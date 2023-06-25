@@ -8,8 +8,8 @@ import torch
 from scvid.transforms import ZScoreLog1pNormalize
 
 from ._probabilisticpca import ProbabilisticPCA
-from .onepass_mean_var_std import OnePassMeanVarStd
 from .incremental_pca import IncrementalPCA
+from .onepass_mean_var_std import OnePassMeanVarStd
 
 
 class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
@@ -18,7 +18,7 @@ class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
 
     Args:
         g_genes: Number of genes.
-        target_count: Target gene epxression count. Default: ``10_000
+        target_count: Target gene epxression count. Default: ``10_000``
     """
 
     def __init__(self, g_genes, target_count: int = 10_000) -> None:
@@ -96,16 +96,18 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
             transform=transform,
         )
 
+
 class IncrementalPCAFromCli(IncrementalPCA):
     """
     Preset default values for the LightningCLI.
 
     Args:
-        target_count: Target gene epxression count. Default: ``10_000
+        k_components: Number of principal components.
+        target_count: Target gene epxression count. Default: ``10_000``
     """
 
-    def __init__(self, k: int, target_count: int = 10_000) -> None:
+    def __init__(self, k_components: int, target_count: int = 10_000) -> None:
         transform = ZScoreLog1pNormalize(
             mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
         )
-        super().__init__(k=k, transform=transform)
+        super().__init__(k_components=k_components, transform=transform)

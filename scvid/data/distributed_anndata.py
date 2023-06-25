@@ -108,8 +108,9 @@ class DistributedAnnDataCollection(AnnCollection):
         convert: ConvertType | None = None,
         indices_strict: bool = True,
     ):
-        from google.cloud.storage import Client
         import re
+
+        from google.cloud.storage import Client
 
         filenames = re.sub(r"^gs://?", "", filenames)
         bucket_name, storage_path = filenames.split("/", 1)

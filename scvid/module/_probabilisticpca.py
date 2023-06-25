@@ -3,42 +3,13 @@
 
 from typing import Any
 
-import math
 import pyro
 import pyro.distributions as dist
 import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
-from torch.distributions.multivariate_normal import _batch_mahalanobis, _batch_mv
 
 from .base_module import BasePyroModule
-
-
-def _batch_lowrank_logdet(W, D, capacitance_tril):
-    r"""
-    Uses "matrix determinant lemma"::
-        log|W @ W.T + D| = log|C| + log|D|,
-    where :math:`C` is the capacitance matrix :math:`I + W.T @ inv(D) @ W`, to compute
-    the log determinant.
-    """
-    return 2 * capacitance_tril.diagonal(dim1=-2, dim2=-1).log().sum(-1) + D.log().sum(
-        -1
-    )
-
-
-def _batch_lowrank_mahalanobis(W, D, x, capacitance_tril, total_var):
-    r"""
-    Uses "Woodbury matrix identity"::
-        inv(W @ W.T + D) = inv(D) - inv(D) @ W @ inv(C) @ W.T @ inv(D),
-    where :math:`C` is the capacitance matrix :math:`I + W.T @ inv(D) @ W`, to compute the squared
-    Mahalanobis distance :math:`x.T @ inv(W @ W.T + D) @ x`.
-    """
-    Wt_Dinv = W.mT / D.unsqueeze(-2)
-    Wt_Dinv_x = _batch_mv(Wt_Dinv, x)
-    # mahalanobis_term_ = (x.pow(2) / D).sum(-1)
-    mahalanobis_term1 = (total_var / D).mean(-1)
-    mahalanobis_term2 = _batch_mahalanobis(capacitance_tril, Wt_Dinv_x)
-    return mahalanobis_term1 - mahalanobis_term2
 
 
 class ProbabilisticPCA(BasePyroModule):
@@ -83,8 +54,6 @@ class ProbabilisticPCA(BasePyroModule):
         seed: int = 0,
         transform: torch.nn.Module | None = None,
         elbo: pyro.infer.ELBO | None = None,
-        S: torch.Tensor | None = None,
-        total_var: torch.Tensor | None = None,
     ):
         super().__init__(type(self).__name__)
 
@@ -109,16 +78,6 @@ class ProbabilisticPCA(BasePyroModule):
         else:
             self.register_buffer("mean_g", torch.as_tensor(mean_g))
 
-        if S is None:
-            self.S = None
-        else:
-            self.register_buffer("S", S)
-
-        if total_var is None:
-            self.total_var = None
-        else:
-            self.register_buffer("total_var", total_var)
-
         rng = torch.Generator()
         rng.manual_seed(seed)
         # model parameters
@@ -137,36 +96,6 @@ class ProbabilisticPCA(BasePyroModule):
         return (x,), {}
 
     def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
-        if self.S is not None:
-            low_rank = dist.LowRankMultivariateNormal(
-                loc=self.mean_g,
-                cov_factor=self.W_kg.T,
-                cov_diag=self.sigma**2 * self.W_kg.new_ones(self.g_genes),
-            )
-            log_det = _batch_lowrank_logdet(
-                low_rank._unbroadcasted_cov_factor,
-                low_rank._unbroadcasted_cov_diag,
-                low_rank._capacitance_tril,
-            )
-            diff = args[0] - self.mean_g
-            M = _batch_lowrank_mahalanobis(
-                low_rank._unbroadcasted_cov_factor,
-                low_rank._unbroadcasted_cov_diag,
-                diff,
-                low_rank._capacitance_tril,
-                self.total_var,
-            )
-            cost = (
-                -0.5
-                # * self.n_cells
-                * (
-                    self.g_genes * math.log(2 * math.pi)
-                    + log_det
-                    + M
-                    # + torch.sum(self.C_inv * self.S.T)
-                )
-            ).sum() * self.n_cells / args[0].shape[0]
-            return -cost
         return self.elbo.differentiable_loss(self.model, self.guide, *args, **kwargs)
 
     def model(self, x_ng: torch.Tensor) -> None:
@@ -220,20 +149,6 @@ class ProbabilisticPCA(BasePyroModule):
         """
         V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
         return (x_ng - self.mean_g) @ V_gk
-
-    @property
-    def C_inv(self) -> torch.Tensor:
-        #  return (
-        #      torch.eye(self.g_genes, device=self.sigma.device) / self.sigma**2
-        #      - 1
-        #      / self.sigma**2
-        #      * self.W_kg.T
-        #      @ torch.linalg.inv(self.M_kk)
-        #      @ self.W_kg
-        #  )
-        return (
-            -1 / self.sigma**2 * self.W_kg.T @ torch.linalg.inv(self.M_kk) @ self.W_kg
-        )
 
     @property
     def M_kk(self) -> torch.Tensor:

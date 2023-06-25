@@ -48,11 +48,11 @@ class AnnDataSchema:
                         ".obs attribute columns for anndata passed in does not match .obs attribute columns "
                         "of the reference anndata."
                     )
-                #  if not ref_value.dtypes.equals(value.dtypes):
-                #      raise ValueError(
-                #          ".obs attribute dtypes for anndata passed in does not match .obs attribute dtypes "
-                #          "of the reference anndata."
-                #      )
+                if not ref_value.dtypes.equals(value.dtypes):
+                    raise ValueError(
+                        ".obs attribute dtypes for anndata passed in does not match .obs attribute dtypes "
+                        "of the reference anndata."
+                    )
             elif attr in ["var", "var_names"]:
                 # For var compare if two DataFrames have the same shape and elements
                 # and the same row/column index.
