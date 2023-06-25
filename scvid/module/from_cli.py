@@ -17,7 +17,7 @@ class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
 
     Args:
         g_genes: Number of genes.
-        target_count: Target gene epxression count. Default: ``10_000
+        target_count: Target gene epxression count. Default: ``10_000``.
     """
 
     def __init__(self, g_genes, target_count: int = 10_000) -> None:
@@ -35,7 +35,7 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
         n_cells: Number of cells.
         g_genes: Number of genes.
         k_components: Number of principcal components.
-        ppca_flavor: Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
+        ppca_flavor: Type of the PPCA model. Has to be one of ``marginalized`` or ``linear_vae``.
         W_init_variance_ratio: Ratio of variance of W_init_scale to variance of data.
             If ``mean_var_std_ckpt_path`` is ``None``, then ``W_init_scale`` is set to
             ``W_init_variance_ratio``.
@@ -43,7 +43,7 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
             If ``mean_var_std_ckpt_path`` is ``None``, then ``sigma_init_scale`` is set to
             ``sigma_init_variance_ratio``.
         seed: Random seed used to initialize parameters. Default: ``0``.
-        target_count: Target gene epxression count. Default: ``10_000``
+        target_count: Target gene epxression count. Default: ``10_000``.
         mean_var_std_ckpt_path: Path to checkpoint containing OnePassMeanVarStd.
     """
 
