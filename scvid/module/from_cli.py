@@ -9,6 +9,7 @@ from scvid.transforms import ZScoreLog1pNormalize
 
 from ._probabilisticpca import ProbabilisticPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
+from .incremental_pca import IncrementalPCA
 
 
 class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
@@ -94,3 +95,17 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
             seed=seed,
             transform=transform,
         )
+
+class IncrementalPCAFromCli(IncrementalPCA):
+    """
+    Preset default values for the LightningCLI.
+
+    Args:
+        target_count: Target gene epxression count. Default: ``10_000
+    """
+
+    def __init__(self, k: int, target_count: int = 10_000) -> None:
+        transform = ZScoreLog1pNormalize(
+            mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
+        )
+        super().__init__(k=k, transform=transform)

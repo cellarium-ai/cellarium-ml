@@ -108,9 +108,21 @@ class DistributedAnnDataCollection(AnnCollection):
         convert: ConvertType | None = None,
         indices_strict: bool = True,
     ):
-        self.filenames = list(
-            braceexpand(filenames) if isinstance(filenames, str) else filenames
-        )
+        from google.cloud.storage import Client
+        import re
+
+        filenames = re.sub(r"^gs://?", "", filenames)
+        bucket_name, storage_path = filenames.split("/", 1)
+        storage_client = Client()
+        bucket = storage_client.bucket(bucket_name)
+        self.filenames = [
+            f"gs://{bucket_name}/{x.name}"
+            for x in bucket.list_blobs(prefix=storage_path)
+            if x.name not in [f"{storage_path}/extract_3446.h5ad"]
+        ][:-2]
+        #  self.filenames = list(
+        #      braceexpand(filenames) if isinstance(filenames, str) else filenames
+        #  )
         if (shard_size is None) and (last_shard_size is not None):
             raise ValueError(
                 "If `last_shard_size` is specified then `shard_size` must also be specified."

@@ -60,3 +60,7 @@ class OnePassMeanVarStd(BaseModule):
     @property
     def std_g(self) -> torch.Tensor:
         return torch.sqrt(self.var_g)
+
+    @property
+    def cov_gg(self) -> torch.Tensor:
+        return self.xy_sums / self.x_size - torch.outer(self.mean_g, self.mean_g)

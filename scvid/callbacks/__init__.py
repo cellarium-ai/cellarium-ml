@@ -3,5 +3,7 @@
 
 from .module_checkpoint import ModuleCheckpoint
 from .variance_monitor import VarianceMonitor
+from .distributed_pca import DistributedPCA
+from .L_monitor import LMonitor
 
-__all__ = ["ModuleCheckpoint", "VarianceMonitor"]
+__all__ = ["ModuleCheckpoint", "VarianceMonitor", "DistributedPCA", "LMonitor"]
