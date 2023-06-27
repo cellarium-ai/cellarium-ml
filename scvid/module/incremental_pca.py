@@ -62,13 +62,19 @@ class IncrementalPCA(BaseModule):
         k = self.k_components
         m = self.x_size
         n = x_ng.size(0)
+        q = min(k + 6, self.g_genes, 2*k)
+        #  assert q >= k
+        #  assert q <= self.g_genes
+        #  assert q >= n
 
         # compute SVD of new data
         if self.mean_correct:
             x_mean_g = x_ng.mean(dim=0)
-            _, S_k, V_kg = torch.svd_lowrank(x_ng - x_mean_g, q=k + 6)
+            _, S_k, V_kg = torch.linalg.svd(x_ng - x_mean_g)
+            # _, S_k, V_kg = torch.svd_lowrank(x_ng - x_mean_g, q=q)
         else:
-            _, S_k, V_kg = torch.svd_lowrank(x_ng, q=k + 6)
+            _, S_k, V_kg = torch.linalg.svd(x_ng)
+            # _, S_k, V_kg = torch.svd_lowrank(x_ng, q=q)
 
         # if not the first batch, merge results
         if m > 0:
@@ -84,10 +90,25 @@ class IncrementalPCA(BaseModule):
             else:
                 C = torch.cat([torch.diag(self.S_k) @ self.V_kg, SV_kg], dim=0)
             # perform SVD on merged results
-            _, S_k, V_kg = torch.svd_lowrank(C, q=k + 6)
+            _, S_k, V_kg = torch.linalg.svd(C)
+            # _, S_k, V_kg = torch.svd_lowrank(C, q=q)
         # update buffers
         self.V_kg = V_kg[:k]
         self.S_k = S_k[:k]
         self.x_size = m + n
         if self.mean_correct:
             self.x_mean_g = self.x_mean_g * m / (m + n) + x_mean_g * n / (m + n)
+
+    @property
+    def L_k(self) -> torch.Tensor:
+        r"""
+        Vector with elements given by the PC eigenvalues.
+        """
+        return self.S_k**2 / self.x_size
+
+    @property
+    def U_gk(self) -> torch.Tensor:
+        r"""
+        Principal components corresponding to eigenvalues ``L_k``.
+        """
+        return self.V_kg.T
