@@ -22,6 +22,8 @@ class IncrementalPCA(BaseModule):
     Args:
         g_genes: Number of genes.
         k_components: Number of principal components.
+        p_oversamples: Additional number of random vectors to sample the range of ``x_ng``
+            so as to ensure proper conditioning.
         ppca_flavor: Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
         mean_g: Mean gene expression of the input data.
         transform: If not ``None`` is used to transform the input data.
@@ -31,12 +33,14 @@ class IncrementalPCA(BaseModule):
         self,
         g_genes: int,
         k_components: int,
+        p_oversamples: int = 10,
         transform: nn.Module | None = None,
         mean_correct: bool = False,
     ) -> None:
         super().__init__()
         self.g_genes = g_genes
         self.k_components = k_components
+        self.p_oversamples = p_oversamples
         self.transform = transform
         self.mean_correct = mean_correct
         self.V_kg: torch.Tensor
@@ -59,30 +63,25 @@ class IncrementalPCA(BaseModule):
     def forward(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)
+        g = self.g_genes
         k = self.k_components
+        p = self.p_oversamples
         m = self.x_size
         n = x_ng.size(0)
-        q = min(k + 6, self.g_genes, 2*k)
-        #  assert q >= k
-        #  assert q <= self.g_genes
-        #  assert q >= n
+        assert p + k <= min(n, g)
 
         # compute SVD of new data
         if self.mean_correct:
             x_mean_g = x_ng.mean(dim=0)
-            _, S_k, V_kg = torch.linalg.svd(x_ng - x_mean_g)
-            # _, S_k, V_kg = torch.svd_lowrank(x_ng - x_mean_g, q=q)
+            # _, S_k, V_kg = torch.linalg.svd(x_ng - x_mean_g)
+            _, S_q, V_gq = torch.svd_lowrank(x_ng - x_mean_g, q=k + p)
         else:
-            _, S_k, V_kg = torch.linalg.svd(x_ng)
-            # _, S_k, V_kg = torch.svd_lowrank(x_ng, q=q)
-        #  # calculate x_ng variance
-        #  x_ng_var = x_ng.var(dim=0).sum()
-        #  L_k = S_k[:k]**2 / n
-        #  breakpoint()
+            # _, S_k, V_kg = torch.linalg.svd(x_ng)
+            _, S_q, V_gq = torch.svd_lowrank(x_ng, q=k + p)
 
         # if not the first batch, merge results
         if m > 0:
-            SV_kg = torch.diag(S_k[:k]) @ V_kg[:k]
+            SV_kg = torch.diag(S_q[:k]) @ V_gq.T[:k]
             if self.mean_correct:
                 mean_correction = (
                     math.sqrt(m * n / (m + n)) * (self.x_mean_g - x_mean_g)[None, :]
@@ -94,11 +93,11 @@ class IncrementalPCA(BaseModule):
             else:
                 C = torch.cat([torch.diag(self.S_k) @ self.V_kg, SV_kg], dim=0)
             # perform SVD on merged results
-            _, S_k, V_kg = torch.linalg.svd(C)
-            # _, S_k, V_kg = torch.svd_lowrank(C, q=q)
+            # _, S_k, V_kg = torch.linalg.svd(C)
+            _, S_q, V_gq = torch.svd_lowrank(C, q=k + p)
         # update buffers
-        self.V_kg = V_kg[:k]
-        self.S_k = S_k[:k]
+        self.V_kg = V_gq.T[:k]
+        self.S_k = S_q[:k]
         self.x_size = m + n
         if self.mean_correct:
             self.x_mean_g = self.x_mean_g * m / (m + n) + x_mean_g * n / (m + n)

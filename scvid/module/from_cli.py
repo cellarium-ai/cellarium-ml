@@ -106,8 +106,19 @@ class IncrementalPCAFromCli(IncrementalPCA):
         target_count: Target gene epxression count. Default: ``10_000``
     """
 
-    def __init__(self, g_genes: int, k_components: int, target_count: int = 10_000, mean_correct: bool = False) -> None:
+    def __init__(
+        self,
+        g_genes: int,
+        k_components: int,
+        target_count: int = 10_000,
+        mean_correct: bool = False,
+    ) -> None:
         transform = ZScoreLog1pNormalize(
             mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
         )
-        super().__init__(g_genes=g_genes, k_components=k_components, transform=transform, mean_correct=mean_correct)
+        super().__init__(
+            g_genes=g_genes,
+            k_components=k_components,
+            transform=transform,
+            mean_correct=mean_correct,
+        )
