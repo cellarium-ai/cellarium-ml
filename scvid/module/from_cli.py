@@ -103,6 +103,9 @@ class IncrementalPCAFromCli(IncrementalPCA):
 
     Args:
         k_components: Number of principal components.
+        p_oversamples: Additional number of random vectors to sample the range of ``x_ng``
+            so as to ensure proper conditioning.
+        mean_correct: If ``True`` then the mean correction is applied to the update step.
         target_count: Target gene epxression count. Default: ``10_000``
     """
 
@@ -110,8 +113,9 @@ class IncrementalPCAFromCli(IncrementalPCA):
         self,
         g_genes: int,
         k_components: int,
-        target_count: int = 10_000,
+        p_oversamples: int = 10,
         mean_correct: bool = False,
+        target_count: int = 10_000,
     ) -> None:
         transform = ZScoreLog1pNormalize(
             mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
@@ -119,6 +123,7 @@ class IncrementalPCAFromCli(IncrementalPCA):
         super().__init__(
             g_genes=g_genes,
             k_components=k_components,
-            transform=transform,
+            p_oversamples=p_oversamples,
             mean_correct=mean_correct,
+            transform=transform,
         )

@@ -29,6 +29,15 @@ EXAMPLES = [
         "--data.num_workers 2 "
         "--trainer.accelerator cpu --trainer.devices 1"
     ),
+    (
+        "incremental_pca.py fit "
+        "--model.module.class_path scvid.module.IncrementalPCAFromCli "
+        "--data.filenames "
+        "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
+        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
+        "--data.num_workers 2 "
+        "--trainer.accelerator cpu --trainer.devices 1"
+    ),
 ]
 
 
