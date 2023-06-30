@@ -75,6 +75,10 @@ class IncrementalPCA(BaseModule):
         else:
             _, S_k, V_kg = torch.linalg.svd(x_ng)
             # _, S_k, V_kg = torch.svd_lowrank(x_ng, q=q)
+        #  # calculate x_ng variance
+        #  x_ng_var = x_ng.var(dim=0).sum()
+        #  L_k = S_k[:k]**2 / n
+        #  breakpoint()
 
         # if not the first batch, merge results
         if m > 0:

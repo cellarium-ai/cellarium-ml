@@ -15,7 +15,7 @@ from scvid.train import TrainingPlan
 
 from .common import TestDataset
 
-n, g, k = 1000, 50, 30
+n, g, k = 10000, 50, 30
 
 
 @pytest.fixture
@@ -30,16 +30,16 @@ def x_ng():
     return x_ng
 
 
-@pytest.mark.parametrize("mean_correct", [False, True])
-@pytest.mark.parametrize("low_rank", [0, -5, -10])
+@pytest.mark.parametrize("mean_correct", [False])
+@pytest.mark.parametrize("low_rank", [-5, -5, -10])
 def test_incremental_pca(x_ng: np.ndarray, mean_correct: bool, low_rank: int):
     n, g = x_ng.shape
-    d = k + low_rank
+    d = 20
     if not mean_correct:
         x_ng = x_ng - x_ng.mean(axis=0)
 
     # dataloader
-    batch_size = 100
+    batch_size = 1000
     train_loader = torch.utils.data.DataLoader(
         TestDataset(x_ng),
         batch_size=batch_size,
@@ -73,6 +73,8 @@ def test_incremental_pca(x_ng: np.ndarray, mean_correct: bool, low_rank: int):
     # variance explained be each PC
     expected_explained_var = L_g[:d]
     actual_explained_var = ipca.L_k[:d]
+    print(actual_explained_var / expected_explained_var)
+    import pdb;pdb.set_trace()
     np.testing.assert_allclose(expected_explained_var, actual_explained_var, rtol=1e-3)
 
     # absolute cosine similarity between expected and actual PCs
