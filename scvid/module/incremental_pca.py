@@ -116,3 +116,11 @@ class IncrementalPCA(BaseModule):
         Principal components corresponding to eigenvalues ``L_k``.
         """
         return self.V_kg.T
+
+    def embed(self, x_ng: torch.Tensor) -> torch.Tensor:
+        r"""
+        Embedding of the input data ``x_ng`` into the principal component space.
+        """
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
+        return x_ng @ self.U_gk
