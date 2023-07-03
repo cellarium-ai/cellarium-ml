@@ -36,12 +36,12 @@ def lazy_getattr():
         _GETATTR_MODE.lazy = False
 
 
-class AnnCollectionView_(AnnCollectionView):
+class DistributedAnnCollectionView(AnnCollectionView):
     def __getitem__(self, index: Index):
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
 
-        return AnnCollectionView_(self.reference, self.convert, resolved_idx)
+        return DistributedAnnCollectionView(self.reference, self.convert, resolved_idx)
 
     @property
     def obs_names(self):
@@ -184,14 +184,14 @@ class DistributedAnnDataCollection(AnnCollection):
                 indices_strict=indices_strict,
             )
 
-    def __getitem__(self, index: Index) -> AnnCollectionView_:
+    def __getitem__(self, index: Index) -> DistributedAnnCollectionView:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
         adatas_indices = [i for i, e in enumerate(resolved_idx[0]) if e is not None]
         # TODO: materialize at the last moment?
         self.materialize(adatas_indices)
 
-        return AnnCollectionView_(self, self.convert, resolved_idx)
+        return DistributedAnnCollectionView(self, self.convert, resolved_idx)
 
     def materialize(self, indices: int | Sequence[int]) -> list[AnnData]:
         """
