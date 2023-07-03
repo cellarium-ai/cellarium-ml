@@ -104,8 +104,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         data = {}
         data["X"] = X.toarray() if issparse(X) else X
-        import pdb;pdb.set_trace()
-        data["ids"] = self.dadc[idx].obs_names
+        data["db_ids"] = self.dadc[idx].obs_names.values.astype(int)
 
         # for testing purposes
         if self.test_mode:

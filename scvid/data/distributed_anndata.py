@@ -36,6 +36,34 @@ def lazy_getattr():
         _GETATTR_MODE.lazy = False
 
 
+class AnnCollectionView_(AnnCollectionView):
+    def __getitem__(self, index: Index):
+        oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
+        resolved_idx = self._resolve_idx(oidx, vidx)
+
+        return AnnCollectionView_(self.reference, self.convert, resolved_idx)
+
+    @property
+    def obs_names(self):
+        indices = []
+        for i, oidx in enumerate(self.adatas_oidx):
+            if oidx is None:
+                continue
+
+            adata = self.adatas[i]
+            indices.append(adata.obs_names[oidx])
+
+        if len(indices) > 1:
+            concat_indices = pd.concat(
+                [pd.Series(idx) for idx in indices], ignore_index=True
+            )
+            obs_names = pd.Index(concat_indices)
+        else:
+            obs_names = indices[0]
+
+        return obs_names
+
+
 class DistributedAnnDataCollection(AnnCollection):
     r"""
     Distributed AnnData Collection.
@@ -156,14 +184,14 @@ class DistributedAnnDataCollection(AnnCollection):
                 indices_strict=indices_strict,
             )
 
-    def __getitem__(self, index: Index) -> AnnCollectionView:
+    def __getitem__(self, index: Index) -> AnnCollectionView_:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
         adatas_indices = [i for i, e in enumerate(resolved_idx[0]) if e is not None]
         # TODO: materialize at the last moment?
         self.materialize(adatas_indices)
 
-        return AnnCollectionView(self, self.convert, resolved_idx)
+        return AnnCollectionView_(self, self.convert, resolved_idx)
 
     def materialize(self, indices: int | Sequence[int]) -> list[AnnData]:
         """
@@ -276,10 +304,14 @@ class LazyAnnData:
     def shape(self) -> tuple[int, int]:
         return self.n_obs, self.n_vars
 
-    @cachedproperty
+    @property
     def obs_names(self) -> pd.Index:
         """This is different from the backed anndata"""
-        return pd.Index([f"cell_{i}" for i in range(*self.limits)])
+        if _GETATTR_MODE.lazy:
+            return pd.Index([f"cell_{i}" for i in range(*self.limits)])
+        else:
+            adata = self.adata
+            return adata.obs_names
 
     @property
     def cached(self) -> bool:
