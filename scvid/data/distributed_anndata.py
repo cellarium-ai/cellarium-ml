@@ -37,14 +37,14 @@ def lazy_getattr():
 
 
 class DistributedAnnCollectionView(AnnCollectionView):
-    def __getitem__(self, index: Index):
+    def __getitem__(self, index: Index) -> DistributedAnnCollectionView:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
 
         return DistributedAnnCollectionView(self.reference, self.convert, resolved_idx)
 
     @property
-    def obs_names(self):
+    def obs_names(self) -> pd.Index:
         indices = []
         for i, oidx in enumerate(self.adatas_oidx):
             if oidx is None:
