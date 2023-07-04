@@ -52,13 +52,12 @@ class DistributedPCA(pl.Callback):
                             math.sqrt(m * n / (m + n)) * (A_mean - B_mean)[None, :]
                         )
                         C = torch.cat([C, mean_correction], dim=0)
+                        x_mean_g = A_mean * m / (m + n) + B_mean * n / (m + n)
                     _, S_q, V_gq = torch.svd_lowrank(C, q=k + p)
                     # update parameters
                     S_k = S_q[:k]
                     V_kg = V_gq.T[:k]
                     m = m + n
-                    if mean_correct:
-                        x_mean_g = A_mean * m / (m + n) + B_mean * n / (m + n)
             else:  # trailing rank
                 # send to a leading rank and exit
                 dst = (rank - 1) * 2**i

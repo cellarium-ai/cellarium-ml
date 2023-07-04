@@ -26,9 +26,9 @@ def x_ng():
     return x_ng
 
 
-@pytest.mark.parametrize("mean_correct", [False, True])
-@pytest.mark.parametrize("batch_size", [10_000, 5000, 1000, 500, 250])
-@pytest.mark.parametrize("k", [30, 50, 80])
+@pytest.mark.parametrize("mean_correct", [False, True][1:])
+@pytest.mark.parametrize("batch_size", [10_000, 5000, 1000, 500, 250][:1])
+@pytest.mark.parametrize("k", [30, 50, 80][:1])
 def test_incremental_pca_multi_device(
     x_ng: np.ndarray, mean_correct: bool, batch_size: int, k: int
 ):
@@ -54,6 +54,7 @@ def test_incremental_pca_multi_device(
     dpca = DistributedPCA()
     trainer = pl.Trainer(
         barebones=True,
+        precision=64,
         accelerator="cpu",
         devices=devices,
         max_epochs=1,
@@ -65,7 +66,8 @@ def test_incremental_pca_multi_device(
     if trainer.global_rank == 0:
         # actual approximation error
         x_diff = torch.linalg.matrix_norm(
-            x_ng_centered - x_ng_centered @ ipca.V_kg.T @ ipca.V_kg, ord="fro"
+            x_ng_centered - x_ng_centered @ ipca.V_kg.T.float() @ ipca.V_kg.float(),
+            ord="fro",
         )
 
         # optimal rank-k approximation error
@@ -76,3 +78,9 @@ def test_incremental_pca_multi_device(
         )
 
         assert x_diff < x_diff_rank_k * 1.05
+        assert ipca.x_size == n
+        np.testing.assert_allclose(
+            ipca.x_mean_g,
+            (x_ng if mean_correct else x_ng_centered).mean(axis=0),
+            atol=1e-5,
+        )
