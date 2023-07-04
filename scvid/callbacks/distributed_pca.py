@@ -6,50 +6,76 @@ import math
 import lightning.pytorch as pl
 import torch
 import torch.distributed as dist
+from lightning.fabric.utilities.rank_zero import rank_zero_only
 
 
 class DistributedPCA(pl.Callback):
+    """
+    Distributed PCA.
+    """
+
     def on_train_epoch_end(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ) -> None:
-        k = pl_module.module.k
-        i = 0
+        # parameters
+        mean_correct = pl_module.module.mean_correct
+        k = pl_module.module.k_components
+        p = pl_module.module.p_oversamples
+        V_kg = pl_module.module.V_kg
+        S_k = pl_module.module.S_k
+        if mean_correct:
+            x_mean_g = pl_module.module.x_mean_g
+            m = pl_module.module.x_size
+        # initialize i, rank, and world_size
         rank = trainer.global_rank
-        rank = rank
         world_size = trainer.world_size
-        C = pl_module.module.US_gk
-        C_ = pl_module.module.x_mean_g1
-        n = pl_module.module.x_size
+        i = 0
         while world_size > 1:
-            if rank % 2 == 0:
-                # if effective rank is even then receive U and S from rank+1
-                if rank + 1 >= world_size:
-                    pass
-                else:
-                    A = C
-                    A_ = C_
-                    n = n
+            # level i
+            # at most two local ranks
+            if rank % 2 == 0:  # leading rank
+                if rank < world_size:
+                    # if there is a trailing rank
+                    # then concatenate and merge SVDs
+                    src = (rank + 1) * 2**i
+                    A = torch.diag(S_k) @ V_kg
                     B = torch.zeros_like(A)
-                    B_ = torch.zeros_like(A_)
-                    m = torch.zeros_like(n)
-                    dist.recv(B, src=(rank + 1) * 2**i)
-                    dist.recv(B_, src=(rank + 1) * 2**i)
-                    dist.recv(m, src=(rank + 1) * 2**i)
-                    C = torch.cat(
-                        [A, B, (A_ - B_) * math.sqrt(n * m / (n + m))], dim=-1
-                    )
-                    U_gk, S_k, _ = torch.svd_lowrank(C, q=k + 6)
-                    C = U_gk[:, :k] @ torch.diag(S_k[:k])
-                    C_ = A_ * n / (n + m) + B_ * m / (n + m)
-                    n = n + m
-            else:
-                # if rank is odd then send U and S to rank-1
-                dist.send(C, dst=(rank - 1) * 2**i)
-                dist.send(C_, dst=(rank - 1) * 2**i)
-                dist.send(n, dst=(rank - 1) * 2**i)
+                    dist.recv(B, src=src)
+                    C = torch.cat([A, B], dim=0)
+                    if mean_correct:
+                        A_mean = x_mean_g
+                        B_mean = torch.zeros_like(A_mean)
+                        m = m
+                        n = torch.zeros_like(m)
+                        dist.recv(B_mean, src=src)
+                        dist.recv(n, src=src)
+                        mean_correction = (
+                            math.sqrt(m * n / (m + n)) * (A_mean - B_mean)[None, :]
+                        )
+                        C = torch.cat([C, mean_correction], dim=0)
+                    _, S_q, V_gq = torch.svd_lowrank(C, q=k + p)
+                    # update parameters
+                    S_k = S_q[:k]
+                    V_kg = V_gq.T[:k]
+                    if mean_correct:
+                        x_mean_g = A_mean * m / (m + n) + B_mean * n / (m + n)
+                        m = m + n
+            else:  # trailing rank
+                # send to a leading rank and exit
+                dst = (rank - 1) * 2**i
+                dist.send(torch.diag(S_k) @ V_kg, dst=dst)
+                if mean_correct:
+                    dist.send(x_mean_g, dst=dst)
+                    dist.send(m, dst=dst)
                 break
-            i += 1
+            # update rank, world_size, and level i
             rank = rank // 2
             world_size = math.ceil(world_size / 2)
+            i += 1
         else:
-            print("full", S_k[:5] ** 2 / n)
+            assert trainer.global_rank == 0
+            self.V_kg = V_kg
+            self.S_k = S_k
+            if mean_correct:
+                self.x_mean_g = x_mean_g
+                self.x_size = m
