@@ -7,7 +7,7 @@ import torch
 
 from scvid.transforms import ZScoreLog1pNormalize
 
-from ._probabilisticpca import ProbabilisticPCA
+from .probabilistic_pca import ProbabilisticPCA
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
 
@@ -106,6 +106,8 @@ class IncrementalPCAFromCli(IncrementalPCA):
         p_oversamples: Additional number of random vectors to sample the range of ``x_ng``
             so as to ensure proper conditioning.
         mean_correct: If ``True`` then the mean correction is applied to the update step.
+            If ``False`` then the data is assumed to be centered and the mean correction
+            is not applied to the update step.
         target_count: Target gene epxression count. Default: ``10_000``
     """
 

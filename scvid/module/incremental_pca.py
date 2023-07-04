@@ -29,6 +29,8 @@ class IncrementalPCA(BaseModule):
             so as to ensure proper conditioning.
         transform: If not ``None`` is used to transform the input data.
         mean_correct: If ``True`` then the mean correction is applied to the update step.
+            If ``False`` then the data is assumed to be centered and the mean correction
+            is not applied to the update step.
     """
 
     def __init__(
@@ -95,20 +97,25 @@ class IncrementalPCA(BaseModule):
         # update buffers
         self.V_kg = V_gq.T[:k]
         self.S_k = S_q[:k]
+        self.x_size = m + n
         if self.mean_correct:
             self.x_mean_g = self.x_mean_g * m / (m + n) + x_mean_g * n / (m + n)
-            self.x_size = m + n
 
     @property
-    def L_k(self) -> torch.Tensor:
+    def explained_variance_k(self) -> torch.Tensor:
         r"""
-        Vector with elements given by the PC eigenvalues.
+        The amount of variance explained by each of the selected components. The variance
+        estimation uses ``x_size`` degrees of freedom.
+
+        Equal to ``k_components`` largest eigenvalues of the covariance matrix of input data.
         """
         return self.S_k**2 / self.x_size
 
     @property
-    def U_gk(self) -> torch.Tensor:
+    def components_kg(self) -> torch.Tensor:
         r"""
-        Principal components corresponding to eigenvalues ``L_k``.
+        Principal axes in feature space, representing the directions of maximum variance
+        in the data. Equivalently, the right singular vectors of the centered input data,
+        parallel to its eigenvectors. The components are sorted by decreasing ``explained_variance_k``.
         """
-        return self.V_kg.T
+        return self.V_kg

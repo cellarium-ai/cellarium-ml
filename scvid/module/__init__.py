@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from ._probabilisticpca import ProbabilisticPCA
+from .probabilistic_pca import ProbabilisticPCA
 from .base_module import BaseModule, BasePyroModule
 from .from_cli import (
     IncrementalPCAFromCli,
