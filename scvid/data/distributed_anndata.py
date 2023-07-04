@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import gc
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
@@ -306,12 +308,11 @@ class LazyAnnData:
 
     @property
     def obs_names(self) -> pd.Index:
-        """This is different from the backed anndata"""
         if _GETATTR_MODE.lazy:
+            # This is only used during the initialization of DistributedAnnDataCollection
             return pd.Index([f"cell_{i}" for i in range(*self.limits)])
         else:
-            adata = self.adata
-            return adata.obs_names
+            return self.adata.obs_names
 
     @property
     def cached(self) -> bool:
