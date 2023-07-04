@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .probabilistic_pca import ProbabilisticPCA
 from .base_module import BaseModule, BasePyroModule
 from .from_cli import (
     IncrementalPCAFromCli,
@@ -11,6 +10,7 @@ from .from_cli import (
 from .gather import GatherLayer
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
+from .probabilistic_pca import ProbabilisticPCA
 
 __all__ = [
     "BaseModule",

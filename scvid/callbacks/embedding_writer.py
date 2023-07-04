@@ -16,10 +16,10 @@ def write_embedding(
     postfix: int | str,
 ) -> None:
     """
-    Write embeddings to a CSV file.
+    Write embedding to a CSV file.
 
     Args:
-        embedding: The embeddings to write.
+        embedding: The embedding to write.
         ids: The CAS IDs of the cells.
         output_dir: The directory to write the embeddings to.
         postfix: A postfix to add to the CSV file name.
@@ -28,7 +28,8 @@ def write_embedding(
         os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(embedding.cpu())
     df.insert(0, "db_ids", ids.cpu())
-    df.to_csv(f"{output_dir}/batch_{postfix}.csv", header=False, index=False)
+    output_path = os.path.join(output_dir, f"batch_{postfix}.csv")
+    df.to_csv(output_path, header=False, index=False)
 
 
 class EmbeddingWriter(pl.callbacks.BasePredictionWriter):

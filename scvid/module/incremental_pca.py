@@ -126,4 +126,4 @@ class IncrementalPCA(BaseModule):
         """
         if self.transform is not None:
             x_ng = self.transform(x_ng)
-        return x_ng @ self.V_kg
+        return x_ng @ self.V_kg.T

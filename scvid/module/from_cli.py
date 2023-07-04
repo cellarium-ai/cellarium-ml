@@ -7,9 +7,9 @@ import torch
 
 from scvid.transforms import ZScoreLog1pNormalize
 
-from .probabilistic_pca import ProbabilisticPCA
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
+from .probabilistic_pca import ProbabilisticPCA
 
 
 class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
