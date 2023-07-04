@@ -312,8 +312,7 @@ class LazyAnnData:
             # This is only used during the initialization of DistributedAnnDataCollection
             return pd.Index([f"cell_{i}" for i in range(*self.limits)])
         else:
-            adata = self.adata
-            return adata.obs_names
+            return self.adata.obs_names
 
     @property
     def cached(self) -> bool:
