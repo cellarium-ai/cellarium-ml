@@ -83,25 +83,21 @@ class IncrementalPCA(BaseModule):
         # if not the first batch, merge results
         if m > 0:
             SV_kg = torch.diag(S_q[:k]) @ V_gq.T[:k]
+            C = torch.cat([torch.diag(self.S_k) @ self.V_kg, SV_kg], dim=0)
             if self.mean_correct:
                 mean_correction = (
                     math.sqrt(m * n / (m + n)) * (self.x_mean_g - x_mean_g)[None, :]
                 )
-                C = torch.cat(
-                    [torch.diag(self.S_k) @ self.V_kg, SV_kg, mean_correction],
-                    dim=0,
-                )
-            else:
-                C = torch.cat([torch.diag(self.S_k) @ self.V_kg, SV_kg], dim=0)
+                C = torch.cat([C, mean_correction], dim=0)
             # perform SVD on merged results
             _, S_q, V_gq = torch.svd_lowrank(C, q=k + p)
 
         # update buffers
         self.V_kg = V_gq.T[:k]
         self.S_k = S_q[:k]
-        self.x_size = m + n
         if self.mean_correct:
             self.x_mean_g = self.x_mean_g * m / (m + n) + x_mean_g * n / (m + n)
+            self.x_size = m + n
 
     @property
     def L_k(self) -> torch.Tensor:
