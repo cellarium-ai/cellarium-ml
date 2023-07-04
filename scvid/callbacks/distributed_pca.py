@@ -23,16 +23,16 @@ class DistributedPCA(pl.Callback):
         p = pl_module.module.p_oversamples
         V_kg = pl_module.module.V_kg
         S_k = pl_module.module.S_k
+        m = pl_module.module.x_size
         if mean_correct:
             x_mean_g = pl_module.module.x_mean_g
-            m = pl_module.module.x_size
         # initialize i, rank, and world_size
         rank = trainer.global_rank
         world_size = trainer.world_size
         i = 0
         while world_size > 1:
             # level i
-            # at most two local ranks
+            # at most two local ranks (leading and trailing)
             if rank % 2 == 0:  # leading rank
                 if rank < world_size:
                     # if there is a trailing rank
@@ -40,15 +40,14 @@ class DistributedPCA(pl.Callback):
                     src = (rank + 1) * 2**i
                     A = torch.diag(S_k) @ V_kg
                     B = torch.zeros_like(A)
+                    n = torch.zeros_like(m)
                     dist.recv(B, src=src)
+                    dist.recv(n, src=src)
                     C = torch.cat([A, B], dim=0)
                     if mean_correct:
                         A_mean = x_mean_g
                         B_mean = torch.zeros_like(A_mean)
-                        m = m
-                        n = torch.zeros_like(m)
                         dist.recv(B_mean, src=src)
-                        dist.recv(n, src=src)
                         mean_correction = (
                             math.sqrt(m * n / (m + n)) * (A_mean - B_mean)[None, :]
                         )
@@ -57,16 +56,16 @@ class DistributedPCA(pl.Callback):
                     # update parameters
                     S_k = S_q[:k]
                     V_kg = V_gq.T[:k]
+                    m = m + n
                     if mean_correct:
                         x_mean_g = A_mean * m / (m + n) + B_mean * n / (m + n)
-                        m = m + n
             else:  # trailing rank
                 # send to a leading rank and exit
                 dst = (rank - 1) * 2**i
                 dist.send(torch.diag(S_k) @ V_kg, dst=dst)
+                dist.send(m, dst=dst)
                 if mean_correct:
                     dist.send(x_mean_g, dst=dst)
-                    dist.send(m, dst=dst)
                 break
             # update rank, world_size, and level i
             rank = rank // 2
@@ -74,8 +73,8 @@ class DistributedPCA(pl.Callback):
             i += 1
         else:
             assert trainer.global_rank == 0
-            self.V_kg = V_kg
-            self.S_k = S_k
+            pl_module.module.V_kg = V_kg
+            pl_module.module.S_k = S_k
+            pl_module.module.x_size = m
             if mean_correct:
-                self.x_mean_g = x_mean_g
-                self.x_size = m
+                pl_module.module.x_mean_g = x_mean_g
