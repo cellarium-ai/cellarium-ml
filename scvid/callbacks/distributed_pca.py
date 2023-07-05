@@ -6,7 +6,6 @@ import math
 import lightning.pytorch as pl
 import torch
 import torch.distributed as dist
-from lightning.fabric.utilities.rank_zero import rank_zero_only
 
 
 class DistributedPCA(pl.Callback):
