@@ -15,7 +15,7 @@ from anndata.experimental.multi_files._anncollection import (
     AnnCollectionView,
     ConvertType,
 )
-from boltons.cacheutils import LRU, cachedproperty
+from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
 from .read import read_h5ad_file
