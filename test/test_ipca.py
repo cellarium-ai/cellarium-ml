@@ -66,3 +66,9 @@ def test_incremental_pca(x_ng: np.ndarray, mean_correct: bool, batch_size: int, 
     )
 
     assert x_diff < x_diff_rank_k * 1.05
+    assert ipca.x_size == n
+    np.testing.assert_allclose(
+        ipca.x_mean_g,
+        (x_ng if mean_correct else x_ng_centered).mean(axis=0),
+        atol=1e-5,
+    )
