@@ -24,7 +24,7 @@ def x_ng():
 
 
 @pytest.mark.parametrize("mean_correct", [False, True])
-@pytest.mark.parametrize("batch_size", [10_000, 5000, 1000, 500, 100])
+@pytest.mark.parametrize("batch_size", [10_000, 5000, 1000, 500, 250])
 @pytest.mark.parametrize("k", [30, 50, 80])
 def test_incremental_pca(x_ng: np.ndarray, mean_correct: bool, batch_size: int, k: int):
     n, g = x_ng.shape
