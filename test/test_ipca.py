@@ -72,8 +72,7 @@ def test_incremental_pca_multi_device(
 
     # actual approximation error
     x_diff = torch.linalg.matrix_norm(
-        x_ng_centered - x_ng_centered @ ipca.V_kg.T.float() @ ipca.V_kg.float(),
-        ord="fro",
+        x_ng_centered - x_ng_centered @ ipca.V_kg.T @ ipca.V_kg, ord="fro"
     )
 
     # optimal rank-k approximation error
