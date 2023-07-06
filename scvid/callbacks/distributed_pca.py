@@ -7,6 +7,8 @@ import lightning.pytorch as pl
 import torch
 import torch.distributed as dist
 
+from scvid.module import IncrementalPCA
+
 
 class DistributedPCA(pl.Callback):
     """
@@ -17,6 +19,7 @@ class DistributedPCA(pl.Callback):
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ) -> None:
         # parameters
+        assert isinstance(pl_module.module, IncrementalPCA)
         mean_correct = pl_module.module.mean_correct
         k = pl_module.module.k_components
         p = pl_module.module.p_oversamples
