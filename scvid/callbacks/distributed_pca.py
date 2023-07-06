@@ -13,6 +13,15 @@ from scvid.module import IncrementalPCA
 class DistributedPCA(pl.Callback):
     """
     Distributed PCA.
+
+    **References:**
+
+    1. *A Distributed and Incremental SVD Algorithm for Agglomerative Data Analysis on Large Networks*,
+       M. A. Iwen, B. W. Ong
+       (https://users.math.msu.edu/users/iwenmark/Papers/distrib_inc_svd.pdf)
+    2. *Incremental Learning for Robust Visual Tracking*,
+       D. Ross, J. Lim, R.-S. Lin, M.-H. Yang
+       (https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf)
     """
 
     def on_train_epoch_end(
