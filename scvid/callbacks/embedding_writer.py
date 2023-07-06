@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -27,7 +28,7 @@ def write_embedding(
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(embedding.cpu())
-    df.insert(0, "db_ids", ids.cpu())
+    df.insert(0, "db_ids", ids.cpu().numpy())
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv")
     df.to_csv(output_path, header=False, index=False)
 
@@ -56,7 +57,7 @@ class EmbeddingWriter(pl.callbacks.BasePredictionWriter):
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
         prediction: torch.Tensor,
-        batch_indices: list[int],
+        batch_indices: Sequence[int] | None,
         batch: dict[str, torch.Tensor],
         batch_idx: int,
         dataloader_idx: int,
