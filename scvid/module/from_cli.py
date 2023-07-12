@@ -7,9 +7,9 @@ import torch
 
 from scvid.transforms import ZScoreLog1pNormalize
 
-from .probabilistic_pca import ProbabilisticPCA
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
+from .probabilistic_pca import ProbabilisticPCA
 
 
 class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
@@ -98,7 +98,7 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
         )
 
 
-class IncrementalPCAFromCli(IncrementalPCA):
+class IncrementalPCAFromCLI(IncrementalPCA):
     """
     Preset default values for the LightningCLI.
 
@@ -106,7 +106,7 @@ class IncrementalPCAFromCli(IncrementalPCA):
         k_components: Number of principal components.
         p_oversamples: Additional number of random vectors to sample the range of ``x_ng``
             so as to ensure proper conditioning.
-        mean_correct: If ``True`` then the mean correction is applied to the update step.
+        perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
         target_count: Target gene epxression count. Default: ``10_000``
@@ -117,7 +117,7 @@ class IncrementalPCAFromCli(IncrementalPCA):
         g_genes: int,
         k_components: int,
         p_oversamples: int = 10,
-        mean_correct: bool = False,
+        perform_mean_correction: bool = False,
         target_count: int = 10_000,
     ) -> None:
         transform = ZScoreLog1pNormalize(
@@ -127,6 +127,6 @@ class IncrementalPCAFromCli(IncrementalPCA):
             g_genes=g_genes,
             k_components=k_components,
             p_oversamples=p_oversamples,
-            mean_correct=mean_correct,
+            perform_mean_correction=perform_mean_correction,
             transform=transform,
         )

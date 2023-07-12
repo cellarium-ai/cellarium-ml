@@ -28,7 +28,7 @@ class IncrementalPCA(BaseModule):
         p_oversamples: Additional number of random vectors to sample the range of ``x_ng``
             so as to ensure proper conditioning.
         transform: If not ``None`` is used to transform the input data.
-        mean_correct: If ``True`` then the mean correction is applied to the update step.
+        perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
     """
@@ -38,14 +38,14 @@ class IncrementalPCA(BaseModule):
         g_genes: int,
         k_components: int,
         p_oversamples: int = 10,
-        mean_correct: bool = False,
+        perform_mean_correction: bool = False,
         transform: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.g_genes = g_genes
         self.k_components = k_components
         self.p_oversamples = p_oversamples
-        self.mean_correct = mean_correct
+        self.perform_mean_correction = perform_mean_correction
         self.transform = transform
         self.V_kg: torch.Tensor
         self.S_k: torch.Tensor
@@ -73,10 +73,13 @@ class IncrementalPCA(BaseModule):
         p = self.p_oversamples
         m = self.x_size
         n = x_ng.size(0)
-        assert p + k <= min(n, g)
+        assert k + p <= min(n, g), (
+            f"Rank of svd_lowrank (k_components + p_oversamples): {k+p}"
+            f" must be less than min(n_cells, g_genes): {min(n, g)}"
+        )
 
         # compute SVD of new data
-        if self.mean_correct:
+        if self.perform_mean_correction:
             x_mean_g = x_ng.mean(dim=0)
             _, S_q, V_gq = torch.svd_lowrank(x_ng - x_mean_g, q=k + p)
         else:
@@ -84,9 +87,9 @@ class IncrementalPCA(BaseModule):
 
         # if not the first batch, merge results
         if m > 0:
-            SV_kg = torch.diag(S_q[:k]) @ V_gq.T[:k]
-            C = torch.cat([torch.diag(self.S_k) @ self.V_kg, SV_kg], dim=0)
-            if self.mean_correct:
+            SV_kg = torch.einsum("k,kg->kg", S_q[:k], V_gq.T[:k])
+            C = torch.cat([torch.einsum("k,kg->kg", self.S_k, self.V_kg), SV_kg], dim=0)
+            if self.perform_mean_correction:
                 mean_correction = (
                     math.sqrt(m * n / (m + n)) * (self.x_mean_g - x_mean_g)[None, :]
                 )
@@ -98,7 +101,7 @@ class IncrementalPCA(BaseModule):
         self.V_kg = V_gq.T[:k]
         self.S_k = S_q[:k]
         self.x_size = m + n
-        if self.mean_correct:
+        if self.perform_mean_correction:
             self.x_mean_g = self.x_mean_g * m / (m + n) + x_mean_g * n / (m + n)
 
     @property

@@ -23,16 +23,18 @@ def x_ng():
     return x_ng
 
 
-@pytest.mark.parametrize("mean_correct", [False, True])
+@pytest.mark.parametrize("perform_mean_correction", [False, True])
 @pytest.mark.parametrize("batch_size", [10_000, 5000, 1000, 500, 250])
 @pytest.mark.parametrize("k", [30, 50, 80])
-def test_incremental_pca(x_ng: np.ndarray, mean_correct: bool, batch_size: int, k: int):
+def test_incremental_pca(
+    x_ng: np.ndarray, perform_mean_correction: bool, batch_size: int, k: int
+):
     n, g = x_ng.shape
     x_ng_centered = x_ng - x_ng.mean(axis=0)
 
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(x_ng if mean_correct else x_ng_centered),
+        TestDataset(x_ng if perform_mean_correction else x_ng_centered),
         batch_size=batch_size,
         shuffle=False,
     )
@@ -40,7 +42,7 @@ def test_incremental_pca(x_ng: np.ndarray, mean_correct: bool, batch_size: int, 
     ipca = IncrementalPCA(
         g_genes=g,
         k_components=k,
-        mean_correct=mean_correct,
+        perform_mean_correction=perform_mean_correction,
     )
     training_plan = TrainingPlan(ipca)
     # trainer
@@ -69,6 +71,6 @@ def test_incremental_pca(x_ng: np.ndarray, mean_correct: bool, batch_size: int, 
     assert ipca.x_size == n
     np.testing.assert_allclose(
         ipca.x_mean_g,
-        (x_ng if mean_correct else x_ng_centered).mean(axis=0),
+        (x_ng if perform_mean_correction else x_ng_centered).mean(axis=0),
         atol=1e-5,
     )

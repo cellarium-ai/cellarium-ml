@@ -31,7 +31,7 @@ EXAMPLES = [
     ),
     (
         "incremental_pca.py fit "
-        "--model.module.class_path scvid.module.IncrementalPCAFromCli "
+        "--model.module.class_path scvid.module.IncrementalPCAFromCLI "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
         "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
