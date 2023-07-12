@@ -193,7 +193,9 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model: OnePassMeanVarStdFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    loaded_model: OnePassMeanVarStdFromCLI = torch.load(
+        os.path.join(tmp_path, "module_checkpoint.pt")
+    )
     # assert
     assert isinstance(model.transform, ZScoreLog1pNormalize)
     assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)
