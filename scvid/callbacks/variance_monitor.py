@@ -7,8 +7,7 @@ import lightning.pytorch as pl
 import torch
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 
-from scvid.module import OnePassMeanVarStdFromCli, ProbabilisticPCA
-from scvid.transforms import ZScoreLog1pNormalize
+from scvid.module import ProbabilisticPCA
 
 
 class VarianceMonitor(pl.Callback):
@@ -41,18 +40,10 @@ class VarianceMonitor(pl.Callback):
                 "Cannot use `LearningRateMonitor` callback with `Trainer` that has no logger."
             )
         # attempt to get the total variance from the checkpoint
-        mean_var_std_ckpt_path = getattr(
-            pl_module.module, "mean_var_std_ckpt_path", None
-        )
+        ppca = pl_module.module
+        mean_var_std_ckpt_path = getattr(ppca, "mean_var_std_ckpt_path", None)
         if self.total_variance is None and mean_var_std_ckpt_path is not None:
-            ppca = pl_module.module
-            assert isinstance(ppca.transform, ZScoreLog1pNormalize)
-            onepass = OnePassMeanVarStdFromCli(
-                ppca.g_genes,
-                target_count=ppca.transform.target_count,
-            )
-            state_dict = torch.load(mean_var_std_ckpt_path)
-            onepass.load_state_dict(state_dict)
+            onepass = torch.load(mean_var_std_ckpt_path)
             self.total_variance = onepass.var_g.sum().item()
 
     @rank_zero_only

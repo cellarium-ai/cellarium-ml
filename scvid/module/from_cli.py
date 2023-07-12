@@ -12,13 +12,13 @@ from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
 
 
-class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
+class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
     """
     Preset default values for the LightningCLI.
 
     Args:
         g_genes: Number of genes.
-        target_count: Target gene epxression count. Default: ``10_000``.
+        target_count: Target gene expression count. Default: ``10_000``.
     """
 
     def __init__(self, g_genes, target_count: int = 10_000) -> None:
@@ -28,7 +28,7 @@ class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
         super().__init__(g_genes, transform=transform)
 
 
-class ProbabilisticPCAFromCli(ProbabilisticPCA):
+class ProbabilisticPCAFromCLI(ProbabilisticPCA):
     """
     Preset default values for the LightningCLI.
 
@@ -44,7 +44,7 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
             If ``mean_var_std_ckpt_path`` is ``None``, then ``sigma_init_scale`` is set to
             ``sigma_init_variance_ratio``.
         seed: Random seed used to initialize parameters. Default: ``0``.
-        target_count: Target gene epxression count. Default: ``10_000``.
+        target_count: Target gene expression count. Default: ``10_000``.
         mean_var_std_ckpt_path: Path to checkpoint containing OnePassMeanVarStd.
     """
 
@@ -66,10 +66,11 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
             sigma_init_scale = sigma_init_variance_ratio
             mean_g = None
         else:
-            # load OnePassMeanVarStd from checkpoint
-            state_dict = torch.load(mean_var_std_ckpt_path)
-            onepass = OnePassMeanVarStdFromCli(g_genes, target_count)
-            onepass.load_state_dict(state_dict)
+            # load OnePassMeanVarStdFromCLI from checkpoint
+            onepass: OnePassMeanVarStdFromCLI = torch.load(mean_var_std_ckpt_path)
+            assert isinstance(onepass.transform, ZScoreLog1pNormalize)
+            assert target_count == onepass.transform.target_count
+            assert g_genes == onepass.g_genes
             # compute W_init_scale and sigma_init_scale
             total_variance = onepass.var_g.sum().item()
             W_init_scale = math.sqrt(

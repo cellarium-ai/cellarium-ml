@@ -4,9 +4,9 @@
 from .probabilistic_pca import ProbabilisticPCA
 from .base_module import BaseModule, BasePyroModule
 from .from_cli import (
-    IncrementalPCAFromCli,
-    OnePassMeanVarStdFromCli,
-    ProbabilisticPCAFromCli,
+    IncrementalPCAFromCLI,
+    OnePassMeanVarStdFromCLI,
+    ProbabilisticPCAFromCLI,
 )
 from .gather import GatherLayer
 from .incremental_pca import IncrementalPCA
@@ -19,7 +19,7 @@ __all__ = [
     "IncrementalPCA",
     "OnePassMeanVarStd",
     "ProbabilisticPCA",
-    "IncrementalPCAFromCli",
-    "OnePassMeanVarStdFromCli",
-    "ProbabilisticPCAFromCli",
+    "IncrementalPCAFromCLI",
+    "OnePassMeanVarStdFromCLI",
+    "ProbabilisticPCAFromCLI",
 ]

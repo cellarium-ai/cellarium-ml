@@ -13,7 +13,7 @@ EXAMPLES_DIR = os.path.join(os.path.dirname(TESTS_DIR), "examples")
 EXAMPLES = [
     (
         "probabilistic_pca.py fit "
-        "--model.module.class_path scvid.module.ProbabilisticPCAFromCli "
+        "--model.module.class_path scvid.module.ProbabilisticPCAFromCLI "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
         "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
@@ -22,7 +22,7 @@ EXAMPLES = [
     ),
     (
         "onepass_mean_var_std.py fit "
-        "--model.module.class_path scvid.module.OnePassMeanVarStdFromCli "
+        "--model.module.class_path scvid.module.OnePassMeanVarStdFromCLI "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
         "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
