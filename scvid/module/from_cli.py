@@ -65,10 +65,9 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
             sigma_init_scale = sigma_init_variance_ratio
             mean_g = None
         else:
-            # load OnePassMeanVarStd from checkpoint
-            state_dict = torch.load(mean_var_std_ckpt_path)
-            onepass = OnePassMeanVarStdFromCLI(g_genes, target_count)
-            onepass.load_state_dict(state_dict)
+            # load OnePassMeanVarStdFromCLI from checkpoint
+            onepass = torch.load(mean_var_std_ckpt_path)
+            assert target_count == onepass.transform.target_count
             # compute W_init_scale and sigma_init_scale
             total_variance = onepass.var_g.sum().item()
             W_init_scale = math.sqrt(

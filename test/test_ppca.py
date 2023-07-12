@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from pathlib import Path
 
 import lightning.pytorch as pl
 import numpy as np
@@ -9,8 +10,8 @@ import pyro
 import pytest
 import torch
 
-from scvid.callbacks import VarianceMonitor
-from scvid.module import ProbabilisticPCA
+from scvid.callbacks import ModuleCheckpoint, VarianceMonitor
+from scvid.module import ProbabilisticPCA, ProbabilisticPCAFromCLI
 from scvid.train import TrainingPlan
 
 from .common import TestDataset
@@ -123,3 +124,50 @@ def test_variance_monitor(x_ng: np.ndarray):
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_kwargs",
+    [
+        {
+            "save_on_train_end": True,
+            "save_on_train_epoch_end": False,
+            "save_on_train_batch_end": False,
+        },
+        {
+            "save_on_train_end": False,
+            "save_on_train_epoch_end": True,
+            "save_on_train_batch_end": False,
+        },
+        {
+            "save_on_train_end": False,
+            "save_on_train_epoch_end": False,
+            "save_on_train_batch_end": True,
+        },
+    ],
+)
+def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
+    # dataloader
+    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
+    # model
+    model = ProbabilisticPCAFromCLI(3, 1, 1, "marginalized", target_count=10)
+    training_plan = TrainingPlan(model)
+    # trainer
+    checkpoint_kwargs["dirpath"] = tmp_path
+    module_checkpoint = ModuleCheckpoint(**checkpoint_kwargs)
+    trainer = pl.Trainer(
+        max_epochs=1,
+        accelerator="cpu",
+        callbacks=[module_checkpoint],
+        log_every_n_steps=1,
+    )
+    # fit
+    trainer.fit(training_plan, train_dataloaders=train_loader)
+    # load model from checkpoint
+    assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
+    loaded_model = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    # assert
+    assert model.transform.target_count == loaded_model.transform.target_count
+    np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())
+    np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())
+    np.testing.assert_allclose(model.mean_g.detach(), loaded_model.mean_g.detach())
