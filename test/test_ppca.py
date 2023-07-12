@@ -13,6 +13,7 @@ import torch
 from scvid.callbacks import ModuleCheckpoint, VarianceMonitor
 from scvid.module import ProbabilisticPCA, ProbabilisticPCAFromCLI
 from scvid.train import TrainingPlan
+from scvid.transforms import ZScoreLog1pNormalize
 
 from .common import TestDataset
 
@@ -165,8 +166,10 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    loaded_model: ProbabilisticPCAFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
+    assert isinstance(model.transform, ZScoreLog1pNormalize)
+    assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)
     assert model.transform.target_count == loaded_model.transform.target_count
     np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())
     np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())

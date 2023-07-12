@@ -66,8 +66,10 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
             mean_g = None
         else:
             # load OnePassMeanVarStdFromCLI from checkpoint
-            onepass = torch.load(mean_var_std_ckpt_path)
+            onepass: OnePassMeanVarStdFromCLI = torch.load(mean_var_std_ckpt_path)
+            assert isinstance(onepass.transform, ZScoreLog1pNormalize)
             assert target_count == onepass.transform.target_count
+            assert g_genes == onepass.g_genes
             # compute W_init_scale and sigma_init_scale
             total_variance = onepass.var_g.sum().item()
             W_init_scale = math.sqrt(

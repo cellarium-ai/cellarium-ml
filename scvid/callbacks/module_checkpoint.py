@@ -64,7 +64,6 @@ class ModuleCheckpoint(pl.Callback):
             and trainer.log_every_n_steps != 0  # type: ignore[attr-defined]
             and trainer.global_step % trainer.log_every_n_steps == 0  # type: ignore[attr-defined]
         ):
-            assert isinstance(pl_module.module, torch.nn.Module)
             torch.save(pl_module.module, self.filepath)
 
     @rank_zero_only
@@ -76,7 +75,6 @@ class ModuleCheckpoint(pl.Callback):
         **kwargs: Any,
     ) -> None:
         if self.save_on_train_epoch_end:
-            assert isinstance(pl_module.module, torch.nn.Module)
             torch.save(pl_module.module, self.filepath)
 
     @rank_zero_only
@@ -88,7 +86,6 @@ class ModuleCheckpoint(pl.Callback):
         **kwargs: Any,
     ) -> None:
         if self.save_on_train_end:
-            assert isinstance(pl_module.module, torch.nn.Module)
             torch.save(pl_module.module, self.filepath)
 
     @property
