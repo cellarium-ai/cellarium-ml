@@ -10,7 +10,7 @@ feature count data in one pass [1].
 
 Example run::
     python examples/onepass_mean_var_std.py fit \
-        --model.module scvid.module.OnePassMeanVarStdFromCli \
+        --model.module scvid.module.OnePassMeanVarStdFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
         --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
         --data.num_workers 4 \
@@ -23,23 +23,23 @@ Example run::
        (https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance)
 """
 
-from lightning.pytorch.cli import LightningCLI
+from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 
 from scvid.data import DistributedAnnDataCollectionDataModule
 from scvid.train.training_plan import TrainingPlan
 
 
-class OnePassMeanVarStdCLI(LightningCLI):
+class _LightningCLIWithLinks(LightningCLI):
     """LightningCLI with custom argument linking."""
 
-    def add_arguments_to_parser(self, parser):
+    def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
         parser.link_arguments(
             "data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate"
         )
 
 
 def main():
-    OnePassMeanVarStdCLI(
+    _LightningCLIWithLinks(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,
         trainer_defaults={"max_epochs": 1},  # one pass
