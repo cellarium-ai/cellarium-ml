@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from .dadc_datamodule import DistributedAnnDataCollectionDataModule
 from .dadc_dataset import (
     DistributedAnnDataCollectionDataset,
     IterableDistributedAnnDataCollectionDataset,
@@ -13,6 +14,7 @@ from .schema import AnnDataSchema
 __all__ = [
     "AnnDataSchema",
     "DistributedAnnDataCollection",
+    "DistributedAnnDataCollectionDataModule",
     "DistributedAnnDataCollectionDataset",
     "DistributedAnnDataCollectionSingleConsumerSampler",
     "IterableDistributedAnnDataCollectionDataset",

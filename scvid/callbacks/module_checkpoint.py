@@ -7,6 +7,7 @@ from typing import Any
 
 import lightning.pytorch as pl
 import torch
+from lightning.fabric.utilities.rank_zero import rank_zero_only
 
 
 class ModuleCheckpoint(pl.Callback):
@@ -46,8 +47,11 @@ class ModuleCheckpoint(pl.Callback):
         assert isinstance(pl_module.module, torch.nn.Module)
         # resolve dirpath at runtime
         dirpath = self._resolve_ckpt_dir(trainer)
+        if not os.path.exists(dirpath):
+            os.makedirs(dirpath, exist_ok=True)
         self.dirpath = dirpath
 
+    @rank_zero_only
     def on_train_batch_end(
         self,
         trainer: pl.Trainer,
@@ -55,9 +59,14 @@ class ModuleCheckpoint(pl.Callback):
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        if self.save_on_train_batch_end:
+        if (
+            self.save_on_train_batch_end
+            and trainer.log_every_n_steps != 0  # type: ignore[attr-defined]
+            and trainer.global_step % trainer.log_every_n_steps == 0  # type: ignore[attr-defined]
+        ):
             torch.save(pl_module.module, self.filepath)
 
+    @rank_zero_only
     def on_train_epoch_end(
         self,
         trainer: pl.Trainer,
@@ -68,6 +77,7 @@ class ModuleCheckpoint(pl.Callback):
         if self.save_on_train_epoch_end:
             torch.save(pl_module.module, self.filepath)
 
+    @rank_zero_only
     def on_train_end(
         self,
         trainer: pl.Trainer,

@@ -84,7 +84,7 @@ class TrainingPlan(pl.LightningModule):
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
         return optim_config
 
-    def on_train_epoch_start(self):
+    def on_train_epoch_start(self) -> None:
         """
         Calls the ``set_epoch`` method on the iterable dataset of the given dataloader.
 
@@ -92,7 +92,12 @@ class TrainingPlan(pl.LightningModule):
         ``set_epoch`` must be called at the beginning of every epoch to ensure shuffling
         applies a new ordering. This has no effect if shuffling is off.
         """
-        dataloaders = self.trainer.fit_loop._combined_loader.flattened
+        # dataloader is wrapped in a combined loader and can be accessed via
+        # flattened property which returns a list of dataloaders
+        # https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.combined_loader.html
+        combined_loader = self.trainer.fit_loop._combined_loader
+        assert combined_loader is not None
+        dataloaders = combined_loader.flattened
         for dataloader in dataloaders:
             dataset = dataloader.dataset
             set_epoch = getattr(dataset, "set_epoch", None)

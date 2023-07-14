@@ -29,6 +29,7 @@ TEST_REQUIRE = [
     "pytest",
     "pytest-xdist",
     "scikit-learn",
+    "tensorboard",
 ]
 
 setuptools.setup(
@@ -49,9 +50,10 @@ setuptools.setup(
         "google-cloud-storage",
         "boltons",
         "braceexpand",
+        "jsonargparse[signatures]",
         "pyro-ppl",
         "lightning>=2.0.0",
-        "torch",
+        "torch>=2.0.0",
     ],
     extras_require={
         "lint": LINT_REQUIRE,
@@ -68,5 +70,5 @@ setuptools.setup(
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.10",
 )
