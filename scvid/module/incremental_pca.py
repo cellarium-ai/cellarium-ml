@@ -25,8 +25,6 @@ class IncrementalPCA(BaseModule):
     Args:
         g_genes: Number of genes.
         k_components: Number of principal components.
-        p_oversamples: Additional number of random vectors to sample the range of ``x_ng``
-            so as to ensure proper conditioning.
         transform: If not ``None`` is used to transform the input data.
         perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
@@ -37,14 +35,12 @@ class IncrementalPCA(BaseModule):
         self,
         g_genes: int,
         k_components: int,
-        p_oversamples: int = 10,
         perform_mean_correction: bool = False,
         transform: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.g_genes = g_genes
         self.k_components = k_components
-        self.p_oversamples = p_oversamples
         self.perform_mean_correction = perform_mean_correction
         self.transform = transform
         self.V_kg: torch.Tensor
@@ -70,24 +66,23 @@ class IncrementalPCA(BaseModule):
 
         g = self.g_genes
         k = self.k_components
-        p = self.p_oversamples
         m = self.x_size
         n = x_ng.size(0)
-        assert k + p <= min(n, g), (
-            f"Rank of svd_lowrank (k_components + p_oversamples): {k+p}"
+        assert k <= min(n, g), (
+            f"Rank of svd_lowrank 'k_components': {k}"
             f" must be less than min(n_cells, g_genes): {min(n, g)}"
         )
 
         # compute SVD of new data
         if self.perform_mean_correction:
             x_mean_g = x_ng.mean(dim=0)
-            _, S_q, V_gq = torch.svd_lowrank(x_ng - x_mean_g, q=k + p)
+            _, S_k, V_gk = torch.svd_lowrank(x_ng - x_mean_g, q=k)
         else:
-            _, S_q, V_gq = torch.svd_lowrank(x_ng, q=k + p)
+            _, S_k, V_gk = torch.svd_lowrank(x_ng, q=k)
 
         # if not the first batch, merge results
         if m > 0:
-            SV_kg = torch.einsum("k,kg->kg", S_q[:k], V_gq.T[:k])
+            SV_kg = torch.einsum("k,kg->kg", S_k, V_gk.T)
             C = torch.cat([torch.einsum("k,kg->kg", self.S_k, self.V_kg), SV_kg], dim=0)
             if self.perform_mean_correction:
                 mean_correction = (
@@ -95,11 +90,11 @@ class IncrementalPCA(BaseModule):
                 )
                 C = torch.cat([C, mean_correction], dim=0)
             # perform SVD on merged results
-            _, S_q, V_gq = torch.svd_lowrank(C, q=k + p)
+            _, S_k, V_gk = torch.svd_lowrank(C, q=k)
 
         # update buffers
-        self.V_kg = V_gq.T[:k]
-        self.S_k = S_q[:k]
+        self.V_kg = V_gk.T
+        self.S_k = S_k
         self.x_size = m + n
         if self.perform_mean_correction:
             self.x_mean_g = self.x_mean_g * m / (m + n) + x_mean_g * n / (m + n)

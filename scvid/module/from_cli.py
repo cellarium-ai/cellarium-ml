@@ -116,7 +116,6 @@ class IncrementalPCAFromCLI(IncrementalPCA):
         self,
         g_genes: int,
         k_components: int,
-        p_oversamples: int = 10,
         perform_mean_correction: bool = False,
         target_count: int = 10_000,
     ) -> None:
@@ -126,7 +125,6 @@ class IncrementalPCAFromCLI(IncrementalPCA):
         super().__init__(
             g_genes=g_genes,
             k_components=k_components,
-            p_oversamples=p_oversamples,
             perform_mean_correction=perform_mean_correction,
             transform=transform,
         )
