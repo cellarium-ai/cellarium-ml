@@ -11,6 +11,7 @@ model [1, 2].
 Example run::
     python examples/incremental_pca.py fit \
         --model.module scvid.module.IncrementalPCAFromCLI \
+        --model.module.init_args.k_components 50 \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
         --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
         --data.num_workers 4 \

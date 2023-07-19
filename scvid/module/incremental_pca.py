@@ -69,7 +69,7 @@ class IncrementalPCA(BaseModule):
         m = self.x_size
         n = x_ng.size(0)
         assert k <= min(n, g), (
-            f"Rank of svd_lowrank 'k_components': {k}"
+            f"Rank of svd_lowrank (k_components): {k}"
             f" must be less than min(n_cells, g_genes): {min(n, g)}"
         )
 

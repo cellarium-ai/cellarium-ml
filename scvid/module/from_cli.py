@@ -104,8 +104,6 @@ class IncrementalPCAFromCLI(IncrementalPCA):
 
     Args:
         k_components: Number of principal components.
-        p_oversamples: Additional number of random vectors to sample the range of ``x_ng``
-            so as to ensure proper conditioning.
         perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
