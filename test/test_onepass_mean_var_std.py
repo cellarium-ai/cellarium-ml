@@ -18,7 +18,7 @@ from scvid.data import (
     IterableDistributedAnnDataCollectionDataset,
 )
 from scvid.data.util import collate_fn
-from scvid.module import OnePassMeanVarStd
+from scvid.module import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
 from scvid.train import TrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
 
@@ -178,7 +178,7 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     # dataloader
     train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
     # model
-    model = OnePassMeanVarStd(g_genes=1)
+    model = OnePassMeanVarStdFromCLI(g_genes=1, target_count=10)
     training_plan = TrainingPlan(model)
     # trainer
     checkpoint_kwargs["dirpath"] = tmp_path
@@ -193,10 +193,13 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    state_dict = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model = OnePassMeanVarStd(g_genes=1)
-    loaded_model.load_state_dict(state_dict)
+    loaded_model: OnePassMeanVarStdFromCLI = torch.load(
+        os.path.join(tmp_path, "module_checkpoint.pt")
+    )
     # assert
+    assert isinstance(model.transform, ZScoreLog1pNormalize)
+    assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)
+    assert model.transform.target_count == loaded_model.transform.target_count
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g)

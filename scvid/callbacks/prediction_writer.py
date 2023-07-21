@@ -10,47 +10,47 @@ import pandas as pd
 import torch
 
 
-def write_embedding(
-    embedding: torch.Tensor,
+def write_prediction(
+    prediction: torch.Tensor,
     ids: torch.Tensor,
     output_dir: Path | str,
     postfix: int | str,
 ) -> None:
     """
-    Write embedding to a CSV file.
+    Write prediction to a CSV file.
 
     Args:
-        embedding: The embedding to write.
+        prediction: The prediction to write.
         ids: The CAS IDs of the cells.
-        output_dir: The directory to write the embeddings to.
+        output_dir: The directory to write the prediction to.
         postfix: A postfix to add to the CSV file name.
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    df = pd.DataFrame(embedding.cpu())
+    df = pd.DataFrame(prediction.cpu())
     df.insert(0, "db_ids", ids.cpu().numpy())
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv")
     df.to_csv(output_path, header=False, index=False)
 
 
-class EmbeddingWriter(pl.callbacks.BasePredictionWriter):
+class PredictionWriter(pl.callbacks.BasePredictionWriter):
     """
-    Write embeddings to a CSV file. The CSV file will have the same number of rows as the
-    number of embeddings, and the number of columns will be the same as the embedding size.
+    Write prediction to a CSV file. The CSV file will have the same number of rows as the
+    number of predictions, and the number of columns will be the same as the embedding size.
     The first column will be the CAS ID of each cell.
 
     Args:
         output_dir: The directory to write the embeddings to.
-        embedding_size: The size of the embeddings. If ``None``, the entire embedding will be
-            written. If not ``None``, only the first ``embedding_size`` columns will be written.
+        prediction_size: The size of the prediction. If ``None``, the entire prediction will be
+            written. If not ``None``, only the first ``prediction_size`` columns will be written.
     """
 
     def __init__(
-        self, output_dir: Path | str, embedding_size: int | None = None
+        self, output_dir: Path | str, prediction_size: int | None = None
     ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
-        self.embedding_size = embedding_size
+        self.prediction_size = prediction_size
 
     def write_on_batch_end(
         self,
@@ -62,11 +62,11 @@ class EmbeddingWriter(pl.callbacks.BasePredictionWriter):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        if self.embedding_size is not None:
-            prediction = prediction[:, : self.embedding_size]
+        if self.prediction_size is not None:
+            prediction = prediction[:, : self.prediction_size]
 
-        write_embedding(
-            embedding=prediction,
+        write_prediction(
+            prediction=prediction,
             ids=batch["obs_names"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,
