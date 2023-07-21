@@ -118,7 +118,7 @@ class IncrementalPCA(BaseModule):
         """
         return self.V_kg
 
-    def embed(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def predict(self, x_ng: torch.Tensor) -> torch.Tensor:
         r"""
         Embedding of the input data ``x_ng`` into the principal component space.
         """

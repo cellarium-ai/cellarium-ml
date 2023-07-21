@@ -73,7 +73,7 @@ class TrainingPlan(pl.LightningModule):
     def forward(self, batch: dict[str, torch.Tensor]) -> Any:
         """Forward pass of the model."""
         args, kwargs = self.module._get_fn_args_from_batch(batch)
-        return self.module.embed(*args, **kwargs)
+        return self.module.predict(*args, **kwargs)
 
     def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizers for the model."""

@@ -1,8 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .embedding_writer import EmbeddingWriter
 from .module_checkpoint import ModuleCheckpoint
+from .prediction_writer import PredictionWriter
 from .variance_monitor import VarianceMonitor
 
-__all__ = ["EmbeddingWriter", "ModuleCheckpoint", "VarianceMonitor"]
+__all__ = ["PredictionWriter", "ModuleCheckpoint", "VarianceMonitor"]
