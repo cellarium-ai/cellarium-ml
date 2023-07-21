@@ -17,12 +17,12 @@ def write_prediction(
     postfix: int | str,
 ) -> None:
     """
-    Write embedding to a CSV file.
+    Write prediction to a CSV file.
 
     Args:
         prediction: The prediction to write.
         ids: The CAS IDs of the cells.
-        output_dir: The directory to write the embeddings to.
+        output_dir: The directory to write the prediction to.
         postfix: A postfix to add to the CSV file name.
     """
     if not os.path.exists(output_dir):
