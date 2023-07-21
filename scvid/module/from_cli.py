@@ -12,13 +12,13 @@ from .onepass_mean_var_std import OnePassMeanVarStd
 from .probabilistic_pca import ProbabilisticPCA
 
 
-class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
+class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
     """
     Preset default values for the LightningCLI.
 
     Args:
         g_genes: Number of genes.
-        target_count: Target gene epxression count. Default: ``10_000``.
+        target_count: Target gene expression count. Default: ``10_000``.
     """
 
     def __init__(self, g_genes, target_count: int = 10_000) -> None:
@@ -28,7 +28,7 @@ class OnePassMeanVarStdFromCli(OnePassMeanVarStd):
         super().__init__(g_genes, transform=transform)
 
 
-class ProbabilisticPCAFromCli(ProbabilisticPCA):
+class ProbabilisticPCAFromCLI(ProbabilisticPCA):
     """
     Preset default values for the LightningCLI.
 
@@ -44,7 +44,7 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
             If ``mean_var_std_ckpt_path`` is ``None``, then ``sigma_init_scale`` is set to
             ``sigma_init_variance_ratio``.
         seed: Random seed used to initialize parameters. Default: ``0``.
-        target_count: Target gene epxression count. Default: ``10_000``.
+        target_count: Target gene expression count. Default: ``10_000``.
         mean_var_std_ckpt_path: Path to checkpoint containing OnePassMeanVarStd.
     """
 
@@ -66,10 +66,11 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
             sigma_init_scale = sigma_init_variance_ratio
             mean_g = None
         else:
-            # load OnePassMeanVarStd from checkpoint
-            state_dict = torch.load(mean_var_std_ckpt_path)
-            onepass = OnePassMeanVarStdFromCli(g_genes, target_count)
-            onepass.load_state_dict(state_dict)
+            # load OnePassMeanVarStdFromCLI from checkpoint
+            onepass: OnePassMeanVarStdFromCLI = torch.load(mean_var_std_ckpt_path)
+            assert isinstance(onepass.transform, ZScoreLog1pNormalize)
+            assert target_count == onepass.transform.target_count
+            assert g_genes == onepass.g_genes
             # compute W_init_scale and sigma_init_scale
             total_variance = onepass.var_g.sum().item()
             W_init_scale = math.sqrt(
@@ -97,15 +98,13 @@ class ProbabilisticPCAFromCli(ProbabilisticPCA):
         )
 
 
-class IncrementalPCAFromCli(IncrementalPCA):
+class IncrementalPCAFromCLI(IncrementalPCA):
     """
     Preset default values for the LightningCLI.
 
     Args:
         k_components: Number of principal components.
-        p_oversamples: Additional number of random vectors to sample the range of ``x_ng``
-            so as to ensure proper conditioning.
-        mean_correct: If ``True`` then the mean correction is applied to the update step.
+        perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
         target_count: Target gene epxression count. Default: ``10_000``
@@ -115,8 +114,7 @@ class IncrementalPCAFromCli(IncrementalPCA):
         self,
         g_genes: int,
         k_components: int,
-        p_oversamples: int = 10,
-        mean_correct: bool = False,
+        perform_mean_correction: bool = False,
         target_count: int = 10_000,
     ) -> None:
         transform = ZScoreLog1pNormalize(
@@ -125,7 +123,6 @@ class IncrementalPCAFromCli(IncrementalPCA):
         super().__init__(
             g_genes=g_genes,
             k_components=k_components,
-            p_oversamples=p_oversamples,
-            mean_correct=mean_correct,
+            perform_mean_correction=perform_mean_correction,
             transform=transform,
         )

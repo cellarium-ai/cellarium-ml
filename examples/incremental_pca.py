@@ -10,7 +10,8 @@ model [1, 2].
 
 Example run::
     python examples/incremental_pca.py fit \
-        --model.module scvid.module.IncrementalPCAFromCli \
+        --model.module scvid.module.IncrementalPCAFromCLI \
+        --model.module.init_args.k_components 50 \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
         --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
         --data.num_workers 4 \
@@ -33,7 +34,7 @@ from scvid.data import DistributedAnnDataCollectionDataModule
 from scvid.train.training_plan import TrainingPlan
 
 
-class IncrementalPCACLI(LightningCLI):
+class _LightningCLIWithLinks(LightningCLI):
     """LightningCLI with custom argument linking."""
 
     def add_arguments_to_parser(self, parser):
@@ -43,7 +44,7 @@ class IncrementalPCACLI(LightningCLI):
 
 
 def main():
-    IncrementalPCACLI(
+    _LightningCLIWithLinks(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,
         trainer_defaults={"max_epochs": 1},  # one pass
