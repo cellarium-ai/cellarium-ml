@@ -7,8 +7,9 @@ import torch
 
 from scvid.transforms import ZScoreLog1pNormalize
 
-from ._probabilisticpca import ProbabilisticPCA
+from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
+from .probabilistic_pca import ProbabilisticPCA
 
 
 class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
@@ -93,5 +94,38 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
             W_init_scale=W_init_scale,
             sigma_init_scale=sigma_init_scale,
             seed=seed,
+            transform=transform,
+        )
+
+
+class IncrementalPCAFromCLI(IncrementalPCA):
+    """
+    Preset default values for the LightningCLI.
+
+    Args:
+        k_components: Number of principal components.
+        svd_lowrank_niter: Number of iterations for the low-rank SVD algorithm. Default: ``2``.
+        perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
+            If ``False`` then the data is assumed to be centered and the mean correction
+            is not applied to the update step.
+        target_count: Target gene epxression count. Default: ``10_000``
+    """
+
+    def __init__(
+        self,
+        g_genes: int,
+        k_components: int,
+        svd_lowrank_niter: int = 2,
+        perform_mean_correction: bool = False,
+        target_count: int = 10_000,
+    ) -> None:
+        transform = ZScoreLog1pNormalize(
+            mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
+        )
+        super().__init__(
+            g_genes=g_genes,
+            k_components=k_components,
+            svd_lowrank_niter=svd_lowrank_niter,
+            perform_mean_correction=perform_mean_correction,
             transform=transform,
         )
