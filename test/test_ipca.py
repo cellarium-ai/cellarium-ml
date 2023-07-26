@@ -33,7 +33,7 @@ def x_ng():
 @pytest.mark.parametrize("batch_size", [10_000, 5000, 1000, 500, 250])
 @pytest.mark.parametrize("k", [30, 50, 80])
 def test_incremental_pca_multi_device(
-    x_ng: np.ndarray, perform_mean_correct: bool, batch_size: int, k: int
+    x_ng: np.ndarray, perform_mean_correction: bool, batch_size: int, k: int
 ):
     n, g = x_ng.shape
     x_ng_centered = x_ng - x_ng.mean(axis=0)

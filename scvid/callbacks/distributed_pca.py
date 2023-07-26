@@ -29,13 +29,12 @@ class DistributedPCA(pl.Callback):
     ) -> None:
         # parameters
         assert isinstance(pl_module.module, IncrementalPCA)
-        mean_correct = pl_module.module.mean_correct
+        perform_mean_correction = pl_module.module.perform_mean_correction
         k = pl_module.module.k_components
-        p = pl_module.module.p_oversamples
         V_kg = pl_module.module.V_kg
         S_k = pl_module.module.S_k
         m = pl_module.module.x_size
-        if mean_correct:
+        if perform_mean_correction:
             x_mean_g = pl_module.module.x_mean_g
         # initialize i, rank, and world_size
         rank = trainer.global_rank
@@ -55,7 +54,7 @@ class DistributedPCA(pl.Callback):
                     dist.recv(B, src=src)
                     dist.recv(n, src=src)
                     C = torch.cat([A, B], dim=0)
-                    if mean_correct:
+                    if perform_mean_correction:
                         A_mean = x_mean_g
                         B_mean = torch.zeros_like(A_mean)
                         dist.recv(B_mean, src=src)
@@ -64,17 +63,16 @@ class DistributedPCA(pl.Callback):
                         )
                         C = torch.cat([C, mean_correction], dim=0)
                         x_mean_g = A_mean * m / (m + n) + B_mean * n / (m + n)
-                    _, S_q, V_gq = torch.svd_lowrank(C, q=k + p)
+                    _, S_k, V_gk = torch.svd_lowrank(C, q=k)
                     # update parameters
-                    S_k = S_q[:k]
-                    V_kg = V_gq.T[:k]
+                    V_kg = V_gk.T
                     m = m + n
             else:  # trailing rank
                 # send to a leading rank and exit
                 dst = (rank - 1) * 2**i
                 dist.send(torch.diag(S_k) @ V_kg, dst=dst)
                 dist.send(m, dst=dst)
-                if mean_correct:
+                if perform_mean_correction:
                     dist.send(x_mean_g, dst=dst)
                 break
             # update rank, world_size, and level i
@@ -86,5 +84,5 @@ class DistributedPCA(pl.Callback):
             pl_module.module.V_kg = V_kg
             pl_module.module.S_k = S_k
             pl_module.module.x_size = m
-            if mean_correct:
+            if perform_mean_correction:
                 pl_module.module.x_mean_g = x_mean_g

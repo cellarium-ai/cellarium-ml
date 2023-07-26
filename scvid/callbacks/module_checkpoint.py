@@ -33,12 +33,14 @@ class ModuleCheckpoint(pl.Callback):
         save_on_train_batch_end: bool = False,
         save_on_train_epoch_end: bool = False,
         save_on_train_end: bool = True,
+        load_checkpoint: str | None = None,
     ) -> None:
         self.dirpath = dirpath
         self.filename = filename
         self.save_on_train_batch_end = save_on_train_batch_end
         self.save_on_train_epoch_end = save_on_train_epoch_end
         self.save_on_train_end = save_on_train_end
+        self.load_checkpoint = load_checkpoint
 
     def setup(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str
@@ -50,6 +52,8 @@ class ModuleCheckpoint(pl.Callback):
         if not os.path.exists(dirpath):
             os.makedirs(dirpath, exist_ok=True)
         self.dirpath = dirpath
+        if self.load_checkpoint is not None:
+            pl_module.module = torch.load(self.load_checkpoint)
 
     @rank_zero_only
     def on_train_batch_end(
