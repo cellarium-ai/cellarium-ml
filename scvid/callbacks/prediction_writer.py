@@ -21,7 +21,7 @@ def write_prediction(
 
     Args:
         prediction: The prediction to write.
-        ids: The CAS IDs of the cells.
+        ids: The IDs of the cells.
         output_dir: The directory to write the prediction to.
         postfix: A postfix to add to the CSV file name.
     """
@@ -36,11 +36,11 @@ def write_prediction(
 class PredictionWriter(pl.callbacks.BasePredictionWriter):
     """
     Write prediction to a CSV file. The CSV file will have the same number of rows as the
-    number of predictions, and the number of columns will be the same as the embedding size.
-    The first column will be the CAS ID of each cell.
+    number of predictions, and the number of columns will be the same as the prediction size.
+    The first column will be the ID of each cell.
 
     Args:
-        output_dir: The directory to write the embeddings to.
+        output_dir: The directory to write the predictions to.
         prediction_size: The size of the prediction. If ``None``, the entire prediction will be
             written. If not ``None``, only the first ``prediction_size`` columns will be written.
     """

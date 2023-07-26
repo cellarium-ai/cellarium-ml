@@ -47,6 +47,9 @@ class DistributedAnnCollectionView(AnnCollectionView):
 
     @property
     def obs_names(self) -> pd.Index:
+        """
+        Gather and return the obs_names from all AnnData objects in the collection.
+        """
         indices = []
         for i, oidx in enumerate(self.adatas_oidx):
             if oidx is None:

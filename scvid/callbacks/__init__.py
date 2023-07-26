@@ -5,4 +5,4 @@ from .module_checkpoint import ModuleCheckpoint
 from .prediction_writer import PredictionWriter
 from .variance_monitor import VarianceMonitor
 
-__all__ = ["PredictionWriter", "ModuleCheckpoint", "VarianceMonitor"]
+__all__ = ["ModuleCheckpoint", "PredictionWriter", "VarianceMonitor"]
