@@ -35,7 +35,7 @@ def write_prediction(
 
 class PredictionWriter(pl.callbacks.BasePredictionWriter):
     """
-    Write prediction to a CSV file. The CSV file will have the same number of rows as the
+    Write predictions to a CSV file. The CSV file will have the same number of rows as the
     number of predictions, and the number of columns will be the same as the prediction size.
     The first column will be the ID of each cell.
 
