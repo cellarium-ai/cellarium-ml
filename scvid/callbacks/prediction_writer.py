@@ -66,6 +66,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         if self.prediction_size is not None:
             prediction = prediction[:, : self.prediction_size]
 
+        assert isinstance(batch["obs_names"], np.ndarray)
         write_prediction(
             prediction=prediction,
             ids=batch["obs_names"],
