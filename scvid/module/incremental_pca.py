@@ -3,6 +3,7 @@
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -58,7 +59,7 @@ class IncrementalPCA(BaseModule):
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: dict[str, torch.Tensor]
+        tensor_dict: dict[str, np.ndarray | torch.Tensor]
     ) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}

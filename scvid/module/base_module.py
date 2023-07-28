@@ -3,6 +3,7 @@
 
 from abc import ABCMeta, abstractmethod
 
+import numpy as np
 import pyro
 import torch
 
@@ -15,7 +16,7 @@ class BaseModule(torch.nn.Module, metaclass=ABCMeta):
     @staticmethod
     @abstractmethod
     def _get_fn_args_from_batch(
-        tensor_dict: dict[str, torch.Tensor]
+        tensor_dict: dict[str, np.ndarray | torch.Tensor]
     ) -> tuple[tuple, dict]:
         """
         Get forward method arguments from batch.

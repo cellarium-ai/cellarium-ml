@@ -5,6 +5,7 @@ from importlib import import_module
 from typing import Any
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 
 from scvid.module import BaseModule
@@ -61,7 +62,7 @@ class TrainingPlan(pl.LightningModule):
         self.scheduler_kwargs = scheduler_kwargs
 
     def training_step(  # type: ignore[override]
-        self, batch: dict[str, torch.Tensor], batch_idx: int
+        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         loss = self.module(*args, **kwargs)
@@ -70,7 +71,7 @@ class TrainingPlan(pl.LightningModule):
             self.log("train_loss", loss)
         return loss
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> Any:
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> Any:
         """Forward pass of the model."""
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         return self.module.predict(*args, **kwargs)
