@@ -6,13 +6,14 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import lightning.pytorch as pl
+import numpy as np
 import pandas as pd
 import torch
 
 
 def write_prediction(
     prediction: torch.Tensor,
-    ids: torch.Tensor,
+    ids: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
 ) -> None:
@@ -28,7 +29,7 @@ def write_prediction(
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(prediction.cpu())
-    df.insert(0, "db_ids", ids.cpu().numpy())
+    df.insert(0, "db_ids", ids)
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv")
     df.to_csv(output_path, header=False, index=False)
 
@@ -58,7 +59,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         pl_module: pl.LightningModule,
         prediction: torch.Tensor,
         batch_indices: Sequence[int] | None,
-        batch: dict[str, torch.Tensor],
+        batch: dict[str, np.ndarray | torch.Tensor],
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
