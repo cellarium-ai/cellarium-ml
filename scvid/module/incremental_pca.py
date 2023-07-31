@@ -125,8 +125,8 @@ class IncrementalPCA(BaseModule):
 
     def predict(self, x_ng: torch.Tensor) -> torch.Tensor:
         r"""
-        Embedding of the input data ``x_ng`` into the principal component space.
+        Centering and embedding of the input data ``x_ng`` into the principal component space.
         """
         if self.transform is not None:
             x_ng = self.transform(x_ng)
-        return x_ng @ self.V_kg.T
+        return (x_ng - self.x_mean_g) @ self.V_kg.T
