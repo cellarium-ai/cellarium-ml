@@ -63,6 +63,7 @@ class DistributedAnnCollectionView(AnnCollectionView):
                 [pd.Series(idx) for idx in indices], ignore_index=True
             )
             obs_names = pd.Index(concat_indices)
+            obs_names = obs_names if self.reverse is None else obs_names[self.reverse]
         else:
             obs_names = indices[0]
 
