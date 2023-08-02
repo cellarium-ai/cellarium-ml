@@ -8,7 +8,7 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 
-from scvid.module import BaseModule, BasePredictModule
+from scvid.module import BaseModule, PredictMixin
 
 
 class TrainingPlan(pl.LightningModule):
@@ -73,7 +73,7 @@ class TrainingPlan(pl.LightningModule):
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor:
         """Forward pass of the model."""
-        assert isinstance(self.module, BasePredictModule)
+        assert isinstance(self.module, PredictMixin)
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         return self.module.predict(*args, **kwargs)
 

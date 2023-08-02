@@ -23,9 +23,21 @@ class BaseModule(torch.nn.Module, metaclass=ABCMeta):
         """
 
 
-class BasePredictModule(BaseModule):
+class PyroABCMeta(pyro.nn.module._PyroModuleMeta, ABCMeta):
     """
-    Base module for all scvi-distributed modules that can be used for prediction.
+    Metaclass for Pyro modules.
+    """
+
+
+class BasePyroModule(pyro.nn.PyroModule, BaseModule, metaclass=PyroABCMeta):
+    """
+    Base module for all scvi-distributed Pyro modules.
+    """
+
+
+class PredictMixin(metaclass=ABCMeta):
+    """
+    Abstract mixin class for modules that can perform prediction.
     """
 
     @abstractmethod
@@ -39,23 +51,3 @@ class BasePredictModule(BaseModule):
         Returns:
             Prediction tensor.
         """
-
-
-class PyroABCMeta(pyro.nn.module._PyroModuleMeta, ABCMeta):
-    """
-    Metaclass for Pyro modules.
-    """
-
-
-class BasePyroModule(pyro.nn.PyroModule, BaseModule, metaclass=PyroABCMeta):
-    """
-    Base module for all scvi-distributed Pyro modules.
-    """
-
-
-class BasePredictPyroModule(
-    pyro.nn.PyroModule, BasePredictModule, metaclass=PyroABCMeta
-):
-    """
-    Base module for all scvi-distributed Pyro modules that can be used for prediction.
-    """

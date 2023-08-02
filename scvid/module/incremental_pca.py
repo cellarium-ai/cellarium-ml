@@ -7,10 +7,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from scvid.module import BasePredictModule
+from scvid.module import BaseModule, PredictMixin
 
 
-class IncrementalPCA(BasePredictModule):
+class IncrementalPCA(BaseModule, PredictMixin):
     """
     Incremental PCA.
 
