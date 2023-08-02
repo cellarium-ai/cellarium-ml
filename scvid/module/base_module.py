@@ -22,15 +22,22 @@ class BaseModule(torch.nn.Module, metaclass=ABCMeta):
         Get forward method arguments from batch.
         """
 
-    def predict(self, x_ng: torch.Tensor) -> torch.Tensor | None:
+
+class BasePredictModule(BaseModule):
+    """
+    Base module for all scvi-distributed modules that can be used for prediction.
+    """
+
+    @abstractmethod
+    def predict(self, x_ng: torch.Tensor) -> torch.Tensor:
         """
-        Embed data.
+        Perform prediction on data tensor.
 
         Args:
             x_ng: Data tensor.
 
         Returns:
-            Embedding tensor.
+            Prediction tensor.
         """
 
 
@@ -43,4 +50,12 @@ class PyroABCMeta(pyro.nn.module._PyroModuleMeta, ABCMeta):
 class BasePyroModule(pyro.nn.PyroModule, BaseModule, metaclass=PyroABCMeta):
     """
     Base module for all scvi-distributed Pyro modules.
+    """
+
+
+class BasePredictPyroModule(
+    pyro.nn.PyroModule, BasePredictModule, metaclass=PyroABCMeta
+):
+    """
+    Base module for all scvi-distributed Pyro modules that can be used for prediction.
     """
