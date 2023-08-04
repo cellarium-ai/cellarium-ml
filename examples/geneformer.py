@@ -43,7 +43,6 @@ def main():
     _LightningCLIWithLinks(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,
-        trainer_defaults={"max_epochs": 1},  # one pass
     )
 
 
