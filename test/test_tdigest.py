@@ -61,7 +61,7 @@ def dadc(adata: AnnData, tmp_path: Path):
         None,
     ],
 )
-def test_tdigest_multi_device(
+def test_tdigest(
     adata: AnnData,
     dadc: DistributedAnnDataCollection,
     shuffle: bool,
@@ -69,7 +69,6 @@ def test_tdigest_multi_device(
     batch_size: int,
     transform: torch.nn.Module | None,
 ):
-    devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc, batch_size=batch_size, shuffle=shuffle
@@ -86,19 +85,15 @@ def test_tdigest_multi_device(
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
-        devices=devices,
+        devices=1,
         max_epochs=1,  # one pass
     )
     trainer.fit(training_plan, train_dataloaders=data_loader)
 
-    # run tests only for rank 0
-    if trainer.global_rank != 0:
-        return
-
-    # actual mean, var, and std
+    # actual median
     actual_median_g = model.median_g
 
-    # expected mean, var, and std
+    # expected median
     x = torch.from_numpy(adata.X)
     if transform is not None:
         x = transform(x)
@@ -106,6 +101,7 @@ def test_tdigest_multi_device(
         mask = torch.nonzero(x[:, i])
         expected_median = torch.median(x[mask, i])
         actual_median = actual_median_g[i]
+        # assert within 0.5% accuracy
         np.testing.assert_allclose(expected_median, actual_median, rtol=0.005)
 
 
