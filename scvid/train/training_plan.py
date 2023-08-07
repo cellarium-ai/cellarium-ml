@@ -110,3 +110,14 @@ class TrainingPlan(pl.LightningModule):
             set_epoch = getattr(dataset, "set_epoch", None)
             if callable(set_epoch):
                 set_epoch(self.current_epoch)
+
+    def on_train_epoch_end(self) -> None:
+        """
+        Calls the ``on_epoch_end`` method on the module.
+
+        If the module has ``on_epoch_end`` method defined, then
+        ``on_epoch_end`` must be called at the end of every epoch.
+        """
+        on_epoch_end = getattr(self.module, "on_epoch_end", None)
+        if callable(on_epoch_end):
+            on_epoch_end(self.trainer)

@@ -1,8 +1,14 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+from pathlib import Path
+
 import crick
+import lightning.pytorch as pl
+import numpy as np
 import torch
+import torch.distributed as dist
 
 from .base_module import BaseModule
 
@@ -32,7 +38,7 @@ class TDigest(BaseModule):
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: dict[str, torch.Tensor]
+        tensor_dict: dict[str, np.ndarray | torch.Tensor]
     ) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}
@@ -47,6 +53,46 @@ class TDigest(BaseModule):
             if len(nonzero_mask) > 0:
                 tdigest.update(x_n[nonzero_mask])
 
+    def on_epoch_end(self, trainer: pl.Trainer) -> None:
+        # no need to merge if only one process
+        if trainer.world_size == 1:
+            return
+
+        # save tdigests
+        dirpath = self._resolve_ckpt_dir(trainer)
+        torch.save(
+            self.tdigests,
+            os.path.join(dirpath, f"tdigests_{trainer.global_rank}.pt"),
+        )
+        # wait for all processes to save
+        dist.barrier()
+
+        if trainer.global_rank != 0:
+            return
+
+        # merge tdigests
+        for i in range(1, trainer.world_size):  # iterate over processes
+            new_tdigests = torch.load(os.path.join(dirpath, f"tdigests_{i}.pt"))
+            for j in range(len(self.tdigests)):  # iterate over genes
+                self.tdigests[j].merge(new_tdigests[j])
+
     @property
     def median_g(self) -> torch.Tensor:
         return torch.as_tensor([tdigest.quantile(0.5) for tdigest in self.tdigests])
+
+    @staticmethod
+    def _resolve_ckpt_dir(trainer: pl.Trainer) -> Path | str:
+        if len(trainer.loggers) > 0:
+            if trainer.loggers[0].save_dir is not None:
+                save_dir = trainer.loggers[0].save_dir
+            else:
+                save_dir = trainer.default_root_dir
+            name = trainer.loggers[0].name
+            version = trainer.loggers[0].version
+            version = version if isinstance(version, str) else f"version_{version}"
+            ckpt_path = os.path.join(save_dir, str(name), version, "checkpoints")
+        else:
+            # if no loggers, use default_root_dir
+            ckpt_path = os.path.join(trainer.default_root_dir, "checkpoints")
+
+        return ckpt_path
