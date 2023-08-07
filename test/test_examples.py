@@ -40,6 +40,17 @@ EXAMPLES = [
         "--trainer.accelerator cpu --trainer.devices 1"
     ),
     (
+        "incremental_pca.py predict "
+        "--model.module.class_path scvid.module.IncrementalPCAFromCLI "
+        "--model.module.init_args.k_components 50 "
+        "--data.filenames "
+        "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
+        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
+        "--data.num_workers 2 "
+        "--trainer.accelerator cpu --trainer.devices 1 "
+        "--trainer.callbacks scvid.callbacks.PredictionWriter --trainer.callbacks.output_dir ./output"
+    ),
+    (
         "tdigest.py fit "
         "--model.module.class_path scvid.module.TDigestFromCLI "
         "--data.filenames "

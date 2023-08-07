@@ -3,6 +3,7 @@
 
 from typing import Any
 
+import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
@@ -90,7 +91,7 @@ class ProbabilisticPCA(BasePyroModule):
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: dict[str, torch.Tensor]
+        tensor_dict: dict[str, np.ndarray | torch.Tensor]
     ) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}

@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .base_module import BaseModule, BasePyroModule
+from .base_module import BaseModule, BasePyroModule, PredictMixin
 from .from_cli import (
     IncrementalPCAFromCLI,
     OnePassMeanVarStdFromCLI,
@@ -19,10 +19,11 @@ __all__ = [
     "BasePyroModule",
     "GatherLayer",
     "IncrementalPCA",
-    "OnePassMeanVarStd",
-    "ProbabilisticPCA",
     "IncrementalPCAFromCLI",
+    "OnePassMeanVarStd",
     "OnePassMeanVarStdFromCLI",
+    "PredictMixin",
+    "ProbabilisticPCA",
     "ProbabilisticPCAFromCLI",
     "TDigest",
     "TDigestFromCLI",
