@@ -95,4 +95,6 @@ class TDigest(BaseModule):
             # if no loggers, use default_root_dir
             ckpt_path = os.path.join(trainer.default_root_dir, "checkpoints")
 
+        os.makedirs(ckpt_path, exist_ok=True)
+
         return ckpt_path

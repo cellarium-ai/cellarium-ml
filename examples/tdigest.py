@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Example: One-pass calculation of feature median using t-digest
-==============================================================
+Example: One-pass calculation of feature median using t-digest statistics
+=========================================================================
 
-This example shows how to calculate median deviation of log normalized feature count
+This example shows how to calculate non-zero median of log normalized feature count
 data in one pass [1].
 
 Example run::
