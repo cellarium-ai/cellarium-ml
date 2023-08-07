@@ -104,3 +104,10 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=collate_fn,
         )
+
+    def predict_dataloader(self) -> torch.utils.data.DataLoader:
+        return torch.utils.data.DataLoader(
+            self.dataset,
+            num_workers=self.num_workers,
+            collate_fn=collate_fn,
+        )

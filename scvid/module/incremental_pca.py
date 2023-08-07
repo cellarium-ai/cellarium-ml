@@ -3,13 +3,14 @@
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 
-from scvid.module import BaseModule
+from scvid.module import BaseModule, PredictMixin
 
 
-class IncrementalPCA(BaseModule):
+class IncrementalPCA(BaseModule, PredictMixin):
     """
     Incremental PCA.
 
@@ -58,7 +59,7 @@ class IncrementalPCA(BaseModule):
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: dict[str, torch.Tensor]
+        tensor_dict: dict[str, np.ndarray | torch.Tensor]
     ) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}
@@ -121,3 +122,11 @@ class IncrementalPCA(BaseModule):
         parallel to its eigenvectors. The components are sorted by decreasing ``explained_variance_k``.
         """
         return self.V_kg
+
+    def predict(self, x_ng: torch.Tensor) -> torch.Tensor:
+        r"""
+        Centering and embedding of the input data ``x_ng`` into the principal component space.
+        """
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
+        return (x_ng - self.x_mean_g) @ self.V_kg.T

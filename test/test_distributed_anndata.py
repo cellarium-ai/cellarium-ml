@@ -12,7 +12,7 @@ from anndata import AnnData
 
 from scvid.data import (
     DistributedAnnDataCollection,
-    DistributedAnnDataCollectionDataset,
+    IterableDistributedAnnDataCollectionDataset,
     read_h5ad_file,
 )
 
@@ -149,6 +149,7 @@ def test_indexing(
         dat_view = dat[oidx, vidx]
         np.testing.assert_array_equal(adt_view.X, dat_view.X)
         np.testing.assert_array_equal(adt_view.var_names, dat_view.var_names)
+        np.testing.assert_array_equal(adt_view.obs_names, dat_view.obs_names)
         np.testing.assert_array_equal(adt_view.layers["L"], dat_view.layers["L"])
         np.testing.assert_array_equal(adt_view.obsm["M"], dat_view.obsm["M"])
         np.testing.assert_array_equal(adt_view.obs["A"], dat_view.obs["A"])
@@ -163,6 +164,7 @@ def test_pickle(dat: DistributedAnnDataCollection):
 
     np.testing.assert_array_equal(new_dat_view.X, dat_view.X)
     np.testing.assert_array_equal(new_dat_view.var_names, dat_view.var_names)
+    np.testing.assert_array_equal(new_dat_view.obs_names, dat_view.obs_names)
     np.testing.assert_array_equal(new_dat_view.layers["L"], dat_view.layers["L"])
     np.testing.assert_array_equal(new_dat_view.obsm["M"], dat_view.obsm["M"])
     np.testing.assert_array_equal(new_dat_view.obs["A"], dat_view.obs["A"])
@@ -183,7 +185,7 @@ def test_indexing_dataset(
     cache_size_strictly_enforced = dat.cache_size_strictly_enforced
     oidx, n_adatas = row_select
 
-    dataset = DistributedAnnDataCollectionDataset(dat)
+    dataset = IterableDistributedAnnDataCollectionDataset(dat)
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
         with pytest.raises(
@@ -195,11 +197,18 @@ def test_indexing_dataset(
         dataset_X = dataset[oidx]["X"]
         np.testing.assert_array_equal(adt_X, dataset_X)
 
+        adt_obs_names = adt[oidx].obs_names
+        dataset_obs_names = dataset[oidx]["obs_names"]
+        np.testing.assert_array_equal(adt_obs_names, dataset_obs_names)
+
 
 def test_pickle_dataset(dat: DistributedAnnDataCollection):
-    dataset = DistributedAnnDataCollectionDataset(dat)
+    dataset = IterableDistributedAnnDataCollectionDataset(dat)
     new_dataset = pickle.loads(pickle.dumps(dataset))
 
     assert len(new_dataset.dadc.cache) == 0
 
     np.testing.assert_array_equal(new_dataset[:2]["X"], dataset[:2]["X"])
+    np.testing.assert_array_equal(
+        new_dataset[:2]["obs_names"], dataset[:2]["obs_names"]
+    )
