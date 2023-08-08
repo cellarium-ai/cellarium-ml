@@ -48,8 +48,7 @@ class ModuleCheckpoint(pl.Callback):
         assert isinstance(pl_module, TrainingPlan)
         # resolve dirpath at runtime
         dirpath = self._resolve_ckpt_dir(trainer)
-        if not os.path.exists(dirpath):
-            os.makedirs(dirpath, exist_ok=True)
+        os.makedirs(dirpath, exist_ok=True)
         self.dirpath = dirpath
 
     @rank_zero_only
