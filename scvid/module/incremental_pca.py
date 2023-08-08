@@ -3,13 +3,14 @@
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 
-from scvid.module import BaseModule
+from scvid.module import BaseModule, PredictMixin
 
 
-class IncrementalPCA(BaseModule):
+class IncrementalPCA(BaseModule, PredictMixin):
     """
     Incremental PCA.
 
@@ -25,6 +26,7 @@ class IncrementalPCA(BaseModule):
     Args:
         g_genes: Number of genes.
         k_components: Number of principal components.
+        svd_lowrank_niter: Number of iterations for the low-rank SVD algorithm. Default: ``2``.
         transform: If not ``None`` is used to transform the input data.
         perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
@@ -35,12 +37,14 @@ class IncrementalPCA(BaseModule):
         self,
         g_genes: int,
         k_components: int,
+        svd_lowrank_niter: int = 2,
         perform_mean_correction: bool = False,
         transform: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.g_genes = g_genes
         self.k_components = k_components
+        self.svd_lowrank_niter = svd_lowrank_niter
         self.perform_mean_correction = perform_mean_correction
         self.transform = transform
         self.V_kg: torch.Tensor
@@ -55,7 +59,7 @@ class IncrementalPCA(BaseModule):
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: dict[str, torch.Tensor]
+        tensor_dict: dict[str, np.ndarray | torch.Tensor]
     ) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}
@@ -66,6 +70,7 @@ class IncrementalPCA(BaseModule):
 
         g = self.g_genes
         k = self.k_components
+        niter = self.svd_lowrank_niter
         m = self.x_size
         n = x_ng.size(0)
         assert k <= min(n, g), (
@@ -76,9 +81,9 @@ class IncrementalPCA(BaseModule):
         # compute SVD of new data
         if self.perform_mean_correction:
             x_mean_g = x_ng.mean(dim=0)
-            _, S_k, V_gk = torch.svd_lowrank(x_ng - x_mean_g, q=k)
+            _, S_k, V_gk = torch.svd_lowrank(x_ng - x_mean_g, q=k, niter=niter)
         else:
-            _, S_k, V_gk = torch.svd_lowrank(x_ng, q=k)
+            _, S_k, V_gk = torch.svd_lowrank(x_ng, q=k, niter=niter)
 
         # if not the first batch, merge results
         if m > 0:
@@ -90,7 +95,7 @@ class IncrementalPCA(BaseModule):
                 )
                 C = torch.cat([C, mean_correction], dim=0)
             # perform SVD on merged results
-            _, S_k, V_gk = torch.svd_lowrank(C, q=k)
+            _, S_k, V_gk = torch.svd_lowrank(C, q=k, niter=niter)
 
         # update buffers
         self.V_kg = V_gk.T
@@ -120,8 +125,8 @@ class IncrementalPCA(BaseModule):
 
     def predict(self, x_ng: torch.Tensor) -> torch.Tensor:
         r"""
-        Embedding of the input data ``x_ng`` into the principal component space.
+        Centering and embedding of the input data ``x_ng`` into the principal component space.
         """
         if self.transform is not None:
             x_ng = self.transform(x_ng)
-        return x_ng @ self.V_kg.T
+        return (x_ng - self.x_mean_g) @ self.V_kg.T

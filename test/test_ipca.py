@@ -10,7 +10,7 @@ import pytest
 import torch
 from lightning.pytorch.strategies import DDPStrategy
 
-from scvid.callbacks import DistributedPCA, ModuleCheckpoint
+from scvid.callbacks import ModuleCheckpoint
 from scvid.module import IncrementalPCA, IncrementalPCAFromCLI
 from scvid.train import TrainingPlan
 from scvid.transforms import ZScoreLog1pNormalize
@@ -54,14 +54,12 @@ def test_incremental_pca_multi_device(
     )
     training_plan = TrainingPlan(ipca)
     # trainer
-    dpca = DistributedPCA()
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
         devices=devices,
         max_epochs=1,
-        callbacks=[dpca],
         strategy=strategy,  # type: ignore[arg-type]
     )
     # fit

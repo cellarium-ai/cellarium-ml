@@ -104,6 +104,7 @@ class IncrementalPCAFromCLI(IncrementalPCA):
 
     Args:
         k_components: Number of principal components.
+        svd_lowrank_niter: Number of iterations for the low-rank SVD algorithm. Default: ``2``.
         perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
@@ -114,6 +115,7 @@ class IncrementalPCAFromCLI(IncrementalPCA):
         self,
         g_genes: int,
         k_components: int,
+        svd_lowrank_niter: int = 2,
         perform_mean_correction: bool = False,
         target_count: int = 10_000,
     ) -> None:
@@ -123,6 +125,7 @@ class IncrementalPCAFromCLI(IncrementalPCA):
         super().__init__(
             g_genes=g_genes,
             k_components=k_components,
+            svd_lowrank_niter=svd_lowrank_niter,
             perform_mean_correction=perform_mean_correction,
             transform=transform,
         )

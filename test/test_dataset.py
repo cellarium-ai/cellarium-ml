@@ -40,8 +40,9 @@ class TestModule(BaseModule):
 
     @staticmethod
     def _get_fn_args_from_batch(
-        tensor_dict: dict[str, torch.Tensor]
+        tensor_dict: dict[str, np.ndarray | torch.Tensor]
     ) -> tuple[tuple, dict]:
+        tensor_dict.pop("obs_names", None)
         return (), tensor_dict
 
     def forward(self, **batch: torch.Tensor) -> None:

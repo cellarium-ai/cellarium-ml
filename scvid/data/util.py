@@ -3,6 +3,7 @@
 
 import warnings
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import get_worker_info as _get_worker_info
@@ -52,9 +53,22 @@ def get_worker_info() -> tuple[int, int]:
     return worker_id, num_workers
 
 
-def collate_fn(batch):
+def collate_fn(
+    batch: list[dict[str, np.ndarray]]
+) -> dict[str, np.ndarray | torch.Tensor]:
+    """
+    Collate function for the ``DataLoader``. This function assumes that the batch is a list of
+    dictionaries, where each dictionary has the same keys. The values of each key are converted
+    to a ``torch.Tensor`` and concatenated along the first dimension. If the key is ``obs_names``,
+    the values are concatenated along the first dimension without converting to a ``torch.Tensor``.
+    """
     keys = batch[0].keys()
-    return {
-        key: torch.cat([torch.from_numpy(data[key]) for data in batch], dim=0)
-        for key in keys
-    }
+    collated_batch = {}
+    for key in keys:
+        if key == "obs_names":
+            collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
+        else:
+            collated_batch[key] = torch.cat(
+                [torch.from_numpy(data[key]) for data in batch], dim=0
+            )
+    return collated_batch

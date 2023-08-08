@@ -5,9 +5,10 @@ from importlib import import_module
 from typing import Any
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 
-from scvid.module import BaseModule
+from scvid.module import BaseModule, PredictMixin
 
 
 class TrainingPlan(pl.LightningModule):
@@ -61,7 +62,7 @@ class TrainingPlan(pl.LightningModule):
         self.scheduler_kwargs = scheduler_kwargs
 
     def training_step(  # type: ignore[override]
-        self, batch: dict[str, torch.Tensor], batch_idx: int
+        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         loss = self.module(*args, **kwargs)
@@ -70,8 +71,9 @@ class TrainingPlan(pl.LightningModule):
             self.log("train_loss", loss)
         return loss
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> Any:
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor:
         """Forward pass of the model."""
+        assert isinstance(self.module, PredictMixin)
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         return self.module.predict(*args, **kwargs)
 
