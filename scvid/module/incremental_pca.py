@@ -74,38 +74,45 @@ class IncrementalPCA(BaseModule, PredictMixin):
         g = self.g_genes
         k = self.k_components
         niter = self.svd_lowrank_niter
-        m = self.x_size
-        n = x_ng.size(0)
-        assert k <= min(n, g), (
+        self_X_size = self.x_size
+        other_X_size = x_ng.size(0)
+        total_X_size = self_X_size + other_X_size
+        assert k <= min(other_X_size, g), (
             f"Rank of svd_lowrank (k_components): {k}"
-            f" must be less than min(n_cells, g_genes): {min(n, g)}"
+            f" must be less than min(n_cells, g_genes): {min(other_X_size, g)}"
         )
 
         # compute SVD of new data
         if self.perform_mean_correction:
-            x_mean_g = x_ng.mean(dim=0)
-            _, S_k, V_gk = torch.svd_lowrank(x_ng - x_mean_g, q=k, niter=niter)
+            self_X_mean = self.x_mean_g
+            other_X_mean = x_ng.mean(dim=0)
+            _, S_k, V_gk = torch.svd_lowrank(x_ng - other_X_mean, q=k, niter=niter)
         else:
             _, S_k, V_gk = torch.svd_lowrank(x_ng, q=k, niter=niter)
 
         # if not the first batch, merge results
-        if m > 0:
-            SV_kg = torch.einsum("k,gk->kg", S_k, V_gk)
-            C = torch.cat([torch.einsum("k,kg->kg", self.S_k, self.V_kg), SV_kg], dim=0)
+        if self_X_size > 0:
+            self_X = torch.einsum("k,kg->kg", self.S_k, self.V_kg)
+            other_X = torch.einsum("k,gk->kg", S_k, V_gk)
+            joined_X = torch.cat([self_X, other_X], dim=0)
             if self.perform_mean_correction:
                 mean_correction = (
-                    math.sqrt(m * n / (m + n)) * (self.x_mean_g - x_mean_g)[None, :]
+                    math.sqrt(self_X_size * other_X_size / total_X_size)
+                    * (self_X_mean - other_X_mean)[None, :]
                 )
-                C = torch.cat([C, mean_correction], dim=0)
+                joined_X = torch.cat([joined_X, mean_correction], dim=0)
             # perform SVD on merged results
-            _, S_k, V_gk = torch.svd_lowrank(C, q=k, niter=niter)
+            _, S_k, V_gk = torch.svd_lowrank(joined_X, q=k, niter=niter)
 
         # update buffers
         self.V_kg = V_gk.T
         self.S_k = S_k
-        self.x_size = m + n
         if self.perform_mean_correction:
-            self.x_mean_g = self.x_mean_g * m / (m + n) + x_mean_g * n / (m + n)
+            self.x_mean_g = (
+                self_X_mean * self_X_size / total_X_size
+                + other_X_mean * other_X_size / total_X_size
+            )
+        self.x_size = total_X_size
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
