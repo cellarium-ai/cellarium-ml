@@ -68,6 +68,9 @@ class IncrementalPCA(BaseModule, PredictMixin):
         return (x,), {}
 
     def forward(self, x_ng: torch.Tensor) -> None:
+        """
+        Incrementally update partial SVD with new data.
+        """
         if self.transform is not None:
             x_ng = self.transform(x_ng)
 
@@ -107,12 +110,12 @@ class IncrementalPCA(BaseModule, PredictMixin):
         # update buffers
         self.V_kg = V_gk.T
         self.S_k = S_k
+        self.x_size = total_X_size
         if self.perform_mean_correction:
             self.x_mean_g = (
                 self_X_mean * self_X_size / total_X_size
                 + other_X_mean * other_X_size / total_X_size
             )
-        self.x_size = total_X_size
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -126,9 +129,23 @@ class IncrementalPCA(BaseModule, PredictMixin):
             )
 
     def on_epoch_end(self, trainer: pl.Trainer) -> None:
+        """
+        Merge partial SVD results from parallel processes at the end of the epoch.
+
+        Merging SVDs is performed hierarchically. At each merging level, the leading
+        process (even rank) merges its SVD with the trailing process (odd rank).
+        The trailing process discards its SVD and is terminated. The leading
+        process continues to the next level. This process continues until only
+        one process remains. The final SVD is stored on the remaining process.
+
+        The number of levels (hierarchy depth) scales logarithmically with the
+        number of processes.
+        """
         # no need to merge if only one process
         if trainer.world_size == 1:
             return
+
+        assert trainer.current_epoch == 0, "Only one pass through the data is required."
 
         # parameters
         k = self.k_components
@@ -138,7 +155,7 @@ class IncrementalPCA(BaseModule, PredictMixin):
         if self.perform_mean_correction:
             self_X_mean = self.x_mean_g
 
-        # initialize merging level i, rank, and world_size
+        # initialize rank, world_size, and merging level i
         rank = trainer.global_rank
         world_size = trainer.world_size
         i = 0
