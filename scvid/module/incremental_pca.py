@@ -3,16 +3,19 @@
 
 import math
 
+import lightning.pytorch as pl
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from lightning.pytorch.strategies import DDPStrategy
 
 from scvid.module import BaseModule, PredictMixin
 
 
 class IncrementalPCA(BaseModule, PredictMixin):
     """
-    Incremental PCA.
+    Distributed and Incremental PCA.
 
     **Reference:**
 
@@ -55,7 +58,7 @@ class IncrementalPCA(BaseModule, PredictMixin):
         self.register_buffer("S_k", torch.zeros(k_components))
         self.register_buffer("x_mean_g", torch.zeros(g_genes))
         self.register_buffer("x_size", torch.tensor(0))
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+        self._dummy_param = nn.Parameter(torch.tensor(0.0))
 
     @staticmethod
     def _get_fn_args_from_batch(
@@ -87,7 +90,7 @@ class IncrementalPCA(BaseModule, PredictMixin):
 
         # if not the first batch, merge results
         if m > 0:
-            SV_kg = torch.einsum("k,kg->kg", S_k, V_gk.T)
+            SV_kg = torch.einsum("k,gk->kg", S_k, V_gk)
             C = torch.cat([torch.einsum("k,kg->kg", self.S_k, self.V_kg), SV_kg], dim=0)
             if self.perform_mean_correction:
                 mean_correction = (
@@ -103,6 +106,91 @@ class IncrementalPCA(BaseModule, PredictMixin):
         self.x_size = m + n
         if self.perform_mean_correction:
             self.x_mean_g = self.x_mean_g * m / (m + n) + x_mean_g * n / (m + n)
+
+    def on_train_start(self, trainer: pl.Trainer) -> None:
+        if trainer.world_size > 1:
+            assert isinstance(trainer.strategy, DDPStrategy), (
+                "Distributed and Incremental PCA requires that "
+                "the trainer uses the DDP strategy."
+            )
+            assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is False, (
+                "Distributed and Incremental PCA requires that "
+                "broadcast_buffers is set to False."
+            )
+
+    def on_epoch_end(self, trainer: pl.Trainer) -> None:
+        # no need to merge if only one process
+        if trainer.world_size == 1:
+            return
+
+        # parameters
+        k = self.k_components
+        niter = self.svd_lowrank_niter
+        self_X_size = self.x_size
+        self_X = torch.einsum("k,kg->kg", self.S_k, self.V_kg).contiguous()
+        if self.perform_mean_correction:
+            self_X_mean = self.x_mean_g
+
+        # initialize merging level i, rank, and world_size
+        rank = trainer.global_rank
+        world_size = trainer.world_size
+        i = 0
+        while world_size > 1:
+            # level i
+            # at most two local ranks (leading and trailing)
+            if rank % 2 == 0:  # leading rank
+                if rank < world_size:
+                    # if there is a trailing rank
+                    # then concatenate and merge SVDs
+                    src = (rank + 1) * 2**i
+                    other_X = torch.zeros_like(self_X)
+                    other_X_size = torch.zeros_like(self_X_size)
+                    dist.recv(other_X, src=src)
+                    dist.recv(other_X_size, src=src)
+                    total_X_size = self_X_size + other_X_size
+
+                    # obtain joined_X
+                    joined_X = torch.cat([self_X, other_X], dim=0)
+                    if self.perform_mean_correction:
+                        other_X_mean = torch.zeros_like(self_X_mean)
+                        dist.recv(other_X_mean, src=src)
+                        mean_correction = (
+                            math.sqrt(self_X_size * other_X_size / total_X_size)
+                            * (self_X_mean - other_X_mean)[None, :]
+                        )
+                        joined_X = torch.cat([joined_X, mean_correction], dim=0)
+
+                    # perform SVD on joined_X
+                    _, S_k, V_gk = torch.svd_lowrank(joined_X, q=k, niter=niter)
+
+                    # update parameters
+                    V_kg = V_gk.T
+                    if self.perform_mean_correction:
+                        self_X_mean = (
+                            self_X_mean * self_X_size / total_X_size
+                            + other_X_mean * other_X_size / total_X_size
+                        )
+                    self_X = torch.einsum("k,kg->kg", S_k, V_kg).contiguous()
+                    self_X_size = total_X_size
+            else:  # trailing rank
+                # send to a leading rank and exit
+                dst = (rank - 1) * 2**i
+                dist.send(self_X, dst=dst)
+                dist.send(self_X_size, dst=dst)
+                if self.perform_mean_correction:
+                    dist.send(self_X_mean, dst=dst)
+                break
+            # update rank, world_size, and level i
+            rank = rank // 2
+            world_size = math.ceil(world_size / 2)
+            i += 1
+        else:
+            assert trainer.global_rank == 0
+            self.V_kg = V_kg
+            self.S_k = S_k
+            self.x_size = self_X_size
+            if self.perform_mean_correction:
+                self.x_mean_g = self_X_mean
 
     @property
     def explained_variance_k(self) -> torch.Tensor:

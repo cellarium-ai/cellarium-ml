@@ -22,17 +22,6 @@ class BaseModule(torch.nn.Module, metaclass=ABCMeta):
         Get forward method arguments from batch.
         """
 
-    def predict(self, x_ng: torch.Tensor) -> torch.Tensor | None:
-        """
-        Embed data.
-
-        Args:
-            x_ng: Data tensor.
-
-        Returns:
-            Embedding tensor.
-        """
-
 
 class PyroABCMeta(pyro.nn.module._PyroModuleMeta, ABCMeta):
     """
