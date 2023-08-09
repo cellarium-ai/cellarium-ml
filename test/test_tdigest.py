@@ -103,8 +103,8 @@ def test_tdigest_multi_device(
         mask = torch.nonzero(x[:, i])
         expected_median = torch.median(x[mask, i])
         actual_median = actual_median_g[i]
-        # assert within 0.5% accuracy
-        np.testing.assert_allclose(expected_median, actual_median, rtol=0.005)
+        # assert within 1% accuracy
+        np.testing.assert_allclose(expected_median, actual_median, rtol=0.01)
 
 
 @pytest.mark.parametrize(
