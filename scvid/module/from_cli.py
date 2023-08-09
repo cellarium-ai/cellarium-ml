@@ -5,7 +5,7 @@ import math
 
 import torch
 
-from scvid.transforms import ZScoreLog1pNormalize
+from scvid.transforms import NormalizeTotal, ZScoreLog1pNormalize
 
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
@@ -138,11 +138,10 @@ class TDigestFromCLI(TDigest):
 
     Args:
         g_genes: Number of genes.
-        target_count: Target gene expression count. Default: ``10_000``.
+        target_count: Target gene epxression count. Default: ``10_000``
+        eps: A value added to the denominator for numerical stability. Default: ``1e-6``
     """
 
-    def __init__(self, g_genes, target_count: int = 10_000) -> None:
-        transform = ZScoreLog1pNormalize(
-            mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
-        )
+    def __init__(self, g_genes, target_count: int = 10_000, eps: float = 1e-6) -> None:
+        transform = NormalizeTotal(target_count=target_count, eps=eps)
         super().__init__(g_genes, transform=transform)
