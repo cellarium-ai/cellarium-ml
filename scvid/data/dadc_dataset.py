@@ -104,6 +104,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         data = {}
         data["X"] = X.toarray() if issparse(X) else X
+        data["obs_names"] = self.dadc[idx].obs_names.values
 
         # for testing purposes
         if self.test_mode:

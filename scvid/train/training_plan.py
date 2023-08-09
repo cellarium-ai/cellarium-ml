@@ -5,9 +5,10 @@ from importlib import import_module
 from typing import Any
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 
-from scvid.module import BaseModule
+from scvid.module import BaseModule, PredictMixin
 
 
 class TrainingPlan(pl.LightningModule):
@@ -61,7 +62,7 @@ class TrainingPlan(pl.LightningModule):
         self.scheduler_kwargs = scheduler_kwargs
 
     def training_step(  # type: ignore[override]
-        self, batch: dict[str, torch.Tensor], batch_idx: int
+        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         loss = self.module(*args, **kwargs)
@@ -69,6 +70,12 @@ class TrainingPlan(pl.LightningModule):
             # Logging to TensorBoard by default
             self.log("train_loss", loss)
         return loss
+
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor:
+        """Forward pass of the model."""
+        assert isinstance(self.module, PredictMixin)
+        args, kwargs = self.module._get_fn_args_from_batch(batch)
+        return self.module.predict(*args, **kwargs)
 
     def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizers for the model."""
@@ -103,3 +110,14 @@ class TrainingPlan(pl.LightningModule):
             set_epoch = getattr(dataset, "set_epoch", None)
             if callable(set_epoch):
                 set_epoch(self.current_epoch)
+
+    def on_train_epoch_end(self) -> None:
+        """
+        Calls the ``on_epoch_end`` method on the module.
+
+        If the module has ``on_epoch_end`` method defined, then
+        ``on_epoch_end`` must be called at the end of every epoch.
+        """
+        on_epoch_end = getattr(self.module, "on_epoch_end", None)
+        if callable(on_epoch_end):
+            on_epoch_end(self.trainer)

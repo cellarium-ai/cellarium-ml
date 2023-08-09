@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import gc
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
@@ -13,7 +15,7 @@ from anndata.experimental.multi_files._anncollection import (
     AnnCollectionView,
     ConvertType,
 )
-from boltons.cacheutils import LRU, cachedproperty
+from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
 from .read import read_h5ad_file
@@ -34,6 +36,38 @@ def lazy_getattr():
         yield
     finally:
         _GETATTR_MODE.lazy = False
+
+
+class DistributedAnnCollectionView(AnnCollectionView):
+    def __getitem__(self, index: Index) -> DistributedAnnCollectionView:
+        oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
+        resolved_idx = self._resolve_idx(oidx, vidx)
+
+        return DistributedAnnCollectionView(self.reference, self.convert, resolved_idx)
+
+    @property
+    def obs_names(self) -> pd.Index:
+        """
+        Gather and return the obs_names from all AnnData objects in the collection.
+        """
+        indices = []
+        for i, oidx in enumerate(self.adatas_oidx):
+            if oidx is None:
+                continue
+
+            adata = self.adatas[i]
+            indices.append(adata.obs_names[oidx])
+
+        if len(indices) > 1:
+            concat_indices = pd.concat(
+                [pd.Series(idx) for idx in indices], ignore_index=True
+            )
+            obs_names = pd.Index(concat_indices)
+            obs_names = obs_names if self.reverse is None else obs_names[self.reverse]
+        else:
+            obs_names = indices[0]
+
+        return obs_names
 
 
 class DistributedAnnDataCollection(AnnCollection):
@@ -156,14 +190,14 @@ class DistributedAnnDataCollection(AnnCollection):
                 indices_strict=indices_strict,
             )
 
-    def __getitem__(self, index: Index) -> AnnCollectionView:
+    def __getitem__(self, index: Index) -> DistributedAnnCollectionView:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
         adatas_indices = [i for i, e in enumerate(resolved_idx[0]) if e is not None]
         # TODO: materialize at the last moment?
         self.materialize(adatas_indices)
 
-        return AnnCollectionView(self, self.convert, resolved_idx)
+        return DistributedAnnCollectionView(self, self.convert, resolved_idx)
 
     def materialize(self, indices: int | Sequence[int]) -> list[AnnData]:
         """
@@ -276,10 +310,13 @@ class LazyAnnData:
     def shape(self) -> tuple[int, int]:
         return self.n_obs, self.n_vars
 
-    @cachedproperty
+    @property
     def obs_names(self) -> pd.Index:
-        """This is different from the backed anndata"""
-        return pd.Index([f"cell_{i}" for i in range(*self.limits)])
+        if _GETATTR_MODE.lazy:
+            # This is only used during the initialization of DistributedAnnDataCollection
+            return pd.Index([f"cell_{i}" for i in range(*self.limits)])
+        else:
+            return self.adata.obs_names
 
     @property
     def cached(self) -> bool:
