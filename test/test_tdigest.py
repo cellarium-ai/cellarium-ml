@@ -18,7 +18,7 @@ from scvid.data import (
 from scvid.data.util import collate_fn
 from scvid.module import TDigest, TDigestFromCLI
 from scvid.train import TrainingPlan
-from scvid.transforms import ZScoreLog1pNormalize
+from scvid.transforms import NormalizeTotal
 
 from .common import TestDataset
 
@@ -54,12 +54,7 @@ def dadc(adata: AnnData, tmp_path: Path):
 @pytest.mark.parametrize("batch_size", [10, 100])
 @pytest.mark.parametrize(
     "transform",
-    [
-        ZScoreLog1pNormalize(
-            mean_g=0, std_g=None, perform_scaling=False, target_count=10_000
-        ),
-        None,
-    ],
+    [NormalizeTotal(target_count=10_000, eps=0), None],
 )
 def test_tdigest_multi_device(
     adata: AnnData,
@@ -155,7 +150,7 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
         os.path.join(tmp_path, "module_checkpoint.pt")
     )
     # assert
-    assert isinstance(model.transform, ZScoreLog1pNormalize)
-    assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)
+    assert isinstance(model.transform, NormalizeTotal)
+    assert isinstance(loaded_model.transform, NormalizeTotal)
     assert model.transform.target_count == loaded_model.transform.target_count
     np.testing.assert_allclose(model.median_g, loaded_model.median_g)
