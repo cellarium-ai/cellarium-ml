@@ -5,6 +5,7 @@ import torch
 from transformers import BertConfig, BertForMaskedLM
 
 from scvid.module import BaseModule
+from scvid.transforms.transforms import NonZeroMedianNormalize
 
 
 class Geneformer(BaseModule):
@@ -52,6 +53,16 @@ class Geneformer(BaseModule):
         config = BertConfig(**config)
         self.model = BertForMaskedLM(config)
 
+        # benchmark_v1 non-zero median
+        tdigest = torch.load(
+            "runs/benchmark_v1/tdigest/lightning_logs/version_2/checkpoints/module_checkpoint.pt"
+        )
+        self.transform = NonZeroMedianNormalize(
+            tdigest.median_g,
+            target_count=tdigest.transform.target_count,
+            eps=tdigest.transform.eps,
+        )
+
     @staticmethod
     def _get_fn_args_from_batch(
         tensor_dict: dict[str, torch.Tensor]
@@ -60,6 +71,9 @@ class Geneformer(BaseModule):
         return (x,), {}
 
     def forward(self, x_ng):
+        # normalize
+        x_ng = self.transform(x_ng)
+
         # tokenize
         gene_tokens = (torch.arange(x_ng.shape[1], device=x_ng.device) + 2).expand(
             x_ng.shape

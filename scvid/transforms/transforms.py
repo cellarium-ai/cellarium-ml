@@ -30,6 +30,33 @@ class NormalizeTotal(nn.Module):
         return f"{self.__class__.__name__}(target_count={self.target_count}, eps={self.eps})"
 
 
+class NonZeroMedianNormalize(nn.Module):
+    """
+    Normalize total gene counts per cell to target count.
+
+    Args:
+        target_count: Target gene epxression count. Default: ``10_000``
+        eps: A value added to the denominator for numerical stability. Default: ``1e-6``
+    """
+
+    def __init__(
+        self,
+        median_g: torch.Tensor,
+        target_count: int = 10_000,
+        eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.register_buffer("median_g", median_g)
+        self.target_count = target_count
+        self.eps = eps
+
+    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+        return self.target_count * x_ng / (x_ng.sum(dim=-1, keepdim=True) + self.eps) / self.median_g
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(median_g={self.median_g}, target_count={self.target_count}, eps={self.eps})"
+
+
 class ZScoreLog1pNormalize(nn.Module):
     """
     Log1pNormalize gene counts with target count and then ZScore with  mean and standard deviation.
