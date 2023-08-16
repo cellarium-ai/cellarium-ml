@@ -9,7 +9,7 @@ from scvid.transforms.transforms import NonZeroMedianNormalize
 
 
 class Geneformer(BaseModule):
-    def __init__(self, g_genes: int):
+    def __init__(self, g_genes: int, tdigest_path: str):
         super().__init__()
 
         # set model parameters
@@ -55,7 +55,8 @@ class Geneformer(BaseModule):
 
         # benchmark_v1 non-zero median
         tdigest = torch.load(
-            "runs/benchmark_v1/tdigest/lightning_logs/version_2/checkpoints/module_checkpoint.pt"
+            # "runs/benchmark_v1/tdigest/lightning_logs/version_2/checkpoints/module_checkpoint.pt"
+            tdigest_path
         )
         self.transform = NonZeroMedianNormalize(
             tdigest.median_g,
@@ -120,3 +121,31 @@ class Geneformer(BaseModule):
         )
 
         return x.loss
+
+    def predict(self, x_ng):
+        # normalize
+        x_ng = self.transform(x_ng)
+
+        # tokenize
+        gene_tokens = (torch.arange(x_ng.shape[1], device=x_ng.device) + 2).expand(
+            x_ng.shape
+        )
+        # sort by median-scaled gene values
+        position_ids = torch.argsort(x_ng, dim=1, descending=True)
+        position_ids = position_ids[:, : self.model.config.max_position_embeddings]
+        ndx = torch.arange(x_ng.shape[0], device=x_ng.device).unsqueeze(-1)
+        input_ids = gene_tokens[ndx, position_ids]
+        # pad genes with zero expression
+        sorted_x_ng = x_ng[ndx, position_ids]
+        attention_mask = sorted_x_ng != 0
+        input_ids.masked_fill_(~attention_mask, 0)
+
+
+        output = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            output_attentions=True,
+        )
+
+        return output, attention_mask
