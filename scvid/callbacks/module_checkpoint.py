@@ -33,7 +33,7 @@ class ModuleCheckpoint(pl.Callback):
         save_on_train_batch_end: bool = False,
         save_on_train_epoch_end: bool = False,
         save_on_train_end: bool = True,
-    ):
+    ) -> None:
         self.dirpath = dirpath
         self.filename = filename
         self.save_on_train_batch_end = save_on_train_batch_end
