@@ -9,60 +9,71 @@ from scvid.transforms.transforms import NonZeroMedianNormalize
 
 
 class Geneformer(BaseModule):
-    def __init__(self, g_genes: int, tdigest_path: str):
+    def __init__(self, g_genes: int, tdigest_path: str | None = None, median_path: str | None = None, model=None):
         super().__init__()
 
-        # set model parameters
-        # model type
-        model_type = "bert"
-        # max input size
-        max_input_size = 2**11  # 2048
-        # number of layers
-        num_layers = 6
-        # number of attention heads
-        num_attn_heads = 4
-        # number of embedding dimensions
-        num_embed_dim = 256
-        # intermediate size
-        intermed_size = num_embed_dim * 2
-        # activation function
-        activ_fn = "relu"
-        # initializer range, layer norm, dropout
-        initializer_range = 0.02
-        layer_norm_eps = 1e-12
-        attention_probs_dropout_prob = 0.02
-        hidden_dropout_prob = 0.02
+        if model is None:
+            # set model parameters
+            # model type
+            model_type = "bert"
+            # max input size
+            max_input_size = 2**11  # 2048
+            # number of layers
+            num_layers = 6
+            # number of attention heads
+            num_attn_heads = 4
+            # number of embedding dimensions
+            num_embed_dim = 256
+            # intermediate size
+            intermed_size = num_embed_dim * 2
+            # activation function
+            activ_fn = "relu"
+            # initializer range, layer norm, dropout
+            initializer_range = 0.02
+            layer_norm_eps = 1e-12
+            attention_probs_dropout_prob = 0.02
+            hidden_dropout_prob = 0.02
 
-        # model configuration
-        config = {
-            "hidden_size": num_embed_dim,
-            "num_hidden_layers": num_layers,
-            "initializer_range": initializer_range,
-            "layer_norm_eps": layer_norm_eps,
-            "attention_probs_dropout_prob": attention_probs_dropout_prob,
-            "hidden_dropout_prob": hidden_dropout_prob,
-            "intermediate_size": intermed_size,
-            "hidden_act": activ_fn,
-            "max_position_embeddings": max_input_size,
-            "model_type": model_type,
-            "num_attention_heads": num_attn_heads,
-            "pad_token_id": 0,
-            "vocab_size": g_genes + 2,  # genes+2 for <mask> and <pad> tokens
-        }
+            # model configuration
+            config = {
+                "hidden_size": num_embed_dim,
+                "num_hidden_layers": num_layers,
+                "initializer_range": initializer_range,
+                "layer_norm_eps": layer_norm_eps,
+                "attention_probs_dropout_prob": attention_probs_dropout_prob,
+                "hidden_dropout_prob": hidden_dropout_prob,
+                "intermediate_size": intermed_size,
+                "hidden_act": activ_fn,
+                "max_position_embeddings": max_input_size,
+                "model_type": model_type,
+                "num_attention_heads": num_attn_heads,
+                "pad_token_id": 0,
+                "vocab_size": g_genes + 2,  # genes+2 for <mask> and <pad> tokens
+            }
 
-        config = BertConfig(**config)
-        self.model = BertForMaskedLM(config)
+            config = BertConfig(**config)
+            self.model = BertForMaskedLM(config)
+        else:
+            self.model = model
 
         # benchmark_v1 non-zero median
-        tdigest = torch.load(
-            # "runs/benchmark_v1/tdigest/lightning_logs/version_2/checkpoints/module_checkpoint.pt"
-            tdigest_path
-        )
-        self.transform = NonZeroMedianNormalize(
-            tdigest.median_g,
-            target_count=tdigest.transform.target_count,
-            eps=tdigest.transform.eps,
-        )
+        if tdigest_path is not None:
+            tdigest = torch.load(
+                # "runs/benchmark_v1/tdigest/lightning_logs/version_2/checkpoints/module_checkpoint.pt"
+                tdigest_path
+            )
+            self.transform = NonZeroMedianNormalize(
+                tdigest.median_g,
+                target_count=tdigest.transform.target_count,
+                eps=tdigest.transform.eps,
+            )
+        elif median_path is not None:
+            median = torch.load(median_path)
+            self.transform = NonZeroMedianNormalize(
+                median,
+                target_count=10_000,
+                eps=0,
+            )
 
     @staticmethod
     def _get_fn_args_from_batch(
