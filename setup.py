@@ -47,6 +47,7 @@ setuptools.setup(
     include_package_data=True,
     install_requires=[
         "anndata",
+        "crick @ git+https://github.com/dask/crick.git",
         "google-cloud-storage",
         "boltons",
         "braceexpand",
