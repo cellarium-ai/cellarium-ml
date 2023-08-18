@@ -6,11 +6,13 @@ from .from_cli import (
     IncrementalPCAFromCLI,
     OnePassMeanVarStdFromCLI,
     ProbabilisticPCAFromCLI,
+    TDigestFromCLI,
 )
 from .gather import GatherLayer
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
 from .probabilistic_pca import ProbabilisticPCA
+from .tdigest import TDigest
 
 __all__ = [
     "BaseModule",
@@ -23,4 +25,6 @@ __all__ = [
     "PredictMixin",
     "ProbabilisticPCA",
     "ProbabilisticPCAFromCLI",
+    "TDigest",
+    "TDigestFromCLI",
 ]

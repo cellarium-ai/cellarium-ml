@@ -9,6 +9,8 @@ import lightning.pytorch as pl
 import torch
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 
+from scvid.train import TrainingPlan
+
 
 class ModuleCheckpoint(pl.Callback):
     """
@@ -43,12 +45,10 @@ class ModuleCheckpoint(pl.Callback):
     def setup(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str
     ) -> None:
-        assert hasattr(pl_module, "module")
-        assert isinstance(pl_module.module, torch.nn.Module)
+        assert isinstance(pl_module, TrainingPlan)
         # resolve dirpath at runtime
         dirpath = self._resolve_ckpt_dir(trainer)
-        if not os.path.exists(dirpath):
-            os.makedirs(dirpath, exist_ok=True)
+        os.makedirs(dirpath, exist_ok=True)
         self.dirpath = dirpath
 
     @rank_zero_only
