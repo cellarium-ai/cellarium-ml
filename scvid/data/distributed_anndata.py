@@ -126,6 +126,8 @@ class DistributedAnnDataCollection(AnnCollection):
             This parameter can be set to `False` if the order in the returned arrays
             is not important, for example, when using them for stochastic gradient descent.
             In this case the performance of subsetting can be a bit better.
+        obs_columns: Subset of columns to validate in the ``.obs`` attribute.
+            If ``None``, all columns are validated. Defaults to ``None``.
     """
 
     def __init__(
@@ -141,6 +143,7 @@ class DistributedAnnDataCollection(AnnCollection):
         index_unique: str | None = None,
         convert: ConvertType | None = None,
         indices_strict: bool = True,
+        obs_columns: Sequence | None = None,
     ):
         self.filenames = list(
             braceexpand(filenames) if isinstance(filenames, str) else filenames
@@ -166,7 +169,7 @@ class DistributedAnnDataCollection(AnnCollection):
         # schema
         adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
         assert len(adata0) == limits[0]
-        self.schema = AnnDataSchema(adata0)
+        self.schema = AnnDataSchema(adata0, obs_columns)
         # lazy anndatas
         lazy_adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)

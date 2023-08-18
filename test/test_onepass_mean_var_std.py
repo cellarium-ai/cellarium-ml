@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 from anndata import AnnData
+from lightning.pytorch.strategies import DDPStrategy
 
 from scvid.callbacks import ModuleCheckpoint
 from scvid.data import (
@@ -126,11 +127,13 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
     # fit
     model = OnePassMeanVarStd(g_genes=dadc.n_vars, transform=transform)
     training_plan = TrainingPlan(model)
+    strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
         devices=devices,
         max_epochs=1,  # one pass
+        strategy=strategy,  # type: ignore[arg-type]
     )
     trainer.fit(training_plan, train_dataloaders=data_loader)
 
