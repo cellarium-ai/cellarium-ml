@@ -1,14 +1,14 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import lightning.pytorch as pl
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
-
-from scvid.data.util import get_rank_and_num_replicas
+from lightning.pytorch.strategies import DDPStrategy
 
 from .base_module import BaseModule
-from .gather import GatherLayer
 
 
 class OnePassMeanVarStd(BaseModule):
@@ -43,12 +43,29 @@ class OnePassMeanVarStd(BaseModule):
     def forward(self, x_ng: torch.Tensor) -> None:
         if self.transform is not None:
             x_ng = self.transform(x_ng)
-        _, num_replicas = get_rank_and_num_replicas()
-        if num_replicas > 1:
-            x_ng = torch.cat(GatherLayer.apply(x_ng), dim=0)
+
         self.x_sums = self.x_sums + x_ng.sum(dim=0)
         self.x_squared_sums = self.x_squared_sums + (x_ng**2).sum(dim=0)
         self.x_size = self.x_size + x_ng.shape[0]
+
+    def on_train_start(self, trainer: pl.Trainer) -> None:
+        if trainer.world_size > 1:
+            assert isinstance(
+                trainer.strategy, DDPStrategy
+            ), "OnePassMeanVarStd requires that the trainer uses the DDP strategy."
+            assert (
+                trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
+            ), "OnePassMeanVarStd requires that broadcast_buffers is set to False."
+
+    def on_epoch_end(self, trainer: pl.Trainer) -> None:
+        # no need to merge if only one process
+        if trainer.world_size == 1:
+            return
+
+        # merge the running sums
+        dist.all_reduce(self.x_sums, op=dist.ReduceOp.SUM)
+        dist.all_reduce(self.x_squared_sums, op=dist.ReduceOp.SUM)
+        dist.all_reduce(self.x_size, op=dist.ReduceOp.SUM)
 
     @property
     def mean_g(self) -> torch.Tensor:
