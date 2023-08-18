@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from collections.abc import Sequence
+
 import numpy as np
 from anndata import AnnData
 
@@ -23,17 +25,20 @@ class AnnDataSchema:
         >>> schema.validate_anndata(adata)
 
     Args:
-        adata (AnnData): Reference AnnData object.
+        adata: Reference AnnData object.
+        obs_columns: Subset of columns to validate in the ``.obs`` attribute.
+            If ``None``, all columns are validated. Defaults to ``None``.
     """
 
     attrs = ["obs", "obsm", "var", "varm", "varp", "var_names", "layers"]
 
-    def __init__(self, adata: AnnData) -> None:
+    def __init__(self, adata: AnnData, obs_columns: Sequence | None = None) -> None:
         self.attr_values = {}
         for attr in self.attrs:
             # FIXME: some of the attributes have a reference to the anndata object itself.
             # This results in anndata object not being garbage collected.
             self.attr_values[attr] = getattr(adata, attr)
+        self.obs_columns = obs_columns
 
     def validate_anndata(self, adata: AnnData) -> None:
         """Validate anndata has proper attributes."""
@@ -42,6 +47,10 @@ class AnnDataSchema:
             value = getattr(adata, attr)
             ref_value = self.attr_values[attr]
             if attr == "obs":
+                if self.obs_columns is not None:
+                    # Subset the columns to validate
+                    ref_value = ref_value[self.obs_columns]
+                    value = value[self.obs_columns]
                 # compare the elements inside the Index object and their order
                 if not ref_value.columns.equals(value.columns):
                     raise ValueError(
