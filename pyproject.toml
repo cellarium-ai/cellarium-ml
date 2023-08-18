@@ -37,14 +37,12 @@ dynamic = ["version"]
 [project.optional-dependencies]
 lint = [
     "black[jupyter]",
-    "flake8",
-    "isort",
+    "ruff",
 ]
 mypy = ["mypy"]
 test = [
   "pytest",
   "pytest-xdist",
-  "scikit-learn",
   "tensorboard",
 ]
 dev = ["scvi-distributed[lint,mypy,test]"]
