@@ -49,6 +49,7 @@ class DistributedAnnDataCollectionView(AnnCollectionView):
     This class is a wrapper around AnnCollectionView where adatas is a list
     of :class:`LazyAnnData` objects.
     """
+
     def __getitem__(self, index: Index) -> DistributedAnnDataCollectionView:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
