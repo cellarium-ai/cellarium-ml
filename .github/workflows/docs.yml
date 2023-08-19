@@ -17,7 +17,7 @@ jobs:
       pages: write
       id-token: write
     steps:
-    - name: Install dependencies
+    - id: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install Cython numpy wheel
