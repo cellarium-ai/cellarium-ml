@@ -20,7 +20,7 @@ class ModuleCheckpoint(pl.Callback):
         dirpath: Directory to save the module checkpoint.
             By default, dirpath is ``None`` and will be set at runtime to the location
             specified by :class:`~lightning.pytorch.trainer.trainer.Trainer`'s
-            :paramref:`~lightning.pytorch.trainer.trainer.Trainer.default_root_dir` argument,
+            :attr:`~lightning.pytorch.trainer.trainer.Trainer.default_root_dir` argument,
             and if the Trainer uses a logger, the path will also contain logger name and version.
         filename: Filename to save the module checkpoint. Default: ``"module_checkpoint.pt"``.
         save_on_train_batch_end: Whether to save the module on train batch end. Default: ``False``.

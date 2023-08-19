@@ -40,7 +40,7 @@ class ProbabilisticPCA(BasePyroModule):
         seed: Random seed used to initialize parameters. Default: ``0``.
         transform: If not ``None`` is used to transform the input data.
         elbo: ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
-            If `None`, defaults to :class:`~pyro.infer.Trace_ELBO`.
+            If ``None``, defaults to :class:`~pyro.infer.Trace_ELBO`.
     """
 
     def __init__(

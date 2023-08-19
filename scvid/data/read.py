@@ -14,14 +14,14 @@ url_schemes = ("http:", "https:", "ftp:")
 
 def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnData:
     r"""
-    Read `.h5ad`-formatted hdf5 file from the Google Cloud Storage.
+    Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
 
     Example::
 
         >>> adata = read_h5ad_gcs("gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.000.h5ad")
 
     Args:
-        filename (str): Path to the data file in Cloud Storage.
+        filename: Path to the data file in Cloud Storage.
     """
     assert filename.startswith("gs:")
     # parse bucket and blob names from the filename
@@ -40,7 +40,7 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
 
 def read_h5ad_url(filename: str) -> AnnData:
     r"""
-    Read `.h5ad`-formatted hdf5 file from the URL.
+    Read ``.h5ad``-formatted hdf5 file from the URL.
 
     Example::
 
@@ -49,7 +49,7 @@ def read_h5ad_url(filename: str) -> AnnData:
         ... )
 
     Args:
-        filename (str): URL of the data file.
+        filename: URL of the data file.
     """
     assert any(filename.startswith(scheme) for scheme in url_schemes)
     with urllib.request.urlopen(filename) as response:
@@ -60,10 +60,10 @@ def read_h5ad_url(filename: str) -> AnnData:
 
 def read_h5ad_local(filename: str) -> AnnData:
     r"""
-    Read `.h5ad`-formatted hdf5 file from the local disk.
+    Read ``.h5ad``-formatted hdf5 file from the local disk.
 
     Args:
-        filename (str): Path to the local data file.
+        filename: Path to the local data file.
     """
     assert filename.startswith("file:")
     filename = re.sub(r"^file://?", "", filename)
@@ -72,10 +72,10 @@ def read_h5ad_local(filename: str) -> AnnData:
 
 def read_h5ad_file(filename: str, **kwargs) -> AnnData:
     r"""
-    Read `.h5ad`-formatted hdf5 file from a filename.
+    Read ``.h5ad``-formatted hdf5 file from a filename.
 
     Args:
-        filename (str): Path to the data file.
+        filename: Path to the data file.
     """
     if filename.startswith("gs:"):
         return read_h5ad_gcs(filename, **kwargs)
