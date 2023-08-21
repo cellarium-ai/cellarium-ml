@@ -59,9 +59,7 @@ class DistributedAnnCollectionView(AnnCollectionView):
             indices.append(adata.obs_names[oidx])
 
         if len(indices) > 1:
-            concat_indices = pd.concat(
-                [pd.Series(idx) for idx in indices], ignore_index=True
-            )
+            concat_indices = pd.concat([pd.Series(idx) for idx in indices], ignore_index=True)
             obs_names = pd.Index(concat_indices)
             obs_names = obs_names if self.reverse is None else obs_names[self.reverse]
         else:
@@ -145,17 +143,11 @@ class DistributedAnnDataCollection(AnnCollection):
         indices_strict: bool = True,
         obs_columns: Sequence | None = None,
     ):
-        self.filenames = list(
-            braceexpand(filenames) if isinstance(filenames, str) else filenames
-        )
+        self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
-            raise ValueError(
-                "If `last_shard_size` is specified then `shard_size` must also be specified."
-            )
+            raise ValueError("If `last_shard_size` is specified then `shard_size` must also be specified.")
         if limits is None:
-            assert (
-                shard_size is not None
-            ), "If `limits` is `None` then `shard_size` must be specified`"
+            assert shard_size is not None, "If `limits` is `None` then `shard_size` must be specified`"
             limits = [shard_size * (i + 1) for i in range(len(self.filenames))]
             if last_shard_size is not None:
                 limits[-1] = limits[-1] - shard_size + last_shard_size
@@ -256,9 +248,7 @@ class DistributedAnnDataCollection(AnnCollection):
         self.cache = LRU(self.max_cache_size)
         self.adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
-            for start, end, filename in zip(
-                [0] + self.limits, self.limits, self.filenames
-            )
+            for start, end, filename in zip([0] + self.limits, self.limits, self.filenames)
         ]
 
 

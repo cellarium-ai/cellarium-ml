@@ -34,9 +34,7 @@ def test_log_normalize_shape(x_ng: torch.Tensor, log_normalize: ZScoreLog1pNorma
     assert x_ng.shape == new_x_ng.shape
 
 
-def test_log_normalize_mean_std(
-    x_ng: torch.Tensor, log_normalize: ZScoreLog1pNormalize
-):
+def test_log_normalize_mean_std(x_ng: torch.Tensor, log_normalize: ZScoreLog1pNormalize):
     new_x_ng = log_normalize(x_ng)
 
     actual_mean = new_x_ng.mean(dim=0)

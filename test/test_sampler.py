@@ -22,13 +22,9 @@ from scvid.data.util import collate_fn
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 1, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
-def test_dadc_sampler_indices(
-    limits: tuple[int, ...], shuffle: bool, num_workers: int, batch_size: int
-):
+def test_dadc_sampler_indices(limits: tuple[int, ...], shuffle: bool, num_workers: int, batch_size: int):
     n_obs = limits[-1]
-    sampler = DistributedAnnDataCollectionSingleConsumerSampler(
-        limits=limits, shuffle=shuffle
-    )
+    sampler = DistributedAnnDataCollectionSingleConsumerSampler(limits=limits, shuffle=shuffle)
     dataset = cast(torch.utils.data.Dataset, range(n_obs))
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -73,13 +69,9 @@ def dadc(tmp_path: Path):
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
-def test_dadc_sampler_misses(
-    dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int
-):
+def test_dadc_sampler_misses(dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int):
     dataset = DistributedAnnDataCollectionDataset(dadc)
-    sampler = DistributedAnnDataCollectionSingleConsumerSampler(
-        limits=dadc.limits, shuffle=shuffle
-    )
+    sampler = DistributedAnnDataCollectionSingleConsumerSampler(limits=dadc.limits, shuffle=shuffle)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         sampler=sampler,

@@ -312,9 +312,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             for limit_idx in limit_indices:
                 lower, upper = iter_limits[limit_idx]
                 # shuffle cells within shards
-                indices.extend(
-                    (torch.randperm(upper - lower, generator=rng) + lower).tolist()
-                )
+                indices.extend((torch.randperm(upper - lower, generator=rng) + lower).tolist())
         else:
             indices = list(range(len(self)))
 
@@ -324,18 +322,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             if padding_size <= len(indices):
                 indices += indices[:padding_size]
             else:
-                indices += (indices * math.ceil(padding_size / len(indices)))[
-                    :padding_size
-                ]
+                indices += (indices * math.ceil(padding_size / len(indices)))[:padding_size]
         else:
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
         indices = indices[rank * per_replica : (rank + 1) * per_replica]
         assert len(indices) == per_replica
 
-        yield from (
-            self[indices[i : i + self.batch_size]]
-            for i in range(iter_start, iter_end, self.batch_size)
-        )
+        yield from (self[indices[i : i + self.batch_size]] for i in range(iter_start, iter_end, self.batch_size))
         # Sets epoch for persistent workers
         self.set_epoch(self.epoch + 1)
