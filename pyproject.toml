@@ -60,5 +60,8 @@ enabled = true
 line-length = 120
 select = ["E", "F", "I", "W"]
 
+[tool.black]
+line-length = 120
+
 [tool.mypy]
 ignore_missing_imports = true

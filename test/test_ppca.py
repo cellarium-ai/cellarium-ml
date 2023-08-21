@@ -34,9 +34,7 @@ def x_ng():
 @pytest.mark.parametrize("ppca_flavor", ["marginalized", "linear_vae"])
 @pytest.mark.parametrize("learn_mean", [False, True])
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
-def test_probabilistic_pca_multi_device(
-    x_ng: np.ndarray, minibatch: bool, ppca_flavor: str, learn_mean: bool
-):
+def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_flavor: str, learn_mean: bool):
     n, g = x_ng.shape
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     if learn_mean:
@@ -166,9 +164,7 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model: ProbabilisticPCAFromCLI = torch.load(
-        os.path.join(tmp_path, "module_checkpoint.pt")
-    )
+    loaded_model: ProbabilisticPCAFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
     assert isinstance(model.transform, ZScoreLog1pNormalize)
     assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)

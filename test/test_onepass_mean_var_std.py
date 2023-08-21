@@ -64,9 +64,7 @@ def test_onepass_mean_var_std(
 ):
     # prepare dataloader
     dataset = DistributedAnnDataCollectionDataset(dadc)
-    sampler = DistributedAnnDataCollectionSingleConsumerSampler(
-        limits=dadc.limits, shuffle=shuffle
-    )
+    sampler = DistributedAnnDataCollectionSingleConsumerSampler(limits=dadc.limits, shuffle=shuffle)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         sampler=sampler,
@@ -74,9 +72,7 @@ def test_onepass_mean_var_std(
         batch_size=batch_size,
         collate_fn=collate_fn,
     )
-    transform = ZScoreLog1pNormalize(
-        mean_g=0, std_g=None, perform_scaling=False, target_count=10_000
-    )
+    transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=10_000)
 
     # fit
     model = OnePassMeanVarStd(g_genes=dadc.n_vars, transform=transform)
@@ -112,17 +108,13 @@ def test_onepass_mean_var_std_iterable_dataset_multi_device(
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
-    dataset = IterableDistributedAnnDataCollectionDataset(
-        dadc, batch_size=batch_size, shuffle=shuffle
-    )
+    dataset = IterableDistributedAnnDataCollectionDataset(dadc, batch_size=batch_size, shuffle=shuffle)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
         collate_fn=collate_fn,
     )
-    transform = ZScoreLog1pNormalize(
-        mean_g=0, std_g=None, perform_scaling=False, target_count=10_000
-    )
+    transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=10_000)
 
     # fit
     model = OnePassMeanVarStd(g_genes=dadc.n_vars, transform=transform)
@@ -196,9 +188,7 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model: OnePassMeanVarStdFromCLI = torch.load(
-        os.path.join(tmp_path, "module_checkpoint.pt")
-    )
+    loaded_model: OnePassMeanVarStdFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
     assert isinstance(model.transform, ZScoreLog1pNormalize)
     assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)

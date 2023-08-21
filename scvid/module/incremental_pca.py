@@ -61,9 +61,7 @@ class IncrementalPCA(BaseModule, PredictMixin):
         self._dummy_param = nn.Parameter(torch.tensor(0.0))
 
     @staticmethod
-    def _get_fn_args_from_batch(
-        tensor_dict: dict[str, np.ndarray | torch.Tensor]
-    ) -> tuple[tuple, dict]:
+    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}
 
@@ -100,8 +98,7 @@ class IncrementalPCA(BaseModule, PredictMixin):
             joined_X = torch.cat([self_X, other_X], dim=0)
             if self.perform_mean_correction:
                 mean_correction = (
-                    math.sqrt(self_X_size * other_X_size / total_X_size)
-                    * (self_X_mean - other_X_mean)[None, :]
+                    math.sqrt(self_X_size * other_X_size / total_X_size) * (self_X_mean - other_X_mean)[None, :]
                 )
                 joined_X = torch.cat([joined_X, mean_correction], dim=0)
             # perform SVD on merged results
@@ -112,20 +109,15 @@ class IncrementalPCA(BaseModule, PredictMixin):
         self.S_k = S_k
         self.x_size = total_X_size
         if self.perform_mean_correction:
-            self.x_mean_g = (
-                self_X_mean * self_X_size / total_X_size
-                + other_X_mean * other_X_size / total_X_size
-            )
+            self.x_mean_g = self_X_mean * self_X_size / total_X_size + other_X_mean * other_X_size / total_X_size
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
             assert isinstance(trainer.strategy, DDPStrategy), (
-                "Distributed and Incremental PCA requires that "
-                "the trainer uses the DDP strategy."
+                "Distributed and Incremental PCA requires that " "the trainer uses the DDP strategy."
             )
             assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is False, (
-                "Distributed and Incremental PCA requires that "
-                "broadcast_buffers is set to False."
+                "Distributed and Incremental PCA requires that " "broadcast_buffers is set to False."
             )
 
     def on_epoch_end(self, trainer: pl.Trainer) -> None:
@@ -179,8 +171,7 @@ class IncrementalPCA(BaseModule, PredictMixin):
                         other_X_mean = torch.zeros_like(self_X_mean)
                         dist.recv(other_X_mean, src=src)
                         mean_correction = (
-                            math.sqrt(self_X_size * other_X_size / total_X_size)
-                            * (self_X_mean - other_X_mean)[None, :]
+                            math.sqrt(self_X_size * other_X_size / total_X_size) * (self_X_mean - other_X_mean)[None, :]
                         )
                         joined_X = torch.cat([joined_X, mean_correction], dim=0)
 
@@ -191,8 +182,7 @@ class IncrementalPCA(BaseModule, PredictMixin):
                     V_kg = V_gk.T
                     if self.perform_mean_correction:
                         self_X_mean = (
-                            self_X_mean * self_X_size / total_X_size
-                            + other_X_mean * other_X_size / total_X_size
+                            self_X_mean * self_X_size / total_X_size + other_X_mean * other_X_size / total_X_size
                         )
                     self_X = torch.einsum("k,kg->kg", S_k, V_kg).contiguous()
                     self_X_size = total_X_size

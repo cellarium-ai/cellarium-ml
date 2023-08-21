@@ -80,14 +80,10 @@ class TrainingPlan(pl.LightningModule):
     def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizers for the model."""
         optim_config = {}
-        optim_config["optimizer"] = self.optim_fn(
-            self.module.parameters(), **self.optim_kwargs
-        )
+        optim_config["optimizer"] = self.optim_fn(self.module.parameters(), **self.optim_kwargs)
         if self.scheduler_fn is not None:
             assert self.scheduler_kwargs is not None
-            scheduler = self.scheduler_fn(
-                optim_config["optimizer"], **self.scheduler_kwargs
-            )
+            scheduler = self.scheduler_fn(optim_config["optimizer"], **self.scheduler_kwargs)
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
         return optim_config
 

@@ -50,9 +50,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
             written. If not ``None``, only the first ``prediction_size`` columns will be written.
     """
 
-    def __init__(
-        self, output_dir: Path | str, prediction_size: int | None = None
-    ) -> None:
+    def __init__(self, output_dir: Path | str, prediction_size: int | None = None) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
         self.prediction_size = prediction_size

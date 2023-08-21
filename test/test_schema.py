@@ -163,9 +163,7 @@ def test_validate_obs_columns(
         schema = AnnDataSchema(ref_adata)
 
     if change_obs_categories and not subset_obs_columns:
-        with pytest.raises(
-            ValueError, match=".obs attribute dtypes for anndata passed in"
-        ):
+        with pytest.raises(ValueError, match=".obs attribute dtypes for anndata passed in"):
             schema.validate_anndata(adata)
     else:
         schema.validate_anndata(adata)
