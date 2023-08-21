@@ -102,9 +102,7 @@ def test_init_dat(dat: DistributedAnnDataCollection):
 
 @pytest.mark.parametrize("num_shards", [3, 4, 10])
 @pytest.mark.parametrize("last_shard_size", [1, 2, 3, None])
-def test_init_shard_size(
-    adatas_path: Path, num_shards: int, last_shard_size: int | None
-):
+def test_init_shard_size(adatas_path: Path, num_shards: int, last_shard_size: int | None):
     shard_size = 2
     filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards-1:03}}}.h5ad"))
     dadc = DistributedAnnDataCollection(
@@ -140,9 +138,7 @@ def test_indexing(
     oidx, n_adatas = row_select
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(
-            AssertionError, match="Expected the number of anndata files"
-        ):
+        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
             dat_view = dat[oidx, vidx]
     else:
         adt_view = adt[oidx, vidx]
@@ -188,9 +184,7 @@ def test_indexing_dataset(
     dataset = IterableDistributedAnnDataCollectionDataset(dat)
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(
-            AssertionError, match="Expected the number of anndata files"
-        ):
+        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
             dataset_X = dataset[oidx]["X"]
     else:
         adt_X = adt[oidx].X
@@ -209,6 +203,4 @@ def test_pickle_dataset(dat: DistributedAnnDataCollection):
     assert len(new_dataset.dadc.cache) == 0
 
     np.testing.assert_array_equal(new_dataset[:2]["X"], dataset[:2]["X"])
-    np.testing.assert_array_equal(
-        new_dataset[:2]["obs_names"], dataset[:2]["obs_names"]
-    )
+    np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])

@@ -21,9 +21,7 @@ class VarianceMonitor(pl.Callback):
     def __init__(self, total_variance: float | None = None):
         self.total_variance = total_variance
 
-    def on_train_start(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule
-    ) -> None:
+    def on_train_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         r"""
         Called when the train begins.
 
@@ -64,15 +62,9 @@ class VarianceMonitor(pl.Callback):
         variance_stats["W_variance"] = W_variance
         variance_stats["sigma_variance"] = sigma_variance
         if self.total_variance is not None:
-            variance_stats["total_explained_variance_ratio"] = (
-                W_variance + sigma_variance
-            ) / self.total_variance
+            variance_stats["total_explained_variance_ratio"] = (W_variance + sigma_variance) / self.total_variance
             variance_stats["W_variance_ratio"] = W_variance / self.total_variance
-            variance_stats["sigma_variance_ratio"] = (
-                sigma_variance / self.total_variance
-            )
+            variance_stats["sigma_variance_ratio"] = sigma_variance / self.total_variance
 
         for logger in trainer.loggers:
-            logger.log_metrics(
-                variance_stats, step=trainer.fit_loop.epoch_loop._batches_that_stepped
-            )
+            logger.log_metrics(variance_stats, step=trainer.fit_loop.epoch_loop._batches_that_stepped)
