@@ -42,9 +42,7 @@ class ModuleCheckpoint(pl.Callback):
         self.save_on_train_epoch_end = save_on_train_epoch_end
         self.save_on_train_end = save_on_train_end
 
-    def setup(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str
-    ) -> None:
+    def setup(self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str) -> None:
         assert isinstance(pl_module, TrainingPlan)
         # resolve dirpath at runtime
         dirpath = self._resolve_ckpt_dir(trainer)

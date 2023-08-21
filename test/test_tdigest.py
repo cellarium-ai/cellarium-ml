@@ -68,9 +68,7 @@ def test_tdigest_multi_device(
     batch_size = batch_size // devices
 
     # prepare dataloader
-    dataset = IterableDistributedAnnDataCollectionDataset(
-        dadc, batch_size=batch_size, shuffle=shuffle
-    )
+    dataset = IterableDistributedAnnDataCollectionDataset(dadc, batch_size=batch_size, shuffle=shuffle)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
@@ -146,9 +144,7 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model: TDigestFromCLI = torch.load(
-        os.path.join(tmp_path, "module_checkpoint.pt")
-    )
+    loaded_model: TDigestFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
     assert isinstance(model.transform, NormalizeTotal)
     assert isinstance(loaded_model.transform, NormalizeTotal)

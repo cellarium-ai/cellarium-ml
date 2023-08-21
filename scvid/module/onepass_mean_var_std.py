@@ -34,9 +34,7 @@ class OnePassMeanVarStd(BaseModule):
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
     @staticmethod
-    def _get_fn_args_from_batch(
-        tensor_dict: dict[str, np.ndarray | torch.Tensor]
-    ) -> tuple[tuple, dict]:
+    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}
 
