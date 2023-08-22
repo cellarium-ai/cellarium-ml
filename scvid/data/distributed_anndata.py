@@ -54,9 +54,7 @@ class DistributedAnnDataCollectionView(AnnCollectionView):
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
 
-        return DistributedAnnDataCollectionView(
-            self.reference, self.convert, resolved_idx
-        )
+        return DistributedAnnDataCollectionView(self.reference, self.convert, resolved_idx)
 
     @property
     def obs_names(self) -> pd.Index:
