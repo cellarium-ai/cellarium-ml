@@ -46,6 +46,7 @@ test = [
   "tensorboard",
 ]
 docs = [
+  "Pillow",
   "sphinx",
   "sphinx_gallery",
   "sphinx_rtd_theme",
