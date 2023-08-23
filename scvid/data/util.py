@@ -55,8 +55,8 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
     """
     Collate function for the ``DataLoader``. This function assumes that the batch is a list of
     dictionaries, where each dictionary has the same keys. The values of each key are converted
-    to a ``torch.Tensor`` and concatenated along the first dimension. If the key is ``obs_names``,
-    the values are concatenated along the first dimension without converting to a ``torch.Tensor``.
+    to a :class:`torch.Tensor` and concatenated along the first dimension. If the key is ``obs_names``,
+    the values are concatenated along the first dimension without converting to a :class:`torch.Tensor`.
     """
     keys = batch[0].keys()
     collated_batch = {}
