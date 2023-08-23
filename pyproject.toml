@@ -45,7 +45,12 @@ test = [
   "pytest-xdist",
   "tensorboard",
 ]
-dev = ["scvi-distributed[lint,mypy,test]"]
+docs = [
+  "sphinx",
+  "sphinx_gallery",
+  "sphinx_rtd_theme",
+]
+dev = ["scvi-distributed[docs,lint,mypy,test]"]
 
 [project.urls]
 "Homepage" = "https://cellarium.ai"

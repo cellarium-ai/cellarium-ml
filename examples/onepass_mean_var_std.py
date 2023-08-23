@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""
+r"""
 Example: One-pass calculation of feature mean, variance, and standard deviation
 ===============================================================================
 
@@ -9,6 +9,7 @@ This example shows how to calculate mean, variance, and standard deviation of lo
 feature count data in one pass [1].
 
 Example run::
+
     python examples/onepass_mean_var_std.py fit \
         --model.module scvid.module.OnePassMeanVarStdFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \

@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""
+r"""
 Example: One-pass calculation of feature median using t-digest statistics
 =========================================================================
 
@@ -9,6 +9,7 @@ This example shows how to calculate non-zero median of normalized feature count
 data in one pass [1].
 
 Example run::
+
     python examples/tdigest.py fit \
         --model.module scvid.module.TDigestFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
@@ -19,9 +20,9 @@ Example run::
 
 **References:**
 
-    1. Dunning, Ted, and Otmar Ertl. "Computing Extremely Accurate
-       Quantiles Using T-Digests." https://github.com/tdunning/t-digest/blob/
-       master/docs/t-digest-paper/histo.pdf
+    1. *Computing Extremely Accurate Quantiles Using T-Digests*,
+       Dunning, Ted, and Otmar Ertl.
+       (https://github.com/tdunning/t-digest/blob/master/docs/t-digest-paper/histo.pdf)
 """
 
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
