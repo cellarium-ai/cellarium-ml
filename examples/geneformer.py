@@ -34,9 +34,7 @@ class _LightningCLIWithLinks(LightningCLI):
     """LightningCLI with custom argument linking."""
 
     def add_arguments_to_parser(self, parser):
-        parser.link_arguments(
-            "data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate"
-        )
+        parser.link_arguments("data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate")
 
 
 def main():

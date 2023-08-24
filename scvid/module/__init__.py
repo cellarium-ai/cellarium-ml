@@ -9,6 +9,7 @@ from .from_cli import (
     TDigestFromCLI,
 )
 from .gather import GatherLayer
+from .geneformer import Geneformer
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
 from .probabilistic_pca import ProbabilisticPCA
@@ -18,6 +19,7 @@ __all__ = [
     "BaseModule",
     "BasePyroModule",
     "GatherLayer",
+    "Geneformer",
     "IncrementalPCA",
     "IncrementalPCAFromCLI",
     "OnePassMeanVarStd",

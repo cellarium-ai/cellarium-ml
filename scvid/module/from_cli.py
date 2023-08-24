@@ -4,9 +4,12 @@
 import math
 
 import torch
+from transformers import BertConfig, BertForMaskedLM
 
 from scvid.transforms import NormalizeTotal, ZScoreLog1pNormalize
+from scvid.transforms.transforms import NonZeroMedianNormalize
 
+from .geneformer import Geneformer
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
 from .probabilistic_pca import ProbabilisticPCA
@@ -135,3 +138,53 @@ class TDigestFromCLI(TDigest):
     def __init__(self, g_genes, target_count: int = 10_000, eps: float = 1e-6) -> None:
         transform = NormalizeTotal(target_count=target_count, eps=eps)
         super().__init__(g_genes, transform=transform)
+
+
+class GeneformerFromCLI(Geneformer):
+    def __init__(
+        self,
+        model_type="bert",
+        max_input_size=2**11,  # 2048
+        num_layers=6,
+        num_attn_heads=4,
+        num_embed_dim=256,
+        intermed_size=None,
+        activ_fn="relu",
+        initializer_range=0.02,
+        layer_norm_eps=1e-12,
+        attention_probs_dropout_prob=0.02,
+        hidden_dropout_prob=0.02,
+        var_names_schema=None,
+        tdigest_path=None,
+        mlm_probability=0.15,
+    ):
+        intermed_size = intermed_size or num_embed_dim * 2
+        # model configuration
+        config = {
+            "hidden_size": num_embed_dim,
+            "num_hidden_layers": num_layers,
+            "initializer_range": initializer_range,
+            "layer_norm_eps": layer_norm_eps,
+            "attention_probs_dropout_prob": attention_probs_dropout_prob,
+            "hidden_dropout_prob": hidden_dropout_prob,
+            "intermediate_size": intermed_size,
+            "hidden_act": activ_fn,
+            "max_position_embeddings": max_input_size,
+            "model_type": model_type,
+            "num_attention_heads": num_attn_heads,
+            "pad_token_id": 0,
+            "vocab_size": len(var_names_schema) + 2,  # genes+2 for <mask> and <pad> tokens
+        }
+        config = BertConfig(**config)
+        model = BertForMaskedLM(config)
+
+        if tdigest_path is not None:
+            tdigest = torch.load(tdigest_path)
+            transform = NonZeroMedianNormalize(
+                tdigest.median_g,
+                target_count=tdigest.transform.target_count,
+                eps=tdigest.transform.eps,
+            )
+        super().__init__(
+            var_names_schema=var_names_schema, model=model, transform=transform, mlm_probability=mlm_probability
+        )
