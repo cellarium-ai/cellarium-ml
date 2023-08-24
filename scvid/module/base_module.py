@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from abc import ABCMeta, abstractmethod
+from typing import Any
 
 import numpy as np
 import pyro
 import torch
+from transformers.utils import ModelOutput
 
 
 class BaseModule(torch.nn.Module, metaclass=ABCMeta):
@@ -39,7 +41,7 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor | ModelOutput:
         """
         Perform prediction on data tensor.
 

@@ -11,42 +11,63 @@ from scvid.module import BaseModule
 
 
 class Geneformer(BaseModule):
+    """
+    Geneformer model.
+
+    **Reference:**
+
+    1. *Transfer learning enables predictions in network biology*,
+       C. V. Theodoris, L. Xiao, A. Chopra, M. D. Chaffin, Z. R. Al Sayed,
+       M. C. Hill, H. Mantineo, E. Brydon, Z. Zeng, X. S. Liu & P. T. Ellinor
+       (https://www.nature.com/articles/s41586-023-06139-9)
+
+    Args:
+        var_names_schema:
+            The list of the variable names in the input data.
+        transform:
+            The transform to apply to the input data.
+        mlm_probability:
+            Ratio of tokens to mask for masked language modeling loss.
+        model:
+            The bert model.
+    """
+
     def __init__(
-        self,
-        var_names_schema: Sequence,
-        model: BertForMaskedLM,
-        transform: torch.nn.Module,
-        mlm_probability: float = 0.15,
+        self, var_names_schema: Sequence, transform: torch.nn.Module, mlm_probability: float, model: BertForMaskedLM
     ):
         super().__init__()
-
-        self.model = model
+        self.var_names_schema = var_names_schema
         self.transform = transform
+        self.mlm_probability = mlm_probability
+        self.model = model
+        self.register_buffer("var_ids", torch.arange(2, len(var_names_schema) + 2))
 
     @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, torch.Tensor]) -> tuple[tuple, dict]:
+    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         var_names = tensor_dict["var_names"]
         return (x, var_names), {}
 
-    def tokenize(self, x_ng: torch.Tensor, var_names: np.ndarray) -> None:
-        # tokenize
-        gene_tokens = (torch.arange(x_ng.shape[1], device=x_ng.device) + 2).expand(x_ng.shape)
+    def tokenize(self, x_ng: torch.Tensor, var_names: Sequence) -> None:
+        tokens = self.var_ids.expand(x_ng.shape)
         # sort by median-scaled gene values
         position_ids = torch.argsort(x_ng, dim=1, descending=True)
         position_ids = position_ids[:, : self.model.config.max_position_embeddings]
-        ndx = torch.arange(x_ng.shape[0], device=x_ng.device).unsqueeze(-1)
-        input_ids = gene_tokens[ndx, position_ids]
+        ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
+        input_ids = tokens[ndx[:, None], position_ids]
         # pad genes with zero expression
         sorted_x_ng = x_ng[ndx, position_ids]
         attention_mask = sorted_x_ng != 0
         input_ids.masked_fill_(~attention_mask, 0)
         return input_ids, attention_mask
 
-    def forward(self, x_ng: torch.Tensor, var_names: np.ndarray) -> None:
+    def forward(self, x_ng: torch.Tensor, var_names: Sequence) -> torch.Tensor:
+        # validate
+        assert x_ng.shape[1] == len(var_names), "x_ng must have the same number of columns as var_names."
+        assert np.array_equal(var_names, self.var_names_schema), "var_names must match the schema."
+
         x_ng = self.transform(x_ng)
 
-        # tokenize
         input_ids, attention_mask = self.tokenize(x_ng, var_names)
 
         labels = input_ids.clone()
@@ -73,14 +94,15 @@ class Geneformer(BaseModule):
             attention_mask=attention_mask,
             labels=labels,
         )
-
         return output.loss
 
     def predict(self, x_ng: torch.Tensor, var_names: Sequence):
-        # normalize
+        # validate
+        assert x_ng.shape[1] == len(var_names), "x_ng must have the same number of columns as var_names."
+        assert np.array_equal(var_names, self.var_names_schema), "var_names must match the schema."
+
         x_ng = self.transform(x_ng)
 
-        # tokenize
         input_ids, attention_mask = self.tokenize(x_ng, var_names)
 
         output = self.model(
@@ -89,5 +111,4 @@ class Geneformer(BaseModule):
             output_hidden_states=True,
             output_attentions=True,
         )
-
-        return output, attention_mask
+        return output
