@@ -32,9 +32,7 @@ def get_rank_and_num_replicas() -> tuple[int, int]:
             num_replicas = 1
             rank = 0
     if rank >= num_replicas or rank < 0:
-        raise ValueError(
-            f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas-1}]"
-        )
+        raise ValueError(f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas-1}]")
     return rank, num_replicas
 
 
@@ -53,14 +51,12 @@ def get_worker_info() -> tuple[int, int]:
     return worker_id, num_workers
 
 
-def collate_fn(
-    batch: list[dict[str, np.ndarray]]
-) -> dict[str, np.ndarray | torch.Tensor]:
+def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | torch.Tensor]:
     """
     Collate function for the ``DataLoader``. This function assumes that the batch is a list of
     dictionaries, where each dictionary has the same keys. The values of each key are converted
-    to a ``torch.Tensor`` and concatenated along the first dimension. If the key is ``obs_names``,
-    the values are concatenated along the first dimension without converting to a ``torch.Tensor``.
+    to a :class:`torch.Tensor` and concatenated along the first dimension. If the key is ``obs_names``,
+    the values are concatenated along the first dimension without converting to a :class:`torch.Tensor`.
     """
     keys = batch[0].keys()
     collated_batch = {}
@@ -68,7 +64,5 @@ def collate_fn(
         if key == "obs_names":
             collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
         else:
-            collated_batch[key] = torch.cat(
-                [torch.from_numpy(data[key]) for data in batch], dim=0
-            )
+            collated_batch[key] = torch.cat([torch.from_numpy(data[key]) for data in batch], dim=0)
     return collated_batch

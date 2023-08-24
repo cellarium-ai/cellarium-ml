@@ -31,6 +31,10 @@ _GETATTR_MODE = getattr_mode()
 
 @contextmanager
 def lazy_getattr():
+    """
+    When in lazy getattr mode, return a :class:`LazyAnnData` object attribute instead of
+    the AnnData object attribute.
+    """
     try:
         _GETATTR_MODE.lazy = True
         yield
@@ -38,12 +42,19 @@ def lazy_getattr():
         _GETATTR_MODE.lazy = False
 
 
-class DistributedAnnCollectionView(AnnCollectionView):
-    def __getitem__(self, index: Index) -> DistributedAnnCollectionView:
+class DistributedAnnDataCollectionView(AnnCollectionView):
+    """
+    Distributed AnnData Collection View.
+
+    This class is a wrapper around AnnCollectionView where adatas is a list
+    of :class:`LazyAnnData` objects.
+    """
+
+    def __getitem__(self, index: Index) -> DistributedAnnDataCollectionView:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
 
-        return DistributedAnnCollectionView(self.reference, self.convert, resolved_idx)
+        return DistributedAnnDataCollectionView(self.reference, self.convert, resolved_idx)
 
     @property
     def obs_names(self) -> pd.Index:
@@ -59,9 +70,7 @@ class DistributedAnnCollectionView(AnnCollectionView):
             indices.append(adata.obs_names[oidx])
 
         if len(indices) > 1:
-            concat_indices = pd.concat(
-                [pd.Series(idx) for idx in indices], ignore_index=True
-            )
+            concat_indices = pd.concat([pd.Series(idx) for idx in indices], ignore_index=True)
             obs_names = pd.Index(concat_indices)
             obs_names = obs_names if self.reverse is None else obs_names[self.reverse]
         else:
@@ -77,9 +86,11 @@ class DistributedAnnDataCollection(AnnCollection):
     This class is a wrapper around AnnCollection where adatas is a list
     of LazyAnnData objects.
 
-    Underlying anndata files must conform to the same schema (see `AnnDataSchema.validate_anndata`)
+    Underlying anndata files must conform to the same schema
+    (see :class:`~scvid.data.schema.AnnDataSchema.validate_anndata`).
     The schema is inferred from the first AnnData file in the collection. Individual AnnData files may
-    otherwise vary in the number of cells, and the actual content stored in `.X`, `.layers`, `.obs` and `.obsm`.
+    otherwise vary in the number of cells, and the actual content stored in :attr:`X`, :attr:`layers`,
+    :attr:`obs` and :attr:`obsm`.
 
     Example 1::
 
@@ -110,22 +121,24 @@ class DistributedAnnDataCollection(AnnCollection):
         last_shard_size: Last shard size.
         max_cache_size: Max size of the cache. Default: ``1``.
         cache_size_strictly_enforced: Assert that the number of retrieved anndatas is not more than maxsize.
-        label: Column in `.obs` to place batch information in. If it's None, no column is added.
+        label: Column in :attr:`obs` to place batch information in. If it's ``None``, no column is added.
         keys: Names for each object being added. These values are used for column values for
-            `label` or appended to the index if `index_unique` is not `None`. Defaults to filenames.
+            ``label`` or appended to the index if ``index_unique`` is not ``None``. Defaults to filenames.
         index_unique: Whether to make the index unique by using the keys. If provided, this
-            is the delimeter between "{orig_idx}{index_unique}{key}". When `None`,
+            is the delimeter between ``{orig_idx}{index_unique}{key}``. When ``None``,
             the original indices are kept.
         convert: You can pass a function or a Mapping of functions which will be applied
-            to the values of attributes (`.obs`, `.obsm`, `.layers`, `.X`) or to specific
+            to the values of attributes (:attr:`obs`, :attr:`obsm`, :attr:`layers`, :attr:`X`) or to specific
             keys of these attributes in the subset object.
             Specify an attribute and a key (if needed) as keys of the passed Mapping
             and a function to be applied as a value.
-        indices_strict: If  `True`, arrays from the subset objects will always have the same order
+        indices_strict: If  ``True``, arrays from the subset objects will always have the same order
             of indices as in selection used to subset.
-            This parameter can be set to `False` if the order in the returned arrays
+            This parameter can be set to ``False`` if the order in the returned arrays
             is not important, for example, when using them for stochastic gradient descent.
             In this case the performance of subsetting can be a bit better.
+        obs_columns: Subset of columns to validate in the :attr:`obs` attribute.
+            If ``None``, all columns are validated. Defaults to ``None``.
     """
 
     def __init__(
@@ -141,18 +154,13 @@ class DistributedAnnDataCollection(AnnCollection):
         index_unique: str | None = None,
         convert: ConvertType | None = None,
         indices_strict: bool = True,
+        obs_columns: Sequence | None = None,
     ):
-        self.filenames = list(
-            braceexpand(filenames) if isinstance(filenames, str) else filenames
-        )
+        self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
-            raise ValueError(
-                "If `last_shard_size` is specified then `shard_size` must also be specified."
-            )
+            raise ValueError("If `last_shard_size` is specified then `shard_size` must also be specified.")
         if limits is None:
-            assert (
-                shard_size is not None
-            ), "If `limits` is `None` then `shard_size` must be specified`"
+            assert shard_size is not None, "If `limits` is `None` then `shard_size` must be specified`"
             limits = [shard_size * (i + 1) for i in range(len(self.filenames))]
             if last_shard_size is not None:
                 limits[-1] = limits[-1] - shard_size + last_shard_size
@@ -166,7 +174,7 @@ class DistributedAnnDataCollection(AnnCollection):
         # schema
         adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
         assert len(adata0) == limits[0]
-        self.schema = AnnDataSchema(adata0)
+        self.schema = AnnDataSchema(adata0, obs_columns)
         # lazy anndatas
         lazy_adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
@@ -190,14 +198,14 @@ class DistributedAnnDataCollection(AnnCollection):
                 indices_strict=indices_strict,
             )
 
-    def __getitem__(self, index: Index) -> DistributedAnnCollectionView:
+    def __getitem__(self, index: Index) -> DistributedAnnDataCollectionView:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
         adatas_indices = [i for i, e in enumerate(resolved_idx[0]) if e is not None]
         # TODO: materialize at the last moment?
         self.materialize(adatas_indices)
 
-        return DistributedAnnCollectionView(self, self.convert, resolved_idx)
+        return DistributedAnnDataCollectionView(self, self.convert, resolved_idx)
 
     def materialize(self, indices: int | Sequence[int]) -> list[AnnData]:
         """
@@ -253,23 +261,21 @@ class DistributedAnnDataCollection(AnnCollection):
         self.cache = LRU(self.max_cache_size)
         self.adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
-            for start, end, filename in zip(
-                [0] + self.limits, self.limits, self.filenames
-            )
+            for start, end, filename in zip([0] + self.limits, self.limits, self.filenames)
         ]
 
 
 class LazyAnnData:
-    r"""
+    """
     Lazy AnnData backed by a file.
 
-    Accessing attributes under `lazy_getattr` context returns schema attributes.
+    Accessing attributes under :func:`lazy_getattr` context returns schema attributes.
 
     Args:
-        filename (str): Name of anndata file.
-        limits (tuple[int, int]): Limits of cell indices (inclusive, exclusive).
-        schema (AnnDataSchema): Schema used as a reference for lazy attributes.
-        cache (LRU): Shared LRU cache storing buffered anndatas.
+        filename: Name of anndata file.
+        limits: Limits of cell indices (inclusive, exclusive).
+        schema: Schema used as a reference for lazy attributes.
+        cache: Shared LRU cache storing buffered anndatas.
     """
 
     _lazy_attrs = ["obs", "obsm", "layers", "var", "varm", "varp", "var_names"]

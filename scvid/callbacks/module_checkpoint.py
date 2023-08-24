@@ -20,7 +20,7 @@ class ModuleCheckpoint(pl.Callback):
         dirpath: Directory to save the module checkpoint.
             By default, dirpath is ``None`` and will be set at runtime to the location
             specified by :class:`~lightning.pytorch.trainer.trainer.Trainer`'s
-            :paramref:`~lightning.pytorch.trainer.trainer.Trainer.default_root_dir` argument,
+            :attr:`~lightning.pytorch.trainer.trainer.Trainer.default_root_dir` argument,
             and if the Trainer uses a logger, the path will also contain logger name and version.
         filename: Filename to save the module checkpoint. Default: ``"module_checkpoint.pt"``.
         save_on_train_batch_end: Whether to save the module on train batch end. Default: ``False``.
@@ -35,16 +35,14 @@ class ModuleCheckpoint(pl.Callback):
         save_on_train_batch_end: bool = False,
         save_on_train_epoch_end: bool = False,
         save_on_train_end: bool = True,
-    ):
+    ) -> None:
         self.dirpath = dirpath
         self.filename = filename
         self.save_on_train_batch_end = save_on_train_batch_end
         self.save_on_train_epoch_end = save_on_train_epoch_end
         self.save_on_train_end = save_on_train_end
 
-    def setup(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str
-    ) -> None:
+    def setup(self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str) -> None:
         assert isinstance(pl_module, TrainingPlan)
         # resolve dirpath at runtime
         dirpath = self._resolve_ckpt_dir(trainer)

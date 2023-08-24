@@ -141,3 +141,29 @@ def test_changed_adata(schema: AnnDataSchema, adata: AnnData, change_adata: str)
     err_msg = change_adata
     with pytest.raises(ValueError, match=err_msg):
         schema.validate_anndata(adata)
+
+
+@pytest.mark.parametrize("change_obs_categories", [False, True])
+@pytest.mark.parametrize("subset_obs_columns", [False, True])
+def test_validate_obs_columns(
+    ref_adata: AnnData,
+    adata: AnnData,
+    change_obs_categories: bool,
+    subset_obs_columns: bool,
+):
+    if change_obs_categories:
+        adata.obs["C"] = pd.Categorical(
+            np.array(["g", "h"])[np.random.randint(0, 2, n_cell)],
+            categories=["g", "h"],
+        )
+
+    if subset_obs_columns:
+        schema = AnnDataSchema(ref_adata, obs_columns=["A", "B"])
+    else:
+        schema = AnnDataSchema(ref_adata)
+
+    if change_obs_categories and not subset_obs_columns:
+        with pytest.raises(ValueError, match=".obs attribute dtypes for anndata passed in"):
+            schema.validate_anndata(adata)
+    else:
+        schema.validate_anndata(adata)

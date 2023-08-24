@@ -39,9 +39,7 @@ class TestModule(BaseModule):
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
     @staticmethod
-    def _get_fn_args_from_batch(
-        tensor_dict: dict[str, np.ndarray | torch.Tensor]
-    ) -> tuple[tuple, dict]:
+    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
         tensor_dict.pop("obs_names", None)
         return (), tensor_dict
 
@@ -77,19 +75,11 @@ def dadc(tmp_path: Path, request: pytest.FixtureRequest):
 
 
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
-@pytest.mark.parametrize(
-    "num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"]
-)
-@pytest.mark.parametrize(
-    "batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"]
-)
-def test_iterable_dataset(
-    dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int
-):
+@pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
+@pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
+def test_iterable_dataset(dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int):
     n_obs = len(dadc)
-    dataset = IterableDistributedAnnDataCollectionDataset(
-        dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True
-    )
+    dataset = IterableDistributedAnnDataCollectionDataset(dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
@@ -116,12 +106,8 @@ def test_iterable_dataset(
 
 
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
-@pytest.mark.parametrize(
-    "num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"]
-)
-@pytest.mark.parametrize(
-    "batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"]
-)
+@pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
+@pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
 @pytest.mark.parametrize("drop_last", [False, True], ids=["no drop last", "drop last"])
 def test_iterable_dataset_multi_device(
     dadc: DistributedAnnDataCollection,

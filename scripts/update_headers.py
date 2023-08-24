@@ -16,19 +16,13 @@ args = parser.parse_args()
 dirty = []
 
 for basename, comment in file_types:
-    copyright_line = comment.format(
-        "Copyright Contributors to the Cellarium project.\n"
-    )
+    copyright_line = comment.format("Copyright Contributors to the Cellarium project.\n")
     # See https://spdx.org/ids-how
     spdx_line = comment.format("SPDX-License-Identifier: BSD-3-Clause\n")
 
     filenames = glob.glob(os.path.join(root, "**", basename), recursive=True)
     filenames.sort()
-    filenames = [
-        filename
-        for filename in filenames
-        if not any(word in filename for word in blacklist)
-    ]
+    filenames = [filename for filename in filenames if not any(word in filename for word in blacklist)]
     for filename in filenames:
         with open(filename) as f:
             lines = f.readlines()

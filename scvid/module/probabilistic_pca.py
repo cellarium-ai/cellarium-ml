@@ -40,7 +40,7 @@ class ProbabilisticPCA(BasePyroModule):
         seed: Random seed used to initialize parameters. Default: ``0``.
         transform: If not ``None`` is used to transform the input data.
         elbo: ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
-            If `None`, defaults to :class:`~pyro.infer.Trace_ELBO`.
+            If ``None``, defaults to :class:`~pyro.infer.Trace_ELBO`.
     """
 
     def __init__(
@@ -82,17 +82,11 @@ class ProbabilisticPCA(BasePyroModule):
         rng = torch.Generator()
         rng.manual_seed(seed)
         # model parameters
-        self.W_kg = PyroParam(
-            lambda: W_init_scale * torch.randn((k_components, g_genes), generator=rng)
-        )
-        self.sigma = PyroParam(
-            lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive
-        )
+        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((k_components, g_genes), generator=rng))
+        self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)
 
     @staticmethod
-    def _get_fn_args_from_batch(
-        tensor_dict: dict[str, np.ndarray | torch.Tensor]
-    ) -> tuple[tuple, dict]:
+    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         return (x,), {}
 
@@ -153,9 +147,7 @@ class ProbabilisticPCA(BasePyroModule):
 
     @property
     def M_kk(self) -> torch.Tensor:
-        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(
-            self.k_components, device=self.sigma.device
-        )
+        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.k_components, device=self.sigma.device)
 
     @property
     @torch.inference_mode()

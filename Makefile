@@ -7,16 +7,15 @@ uninstall: FORCE
 	pip uninstall scvi-distributed
 
 lint: FORCE
-	flake8
+	ruff check .
 	black --check .
-	isort --check .
 
 license: FORCE
 	python scripts/update_headers.py
 
 format: license FORCE
+	ruff check --fix .
 	black .
-	isort .
 
 typecheck: FORCE
 	mypy scvid test examples

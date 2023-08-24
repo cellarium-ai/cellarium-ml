@@ -23,9 +23,7 @@ class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
     """
 
     def __init__(self, g_genes, target_count: int = 10_000) -> None:
-        transform = ZScoreLog1pNormalize(
-            mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
-        )
+        transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=target_count)
         super().__init__(g_genes, transform=transform)
 
 
@@ -74,17 +72,11 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
             assert g_genes == onepass.g_genes
             # compute W_init_scale and sigma_init_scale
             total_variance = onepass.var_g.sum().item()
-            W_init_scale = math.sqrt(
-                W_init_variance_ratio * total_variance / (g_genes * k_components)
-            )
-            sigma_init_scale = math.sqrt(
-                sigma_init_variance_ratio * total_variance / g_genes
-            )
+            W_init_scale = math.sqrt(W_init_variance_ratio * total_variance / (g_genes * k_components))
+            sigma_init_scale = math.sqrt(sigma_init_variance_ratio * total_variance / g_genes)
             mean_g = onepass.mean_g
         # create transform
-        transform = ZScoreLog1pNormalize(
-            mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
-        )
+        transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=target_count)
         self.mean_var_std_ckpt_path = mean_var_std_ckpt_path
         super().__init__(
             n_cells=n_cells,
@@ -120,9 +112,7 @@ class IncrementalPCAFromCLI(IncrementalPCA):
         perform_mean_correction: bool = False,
         target_count: int = 10_000,
     ) -> None:
-        transform = ZScoreLog1pNormalize(
-            mean_g=0, std_g=None, perform_scaling=False, target_count=target_count
-        )
+        transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=target_count)
         super().__init__(
             g_genes=g_genes,
             k_components=k_components,

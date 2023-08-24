@@ -80,14 +80,10 @@ class TrainingPlan(pl.LightningModule):
     def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizers for the model."""
         optim_config = {}
-        optim_config["optimizer"] = self.optim_fn(
-            self.module.parameters(), **self.optim_kwargs
-        )
+        optim_config["optimizer"] = self.optim_fn(self.module.parameters(), **self.optim_kwargs)
         if self.scheduler_fn is not None:
             assert self.scheduler_kwargs is not None
-            scheduler = self.scheduler_fn(
-                optim_config["optimizer"], **self.scheduler_kwargs
-            )
+            scheduler = self.scheduler_fn(optim_config["optimizer"], **self.scheduler_kwargs)
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
         return optim_config
 
@@ -111,10 +107,19 @@ class TrainingPlan(pl.LightningModule):
             if callable(set_epoch):
                 set_epoch(self.current_epoch)
 
+    def on_train_start(self) -> None:
+        """
+        Calls the ``on_train_start`` method on the module.
+        If the module has ``on_train_start`` method defined, then
+        ``on_train_start`` must be called at the beginning of training.
+        """
+        on_train_start = getattr(self.module, "on_train_start", None)
+        if callable(on_train_start):
+            on_train_start(self.trainer)
+
     def on_train_epoch_end(self) -> None:
         """
         Calls the ``on_epoch_end`` method on the module.
-
         If the module has ``on_epoch_end`` method defined, then
         ``on_epoch_end`` must be called at the end of every epoch.
         """

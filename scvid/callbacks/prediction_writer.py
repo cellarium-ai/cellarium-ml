@@ -40,15 +40,17 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
     number of predictions, and the number of columns will be the same as the prediction size.
     The first column will be the ID of each cell.
 
+    .. note::
+        To prevent an out-of-memory error, set the ``return_predictions`` argument of the
+        :class:`~lightning.pytorch.Trainer` to ``False``.
+
     Args:
         output_dir: The directory to write the predictions to.
         prediction_size: The size of the prediction. If ``None``, the entire prediction will be
             written. If not ``None``, only the first ``prediction_size`` columns will be written.
     """
 
-    def __init__(
-        self, output_dir: Path | str, prediction_size: int | None = None
-    ) -> None:
+    def __init__(self, output_dir: Path | str, prediction_size: int | None = None) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
         self.prediction_size = prediction_size

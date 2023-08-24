@@ -39,12 +39,7 @@ class NonZeroMedianNormalize(nn.Module):
         eps: A value added to the denominator for numerical stability. Default: ``1e-6``
     """
 
-    def __init__(
-        self,
-        median_g: torch.Tensor,
-        target_count: int = 10_000,
-        eps: float = 1e-6,
-    ):
+    def __init__(self, median_g: torch.Tensor, target_count: int = 10_000, eps: float = 1e-6):
         super().__init__()
         self.register_buffer("median_g", median_g)
         self.target_count = target_count
