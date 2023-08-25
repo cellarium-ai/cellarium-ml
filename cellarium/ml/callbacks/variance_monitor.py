@@ -7,7 +7,7 @@ import lightning.pytorch as pl
 import torch
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 
-from scvid.module import ProbabilisticPCA
+from cellarium.ml.module import ProbabilisticPCA
 
 
 class VarianceMonitor(pl.Callback):

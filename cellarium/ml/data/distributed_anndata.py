@@ -87,7 +87,7 @@ class DistributedAnnDataCollection(AnnCollection):
     of LazyAnnData objects.
 
     Underlying anndata files must conform to the same schema
-    (see :class:`~scvid.data.schema.AnnDataSchema.validate_anndata`).
+    (see :class:`~cellarium.ml.data.schema.AnnDataSchema.validate_anndata`).
     The schema is inferred from the first AnnData file in the collection. Individual AnnData files may
     otherwise vary in the number of cells, and the actual content stored in :attr:`X`, :attr:`layers`,
     :attr:`obs` and :attr:`obsm`.

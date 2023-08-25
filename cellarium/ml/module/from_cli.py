@@ -5,7 +5,7 @@ import math
 
 import torch
 
-from scvid.transforms import NormalizeTotal, ZScoreLog1pNormalize
+from cellarium.ml.transforms import NormalizeTotal, ZScoreLog1pNormalize
 
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd

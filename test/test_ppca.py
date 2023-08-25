@@ -10,10 +10,10 @@ import pyro
 import pytest
 import torch
 
-from scvid.callbacks import ModuleCheckpoint, VarianceMonitor
-from scvid.module import ProbabilisticPCA, ProbabilisticPCAFromCLI
-from scvid.train import TrainingPlan
-from scvid.transforms import ZScoreLog1pNormalize
+from cellarium.ml.callbacks import ModuleCheckpoint, VarianceMonitor
+from cellarium.ml.module import ProbabilisticPCA, ProbabilisticPCAFromCLI
+from cellarium.ml.train import TrainingPlan
+from cellarium.ml.transforms import ZScoreLog1pNormalize
 
 from .common import TestDataset
 

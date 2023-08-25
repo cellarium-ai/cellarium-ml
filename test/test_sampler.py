@@ -10,12 +10,12 @@ import pytest
 import torch
 from anndata import AnnData
 
-from scvid.data import (
+from cellarium.ml.data import (
     DistributedAnnDataCollection,
     DistributedAnnDataCollectionDataset,
     DistributedAnnDataCollectionSingleConsumerSampler,
 )
-from scvid.data.util import collate_fn
+from cellarium.ml.data.util import collate_fn
 
 
 @pytest.mark.parametrize("limits", [(4, 10), (2, 5, 10)])
