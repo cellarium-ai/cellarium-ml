@@ -10,7 +10,7 @@ import torch
 
 class BaseModule(torch.nn.Module, metaclass=ABCMeta):
     """
-    Base module for all scvi-distributed modules.
+    Base module for all cellarium-ml modules.
     """
 
     @staticmethod
@@ -29,7 +29,7 @@ class PyroABCMeta(pyro.nn.module._PyroModuleMeta, ABCMeta):
 
 class BasePyroModule(pyro.nn.PyroModule, BaseModule, metaclass=PyroABCMeta):
     """
-    Base module for all scvi-distributed Pyro modules.
+    Base module for all cellarium-ml Pyro modules.
     """
 
 

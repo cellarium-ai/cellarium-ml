@@ -1,6 +1,6 @@
 Datasets & Data Loaders
 =======================
 
-.. automodule:: scvid.data
+.. automodule:: cellarium.ml.data
    :members:
    :show-inheritance:

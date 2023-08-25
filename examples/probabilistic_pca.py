@@ -23,7 +23,7 @@ There are two flavors of probabilistic PCA model that are available:
 Example run::
 
     python examples/probabilistic_pca.py fit \
-        --model.module.class_path scvid.module.ProbabilisticPCAFromCLI \
+        --model.module.class_path cellarium.ml.module.ProbabilisticPCAFromCLI \
         --model.module.init_args.mean_var_std_ckpt_path \
         "runs/onepass/lightning_logs/version_0/checkpoints/module_checkpoint.pt" \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
@@ -31,7 +31,7 @@ Example run::
         --data.shuffle true --data.num_workers 4 \
         --trainer.accelerator gpu --trainer.devices 1 --trainer.max_steps 1000 \
         --trainer.default_root_dir runs/ppca \
-        --trainer.callbacks scvid.callbacks.VarianceMonitor \
+        --trainer.callbacks cellarium.ml.callbacks.VarianceMonitor \
         --trainer.callbacks.mean_var_std_ckpt_path \
         "runs/onepass/lightning_logs/version_0/checkpoints/module_checkpoint.pt"
 
@@ -47,8 +47,8 @@ Example run::
 
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 
-from scvid.data import DistributedAnnDataCollectionDataModule
-from scvid.train import TrainingPlan
+from cellarium.ml.data import DistributedAnnDataCollectionDataModule
+from cellarium.ml.train import TrainingPlan
 
 
 class _LightningCLIWithLinks(LightningCLI):

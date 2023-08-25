@@ -11,13 +11,13 @@ model [1, 2].
 Example run::
 
     python examples/incremental_pca.py fit \
-        --model.module scvid.module.IncrementalPCAFromCLI \
+        --model.module cellarium.ml.module.IncrementalPCAFromCLI \
         --model.module.init_args.k_components 50 \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
         --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
         --data.num_workers 4 \
         --trainer.accelerator gpu --trainer.devices 1 --trainer.default_root_dir runs/ipca \
-        --trainer.callbacks scvid.callbacks.ModuleCheckpoint
+        --trainer.callbacks cellarium.ml.callbacks.ModuleCheckpoint
 
 **References:**
 
@@ -31,8 +31,8 @@ Example run::
 
 from lightning.pytorch.cli import LightningCLI
 
-from scvid.data import DistributedAnnDataCollectionDataModule
-from scvid.train.training_plan import TrainingPlan
+from cellarium.ml.data import DistributedAnnDataCollectionDataModule
+from cellarium.ml.train.training_plan import TrainingPlan
 
 
 class _LightningCLIWithLinks(LightningCLI):
