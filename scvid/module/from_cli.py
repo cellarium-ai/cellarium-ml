@@ -234,7 +234,7 @@ class GeneformerFromCLI(Geneformer):
                     eps=tdigest.transform.eps,
                 ),
                 DivideByScale(
-                    scale=tdigest.median_g,
+                    scale_g=tdigest.median_g,
                     eps=tdigest.transform.eps,
                 ),
             )

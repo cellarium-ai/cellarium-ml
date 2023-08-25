@@ -22,6 +22,7 @@ Table of Contents
    callbacks
    data
    module
+   optim
    trainer
    transforms
 

@@ -49,7 +49,8 @@ class Geneformer(BaseModule, PredictMixin):
         self.mlm_probability = mlm_probability
         self.transform = transform
         self.validate_input = validate_input
-        self.register_buffer("var_ids", torch.arange(2, len(feature_schema) + 2))
+        self.feature_ids: torch.Tensor
+        self.register_buffer("feature_ids", torch.arange(2, len(feature_schema) + 2))
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
@@ -57,8 +58,8 @@ class Geneformer(BaseModule, PredictMixin):
         feature_list = tensor_dict["var_names"]
         return (x, feature_list), {}
 
-    def tokenize(self, x_ng: torch.Tensor, feature_list: Sequence) -> None:
-        tokens = self.var_ids.expand(x_ng.shape)
+    def tokenize(self, x_ng: torch.Tensor, feature_list: Sequence) -> tuple[torch.Tensor, torch.Tensor]:
+        tokens = self.feature_ids.expand(x_ng.shape)
         # sort by median-scaled gene values
         position_ids = torch.argsort(x_ng, dim=1, descending=True)
         position_ids = position_ids[:, : self.model.config.max_position_embeddings]

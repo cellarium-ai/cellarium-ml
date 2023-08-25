@@ -41,6 +41,7 @@ class DivideByScale(nn.Module):
 
     def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6):
         super().__init__()
+        self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)
         self.eps = eps
 

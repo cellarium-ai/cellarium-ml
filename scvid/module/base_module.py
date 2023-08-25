@@ -41,13 +41,7 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor | ModelOutput:
+    def predict(self, *args: Any, **kwargs: Any) -> torch.Tensor | ModelOutput:
         """
-        Perform prediction on data tensor.
-
-        Args:
-            x_ng: Data tensor.
-
-        Returns:
-            Prediction tensor.
+        Perform prediction on input data.
         """

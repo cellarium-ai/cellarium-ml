@@ -12,15 +12,19 @@ class LinearLR(LambdaLR):
     to the initial lr set in the optimizer.
 
     Args:
-        optimizer: The optimizer for which to schedule the learning rate.
-        num_warmup_steps: The number of steps for the warmup phase.
-        num_training_steps: The total number of training steps.
-        last_epoch: The index of the last epoch when resuming training.
+        optimizer:
+            The optimizer for which to schedule the learning rate.
+        num_warmup_steps:
+            The number of steps for the warmup phase.
+        num_training_steps:
+            The total number of training steps.
+        last_epoch:
+            The index of the last epoch when resuming training.
     """
 
     def __init__(
         self,
-        optimizer: type[torch.optim.Optimizer],
+        optimizer: torch.optim.Optimizer,
         num_warmup_steps: int,
         num_training_steps: int,
         last_epoch: int = -1,
