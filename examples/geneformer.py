@@ -1,11 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""
+r"""
 Example: Geneformer
 ===================
 
-This example shows how to fit feature count data to Geneformer model [1].
+This example shows how to fit feature count data to the Geneformer model [1].
 
 Example run::
 

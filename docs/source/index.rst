@@ -10,6 +10,7 @@ Table of Contents
    :maxdepth: 1
    :caption: Examples:
 
+   examples/geneformer
    examples/incremental_pca
    examples/onepass_mean_var_std
    examples/probabilistic_pca

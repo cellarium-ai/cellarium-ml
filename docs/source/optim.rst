@@ -1,5 +1,5 @@
-Optimizers
-==========
+Optimization
+============
 
 .. automodule:: scvid.optim
    :members:
