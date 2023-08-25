@@ -8,13 +8,14 @@ Example: Geneformer
 This example shows how to fit feature count data to Geneformer model [1].
 
 Example run::
+
     python examples/geneformer.py fit \
-        --model.module scvid.module.geneformer.Geneformer \
+        --model.module scvid.module.GeneformerFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
-        --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
-        --data.num_workers 4 \
-        --trainer.accelerator gpu --trainer.devices 1 --trainer.default_root_dir runs/ipca \
-        --trainer.callbacks scvid.callbacks.ModuleCheckpoint
+        --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5 \
+        --data.num_workers 1 \
+        --trainer.accelerator gpu --trainer.devices 1 --trainer.default_root_dir runs/geneformer \
+        --trainer.max_steps 10
 
 **References:**
 
@@ -34,7 +35,7 @@ class _LightningCLIWithLinks(LightningCLI):
     """LightningCLI with custom argument linking."""
 
     def add_arguments_to_parser(self, parser):
-        parser.link_arguments("data.var_names", "model.module.init_args.var_names_schema", apply_on="instantiate")
+        parser.link_arguments("data.var_names", "model.module.init_args.feature_schema", apply_on="instantiate")
 
 
 def main():

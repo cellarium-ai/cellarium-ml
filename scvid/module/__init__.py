@@ -3,6 +3,7 @@
 
 from .base_module import BaseModule, BasePyroModule, PredictMixin
 from .from_cli import (
+    GeneformerFromCLI,
     IncrementalPCAFromCLI,
     OnePassMeanVarStdFromCLI,
     ProbabilisticPCAFromCLI,
@@ -20,6 +21,7 @@ __all__ = [
     "BasePyroModule",
     "GatherLayer",
     "Geneformer",
+    "GeneformerFromCLI",
     "IncrementalPCA",
     "IncrementalPCAFromCLI",
     "OnePassMeanVarStd",

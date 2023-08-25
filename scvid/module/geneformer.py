@@ -6,11 +6,12 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 from transformers import BertForMaskedLM
+from transformers.utils import ModelOutput
 
-from scvid.module import BaseModule
+from scvid.module import BaseModule, PredictMixin
 
 
-class Geneformer(BaseModule):
+class Geneformer(BaseModule, PredictMixin):
     """
     Geneformer model.
 
@@ -22,33 +23,41 @@ class Geneformer(BaseModule):
        (https://www.nature.com/articles/s41586-023-06139-9)
 
     Args:
-        var_names_schema:
+        feature_schema:
             The list of the variable names in the input data.
-        transform:
-            The transform to apply to the input data.
-        mlm_probability:
-            Ratio of tokens to mask for masked language modeling loss.
         model:
             The bert model.
+        mlm_probability:
+            Ratio of tokens to mask for masked language modeling loss.
+        transform:
+            If not ``None`` is used to transform the input data.
+        validate_input:
+            If ``True`` (default) the input data is validated.
     """
 
     def __init__(
-        self, var_names_schema: Sequence, transform: torch.nn.Module, mlm_probability: float, model: BertForMaskedLM
+        self,
+        feature_schema: Sequence,
+        model: BertForMaskedLM,
+        mlm_probability: float,
+        transform: torch.nn.Module | None = None,
+        validate_input: bool = True,
     ):
         super().__init__()
-        self.var_names_schema = var_names_schema
-        self.transform = transform
-        self.mlm_probability = mlm_probability
+        self.feature_schema = feature_schema
         self.model = model
-        self.register_buffer("var_ids", torch.arange(2, len(var_names_schema) + 2))
+        self.mlm_probability = mlm_probability
+        self.transform = transform
+        self.validate_input = validate_input
+        self.register_buffer("var_ids", torch.arange(2, len(feature_schema) + 2))
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
-        var_names = tensor_dict["var_names"]
-        return (x, var_names), {}
+        feature_list = tensor_dict["var_names"]
+        return (x, feature_list), {}
 
-    def tokenize(self, x_ng: torch.Tensor, var_names: Sequence) -> None:
+    def tokenize(self, x_ng: torch.Tensor, feature_list: Sequence) -> None:
         tokens = self.var_ids.expand(x_ng.shape)
         # sort by median-scaled gene values
         position_ids = torch.argsort(x_ng, dim=1, descending=True)
@@ -56,19 +65,20 @@ class Geneformer(BaseModule):
         ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
         input_ids = tokens[ndx[:, None], position_ids]
         # pad genes with zero expression
-        sorted_x_ng = x_ng[ndx, position_ids]
+        sorted_x_ng = x_ng[ndx[:, None], position_ids]
         attention_mask = sorted_x_ng != 0
         input_ids.masked_fill_(~attention_mask, 0)
         return input_ids, attention_mask
 
-    def forward(self, x_ng: torch.Tensor, var_names: Sequence) -> torch.Tensor:
-        # validate
-        assert x_ng.shape[1] == len(var_names), "x_ng must have the same number of columns as var_names."
-        assert np.array_equal(var_names, self.var_names_schema), "var_names must match the schema."
+    def forward(self, x_ng: torch.Tensor, feature_list: Sequence) -> torch.Tensor:
+        if self.validate_input:
+            assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
+            assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
 
-        x_ng = self.transform(x_ng)
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
 
-        input_ids, attention_mask = self.tokenize(x_ng, var_names)
+        input_ids, attention_mask = self.tokenize(x_ng, feature_list)
 
         labels = input_ids.clone()
         labels_probs = torch.full(labels.shape, self.mlm_probability, device=x_ng.device)
@@ -96,14 +106,15 @@ class Geneformer(BaseModule):
         )
         return output.loss
 
-    def predict(self, x_ng: torch.Tensor, var_names: Sequence):
-        # validate
-        assert x_ng.shape[1] == len(var_names), "x_ng must have the same number of columns as var_names."
-        assert np.array_equal(var_names, self.var_names_schema), "var_names must match the schema."
+    def predict(self, x_ng: torch.Tensor, feature_list: Sequence) -> ModelOutput:
+        if self.validate_input:
+            assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
+            assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
 
-        x_ng = self.transform(x_ng)
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
 
-        input_ids, attention_mask = self.tokenize(x_ng, var_names)
+        input_ids, attention_mask = self.tokenize(x_ng, feature_list)
 
         output = self.model(
             input_ids=input_ids,

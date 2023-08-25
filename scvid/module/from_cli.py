@@ -7,8 +7,7 @@ from collections.abc import Sequence
 import torch
 from transformers import BertConfig, BertForMaskedLM
 
-from scvid.transforms import NormalizeTotal, ZScoreLog1pNormalize
-from scvid.transforms.transforms import NonZeroMedianNormalize
+from scvid.transforms import DivideByScale, NormalizeTotal, ZScoreLog1pNormalize
 
 from .geneformer import Geneformer
 from .incremental_pca import IncrementalPCA
@@ -146,12 +145,8 @@ class GeneformerFromCLI(Geneformer):
     Preset default values for the LightningCLI.
 
     Args:
-        var_names_schema:
+        feature_schema:
             The list of the variable names in the input data.
-        tdigest_path:
-            Path to the TDigest checkpoint.
-        mlm_probability:
-            Ratio of tokens to mask for masked language modeling loss.
         hidden_size:
             Dimensionality of the encoder layers and the pooler layer.
         num_hidden_layers:
@@ -184,13 +179,17 @@ class GeneformerFromCLI(Geneformer):
             with Better Relative Position Embeddings (Huang et al.)](https://arxiv.org/abs/2009.13658).
         layer_norm_eps:
             The epsilon used by the layer normalization layers.
+        mlm_probability:
+            Ratio of tokens to mask for masked language modeling loss.
+        tdigest_path:
+            Path to the TDigest checkpoint. If ``None`` then the TDigest is not used.
+        validate_input:
+            If ``True`` (default) the input data is validated.
     """
 
     def __init__(
         self,
-        var_names_schema: Sequence,
-        tdigest_path: str,
-        mlm_probability: float = 0.15,
+        feature_schema: Sequence,
         hidden_size: int = 256,
         num_hidden_layers: int = 6,
         num_attention_heads: int = 4,
@@ -203,10 +202,13 @@ class GeneformerFromCLI(Geneformer):
         initializer_range: float = 0.02,
         position_embedding_type: str = "absolute",
         layer_norm_eps: float = 1e-12,
+        mlm_probability: float = 0.15,
+        tdigest_path: str | None = None,
+        validate_input: bool = True,
     ):
         # model configuration
         config = {
-            "vocab_size": len(var_names_schema) + 2,  # number of genes + 2 for <mask> and <pad> tokens
+            "vocab_size": len(feature_schema) + 2,  # number of genes + 2 for <mask> and <pad> tokens
             "hidden_size": hidden_size,
             "num_hidden_layers": num_hidden_layers,
             "num_attention_heads": num_attention_heads,
@@ -224,12 +226,24 @@ class GeneformerFromCLI(Geneformer):
         config = BertConfig(**config)
         model = BertForMaskedLM(config)
 
-        tdigest = torch.load(tdigest_path)
-        transform = NonZeroMedianNormalize(
-            tdigest.median_g,
-            target_count=tdigest.transform.target_count,
-            eps=tdigest.transform.eps,
-        )
+        if tdigest_path is not None:
+            tdigest = torch.load(tdigest_path)
+            transform = torch.nn.Sequential(
+                NormalizeTotal(
+                    target_count=tdigest.transform.target_count,
+                    eps=tdigest.transform.eps,
+                ),
+                DivideByScale(
+                    scale=tdigest.median_g,
+                    eps=tdigest.transform.eps,
+                ),
+            )
+        else:
+            transform = None
         super().__init__(
-            var_names_schema=var_names_schema, transform=transform, mlm_probability=mlm_probability, model=model
+            feature_schema=feature_schema,
+            model=model,
+            mlm_probability=mlm_probability,
+            transform=transform,
+            validate_input=validate_input,
         )

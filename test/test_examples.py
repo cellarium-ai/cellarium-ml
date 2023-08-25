@@ -12,6 +12,25 @@ EXAMPLES_DIR = os.path.join(os.path.dirname(TESTS_DIR), "examples")
 
 EXAMPLES = [
     (
+        "geneformer.py fit "
+        "--model.module.class_path scvid.module.GeneformerFromCLI "
+        "--data.filenames "
+        "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.000.h5ad "
+        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5 "
+        "--data.num_workers 1 "
+        "--trainer.accelerator cpu --trainer.devices 1 --trainer.max_steps 1"
+    ),
+    (
+        "geneformer.py predict "
+        "--model.module.class_path scvid.module.GeneformerFromCLI "
+        "--data.filenames "
+        "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.000.h5ad "
+        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5 "
+        "--data.num_workers 1 "
+        "--trainer.accelerator cpu --trainer.devices 1 --trainer.max_steps 1 --trainer.return_predictions false "
+        "--trainer.limit_predict_batches 1"
+    ),
+    (
         "probabilistic_pca.py fit "
         "--model.module.class_path scvid.module.ProbabilisticPCAFromCLI "
         "--data.filenames "
