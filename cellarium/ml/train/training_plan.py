@@ -13,7 +13,7 @@ from cellarium.ml.module import BaseModule, PredictMixin
 
 class TrainingPlan(pl.LightningModule):
     """
-    Lightning module task to train scvi-distributed modules.
+    Lightning module task to train cellarium-ml modules.
 
     Args:
         module: A cellarium.ml module to train.

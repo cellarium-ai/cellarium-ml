@@ -1,6 +1,6 @@
 Callbacks
 =========
 
-.. automodule:: scvid.callbacks
+.. automodule:: cellarium.ml.callbacks
    :members:
    :show-inheritance:
