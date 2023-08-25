@@ -4,7 +4,7 @@ install: FORCE
 	pip install -e .[dev]
 
 uninstall: FORCE
-	pip uninstall scvi-distributed
+	pip uninstall cellarium-ml
 
 lint: FORCE
 	ruff check .
@@ -18,7 +18,7 @@ format: license FORCE
 	black .
 
 typecheck: FORCE
-	mypy scvid test examples
+	mypy cellarium test examples
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)

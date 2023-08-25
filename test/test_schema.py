@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from anndata import AnnData
 
-from scvid.data import AnnDataSchema
+from cellarium.ml.data import AnnDataSchema
 
 n_cell_ref, n_cell, n_gene = (3, 5, 4)
 

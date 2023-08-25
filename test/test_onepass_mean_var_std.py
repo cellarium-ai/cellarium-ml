@@ -11,17 +11,17 @@ import torch
 from anndata import AnnData
 from lightning.pytorch.strategies import DDPStrategy
 
-from scvid.callbacks import ModuleCheckpoint
-from scvid.data import (
+from cellarium.ml.callbacks import ModuleCheckpoint
+from cellarium.ml.data import (
     DistributedAnnDataCollection,
     DistributedAnnDataCollectionDataset,
     DistributedAnnDataCollectionSingleConsumerSampler,
     IterableDistributedAnnDataCollectionDataset,
 )
-from scvid.data.util import collate_fn
-from scvid.module import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
-from scvid.train import TrainingPlan
-from scvid.transforms import ZScoreLog1pNormalize
+from cellarium.ml.data.util import collate_fn
+from cellarium.ml.module import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
+from cellarium.ml.train import TrainingPlan
+from cellarium.ml.transforms import ZScoreLog1pNormalize
 
 from .common import TestDataset
 

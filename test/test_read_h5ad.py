@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from scvid.data import read_h5ad_file
+from cellarium.ml.data import read_h5ad_file
 
 
 def test_read_h5ad_file():

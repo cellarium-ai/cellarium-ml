@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from scvid.transforms import ZScoreLog1pNormalize
+from cellarium.ml.transforms import ZScoreLog1pNormalize
 
 n, g, target_count = 100, 3, 10_000
 
