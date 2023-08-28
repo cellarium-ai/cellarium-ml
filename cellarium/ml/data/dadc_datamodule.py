@@ -15,7 +15,7 @@ from .util import collate_fn
 
 class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
     """
-    DataModule for :class:`~scvid.data.dadc_dataset.IterableDistributedAnnDataCollectionDataset`.
+    DataModule for :class:`~cellarium.ml.data.dadc_dataset.IterableDistributedAnnDataCollectionDataset`.
     """
 
     def __init__(

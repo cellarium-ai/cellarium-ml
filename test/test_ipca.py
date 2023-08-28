@@ -10,10 +10,10 @@ import pytest
 import torch
 from lightning.pytorch.strategies import DDPStrategy
 
-from scvid.callbacks import ModuleCheckpoint
-from scvid.module import IncrementalPCA, IncrementalPCAFromCLI
-from scvid.train import TrainingPlan
-from scvid.transforms import ZScoreLog1pNormalize
+from cellarium.ml.callbacks import ModuleCheckpoint
+from cellarium.ml.module import IncrementalPCA, IncrementalPCAFromCLI
+from cellarium.ml.train import TrainingPlan
+from cellarium.ml.transforms import ZScoreLog1pNormalize
 
 from .common import TestDataset
 

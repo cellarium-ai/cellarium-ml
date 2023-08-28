@@ -8,15 +8,15 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 
-from scvid.module import BaseModule, PredictMixin
+from cellarium.ml.module import BaseModule, PredictMixin
 
 
 class TrainingPlan(pl.LightningModule):
     """
-    Lightning module task to train scvi-distributed modules.
+    Lightning module task to train cellarium-ml modules.
 
     Args:
-        module: A scvid module to train.
+        module: A cellarium.ml module to train.
         optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
         optim_kwargs: Keyword arguments for optimiser. If ``None``, defaults to ``default_lr``.

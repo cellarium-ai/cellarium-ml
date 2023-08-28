@@ -11,13 +11,13 @@ import pytest
 import torch
 from anndata import AnnData
 
-from scvid.data import (
+from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from scvid.data.util import collate_fn, get_rank_and_num_replicas
-from scvid.module import BaseModule, GatherLayer
-from scvid.train import TrainingPlan
+from cellarium.ml.data.util import collate_fn, get_rank_and_num_replicas
+from cellarium.ml.module import BaseModule, GatherLayer
+from cellarium.ml.train import TrainingPlan
 
 # RuntimeError: Too many open files. Communication with the workers is no longer possible.
 # Please increase the limit using `ulimit -n` in the shell or change the sharing strategy

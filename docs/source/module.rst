@@ -1,6 +1,6 @@
 Cellarium Models
 ================
 
-.. automodule:: scvid.module
+.. automodule:: cellarium.ml.module
    :members:
    :show-inheritance:

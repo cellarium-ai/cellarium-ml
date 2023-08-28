@@ -10,15 +10,15 @@ import pytest
 import torch
 from anndata import AnnData
 
-from scvid.callbacks import ModuleCheckpoint
-from scvid.data import (
+from cellarium.ml.callbacks import ModuleCheckpoint
+from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from scvid.data.util import collate_fn
-from scvid.module import TDigest, TDigestFromCLI
-from scvid.train import TrainingPlan
-from scvid.transforms import NormalizeTotal
+from cellarium.ml.data.util import collate_fn
+from cellarium.ml.module import TDigest, TDigestFromCLI
+from cellarium.ml.train import TrainingPlan
+from cellarium.ml.transforms import NormalizeTotal
 
 from .common import TestDataset
 

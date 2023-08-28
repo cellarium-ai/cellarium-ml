@@ -1,6 +1,6 @@
 Transforms
 ==========
 
-.. automodule:: scvid.transforms
+.. automodule:: cellarium.ml.transforms
    :members:
    :show-inheritance:

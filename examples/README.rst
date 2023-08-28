@@ -1,4 +1,4 @@
 Code Examples
 =============
 
-Example usages of ``scvi-distributed`` infrastructure for distributed training.
+Example usages of ``cellarium-ml`` infrastructure for distributed training.

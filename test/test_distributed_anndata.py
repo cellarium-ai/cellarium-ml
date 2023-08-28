@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from anndata import AnnData
 
-from scvid.data import (
+from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
     read_h5ad_file,

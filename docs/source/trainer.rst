@@ -1,6 +1,6 @@
 Training
 ========
 
-.. automodule:: scvid.train
+.. automodule:: cellarium.ml.train
    :members:
    :show-inheritance:

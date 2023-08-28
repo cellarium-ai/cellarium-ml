@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import torch
 from transformers import BertConfig, BertForMaskedLM
 
-from scvid.transforms import DivideByScale, NormalizeTotal, ZScoreLog1pNormalize
+from cellarium.ml.transforms import DivideByScale, NormalizeTotal, ZScoreLog1pNormalize
 
 from .geneformer import Geneformer
 from .incremental_pca import IncrementalPCA
