@@ -10,7 +10,7 @@ This example shows how to fit feature count data to the Geneformer model [1].
 Example run::
 
     python examples/geneformer.py fit \
-        --model.module scvid.module.GeneformerFromCLI \
+        --model.module cellarium.ml.module.GeneformerFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
         --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5 \
         --data.num_workers 1 \
@@ -27,8 +27,8 @@ Example run::
 
 from lightning.pytorch.cli import LightningCLI
 
-from scvid.data import DistributedAnnDataCollectionDataModule
-from scvid.train.training_plan import TrainingPlan
+from cellarium.ml.data import DistributedAnnDataCollectionDataModule
+from cellarium.ml.train.training_plan import TrainingPlan
 
 
 class _LightningCLIWithLinks(LightningCLI):

@@ -8,7 +8,7 @@ import torch
 from transformers import BertForMaskedLM
 from transformers.utils import ModelOutput
 
-from scvid.module import BaseModule, PredictMixin
+from cellarium.ml.module import BaseModule, PredictMixin
 
 
 class Geneformer(BaseModule, PredictMixin):
