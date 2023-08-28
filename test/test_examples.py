@@ -67,7 +67,8 @@ EXAMPLES = [
         "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
         "--data.num_workers 2 "
         "--trainer.accelerator cpu --trainer.devices 1 "
-        "--trainer.callbacks cellarium.ml.callbacks.PredictionWriter --trainer.callbacks.output_dir ./output"
+        "--trainer.callbacks cellarium.ml.callbacks.PredictionWriter --trainer.callbacks.output_dir ./output "
+        "--return_predictions false"
     ),
     (
         "tdigest.py fit "
