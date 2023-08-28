@@ -24,6 +24,7 @@ Table of Contents
    module
    trainer
    transforms
+   utils
 
 Indices and tables
 ==================
