@@ -16,7 +16,7 @@ EXAMPLES = [
         "--model.module.class_path cellarium.ml.module.ProbabilisticPCAFromCLI "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
-        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
+        "--data.shard_size 100 --data.max_cache_size 2 --data.batch_size 50 "
         "--data.shuffle true --data.num_workers 2 "
         "--trainer.accelerator cpu --trainer.devices 1 --trainer.max_steps 4"
     ),
@@ -25,7 +25,7 @@ EXAMPLES = [
         "--model.module.class_path cellarium.ml.module.OnePassMeanVarStdFromCLI "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
-        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
+        "--data.shard_size 100 --data.max_cache_size 2 --data.batch_size 50 "
         "--data.num_workers 2 "
         "--trainer.accelerator cpu --trainer.devices 1"
     ),
@@ -35,7 +35,7 @@ EXAMPLES = [
         "--model.module.init_args.k_components 50 "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
-        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
+        "--data.shard_size 100 --data.max_cache_size 2 --data.batch_size 50 "
         "--data.num_workers 2 "
         "--trainer.accelerator cpu --trainer.devices 1"
     ),
@@ -45,7 +45,7 @@ EXAMPLES = [
         "--model.module.init_args.k_components 50 "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
-        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
+        "--data.shard_size 100 --data.max_cache_size 2 --data.batch_size 50 "
         "--data.num_workers 2 "
         "--trainer.accelerator cpu --trainer.devices 1 "
         "--trainer.callbacks cellarium.ml.callbacks.PredictionWriter --trainer.callbacks.output_dir ./output"
@@ -55,7 +55,7 @@ EXAMPLES = [
         "--model.module.class_path cellarium.ml.module.TDigestFromCLI "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.{000..001}.h5ad "
-        "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5000 "
+        "--data.shard_size 100 --data.max_cache_size 2 --data.batch_size 50 "
         "--data.num_workers 2 "
         "--trainer.accelerator cpu --trainer.devices 1"
     ),
