@@ -14,6 +14,8 @@ EXAMPLES = [
     (
         "geneformer.py fit "
         "--model.module.class_path cellarium.ml.module.GeneformerFromCLI "
+        "--model.module.init_args.num_hidden_layers 1 "
+        "--model.module.init_args.num_attention_heads 1 "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.000.h5ad "
         "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5 "
@@ -23,6 +25,8 @@ EXAMPLES = [
     (
         "geneformer.py predict "
         "--model.module.class_path cellarium.ml.module.GeneformerFromCLI "
+        "--model.module.init_args.num_hidden_layers 1 "
+        "--model.module.init_args.num_attention_heads 1 "
         "--data.filenames "
         "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.000.h5ad "
         "--data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 5 "

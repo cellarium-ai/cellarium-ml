@@ -74,5 +74,4 @@ jobs:
         pip install Cython numpy wheel
         pip install .[test]
     - name: Test with pytest
-      timeout-minutes: 10
       run: make test
