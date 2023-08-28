@@ -169,7 +169,7 @@ class GeneformerFromCLI(Geneformer):
             The vocabulary size of the `token_type_ids` passed when calling [`BertModel`] or [`TFBertModel`].
         initializer_range:
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
-        layer_norm_eps (`float`, *optional*, defaults to 1e-12):
+        layer_norm_eps:
             The epsilon used by the layer normalization layers.
         position_embedding_type:
             Type of position embedding. Choose one of `"absolute"`, `"relative_key"`, `"relative_key_query"`. For
@@ -182,7 +182,8 @@ class GeneformerFromCLI(Geneformer):
         mlm_probability:
             Ratio of tokens to mask for masked language modeling loss.
         tdigest_path:
-            Path to the TDigest checkpoint. If ``None`` then the TDigest is not used.
+            Path to the tdigest checkpoint. The tdigest checkpoint is used to normalize the input data by the non-zero
+            median gene count values. If ``None`` then no normalization is applied.
         validate_input:
             If ``True`` (default) the input data is validated.
     """

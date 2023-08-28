@@ -50,6 +50,7 @@ class Geneformer(BaseModule, PredictMixin):
         self.transform = transform
         self.validate_input = validate_input
         self.feature_ids: torch.Tensor
+        # ids for the features, 0 is for padding, 1 is for mask
         self.register_buffer("feature_ids", torch.arange(2, len(feature_schema) + 2))
 
     @staticmethod
@@ -61,14 +62,15 @@ class Geneformer(BaseModule, PredictMixin):
     def tokenize(self, x_ng: torch.Tensor, feature_list: Sequence) -> tuple[torch.Tensor, torch.Tensor]:
         tokens = self.feature_ids.expand(x_ng.shape)
         # sort by median-scaled gene values
-        position_ids = torch.argsort(x_ng, dim=1, descending=True)
-        position_ids = position_ids[:, : self.model.config.max_position_embeddings]
+        sorted_indices = torch.argsort(x_ng, dim=1, descending=True)
+        sorted_indices = sorted_indices[:, : self.model.config.max_position_embeddings]
         ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
-        input_ids = tokens[ndx[:, None], position_ids]
-        # pad genes with zero expression
-        sorted_x_ng = x_ng[ndx[:, None], position_ids]
+        input_ids = tokens[ndx[:, None], sorted_indices]
+        # mask out genes with zero expression
+        sorted_x_ng = x_ng[ndx[:, None], sorted_indices]
         attention_mask = sorted_x_ng != 0
-        input_ids.masked_fill_(~attention_mask, 0)
+        # pad genes with zero expression
+        input_ids[~attention_mask] = 0
         return input_ids, attention_mask
 
     def forward(self, x_ng: torch.Tensor, feature_list: Sequence) -> torch.Tensor:
