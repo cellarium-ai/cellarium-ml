@@ -6,38 +6,10 @@ import math
 import numpy as np
 import torch
 from scipy.sparse import issparse
-from torch.utils.data import Dataset, IterableDataset
+from torch.utils.data import IterableDataset
 
 from .distributed_anndata import DistributedAnnDataCollection
 from .util import get_rank_and_num_replicas, get_worker_info
-
-
-class DistributedAnnDataCollectionDataset(Dataset):
-    r"""
-    DistributedAnnDataCollection Dataset.
-
-    Args:
-        dadc: DistributedAnnDataCollection from which to load the data.
-    """
-
-    def __init__(self, dadc: DistributedAnnDataCollection) -> None:
-        self.dadc = dadc
-
-    def __len__(self) -> int:
-        return len(self.dadc)
-
-    def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
-        r"""
-        Return feature counts for cells at idx.
-
-        If the count data ``X`` is sparse then it is densified.
-        """
-        X = self.dadc[idx].X
-
-        data = {}
-        data["X"] = X.toarray() if issparse(X) else X
-
-        return data
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
