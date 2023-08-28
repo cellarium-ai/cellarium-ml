@@ -1,6 +1,6 @@
 Optimization
 ============
 
-.. automodule:: scvid.optim
+.. automodule:: cellarium.ml.optim
    :members:
    :show-inheritance:
