@@ -63,7 +63,7 @@ where = ["cellarium"]
 
 [tool.setuptools-git-versioning]
 enabled = true
-dev_template = "{tag}.dev{ccount}"
+dev_template = "{tag}.post{ccount}"
 
 [tool.ruff]
 line-length = 120
