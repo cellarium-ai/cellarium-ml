@@ -1,17 +1,17 @@
 # source: https://github.com/marketplace/actions/pypi-publish
-name: Upload Python Package to TestPyPI
+name: Upload Python Package to PyPI
 
 on:
-  push:
-    branches: [main]
+  release:
+    types: [published]
 
 jobs:
-  testpypi-publish:
-    name: Upload commit to TestPyPI
+  pypi-publish:
+    name: Upload commit to PyPI
     runs-on: ubuntu-latest
     environment:
-      name: test-pypi
-      url: https://test.pypi.org/p/cellarium-ml
+      name: pypi
+      url: https://pypi.org/p/cellarium-ml
     permissions:
       id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
     steps:
@@ -29,8 +29,6 @@ jobs:
         pip install build setuptools-git-versioning
     - name: Build package
       run: python -m build
-    - name: Publish package distributions to TestPyPI
+    - name: Publish package distributions to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        repository-url: https://test.pypi.org/legacy/
 
