@@ -26,6 +26,7 @@ Table of Contents
    optim
    trainer
    transforms
+   utils
 
 Indices and tables
 ==================

@@ -13,7 +13,7 @@ Example run::
     python examples/tdigest.py fit \
         --model.module cellarium.ml.module.TDigestFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
-        --data.shard_size 10_000 --data.max_cache_size 2 --data.batch_size 10_000 \
+        --data.shard_size 100 --data.max_cache_size 2 --data.batch_size 100 \
         --data.num_workers 4 \
         --trainer.accelerator cpu --trainer.devices 1 --trainer.default_root_dir runs/tdigest \
         --trainer.callbacks cellarium.ml.callbacks.ModuleCheckpoint
