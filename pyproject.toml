@@ -59,8 +59,7 @@ dev = ["cellarium-ml[docs,lint,mypy,test]"]
 "Discussion Forum" = "https://github.com/cellarium-ai/cellarium-ml/discussions"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["cellarium*"]
+include = ["cellarium.*"]
 
 [tool.setuptools.package-data]
 "cellarium.ml" = ["py.typed"]
