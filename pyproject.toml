@@ -62,6 +62,9 @@ dev = ["cellarium-ml[docs,lint,mypy,test]"]
 where = ["."]
 include = ["cellarium*"]
 
+[tool.setuptools.package-data]
+"cellarium.ml" = ["py.typed"]
+
 [tool.setuptools-git-versioning]
 enabled = true
 dev_template = "{tag}.post{ccount}"
