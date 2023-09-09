@@ -18,7 +18,7 @@ format: license FORCE
 	black .
 
 typecheck: FORCE
-	mypy --explicit-package-bases cellarium test examples
+	mypy cellarium test examples
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)
