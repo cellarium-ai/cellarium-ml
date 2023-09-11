@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, Callable, abstractmethod
 from typing import Any
 
 import numpy as np
@@ -13,6 +13,8 @@ class BaseModule(torch.nn.Module, metaclass=ABCMeta):
     """
     Base module for all cellarium-ml modules.
     """
+
+    __call__: Callable[..., torch.Tensor | None]
 
     @staticmethod
     @abstractmethod
@@ -40,7 +42,14 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, *args: Any, **kwargs: Any) -> torch.Tensor | dict[str, torch.Tensor | None]:
+    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor | dict[str, torch.Tensor | None]:
         """
-        Perform prediction on input data.
+        Perform prediction on data tensor.
+
+        Args:
+            x_ng: Data tensor.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            Prediction tensor or dictionary of prediction tensors.
         """

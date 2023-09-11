@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
@@ -225,7 +226,7 @@ class IncrementalPCA(BaseModule, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         r"""
         Centering and embedding of the input data ``x_ng`` into the principal component space.
         """

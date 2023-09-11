@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import torch
@@ -56,7 +57,7 @@ class Geneformer(BaseModule, PredictMixin):
     def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
         x = tensor_dict["X"]
         feature_list = tensor_dict["var_names"]
-        return (x, feature_list), {}
+        return (x,), {"feature_list": feature_list}
 
     def tokenize(self, x_ng: torch.Tensor, feature_list: Sequence) -> tuple[torch.Tensor, torch.Tensor]:
         tokens = self.feature_ids.expand(x_ng.shape)
@@ -72,7 +73,10 @@ class Geneformer(BaseModule, PredictMixin):
         input_ids[~attention_mask] = 0
         return input_ids, attention_mask
 
-    def forward(self, x_ng: torch.Tensor, feature_list: Sequence) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        assert "feature_list" in kwargs, "feature_list must be provided."
+        feature_list: Sequence = kwargs.pop("feature_list")
+
         if self.validate_input:
             assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
             assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
@@ -108,7 +112,12 @@ class Geneformer(BaseModule, PredictMixin):
         )
         return output.loss
 
-    def predict(self, x_ng: torch.Tensor, feature_list: Sequence) -> dict[str, torch.Tensor | None]:
+    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> dict[str, torch.Tensor | None]:
+        assert "feature_list" in kwargs, "feature_list must be provided."
+        feature_list: Sequence = kwargs.pop("feature_list")
+        output_hidden_states = kwargs.pop("output_hidden_states", True)
+        output_attentions = kwargs.pop("output_attentions", True)
+
         if self.validate_input:
             assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
             assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
@@ -121,7 +130,7 @@ class Geneformer(BaseModule, PredictMixin):
         output = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=True,
-            output_attentions=True,
+            output_hidden_states=output_hidden_states,
+            output_attentions=output_attentions,
         )
-        return dict(output)
+        return output
