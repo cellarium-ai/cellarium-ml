@@ -1,7 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from abc import ABCMeta, Callable, abstractmethod
+from abc import ABCMeta, abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np

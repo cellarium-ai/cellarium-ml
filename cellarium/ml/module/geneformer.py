@@ -115,8 +115,8 @@ class Geneformer(BaseModule, PredictMixin):
     def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> dict[str, torch.Tensor | None]:
         assert "feature_list" in kwargs, "feature_list must be provided."
         feature_list: Sequence = kwargs.pop("feature_list")
-        output_hidden_states = kwargs.pop("output_hidden_states", True)
-        output_attentions = kwargs.pop("output_attentions", True)
+        output_hidden_states: bool = kwargs.pop("output_hidden_states", True)
+        output_attentions: bool = kwargs.pop("output_attentions", True)
 
         if self.validate_input:
             assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
