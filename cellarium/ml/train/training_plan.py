@@ -71,7 +71,7 @@ class TrainingPlan(pl.LightningModule):
             self.log("train_loss", loss)
         return loss
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor:
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor | dict[str, torch.Tensor | None]:
         """Forward pass of the model."""
         assert isinstance(self.module, PredictMixin)
         args, kwargs = self.module._get_fn_args_from_batch(batch)

@@ -7,7 +7,6 @@ from typing import Any
 import numpy as np
 import pyro
 import torch
-from transformers.utils import ModelOutput
 
 
 class BaseModule(torch.nn.Module, metaclass=ABCMeta):
@@ -41,7 +40,7 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, *args: Any, **kwargs: Any) -> torch.Tensor | ModelOutput:
+    def predict(self, *args: Any, **kwargs: Any) -> torch.Tensor | dict[str, torch.Tensor | None]:
         """
         Perform prediction on input data.
         """

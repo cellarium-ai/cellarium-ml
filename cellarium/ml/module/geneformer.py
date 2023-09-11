@@ -6,7 +6,6 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 from transformers import BertForMaskedLM
-from transformers.utils import ModelOutput
 
 from cellarium.ml.module import BaseModule, PredictMixin
 
@@ -109,7 +108,7 @@ class Geneformer(BaseModule, PredictMixin):
         )
         return output.loss
 
-    def predict(self, x_ng: torch.Tensor, feature_list: Sequence) -> ModelOutput:
+    def predict(self, x_ng: torch.Tensor, feature_list: Sequence) -> dict[str, torch.Tensor | None]:
         if self.validate_input:
             assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
             assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
@@ -125,4 +124,4 @@ class Geneformer(BaseModule, PredictMixin):
             output_hidden_states=True,
             output_attentions=True,
         )
-        return output
+        return dict(output)
