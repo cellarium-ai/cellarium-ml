@@ -60,9 +60,19 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
     """
     keys = batch[0].keys()
     collated_batch = {}
+    if len(batch) > 1:
+        assert all(keys == data.keys() for data in batch[1:]), "All dictionaries in the batch must have the same keys."
     for key in keys:
         if key == "obs_names":
             collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
+        elif key == "var_names":
+            # Check that all var_names are the same
+            if len(batch) > 1:
+                assert all(
+                    np.array_equal(batch[0][key], data[key]) for data in batch[1:]
+                ), "All dictionaries in the batch must have the same var_names."
+            # If so, just take the first one
+            collated_batch[key] = batch[0][key]
         else:
             collated_batch[key] = torch.cat([torch.from_numpy(data[key]) for data in batch], dim=0)
     return collated_batch

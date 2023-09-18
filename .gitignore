@@ -4,3 +4,6 @@ scvi_distributed.egg-info/
 runs/
 .mypy_cache/
 docs/build/
+docs/source/examples/
+lightning_logs/
+output/

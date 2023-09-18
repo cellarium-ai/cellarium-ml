@@ -4,6 +4,7 @@
 from collections.abc import Iterable, Sequence
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 from anndata.experimental.multi_files._anncollection import ConvertType
 
@@ -83,6 +84,10 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
     @property
     def n_vars(self) -> int:
         return self.dadc.n_vars
+
+    @property
+    def var_names(self) -> np.ndarray:
+        return self.dadc.var_names.values
 
     def setup(self, stage: str | None = None) -> None:
         """
