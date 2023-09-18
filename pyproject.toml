@@ -26,7 +26,7 @@ dependencies = [
   "braceexpand",
   "google-cloud-storage",
   "jsonargparse[signatures]",
-  "lightning>=2.0.0",
+  "lightning>=2.0.9",
   "pyro-ppl",
   "torch>=2.0.0",
   "transformers",
