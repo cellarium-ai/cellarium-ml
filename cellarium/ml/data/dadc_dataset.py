@@ -74,7 +74,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
         r"""
-        Return feature counts for cells at idx.
+        Returns a dictionary containing the data and metadata for the given index ``idx``.
 
         If the count data ``X`` is sparse then it is densified.
         """

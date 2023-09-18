@@ -211,6 +211,11 @@ class DistributedAnnDataCollection(AnnCollection):
             )
 
     def __getitem__(self, index: Index) -> DistributedAnnDataCollectionView:
+        """
+        Return a distributed view of the collection of anndatas.
+
+        Lazy anndatas corresponding to cells in the index are materialized.
+        """
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
         adatas_indices = [i for i, e in enumerate(resolved_idx[0]) if e is not None]
@@ -284,10 +289,14 @@ class LazyAnnData:
     Accessing attributes under :func:`lazy_getattr` context returns schema attributes.
 
     Args:
-        filename: Name of anndata file.
-        limits: Limits of cell indices (inclusive, exclusive).
-        schema: Schema used as a reference for lazy attributes.
-        cache: Shared LRU cache storing buffered anndatas.
+        filename:
+            Name of anndata file.
+        limits:
+            Limits of cell indices (inclusive, exclusive).
+        schema:
+            Schema used as a reference for lazy attributes.
+        cache:
+            Shared LRU cache storing buffered anndatas.
     """
 
     _lazy_attrs = ["obs", "obsm", "layers", "var", "varm", "varp", "var_names"]
@@ -318,18 +327,22 @@ class LazyAnnData:
 
     @property
     def n_obs(self) -> int:
+        """Number of observations."""
         return self.limits[1] - self.limits[0]
 
     @property
     def n_vars(self) -> int:
+        """Number of variables/features."""
         return len(self.schema.attr_values["var_names"])
 
     @property
     def shape(self) -> tuple[int, int]:
+        """Shape of the data matrix."""
         return self.n_obs, self.n_vars
 
     @property
     def obs_names(self) -> pd.Index:
+        """Return the observation names."""
         if _GETATTR_MODE.lazy:
             # This is only used during the initialization of DistributedAnnDataCollection
             return pd.Index([f"cell_{i}" for i in range(*self.limits)])
@@ -338,6 +351,7 @@ class LazyAnnData:
 
     @property
     def cached(self) -> bool:
+        """Return whether the anndata is cached."""
         return self.filename in self.cache
 
     @property
