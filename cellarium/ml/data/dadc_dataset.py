@@ -28,15 +28,21 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     the user's responsibility to prepare appropriately shuffled data shards.
 
     Args:
-        dadc: DistributedAnnDataCollection from which to load the data.
-        batch_size: How many samples per batch to load. Default: ``1``.
-        shuffle: Set to ``True`` to have the data reshuffled at every epoch. Default: ``False``.
-        seed: Random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
-        drop_last: If ``True``, then the sampler will drop the tail of the data
+        dadc:
+            DistributedAnnDataCollection from which to load the data.
+        batch_size:
+            How many samples per batch to load. Default: ``1``.
+        shuffle:
+            Set to ``True`` to have the data reshuffled at every epoch. Default: ``False``.
+        seed:
+            Random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
+        drop_last:
+            If ``True``, then the sampler will drop the tail of the data
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
             the replicas. Default: ``False``.
-        test_mode: If ``True`` enables tracking of cache and worker informations.
+        test_mode:
+            If ``True`` enables tracking of cache and worker informations.
     """
 
     def __init__(

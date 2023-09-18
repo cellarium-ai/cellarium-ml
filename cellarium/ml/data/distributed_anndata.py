@@ -115,29 +115,41 @@ class DistributedAnnDataCollection(AnnCollection):
         ...     max_cache_size=2)
 
     Args:
-        filenames: Names of anndata files.
-        limits: Limits of cell indices.
-        shard_size: Shard size.
-        last_shard_size: Last shard size.
-        max_cache_size: Max size of the cache. Default: ``1``.
-        cache_size_strictly_enforced: Assert that the number of retrieved anndatas is not more than maxsize.
-        label: Column in :attr:`obs` to place batch information in. If it's ``None``, no column is added.
-        keys: Names for each object being added. These values are used for column values for
+        filenames:
+            Names of anndata files.
+        limits:
+            Limits of cell indices.
+        shard_size:
+            Shard size.
+        last_shard_size:
+            Last shard size.
+        max_cache_size:
+            Max size of the cache. Default: ``1``.
+        cache_size_strictly_enforced:
+            Assert that the number of retrieved anndatas is not more than maxsize.
+        label:
+            Column in :attr:`obs` to place batch information in. If it's ``None``, no column is added.
+        keys:
+            Names for each object being added. These values are used for column values for
             ``label`` or appended to the index if ``index_unique`` is not ``None``. Defaults to filenames.
-        index_unique: Whether to make the index unique by using the keys. If provided, this
+        index_unique:
+            Whether to make the index unique by using the keys. If provided, this
             is the delimeter between ``{orig_idx}{index_unique}{key}``. When ``None``,
             the original indices are kept.
-        convert: You can pass a function or a Mapping of functions which will be applied
+        convert:
+            You can pass a function or a Mapping of functions which will be applied
             to the values of attributes (:attr:`obs`, :attr:`obsm`, :attr:`layers`, :attr:`X`) or to specific
             keys of these attributes in the subset object.
             Specify an attribute and a key (if needed) as keys of the passed Mapping
             and a function to be applied as a value.
-        indices_strict: If  ``True``, arrays from the subset objects will always have the same order
+        indices_strict:
+            If  ``True``, arrays from the subset objects will always have the same order
             of indices as in selection used to subset.
             This parameter can be set to ``False`` if the order in the returned arrays
             is not important, for example, when using them for stochastic gradient descent.
             In this case the performance of subsetting can be a bit better.
-        obs_columns: Subset of columns to validate in the :attr:`obs` attribute.
+        obs_columns:
+            Subset of columns to validate in the :attr:`obs` attribute.
             If ``None``, all columns are validated. Defaults to ``None``.
     """
 
