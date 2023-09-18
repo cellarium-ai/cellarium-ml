@@ -29,6 +29,7 @@ dependencies = [
   "lightning>=2.0.0",
   "pyro-ppl",
   "torch>=2.0.0",
+  "transformers",
 ]
 
 dynamic = ["version"]

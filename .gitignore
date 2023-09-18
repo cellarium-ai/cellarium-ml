@@ -6,3 +6,4 @@ docs/source/examples/
 eggs/
 *.egg*
 lightning_logs/
+output/

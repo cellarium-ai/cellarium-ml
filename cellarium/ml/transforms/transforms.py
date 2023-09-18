@@ -30,6 +30,28 @@ class NormalizeTotal(nn.Module):
         return f"{self.__class__.__name__}(target_count={self.target_count}, eps={self.eps})"
 
 
+class DivideByScale(nn.Module):
+    """
+    Divide gene counts by a scale.
+
+    Args:
+        scale_g: A scale for each gene.
+        eps: A value added to the denominator for numerical stability. Default: ``1e-6``
+    """
+
+    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6):
+        super().__init__()
+        self.scale_g: torch.Tensor
+        self.register_buffer("scale_g", scale_g)
+        self.eps = eps
+
+    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+        return x_ng / (self.scale_g + self.eps)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(scale_g={self.scale_g}, eps={self.eps})"
+
+
 class ZScoreLog1pNormalize(nn.Module):
     """
     Log1pNormalize gene counts with target count and then ZScore with  mean and standard deviation.
