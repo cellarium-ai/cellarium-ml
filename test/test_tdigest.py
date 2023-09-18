@@ -20,7 +20,7 @@ from cellarium.ml.module import TDigest, TDigestFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import NormalizeTotal
 
-from .common import TestDataset
+from .common import TestDataset, requires_crick
 
 
 @pytest.fixture
@@ -49,6 +49,7 @@ def dadc(adata: AnnData, tmp_path: Path):
     )
 
 
+@requires_crick
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [10, 100])
@@ -105,6 +106,7 @@ def test_tdigest_multi_device(
         np.testing.assert_allclose(expected_median, actual_median, rtol=0.01)
 
 
+@requires_crick
 @pytest.mark.parametrize(
     "checkpoint_kwargs",
     [
