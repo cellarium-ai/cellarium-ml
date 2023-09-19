@@ -3,7 +3,7 @@ requires = ["setuptools>=41", "setuptools-git-versioning<2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scvi-distributed"
+name = "cellarium-ml"
 authors = [
   { name="Yerdos Ordabayev", email="yordabay@broadinstitute.org" },
   { name="Mehrtash Babadi", email="mehrtash@broadinstitute.org" },
@@ -24,12 +24,12 @@ dependencies = [
   "anndata",
   "boltons",
   "braceexpand",
-  "crick @ git+https://github.com/dask/crick.git",
   "google-cloud-storage",
   "jsonargparse[signatures]",
-  "lightning>=2.0.0",
+  "lightning>=2.0.9",
   "pyro-ppl",
   "torch>=2.0.0",
+  "transformers",
 ]
 
 dynamic = ["version"]
@@ -51,16 +51,23 @@ docs = [
   "sphinx_gallery",
   "sphinx_rtd_theme",
 ]
-dev = ["scvi-distributed[docs,lint,mypy,test]"]
+dev = ["cellarium-ml[docs,lint,mypy,test]"]
 
 [project.urls]
-"Homepage" = "https://cellarium.ai"
+"Homepage" = "https://cellarium-ai.github.io/cellarium-ml"
 "Source Code" = "https://github.com/cellarium-ai/cellarium-ml"
 "Bug Tracker" = "https://github.com/cellarium-ai/cellarium-ml/issues"
 "Discussion Forum" = "https://github.com/cellarium-ai/cellarium-ml/discussions"
 
+[tool.setuptools.packages.find]
+include = ["cellarium.*"]
+
+[tool.setuptools.package-data]
+"cellarium.ml" = ["py.typed"]
+
 [tool.setuptools-git-versioning]
 enabled = true
+dev_template = "{tag}.post{ccount}"
 
 [tool.ruff]
 line-length = 120
@@ -71,3 +78,4 @@ line-length = 120
 
 [tool.mypy]
 ignore_missing_imports = true
+explicit_package_bases = true

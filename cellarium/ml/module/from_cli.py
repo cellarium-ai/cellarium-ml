@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+from collections.abc import Sequence
 
 import torch
+from transformers import BertConfig, BertForMaskedLM
 
-from cellarium.ml.transforms import NormalizeTotal, ZScoreLog1pNormalize
+from cellarium.ml.transforms import DivideByScale, NormalizeTotal, ZScoreLog1pNormalize
 
+from .geneformer import Geneformer
 from .incremental_pca import IncrementalPCA
 from .onepass_mean_var_std import OnePassMeanVarStd
 from .probabilistic_pca import ProbabilisticPCA
@@ -135,3 +138,113 @@ class TDigestFromCLI(TDigest):
     def __init__(self, g_genes, target_count: int = 10_000, eps: float = 1e-6) -> None:
         transform = NormalizeTotal(target_count=target_count, eps=eps)
         super().__init__(g_genes, transform=transform)
+
+
+class GeneformerFromCLI(Geneformer):
+    """
+    Preset default values for the LightningCLI.
+
+    Args:
+        feature_schema:
+            The list of the variable names in the input data.
+        hidden_size:
+            Dimensionality of the encoder layers and the pooler layer.
+        num_hidden_layers:
+            Number of hidden layers in the Transformer encoder.
+        num_attention_heads:
+            Number of attention heads for each attention layer in the Transformer encoder.
+        intermediate_size:
+            Dimensionality of the "intermediate" (often named feed-forward) layer in the Transformer encoder.
+        hidden_act:
+            The non-linear activation function (function or string) in the encoder and pooler. If string, `"gelu"`,
+            `"relu"`, `"silu"` and `"gelu_new"` are supported.
+        hidden_dropout_prob:
+            The dropout probability for all fully connected layers in the embeddings, encoder, and pooler.
+        attention_probs_dropout_prob:
+            The dropout ratio for the attention probabilities.
+        max_position_embeddings:
+            The maximum sequence length that this model might ever be used with. Typically set this to something large
+            just in case (e.g., 512 or 1024 or 2048).
+        type_vocab_size:
+            The vocabulary size of the `token_type_ids` passed when calling [`BertModel`] or [`TFBertModel`].
+        initializer_range:
+            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
+        layer_norm_eps:
+            The epsilon used by the layer normalization layers.
+        position_embedding_type:
+            Type of position embedding. Choose one of `"absolute"`, `"relative_key"`, `"relative_key_query"`. For
+            positional embeddings use `"absolute"`. For more information on `"relative_key"`, please refer to
+            [Self-Attention with Relative Position Representations (Shaw et al.)](https://arxiv.org/abs/1803.02155).
+            For more information on `"relative_key_query"`, please refer to *Method 4* in [Improve Transformer Models
+            with Better Relative Position Embeddings (Huang et al.)](https://arxiv.org/abs/2009.13658).
+        layer_norm_eps:
+            The epsilon used by the layer normalization layers.
+        mlm_probability:
+            Ratio of tokens to mask for masked language modeling loss.
+        tdigest_path:
+            Path to the tdigest checkpoint. The tdigest checkpoint is used to normalize the input data by the non-zero
+            median gene count values. If ``None`` then no normalization is applied.
+        validate_input:
+            If ``True`` (default) the input data is validated.
+    """
+
+    def __init__(
+        self,
+        feature_schema: Sequence,
+        hidden_size: int = 256,
+        num_hidden_layers: int = 6,
+        num_attention_heads: int = 4,
+        intermediate_size: int = 512,
+        hidden_act: str = "relu",
+        hidden_dropout_prob: float = 0.02,
+        attention_probs_dropout_prob: float = 0.02,
+        max_position_embeddings: int = 2**11,  # 2048
+        type_vocab_size: int = 2,
+        initializer_range: float = 0.02,
+        position_embedding_type: str = "absolute",
+        layer_norm_eps: float = 1e-12,
+        mlm_probability: float = 0.15,
+        tdigest_path: str | None = None,
+        validate_input: bool = True,
+    ):
+        # model configuration
+        config = {
+            "vocab_size": len(feature_schema) + 2,  # number of genes + 2 for <mask> and <pad> tokens
+            "hidden_size": hidden_size,
+            "num_hidden_layers": num_hidden_layers,
+            "num_attention_heads": num_attention_heads,
+            "intermediate_size": intermediate_size,
+            "hidden_act": hidden_act,
+            "attention_probs_dropout_prob": attention_probs_dropout_prob,
+            "hidden_dropout_prob": hidden_dropout_prob,
+            "max_position_embeddings": max_position_embeddings,
+            "type_vocab_size": type_vocab_size,
+            "initializer_range": initializer_range,
+            "position_embedding_type": position_embedding_type,
+            "layer_norm_eps": layer_norm_eps,
+            "pad_token_id": 0,
+        }
+        config = BertConfig(**config)
+        model = BertForMaskedLM(config)
+
+        if tdigest_path is not None:
+            tdigest = torch.load(tdigest_path)
+            transform = torch.nn.Sequential(
+                NormalizeTotal(
+                    target_count=tdigest.transform.target_count,
+                    eps=tdigest.transform.eps,
+                ),
+                DivideByScale(
+                    scale_g=tdigest.median_g,
+                    eps=tdigest.transform.eps,
+                ),
+            )
+        else:
+            transform = None
+        super().__init__(
+            feature_schema=feature_schema,
+            model=model,
+            mlm_probability=mlm_probability,
+            transform=transform,
+            validate_input=validate_input,
+        )

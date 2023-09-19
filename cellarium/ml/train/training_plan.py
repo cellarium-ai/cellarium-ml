@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from importlib import import_module
-from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
+from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 
 from cellarium.ml.module import BaseModule, PredictMixin
 
@@ -71,16 +71,17 @@ class TrainingPlan(pl.LightningModule):
             self.log("train_loss", loss)
         return loss
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor:
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor | dict[str, torch.Tensor | None]:
         """Forward pass of the model."""
         assert isinstance(self.module, PredictMixin)
         args, kwargs = self.module._get_fn_args_from_batch(batch)
         return self.module.predict(*args, **kwargs)
 
-    def configure_optimizers(self) -> dict[str, Any]:
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         """Configure optimizers for the model."""
-        optim_config = {}
-        optim_config["optimizer"] = self.optim_fn(self.module.parameters(), **self.optim_kwargs)
+        optim_config: OptimizerLRSchedulerConfig = {
+            "optimizer": self.optim_fn(self.module.parameters(), **self.optim_kwargs)
+        }
         if self.scheduler_fn is not None:
             assert self.scheduler_kwargs is not None
             scheduler = self.scheduler_fn(optim_config["optimizer"], **self.scheduler_kwargs)

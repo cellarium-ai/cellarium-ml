@@ -1,6 +1,9 @@
 __pycache__/
-scvid/__pycache__/
-scvi_distributed.egg-info/
 runs/
 .mypy_cache/
 docs/build/
+docs/source/examples/
+eggs/
+*.egg*
+lightning_logs/
+output/

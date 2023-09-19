@@ -4,7 +4,6 @@
 import os
 from pathlib import Path
 
-import crick
 import lightning.pytorch as pl
 import numpy as np
 import torch
@@ -30,6 +29,8 @@ class TDigest(BaseModule):
     """
 
     def __init__(self, g_genes: int, transform: torch.nn.Module | None = None) -> None:
+        import crick
+
         super().__init__()
         self.g_genes = g_genes
         self.transform = transform

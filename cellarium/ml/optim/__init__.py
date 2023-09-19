@@ -1,6 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from pkgutil import extend_path
+from .lr_scheduler import LinearLR
 
-__path__ = extend_path(__path__, __name__)
+__all__ = ["LinearLR"]

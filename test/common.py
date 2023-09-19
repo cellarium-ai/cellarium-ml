@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import pytest
 import torch
 
 
@@ -15,3 +16,10 @@ class TestDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         return {"X": self.data[idx]}
+
+
+try:
+    import crick
+except ImportError:
+    crick = None
+requires_crick = pytest.mark.skipif(crick is None, reason="crick is not available")
