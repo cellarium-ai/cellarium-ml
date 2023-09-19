@@ -136,12 +136,10 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
 
     @property
     def n_obs(self) -> int:
-        """Number of observations."""
         return self.dadc.n_obs
 
     @property
     def n_vars(self) -> int:
-        """Number of variables/features."""
         return self.dadc.n_vars
 
     @property
