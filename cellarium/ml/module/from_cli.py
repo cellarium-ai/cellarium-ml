@@ -21,8 +21,10 @@ class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
     Preset default values for the LightningCLI.
 
     Args:
-        g_genes: Number of genes.
-        target_count: Target gene expression count. Default: ``10_000``.
+        g_genes:
+            Number of genes.
+        target_count:
+            Target gene expression count. Default: ``10_000``.
     """
 
     def __init__(self, g_genes, target_count: int = 10_000) -> None:
@@ -35,19 +37,28 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
     Preset default values for the LightningCLI.
 
     Args:
-        n_cells: Number of cells.
-        g_genes: Number of genes.
-        k_components: Number of principcal components.
-        ppca_flavor: Type of the PPCA model. Has to be one of ``marginalized`` or ``linear_vae``.
-        W_init_variance_ratio: Ratio of variance of W_init_scale to variance of data.
+        n_cells:
+            Number of cells.
+        g_genes:
+            Number of genes.
+        k_components:
+            Number of principcal components.
+        ppca_flavor:
+            Type of the PPCA model. Has to be one of ``marginalized`` or ``linear_vae``.
+        W_init_variance_ratio:
+            Ratio of variance of W_init_scale to variance of data.
             If ``mean_var_std_ckpt_path`` is ``None``, then ``W_init_scale`` is set to
             ``W_init_variance_ratio``.
-        sigma_init_variance_ratio: Ratio of variance of sigma_init_scale to variance of data.
+        sigma_init_variance_ratio:
+            Ratio of variance of sigma_init_scale to variance of data.
             If ``mean_var_std_ckpt_path`` is ``None``, then ``sigma_init_scale`` is set to
             ``sigma_init_variance_ratio``.
-        seed: Random seed used to initialize parameters. Default: ``0``.
-        target_count: Target gene expression count. Default: ``10_000``.
-        mean_var_std_ckpt_path: Path to checkpoint containing OnePassMeanVarStd.
+        seed:
+            Random seed used to initialize parameters. Default: ``0``.
+        target_count:
+            Target gene expression count. Default: ``10_000``.
+        mean_var_std_ckpt_path:
+            Path to checkpoint containing OnePassMeanVarStd.
     """
 
     def __init__(
@@ -99,12 +110,16 @@ class IncrementalPCAFromCLI(IncrementalPCA):
     Preset default values for the LightningCLI.
 
     Args:
-        k_components: Number of principal components.
-        svd_lowrank_niter: Number of iterations for the low-rank SVD algorithm. Default: ``2``.
-        perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
+        k_components:
+            Number of principal components.
+        svd_lowrank_niter:
+            Number of iterations for the low-rank SVD algorithm. Default: ``2``.
+        perform_mean_correction:
+            If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
-        target_count: Target gene epxression count. Default: ``10_000``
+        target_count:
+            Target gene epxression count. Default: ``10_000``
     """
 
     def __init__(
@@ -130,9 +145,12 @@ class TDigestFromCLI(TDigest):
     Preset default values for the LightningCLI.
 
     Args:
-        g_genes: Number of genes.
-        target_count: Target gene epxression count. Default: ``10_000``
-        eps: A value added to the denominator for numerical stability. Default: ``1e-6``
+        g_genes:
+            Number of genes.
+        target_count:
+            Target gene epxression count. Default: ``10_000``
+        eps: 
+            A value added to the denominator for numerical stability. Default: ``1e-6``
     """
 
     def __init__(self, g_genes, target_count: int = 10_000, eps: float = 1e-6) -> None:

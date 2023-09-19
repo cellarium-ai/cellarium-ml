@@ -17,8 +17,10 @@ class OnePassMeanVarStd(BaseModule):
     using running sums and running squared sums.
 
     Args:
-        g_genes: Number of genes.
-        transform: If not ``None`` is used to transform the input data.
+        g_genes:
+            Number of genes.
+        transform:
+            If not ``None`` is used to transform the input data.
     """
 
     def __init__(self, g_genes: int, transform: nn.Module | None = None) -> None:

@@ -30,16 +30,26 @@ class ProbabilisticPCA(BasePyroModule):
        (https://openreview.net/pdf?id=r1xaVLUYuE)
 
     Args:
-        n_cells: Number of cells.
-        g_genes: Number of genes.
-        k_components: Number of principal components.
-        ppca_flavor: Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
-        mean_g: Mean gene expression of the input data.
-        W_init_scale: Scale of the random initialization of the `W_kg` parameter.
-        sigma_init_scale: Initialization value of the `sigma` parameter.
-        seed: Random seed used to initialize parameters. Default: ``0``.
-        transform: If not ``None`` is used to transform the input data.
-        elbo: ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
+        n_cells:
+            Number of cells.
+        g_genes:
+            Number of genes.
+        k_components:
+            Number of principal components.
+        ppca_flavor:
+            Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
+        mean_g:
+            Mean gene expression of the input data.
+        W_init_scale:
+            Scale of the random initialization of the `W_kg` parameter.
+        sigma_init_scale:
+            Initialization value of the `sigma` parameter.
+        seed: 
+            Random seed used to initialize parameters. Default: ``0``.
+        transform: 
+            If not ``None`` is used to transform the input data.
+        elbo: 
+            ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
             If ``None``, defaults to :class:`~pyro.infer.Trace_ELBO`.
     """
 

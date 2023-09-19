@@ -28,13 +28,18 @@ class IncrementalPCA(BaseModule, PredictMixin):
        (https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf)
 
     Args:
-        g_genes: Number of genes.
-        k_components: Number of principal components.
-        svd_lowrank_niter: Number of iterations for the low-rank SVD algorithm. Default: ``2``.
-        perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
+        g_genes: 
+            Number of genes.
+        k_components: 
+            Number of principal components.
+        svd_lowrank_niter: 
+            Number of iterations for the low-rank SVD algorithm. Default: ``2``.
+        perform_mean_correction: 
+            If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
-        transform: If not ``None`` is used to transform the input data.
+        transform: 
+            If not ``None`` is used to transform the input data.
     """
 
     def __init__(
