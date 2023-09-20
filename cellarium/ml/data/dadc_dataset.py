@@ -78,6 +78,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         data["X"] = X.toarray() if issparse(X) else X
         data["obs_names"] = self.dadc[idx].obs_names.values.copy()
         data["var_names"] = self.dadc.var_names.values.copy()
+        data["cell_types"] = self.dadc[idx].obs["cell_type"].values.codes.copy()
 
         # for testing purposes
         if self.test_mode:

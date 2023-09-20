@@ -86,6 +86,10 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         return self.dadc.n_vars
 
     @property
+    def n_cell_types(self) -> int:
+        return len(self.dadc[0].obs["cell_type"].dtype.categories)
+
+    @property
     def var_names(self) -> np.ndarray:
         return self.dadc.var_names.values
 
