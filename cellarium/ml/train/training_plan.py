@@ -21,13 +21,13 @@ class TrainingPlan(pl.LightningModule):
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
-        optim_kwargs: 
+        optim_kwargs:
             Keyword arguments for optimiser. If ``None``, defaults to ``default_lr``.
-        scheduler_fn: 
+        scheduler_fn:
             A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
-        scheduler_kwargs: 
+        scheduler_kwargs:
             Keyword arguments for lr scheduler.
-        default_lr: 
+        default_lr:
             Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
     """
 

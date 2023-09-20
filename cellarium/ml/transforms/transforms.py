@@ -10,9 +10,9 @@ class NormalizeTotal(nn.Module):
     Normalize total gene counts per cell to target count.
 
     Args:
-        target_count: 
+        target_count:
             Target gene epxression count. Default: ``10_000``
-        eps: 
+        eps:
             A value added to the denominator for numerical stability. Default: ``1e-6``
     """
 
@@ -37,9 +37,9 @@ class DivideByScale(nn.Module):
     Divide gene counts by a scale.
 
     Args:
-        scale_g: 
+        scale_g:
             A scale for each gene.
-        eps: 
+        eps:
             A value added to the denominator for numerical stability. Default: ``1e-6``
     """
 
@@ -61,15 +61,15 @@ class ZScoreLog1pNormalize(nn.Module):
     Log1pNormalize gene counts with target count and then ZScore with  mean and standard deviation.
 
     Args:
-        mean_g: 
+        mean_g:
             Means for each gene.
-        std_g: 
+        std_g:
             Standard deviations for each gene.
-        perform_scaling: 
+        perform_scaling:
             A boolean value that when set to ``True``, scaling by ``std_g`` is applied.
-        target_count: 
+        target_count:
             Target gene epxression count. Default: ``10_000``
-        eps: 
+        eps:
             A value added to the denominator for numerical stability. Default: ``1e-6``
     """
 

@@ -25,11 +25,11 @@ class ModuleCheckpoint(pl.Callback):
             and if the Trainer uses a logger, the path will also contain logger name and version.
         filename:
             Filename to save the module checkpoint. Default: ``"module_checkpoint.pt"``.
-        save_on_train_batch_end: 
+        save_on_train_batch_end:
             Whether to save the module on train batch end. Default: ``False``.
-        save_on_train_epoch_end: 
+        save_on_train_epoch_end:
             Whether to save the module on train epoch end. Default: ``False``.
-        save_on_train_end: 
+        save_on_train_end:
             Whether to save the module on train end. Default: ``True``.
     """
 

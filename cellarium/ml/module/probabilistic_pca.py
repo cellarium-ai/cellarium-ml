@@ -44,11 +44,11 @@ class ProbabilisticPCA(BasePyroModule):
             Scale of the random initialization of the `W_kg` parameter.
         sigma_init_scale:
             Initialization value of the `sigma` parameter.
-        seed: 
+        seed:
             Random seed used to initialize parameters. Default: ``0``.
-        transform: 
+        transform:
             If not ``None`` is used to transform the input data.
-        elbo: 
+        elbo:
             ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
             If ``None``, defaults to :class:`~pyro.infer.Trace_ELBO`.
     """

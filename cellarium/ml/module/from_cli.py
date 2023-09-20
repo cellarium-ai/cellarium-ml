@@ -149,7 +149,7 @@ class TDigestFromCLI(TDigest):
             Number of genes.
         target_count:
             Target gene epxression count. Default: ``10_000``
-        eps: 
+        eps:
             A value added to the denominator for numerical stability. Default: ``1e-6``
     """
 
