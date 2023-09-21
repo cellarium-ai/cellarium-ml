@@ -5,7 +5,6 @@ import math
 
 import numpy as np
 import torch
-from scipy.sparse import issparse
 from torch.utils.data import IterableDataset
 
 from .distributed_anndata import DistributedAnnDataCollection
@@ -72,13 +71,16 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         If the count data ``X`` is sparse then it is densified.
         """
-        X = self.dadc[idx].X
 
         data = {}
-        data["X"] = X.toarray() if issparse(X) else X
-        data["obs_names"] = self.dadc[idx].obs_names.values.copy()
-        data["var_names"] = self.dadc.var_names.values.copy()
-        data["cell_types"] = self.dadc[idx].obs["cell_type"].values.codes.copy()
+        for attr, value in self.dadc.convert.items():
+            if callable(value):
+                data[attr] = getattr(self.dadc[idx], attr)
+                continue
+            if isinstance(value, dict):
+                for key, v in value.items():
+                    data[key] = getattr(self.dadc[idx], attr)[key]
+                continue
 
         # for testing purposes
         if self.test_mode:

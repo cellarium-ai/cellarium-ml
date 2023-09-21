@@ -6,10 +6,9 @@ from collections.abc import Iterable, Sequence
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from anndata.experimental.multi_files._anncollection import ConvertType
 
 from .dadc_dataset import IterableDistributedAnnDataCollectionDataset
-from .distributed_anndata import DistributedAnnDataCollection
+from .distributed_anndata import ConvertType, DistributedAnnDataCollection
 from .util import collate_fn
 
 
@@ -87,6 +86,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
 
     @property
     def n_cell_types(self) -> int:
+        return 666
         return len(self.dadc[0].obs["cell_type"].dtype.categories)
 
     @property

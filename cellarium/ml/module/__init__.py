@@ -12,6 +12,7 @@ from .from_cli import (
 from .gather import GatherLayer
 from .geneformer import Geneformer
 from .incremental_pca import IncrementalPCA
+from .logistic_regression import LogisticRegression
 from .onepass_mean_var_std import OnePassMeanVarStd
 from .probabilistic_pca import ProbabilisticPCA
 from .tdigest import TDigest
@@ -24,6 +25,7 @@ __all__ = [
     "GeneformerFromCLI",
     "IncrementalPCA",
     "IncrementalPCAFromCLI",
+    "LogisticRegression",
     "OnePassMeanVarStd",
     "OnePassMeanVarStdFromCLI",
     "PredictMixin",

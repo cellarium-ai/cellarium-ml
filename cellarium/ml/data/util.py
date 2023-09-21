@@ -6,6 +6,7 @@ import warnings
 import numpy as np
 import torch
 import torch.distributed as dist
+from scipy.sparse import issparse
 from torch.utils.data import get_worker_info as _get_worker_info
 
 
@@ -76,3 +77,15 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
         else:
             collated_batch[key] = torch.cat([torch.from_numpy(data[key]) for data in batch], dim=0)
     return collated_batch
+
+
+def densify(data):
+    return data.toarray() if issparse(data) else data
+
+
+def get_codes(data):
+    return data.values.codes.copy()
+
+
+def get_values(data):
+    return data.values.copy()
