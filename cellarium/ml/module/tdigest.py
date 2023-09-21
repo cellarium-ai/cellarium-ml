@@ -17,11 +17,10 @@ class TDigest(BaseModule):
     Compute an approximate non-zero histogram of the distribution of each gene in a batch of
     cells using t-digests.
 
-    **Reference**:
+    **References**:
 
-    1. Dunning, Ted, and Otmar Ertl. "Computing Extremely Accurate
-       Quantiles Using T-Digests." https://github.com/tdunning/t-digest/blob/
-       master/docs/t-digest-paper/histo.pdf
+    1. `Computing Extremely Accurate Quantiles Using T-Digests (Dunning et al.)
+       <https://github.com/tdunning/t-digest/blob/master/docs/t-digest-paper/histo.pdf>`_.
 
     Args:
         g_genes:

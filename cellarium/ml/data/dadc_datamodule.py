@@ -21,20 +21,24 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         filenames:
             Names of anndata files.
         limits:
-            Limits of cell indices.
+            List of global cell indices (limits) for the last cells in each shard.
+            If ``None``, the limits are inferred from ``shard_size`` and ``last_shard_size``.
         shard_size:
-            Shard size.
+            The number of cells in each anndata file (shard).
+            Must be specified if the ``limits`` is not provided.
         last_shard_size:
-            Last shard size.
+            Last shard size. If not ``None``, the last shard will have this size possibly
+            different from ``shard_size``.
         max_cache_size:
-            Max size of the cache. Default: ``1``.
+            Max size of the cache.
         cache_size_strictly_enforced:
             Assert that the number of retrieved anndatas is not more than maxsize.
         label:
             Column in :attr:`obs` to place batch information in. If it's ``None``, no column is added.
         keys:
             Names for each object being added. These values are used for column values for
-            ``label`` or appended to the index if ``index_unique`` is not ``None``. Defaults to filenames.
+            ``label`` or appended to the index if ``index_unique`` is not ``None``.
+            If ``None``, ``keys`` are set to ``filenames``.
         index_unique:
             Whether to make the index unique by using the keys. If provided, this
             is the delimeter between ``{orig_idx}{index_unique}{key}``. When ``None``,
@@ -53,23 +57,22 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
             In this case the performance of subsetting can be a bit better.
         obs_columns:
             Subset of columns to validate in the :attr:`obs` attribute.
-            If ``None``, all columns are validated. Defaults to ``None``.
+            If ``None``, all columns are validated.
         batch_size:
-            How many samples per batch to load. Default: ``1``.
+            How many samples per batch to load.
         shuffle:
-            Set to ``True`` to have the data reshuffled at every epoch. Default: ``False``.
+            If ``True``, the data is reshuffled at every epoch.
         seed:
-            Random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
+            Random seed used to shuffle the sampler if :attr:`shuffle=True`.
         drop_last:
             If ``True``, then the sampler will drop the tail of the data
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
-            the replicas. Default: ``False``.
+            the replicas.
         test_mode:
             If ``True`` enables tracking of cache and worker informations.
         num_workers:
             How many subprocesses to use for data loading. ``0`` means that the data will be loaded in the main process.
-            Default: ``0``.
     """
 
     def __init__(
@@ -150,6 +153,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         """
         .. note::
            setup is called from every process across all the nodes. Setting state here is recommended.
+
         """
         self.dataset = IterableDistributedAnnDataCollectionDataset(
             dadc=self.dadc,

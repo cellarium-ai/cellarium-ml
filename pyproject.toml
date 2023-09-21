@@ -50,6 +50,8 @@ docs = [
   "sphinx",
   "sphinx_gallery",
   "sphinx_rtd_theme",
+  "sphinx-autodoc-typehints",
+  "sphinx-copybutton",
 ]
 dev = ["cellarium-ml[docs,lint,mypy,test]"]
 

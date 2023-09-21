@@ -11,9 +11,9 @@ class NormalizeTotal(nn.Module):
 
     Args:
         target_count:
-            Target gene epxression count. Default: ``10_000``
+            Target gene epxression count.
         eps:
-            A value added to the denominator for numerical stability. Default: ``1e-6``
+            A value added to the denominator for numerical stability.
     """
 
     def __init__(
@@ -40,7 +40,7 @@ class DivideByScale(nn.Module):
         scale_g:
             A scale for each gene.
         eps:
-            A value added to the denominator for numerical stability. Default: ``1e-6``
+            A value added to the denominator for numerical stability.
     """
 
     def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6):
@@ -68,9 +68,9 @@ class ZScoreLog1pNormalize(nn.Module):
         perform_scaling:
             A boolean value that when set to ``True``, scaling by ``std_g`` is applied.
         target_count:
-            Target gene epxression count. Default: ``10_000``
+            Target gene epxression count.
         eps:
-            A value added to the denominator for numerical stability. Default: ``1e-6``
+            A value added to the denominator for numerical stability.
     """
 
     def __init__(

@@ -23,10 +23,10 @@ def get_highly_variable_genes(
     r"""
     Get Highly variably genes. This is a replication of Highly Variable Genes from Scanpy with a ``Seurat`` flavor.
 
-    **Reference:**
+    **References:**
 
-    1. *Highly Variable Genes from Scanpy*,
-       (https://scanpy.readthedocs.io/en/stable/generated/scanpy.pp.highly_variable_genes.html)
+    1. `Highly Variable Genes from Scanpy
+       <https://scanpy.readthedocs.io/en/stable/generated/scanpy.pp.highly_variable_genes.html>`_.
 
     Args:
         gene_names:

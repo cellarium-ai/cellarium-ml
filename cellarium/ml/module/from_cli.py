@@ -24,7 +24,7 @@ class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
         g_genes:
             Number of genes.
         target_count:
-            Target gene expression count. Default: ``10_000``.
+            Target gene expression count.
     """
 
     def __init__(self, g_genes, target_count: int = 10_000) -> None:
@@ -54,9 +54,9 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
             If ``mean_var_std_ckpt_path`` is ``None``, then ``sigma_init_scale`` is set to
             ``sigma_init_variance_ratio``.
         seed:
-            Random seed used to initialize parameters. Default: ``0``.
+            Random seed used to initialize parameters.
         target_count:
-            Target gene expression count. Default: ``10_000``.
+            Target gene expression count.
         mean_var_std_ckpt_path:
             Path to checkpoint containing OnePassMeanVarStd.
     """
@@ -113,13 +113,13 @@ class IncrementalPCAFromCLI(IncrementalPCA):
         k_components:
             Number of principal components.
         svd_lowrank_niter:
-            Number of iterations for the low-rank SVD algorithm. Default: ``2``.
+            Number of iterations for the low-rank SVD algorithm.
         perform_mean_correction:
             If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
         target_count:
-            Target gene epxression count. Default: ``10_000``
+            Target gene epxression count.
     """
 
     def __init__(
@@ -148,9 +148,9 @@ class TDigestFromCLI(TDigest):
         g_genes:
             Number of genes.
         target_count:
-            Target gene epxression count. Default: ``10_000``
+            Target gene epxression count.
         eps:
-            A value added to the denominator for numerical stability. Default: ``1e-6``
+            A value added to the denominator for numerical stability.
     """
 
     def __init__(self, g_genes, target_count: int = 10_000, eps: float = 1e-6) -> None:
@@ -174,8 +174,8 @@ class GeneformerFromCLI(Geneformer):
         intermediate_size:
             Dimensionality of the "intermediate" (often named feed-forward) layer in the Transformer encoder.
         hidden_act:
-            The non-linear activation function (function or string) in the encoder and pooler. If string, `"gelu"`,
-            `"relu"`, `"silu"` and `"gelu_new"` are supported.
+            The non-linear activation function (function or string) in the encoder and pooler. If string, ``"gelu"``,
+            ``"relu"``, ``"silu"`` and ``"gelu_new"`` are supported.
         hidden_dropout_prob:
             The dropout probability for all fully connected layers in the embeddings, encoder, and pooler.
         attention_probs_dropout_prob:
@@ -184,17 +184,15 @@ class GeneformerFromCLI(Geneformer):
             The maximum sequence length that this model might ever be used with. Typically set this to something large
             just in case (e.g., 512 or 1024 or 2048).
         type_vocab_size:
-            The vocabulary size of the `token_type_ids` passed when calling [`BertModel`] or [`TFBertModel`].
+            The vocabulary size of the ``token_type_ids`` passed when calling :class:`transformers.BertModel`.
         initializer_range:
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
-        layer_norm_eps:
-            The epsilon used by the layer normalization layers.
         position_embedding_type:
-            Type of position embedding. Choose one of `"absolute"`, `"relative_key"`, `"relative_key_query"`. For
-            positional embeddings use `"absolute"`. For more information on `"relative_key"`, please refer to
-            [Self-Attention with Relative Position Representations (Shaw et al.)](https://arxiv.org/abs/1803.02155).
-            For more information on `"relative_key_query"`, please refer to *Method 4* in [Improve Transformer Models
-            with Better Relative Position Embeddings (Huang et al.)](https://arxiv.org/abs/2009.13658).
+            Type of position embedding. Choose one of ``"absolute"``, ``"relative_key"``, ``"relative_key_query"``. For
+            positional embeddings use ``"absolute"``. For more information on ``"relative_key"``, please refer to
+            `Self-Attention with Relative Position Representations (Shaw et al.) <https://arxiv.org/abs/1803.02155>`_.
+            For more information on ``"relative_key_query"``, please refer to *Method 4* in `Improve Transformer Models
+            with Better Relative Position Embeddings (Huang et al.) <https://arxiv.org/abs/2009.13658>`_.
         layer_norm_eps:
             The epsilon used by the layer normalization layers.
         mlm_probability:
@@ -203,7 +201,7 @@ class GeneformerFromCLI(Geneformer):
             Path to the tdigest checkpoint. The tdigest checkpoint is used to normalize the input data by the non-zero
             median gene count values. If ``None`` then no normalization is applied.
         validate_input:
-            If ``True`` (default) the input data is validated.
+            If ``True`` the input data is validated.
     """
 
     def __init__(
@@ -216,7 +214,7 @@ class GeneformerFromCLI(Geneformer):
         hidden_act: str = "relu",
         hidden_dropout_prob: float = 0.02,
         attention_probs_dropout_prob: float = 0.02,
-        max_position_embeddings: int = 2**11,  # 2048
+        max_position_embeddings: int = 2048,
         type_vocab_size: int = 2,
         initializer_range: float = 0.02,
         position_embedding_type: str = "absolute",
