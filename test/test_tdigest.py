@@ -15,7 +15,7 @@ from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.data.util import collate_fn
+from cellarium.ml.data.util import collate_fn, identity
 from cellarium.ml.module import TDigest, TDigestFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import NormalizeTotal
@@ -69,7 +69,7 @@ def test_tdigest_multi_device(
     batch_size = batch_size // devices
 
     # prepare dataloader
-    dataset = IterableDistributedAnnDataCollectionDataset(dadc, batch_size=batch_size, shuffle=shuffle)
+    dataset = IterableDistributedAnnDataCollectionDataset(dadc, {"X": identity}, batch_size=batch_size, shuffle=shuffle)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,

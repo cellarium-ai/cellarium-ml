@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import numpy as np
 import pytest
 import torch
 
@@ -8,13 +9,13 @@ import torch
 class TestDataset(torch.utils.data.Dataset):
     """A simple dataset for testing purposes."""
 
-    def __init__(self, data):
+    def __init__(self, data: np.ndarray) -> None:
         self.data = data
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         return {"X": self.data[idx]}
 
 

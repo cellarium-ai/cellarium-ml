@@ -6,10 +6,9 @@ from collections.abc import Iterable, Sequence
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from anndata.experimental.multi_files._anncollection import ConvertType
 
 from .dadc_dataset import IterableDistributedAnnDataCollectionDataset
-from .distributed_anndata import DistributedAnnDataCollection
+from .distributed_anndata import ConvertType, DistributedAnnDataCollection
 from .util import collate_fn
 
 
@@ -30,9 +29,9 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         label: str | None = None,
         keys: Sequence[str] | None = None,
         index_unique: str | None = None,
-        convert: ConvertType | None = None,
         indices_strict: bool = True,
         # IterableDistributedAnnDataCollectionDataset args
+        convert: ConvertType | None = None,
         batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
@@ -52,9 +51,9 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         self.label = label
         self.keys = keys
         self.index_unique = index_unique
-        self.convert = convert
         self.indices_strict = indices_strict
         # IterableDistributedAnnDataCollectionDataset args
+        self.convert = convert or {}
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -73,7 +72,6 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
             label=self.label,
             keys=self.keys,
             index_unique=self.index_unique,
-            convert=self.convert,
             indices_strict=self.indices_strict,
         )
 
@@ -96,6 +94,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         """
         self.dataset = IterableDistributedAnnDataCollectionDataset(
             dadc=self.dadc,
+            convert=self.convert,
             batch_size=self.batch_size,
             shuffle=self.shuffle,
             seed=self.seed,
