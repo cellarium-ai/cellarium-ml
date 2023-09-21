@@ -15,7 +15,7 @@ class TestDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         return {"X": self.data[idx]}
 
 
