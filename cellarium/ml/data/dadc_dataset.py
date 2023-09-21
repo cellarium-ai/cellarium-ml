@@ -26,7 +26,6 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     cells coming from the same tissue or experiment), then this assumption is violated. It is
     the user's responsibility to prepare appropriately shuffled data shards.
 
-
     Example of ``convert``::
 
         {
