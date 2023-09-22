@@ -48,8 +48,10 @@ class PredictMixin(metaclass=ABCMeta):
         Perform prediction on data tensor.
 
         Args:
-            x_ng: Data tensor.
-            **kwargs: Additional keyword arguments.
+            x_ng:
+                Data tensor.
+            **kwargs:
+                Additional keyword arguments.
 
         Returns:
             Prediction tensor or dictionary of prediction tensors.

@@ -41,18 +41,18 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
             in the ``__getitem__`` method and how to convert them.
         batch_size:
-            How many samples per batch to load. Default: ``1``.
+            How many samples per batch to load.
         shuffle:
-            Set to ``True`` to have the data reshuffled at every epoch. Default: ``False``.
+            If ``True``, the data is reshuffled at every epoch.
         seed:
-            Random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
+            Random seed used to shuffle the sampler if :attr:`shuffle=True`.
         drop_last:
             If ``True``, then the sampler will drop the tail of the data
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
-            the replicas. Default: ``False``.
+            the replicas.
         test_mode:
-            If ``True`` enables tracking of cache and worker informations.
+            If ``True``, then tracking of cache and worker informations will be enabled.
     """
 
     def __init__(

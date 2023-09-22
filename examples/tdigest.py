@@ -12,17 +12,20 @@ Example run::
 
     python examples/tdigest.py fit \
         --model.module cellarium.ml.module.TDigestFromCLI \
-        --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
-        --data.shard_size 100 --data.max_cache_size 2 --data.batch_size 100 \
+        --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+        --data.shard_size 100 \
+        --data.max_cache_size 2 \
+        --data.batch_size 100 \
         --data.num_workers 4 \
-        --trainer.accelerator cpu --trainer.devices 1 --trainer.default_root_dir runs/tdigest \
+        --trainer.accelerator cpu \
+        --trainer.devices 1 \
+        --trainer.default_root_dir runs/tdigest \
         --trainer.callbacks cellarium.ml.callbacks.ModuleCheckpoint
 
 **References:**
 
-    1. *Computing Extremely Accurate Quantiles Using T-Digests*,
-       Dunning, Ted, and Otmar Ertl.
-       (https://github.com/tdunning/t-digest/blob/master/docs/t-digest-paper/histo.pdf)
+1. `Computing Extremely Accurate Quantiles Using T-Digests (Dunning et al.)
+   <https://github.com/tdunning/t-digest/blob/master/docs/t-digest-paper/histo.pdf>`_.
 """
 
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI

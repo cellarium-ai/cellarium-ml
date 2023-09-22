@@ -16,9 +16,16 @@ class OnePassMeanVarStd(BaseModule):
     Calculate the mean, variance, and standard deviation of the data in one pass (epoch)
     using running sums and running squared sums.
 
+    **References:**
+
+    1. `Algorithms for calculating variance
+       <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
+
     Args:
-        g_genes: Number of genes.
-        transform: If not ``None`` is used to transform the input data.
+        g_genes:
+            Number of genes.
+        transform:
+            If not ``None`` is used to transform the input data.
     """
 
     def __init__(self, g_genes: int, transform: nn.Module | None = None) -> None:

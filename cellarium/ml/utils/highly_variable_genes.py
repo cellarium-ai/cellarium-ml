@@ -23,25 +23,34 @@ def get_highly_variable_genes(
     r"""
     Get Highly variably genes. This is a replication of Highly Variable Genes from Scanpy with a ``Seurat`` flavor.
 
-    **Reference:**
+    **References:**
 
-    1. *Highly Variable Genes from Scanpy*,
-       (https://scanpy.readthedocs.io/en/stable/generated/scanpy.pp.highly_variable_genes.html)
+    1. `Highly Variable Genes from Scanpy
+       <https://scanpy.readthedocs.io/en/stable/generated/scanpy.pp.highly_variable_genes.html>`_.
 
     Args:
-        gene_names: Ensembl gene ids.
-        mean: Gene expression means.
-        var: Gene expression vars.
-        n_top_genes: Number of highly-variable genes to keep.
-        min_disp: If ``n_top_genes`` unequals None, this and all other cutoffs for the means and the normalized
+        gene_names:
+            Ensembl gene ids.
+        mean:
+            Gene expression means.
+        var:
+            Gene expression vars.
+        n_top_genes:
+            Number of highly-variable genes to keep.
+        min_disp:
+            If ``n_top_genes`` unequals None, this and all other cutoffs for the means and the normalized
             dispersions are ignored.
-        max_disp: If ``n_top_genes`` unequals None, this and all other cutoffs for the means and the normalized
+        max_disp:
+            If ``n_top_genes`` unequals None, this and all other cutoffs for the means and the normalized
             dispersions are ignored.
-        min_mean: If ``n_top_genes`` unequals None, this and all other cutoffs for the means and the normalized
+        min_mean:
+            If ``n_top_genes`` unequals None, this and all other cutoffs for the means and the normalized
             dispersions are ignored.
-        max_mean: If ``n_top_genes`` unequals None, this and all other cutoffs for the means and the normalized
+        max_mean:
+            If ``n_top_genes`` unequals None, this and all other cutoffs for the means and the normalized
             dispersions are ignored.
-        n_bins: Number of bins for binning the mean gene expression. Normalization is done with respect to each bin.
+        n_bins:
+            Number of bins for binning the mean gene expression. Normalization is done with respect to each bin.
             If just a single gene falls into a bin, the normalized dispersion is artificially set to 1. You’ll be
             informed about this
     """

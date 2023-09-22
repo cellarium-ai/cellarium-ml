@@ -15,12 +15,10 @@ class Geneformer(BaseModule, PredictMixin):
     """
     Geneformer model.
 
-    **Reference:**
+    **References:**
 
-    1. *Transfer learning enables predictions in network biology*,
-       C. V. Theodoris, L. Xiao, A. Chopra, M. D. Chaffin, Z. R. Al Sayed,
-       M. C. Hill, H. Mantineo, E. Brydon, Z. Zeng, X. S. Liu & P. T. Ellinor
-       (https://www.nature.com/articles/s41586-023-06139-9)
+    1. `Transfer learning enables predictions in network biology (Theodoris et al.)
+       <https://www.nature.com/articles/s41586-023-06139-9>`_.
 
     Args:
         feature_schema:
@@ -32,7 +30,7 @@ class Geneformer(BaseModule, PredictMixin):
         transform:
             If not ``None`` is used to transform the input data.
         validate_input:
-            If ``True`` (default) the input data is validated.
+            If ``True`` the input data is validated.
     """
 
     def __init__(

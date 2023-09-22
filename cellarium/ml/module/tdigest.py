@@ -17,15 +17,16 @@ class TDigest(BaseModule):
     Compute an approximate non-zero histogram of the distribution of each gene in a batch of
     cells using t-digests.
 
-    **Reference**:
+    **References**:
 
-    1. Dunning, Ted, and Otmar Ertl. "Computing Extremely Accurate
-       Quantiles Using T-Digests." https://github.com/tdunning/t-digest/blob/
-       master/docs/t-digest-paper/histo.pdf
+    1. `Computing Extremely Accurate Quantiles Using T-Digests (Dunning et al.)
+       <https://github.com/tdunning/t-digest/blob/master/docs/t-digest-paper/histo.pdf>`_.
 
     Args:
-        g_genes: Number of genes.
-        transform: If not ``None`` is used to transform the input data.
+        g_genes:
+            Number of genes.
+        transform:
+            If not ``None`` is used to transform the input data.
     """
 
     def __init__(self, g_genes: int, transform: torch.nn.Module | None = None) -> None:

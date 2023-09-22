@@ -18,7 +18,7 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
 
     Example::
 
-        >>> adata = read_h5ad_gcs("gs://dsp-cell-annotation-service/benchmark_v1/benchmark_v1.000.h5ad")
+        >>> adata = read_h5ad_gcs("gs://dsp-cellarium-cas-public/test-data/test_0.h5ad")
 
     Args:
         filename: Path to the data file in Cloud Storage.
@@ -45,7 +45,7 @@ def read_h5ad_url(filename: str) -> AnnData:
     Example::
 
         >>> adata = read_h5ad_url(
-        ...     "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/benchmark_v1.000.h5ad"
+        ...     "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad"
         ... )
 
     Args:

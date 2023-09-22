@@ -26,10 +26,15 @@ Example run::
         --model.module.class_path cellarium.ml.module.ProbabilisticPCAFromCLI \
         --model.module.init_args.mean_var_std_ckpt_path \
         "runs/onepass/lightning_logs/version_0/checkpoints/module_checkpoint.pt" \
-        --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
-        --data.shard_size 100 --data.max_cache_size 2 --data.batch_size 100 \
-        --data.shuffle true --data.num_workers 4 \
-        --trainer.accelerator gpu --trainer.devices 1 --trainer.max_steps 1000 \
+        --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+        --data.shard_size 100 \
+        --data.max_cache_size 2 \
+        --data.batch_size 100 \
+        --data.shuffle true \
+        --data.num_workers 4 \
+        --trainer.accelerator gpu \
+        --trainer.devices 1 \
+        --trainer.max_steps 1000 \
         --trainer.default_root_dir runs/ppca \
         --trainer.callbacks cellarium.ml.callbacks.VarianceMonitor \
         --trainer.callbacks.mean_var_std_ckpt_path \
@@ -37,12 +42,10 @@ Example run::
 
 **References:**
 
-    1. *Probabilistic Principal Component Analysis*,
-       Tipping, Michael E., and Christopher M. Bishop. 1999.
-       (https://www.robots.ox.ac.uk/~cvrg/hilary2006/ppca.pdf)
-    2. *Understanding Posterior Collapse in Generative Latent Variable Models*,
-       James Lucas, George Tucker, Roger Grosse, Mohammad Norouzi. 2019.
-       (https://openreview.net/pdf?id=r1xaVLUYuE)
+1. `Probabilistic Principal Component Analysis (Tipping et al.)
+   <https://www.robots.ox.ac.uk/~cvrg/hilary2006/ppca.pdf>`_.
+2. `Understanding Posterior Collapse in Generative Latent Variable Models (Lucas et al.)
+   <https://openreview.net/pdf?id=r1xaVLUYuE>`_.
 """
 
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI

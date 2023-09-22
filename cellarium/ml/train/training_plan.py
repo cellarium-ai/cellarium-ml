@@ -13,16 +13,22 @@ from cellarium.ml.module import BaseModule, PredictMixin
 
 class TrainingPlan(pl.LightningModule):
     """
-    Lightning module task to train cellarium-ml modules.
+    Lightning module task to train ``cellarium.ml`` modules.
 
     Args:
-        module: A cellarium.ml module to train.
-        optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
+        module:
+            A ``cellarium.ml`` module to train.
+        optim_fn:
+            A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
-        optim_kwargs: Keyword arguments for optimiser. If ``None``, defaults to ``default_lr``.
-        scheduler_fn: A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
-        scheduler_kwargs: Keyword arguments for lr scheduler.
-        default_lr: Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
+        optim_kwargs:
+            Keyword arguments for optimiser. If ``None``, defaults to ``default_lr``.
+        scheduler_fn:
+            A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
+        scheduler_kwargs:
+            Keyword arguments for lr scheduler.
+        default_lr:
+            Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
     """
 
     def __init__(
