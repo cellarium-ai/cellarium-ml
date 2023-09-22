@@ -11,18 +11,20 @@ Example run::
 
     python examples/geneformer.py fit \
         --model.module cellarium.ml.module.GeneformerFromCLI \
-        --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
-        --data.shard_size 100 --data.max_cache_size 2 --data.batch_size 5 \
+        --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+        --data.shard_size 100 \
+        --data.max_cache_size 2 \
+        --data.batch_size 5 \
         --data.num_workers 1 \
-        --trainer.accelerator gpu --trainer.devices 1 --trainer.default_root_dir runs/geneformer \
+        --trainer.accelerator gpu \
+        --trainer.devices 1 \
+        --trainer.default_root_dir runs/geneformer \
         --trainer.max_steps 10
 
 **References:**
 
-    1. *Transfer learning enables predictions in network biology*,
-       C. V. Theodoris, L. Xiao, A. Chopra, M. D. Chaffin, Z. R. Al Sayed,
-       M. C. Hill, H. Mantineo, E. Brydon, Z. Zeng, X. S. Liu & P. T. Ellinor
-       (https://www.nature.com/articles/s41586-023-06139-9)
+1. `Transfer learning enables predictions in network biology (Theodoris et al.)
+   <https://www.nature.com/articles/s41586-023-06139-9>`_.
 """
 
 from lightning.pytorch.cli import LightningCLI
