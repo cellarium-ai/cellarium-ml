@@ -17,15 +17,20 @@ class ModuleCheckpoint(pl.Callback):
     Saves the :attr:`module` of the lightning module at the specified time.
 
     Args:
-        dirpath: Directory to save the module checkpoint.
+        dirpath:
+            Directory to save the module checkpoint.
             By default, dirpath is ``None`` and will be set at runtime to the location
             specified by :class:`~lightning.pytorch.trainer.trainer.Trainer`'s
             :attr:`~lightning.pytorch.trainer.trainer.Trainer.default_root_dir` argument,
             and if the Trainer uses a logger, the path will also contain logger name and version.
-        filename: Filename to save the module checkpoint. Default: ``"module_checkpoint.pt"``.
-        save_on_train_batch_end: Whether to save the module on train batch end. Default: ``False``.
-        save_on_train_epoch_end: Whether to save the module on train epoch end. Default: ``False``.
-        save_on_train_end: Whether to save the module on train end. Default: ``True``.
+        filename:
+            Filename to save the module checkpoint.
+        save_on_train_batch_end:
+            Whether to save the module on train batch end.
+        save_on_train_epoch_end:
+            Whether to save the module on train epoch end.
+        save_on_train_end:
+            Whether to save the module on train end.
     """
 
     def __init__(

@@ -20,6 +20,8 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
+    "sphinx_autodoc_typehints",
+    "sphinx_copybutton",
     "sphinx_rtd_theme",
     "sphinx_gallery.gen_gallery",
 ]
@@ -30,6 +32,10 @@ exclude_patterns = []
 # Disable documentation inheritance
 
 autodoc_inherit_docstrings = False
+
+# Add a default annotation
+
+typehints_defaults = "comma"
 
 
 # -- Convert scripts to notebooks

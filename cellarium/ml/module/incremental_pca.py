@@ -18,23 +18,26 @@ class IncrementalPCA(BaseModule, PredictMixin):
     """
     Distributed and Incremental PCA.
 
-    **Reference:**
+    **References:**
 
-    1. *A Distributed and Incremental SVD Algorithm for Agglomerative Data Analysis on Large Networks*,
-       M. A. Iwen, B. W. Ong
-       (https://users.math.msu.edu/users/iwenmark/Papers/distrib_inc_svd.pdf)
-    2. *Incremental Learning for Robust Visual Tracking*,
-       D. Ross, J. Lim, R.-S. Lin, M.-H. Yang
-       (https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf)
+    1. `A Distributed and Incremental SVD Algorithm for Agglomerative Data Analysis on Large Networks (Iwen et al.)
+       <https://users.math.msu.edu/users/iwenmark/Papers/distrib_inc_svd.pdf>`_.
+    2. `Incremental Learning for Robust Visual Tracking (Ross et al.)
+       <https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf>`_.
 
     Args:
-        g_genes: Number of genes.
-        k_components: Number of principal components.
-        svd_lowrank_niter: Number of iterations for the low-rank SVD algorithm. Default: ``2``.
-        perform_mean_correction: If ``True`` then the mean correction is applied to the update step.
+        g_genes:
+            Number of genes.
+        k_components:
+            Number of principal components.
+        svd_lowrank_niter:
+            Number of iterations for the low-rank SVD algorithm.
+        perform_mean_correction:
+            If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
-        transform: If not ``None`` is used to transform the input data.
+        transform:
+            If not ``None`` is used to transform the input data.
     """
 
     def __init__(
