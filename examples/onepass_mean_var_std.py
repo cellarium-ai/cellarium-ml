@@ -12,7 +12,7 @@ Example run::
 
     python examples/onepass_mean_var_std.py fit \
         --model.module cellarium.ml.module.OnePassMeanVarStdFromCLI \
-        --data.filenames "gs://dsp-cellarium-cas-public/test-data/benchmark_v1.{000..003}.h5ad" \
+        --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
         --data.shard_size 100 \
         --data.max_cache_size 2 \
         --data.batch_size 100 \

@@ -26,4 +26,5 @@ def read_h5ad_file(filename: str, **kwargs) -> AnnData:
             Extra options that make sense to a particular storage connection, e.g. host, port, username, password, etc.
     """
     with fsspec.open(filename, "rb", **kwargs) as f:
+        fsspec.asyn.reset_lock()
         return read_h5ad(f)
