@@ -1,89 +1,46 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import re
-import shutil
-import tempfile
-import urllib.request
-
+import fsspec
 from anndata import AnnData, read_h5ad
-from google.cloud.storage import Client
-
-url_schemes = ("http:", "https:", "ftp:")
 
 
-def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnData:
-    r"""
-    Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
-
-    Example::
-
-        >>> adata = read_h5ad_gcs("gs://dsp-cellarium-cas-public/test-data/test_0.h5ad")
-
-    Args:
-        filename: Path to the data file in Cloud Storage.
-    """
-    assert filename.startswith("gs:")
-    # parse bucket and blob names from the filename
-    filename = re.sub(r"^gs://?", "", filename)
-    bucket_name, blob_name = filename.split("/", 1)
-
-    if storage_client is None:
-        storage_client = Client()
-
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-
-    with blob.open("rb") as f:
-        return read_h5ad(f)
-
-
-def read_h5ad_url(filename: str) -> AnnData:
-    r"""
-    Read ``.h5ad``-formatted hdf5 file from the URL.
-
-    Example::
-
-        >>> adata = read_h5ad_url(
-        ...     "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad"
-        ... )
-
-    Args:
-        filename: URL of the data file.
-    """
-    assert any(filename.startswith(scheme) for scheme in url_schemes)
-    with urllib.request.urlopen(filename) as response:
-        with tempfile.TemporaryFile() as tmp_file:
-            shutil.copyfileobj(response, tmp_file)
-            return read_h5ad(tmp_file)
-
-
-def read_h5ad_local(filename: str) -> AnnData:
-    r"""
-    Read ``.h5ad``-formatted hdf5 file from the local disk.
-
-    Args:
-        filename: Path to the local data file.
-    """
-    assert filename.startswith("file:")
-    filename = re.sub(r"^file://?", "", filename)
-    return read_h5ad(filename)
-
-
-def read_h5ad_file(filename: str, **kwargs) -> AnnData:
+def read_h5ad_file(filename: str, storage_kwargs: dict | None = None) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from a filename.
 
+    Example 1::
+
+        >>> adata = read_h5ad_file("test_0.h5ad")
+
+    Example 2::
+
+        >>> adata = read_h5ad_file("gs://dsp-cellarium-cas-public/test-data/test_0.h5ad")
+
+    Example 3::
+
+        >>> adata = read_h5ad_file(
+        ...     "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad"
+        ... )
+
+    .. note::
+
+        For a full list of the available protocols and the implementations that
+        they map across to see the latest online documentation:
+
+        - For implementations built into ``fsspec`` see
+          https://filesystem-spec.readthedocs.io/en/latest/api.html#built-in-implementations
+        - For implementations in separate packages see
+          https://filesystem-spec.readthedocs.io/en/latest/api.html#other-known-implementations
+
     Args:
-        filename: Path to the data file.
+        filename:
+            Absolute or relative path to the data file. Prefix with a protocol like ``gs://`` to read from alternative
+            filesystems.
+        storage_kwargs:
+            Extra options that make sense to a particular storage connection, e.g. host, port, username, password, etc.
     """
-    if filename.startswith("gs:"):
-        return read_h5ad_gcs(filename, **kwargs)
-
-    if filename.startswith("file:"):
-        return read_h5ad_local(filename)
-
-    if any(filename.startswith(scheme) for scheme in url_schemes):
-        return read_h5ad_url(filename)
-
-    return read_h5ad(filename)
+    storage_kwargs = storage_kwargs or {}
+    # reset_lock()  # see https://github.com/fsspec/gcsfs/issues/379
+    with fsspec.open(filename, "rb", **storage_kwargs) as f:
+        return read_h5ad(f)

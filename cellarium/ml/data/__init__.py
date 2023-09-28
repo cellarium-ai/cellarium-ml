@@ -7,7 +7,7 @@ from .distributed_anndata import (
     DistributedAnnDataCollection,
     DistributedAnnDataCollectionView,
 )
-from .read import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url
+from .read import read_h5ad_file
 from .schema import AnnDataSchema
 
 __all__ = [
@@ -17,7 +17,4 @@ __all__ = [
     "DistributedAnnDataCollectionDataModule",
     "IterableDistributedAnnDataCollectionDataset",
     "read_h5ad_file",
-    "read_h5ad_gcs",
-    "read_h5ad_local",
-    "read_h5ad_url",
 ]

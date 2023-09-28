@@ -41,7 +41,7 @@ def dadc(adata: AnnData, tmp_path: Path):
     filenames = str(os.path.join(tmp_path, "adata.{000..002}.h5ad"))
     return DistributedAnnDataCollection(
         filenames,
-        limits,
+        limits=limits,
         max_cache_size=2,  # allow max_cache_size=2 for IterableDistributedAnnDataCollectionDataset
         cache_size_strictly_enforced=True,
     )

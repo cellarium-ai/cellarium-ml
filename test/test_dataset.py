@@ -68,7 +68,7 @@ def dadc(tmp_path: Path, request: pytest.FixtureRequest):
     filenames = str(os.path.join(tmp_path, f"adata.{{000..00{len(limits)-1}}}.h5ad"))
     dadc = DistributedAnnDataCollection(
         filenames,
-        limits,
+        limits=limits,
         max_cache_size=2,
         cache_size_strictly_enforced=True,
     )
