@@ -17,6 +17,7 @@ from anndata.experimental.multi_files._anncollection import (
 )
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
+from fsspec.asyn import reset_lock
 
 from .read import read_h5ad_file
 from .schema import AnnDataSchema
@@ -117,6 +118,8 @@ class DistributedAnnDataCollection(AnnCollection):
     Args:
         filenames:
             Names of anndata files.
+        storage_kwargs:
+            Extra options that make sense to a particular storage connection, e.g. host, port, username, password, etc.
         limits:
             List of global cell indices (limits) for the last cells in each shard.
             If ``None``, the limits are inferred from ``shard_size`` and ``last_shard_size``.
@@ -160,6 +163,7 @@ class DistributedAnnDataCollection(AnnCollection):
     def __init__(
         self,
         filenames: Sequence[str] | str,
+        storage_kwargs: dict | None = None,
         limits: Iterable[int] | None = None,
         shard_size: int | None = None,
         last_shard_size: int | None = None,
@@ -173,6 +177,7 @@ class DistributedAnnDataCollection(AnnCollection):
         obs_columns: Sequence | None = None,
     ):
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
+        self.storage_kwargs = storage_kwargs
         if (shard_size is None) and (last_shard_size is not None):
             raise ValueError("If `last_shard_size` is specified then `shard_size` must also be specified.")
         if limits is None:
@@ -188,12 +193,13 @@ class DistributedAnnDataCollection(AnnCollection):
         self.max_cache_size = max_cache_size
         self.cache_size_strictly_enforced = cache_size_strictly_enforced
         # schema
-        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
+        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0], storage_kwargs)
+        reset_lock()
         assert len(adata0) == limits[0]
         self.schema = AnnDataSchema(adata0, obs_columns)
         # lazy anndatas
         lazy_adatas = [
-            LazyAnnData(filename, (start, end), self.schema, self.cache)
+            LazyAnnData(filename, storage_kwargs, (start, end), self.schema, self.cache)
             for start, end, filename in zip([0] + limits, limits, self.filenames)
         ]
         # use filenames as default keys
@@ -281,7 +287,7 @@ class DistributedAnnDataCollection(AnnCollection):
         self.__dict__.update(state)
         self.cache = LRU(self.max_cache_size)
         self.adatas = [
-            LazyAnnData(filename, (start, end), self.schema, self.cache)
+            LazyAnnData(filename, self.storage_kwargs, (start, end), self.schema, self.cache)
             for start, end, filename in zip([0] + self.limits, self.limits, self.filenames)
         ]
 
@@ -295,6 +301,8 @@ class LazyAnnData:
     Args:
         filename:
             Name of anndata file.
+        storage_kwargs:
+            Extra options that make sense to a particular storage connection, e.g. host, port, username, password, etc.
         limits:
             Limits of cell indices (inclusive, exclusive).
         schema:
@@ -318,11 +326,13 @@ class LazyAnnData:
     def __init__(
         self,
         filename: str,
+        storage_kwargs: dict | None,
         limits: tuple[int, int],
         schema: AnnDataSchema,
         cache: LRU | None = None,
     ):
         self.filename = filename
+        self.storage_kwargs = storage_kwargs
         self.limits = limits
         self.schema = schema
         if cache is None:
@@ -365,7 +375,7 @@ class LazyAnnData:
             adata = self.cache[self.filename]
         except KeyError:
             # fetch anndata
-            adata = read_h5ad_file(self.filename)
+            adata = read_h5ad_file(self.filename, self.storage_kwargs)
             # validate anndata
             assert self.n_obs == adata.n_obs, (
                 "Expected n_obs for LazyAnnData object and backed anndata to match "

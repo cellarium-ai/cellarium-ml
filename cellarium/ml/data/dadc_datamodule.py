@@ -20,6 +20,8 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
     Args:
         filenames:
             Names of anndata files.
+        storage_kwargs:
+            Extra options that make sense to a particular storage connection, e.g. host, port, username, password, etc.
         limits:
             List of global cell indices (limits) for the last cells in each shard.
             If ``None``, the limits are inferred from ``shard_size`` and ``last_shard_size``.
@@ -79,6 +81,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         self,
         # DistributedAnnDataCollection args
         filenames: Sequence[str] | str,
+        storage_kwargs: dict | None,
         limits: Iterable[int] | None = None,
         shard_size: int | None = None,
         last_shard_size: int | None = None,
@@ -102,6 +105,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         super().__init__()
         # DistributedAnnDataCollection args
         self.filenames = filenames
+        self.storage_kwargs = storage_kwargs
         self.limits = limits
         self.shard_size = shard_size
         self.last_shard_size = last_shard_size
@@ -124,6 +128,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         # DistributedAnnDataCollection
         self.dadc = DistributedAnnDataCollection(
             filenames=self.filenames,
+            storage_kwargs=self.storage_kwargs,
             limits=self.limits,
             shard_size=self.shard_size,
             last_shard_size=self.last_shard_size,

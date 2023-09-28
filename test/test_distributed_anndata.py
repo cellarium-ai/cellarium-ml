@@ -76,7 +76,7 @@ def dat(adatas_path: Path, request: pytest.FixtureRequest):
     max_cache_size, cache_size_strictly_enforced = request.param
     dat = DistributedAnnDataCollection(
         filenames,
-        limits,
+        limits=limits,
         max_cache_size=max_cache_size,
         cache_size_strictly_enforced=cache_size_strictly_enforced,
     )
