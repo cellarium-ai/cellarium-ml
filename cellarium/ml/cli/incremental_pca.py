@@ -10,7 +10,7 @@ model [1, 2].
 
 Example run::
 
-    python examples/incremental_pca.py fit \
+    python incremental_pca.py fit \
         --model.module cellarium.ml.module.IncrementalPCAFromCLI \
         --model.module.init_args.k_components 50 \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
@@ -31,6 +31,9 @@ Example run::
    <https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf>`_.
 """
 
+from typing import Any
+
+from jsonargparse import Namespace
 from lightning.pytorch.cli import LightningCLI
 
 from cellarium.ml.data import DistributedAnnDataCollectionDataModule
@@ -44,7 +47,11 @@ class _LightningCLIWithLinks(LightningCLI):
         parser.link_arguments("data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate")
 
 
-def main(args=None):
+def main(args: list[str] | dict[str, Any] | Namespace | None = None):
+    """
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
     _LightningCLIWithLinks(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,

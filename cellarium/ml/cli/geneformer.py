@@ -9,7 +9,7 @@ This example shows how to fit feature count data to the Geneformer model [1].
 
 Example run::
 
-    python examples/geneformer.py fit \
+    python geneformer.py fit \
         --model.module cellarium.ml.module.GeneformerFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
         --data.shard_size 100 \
@@ -27,6 +27,9 @@ Example run::
    <https://www.nature.com/articles/s41586-023-06139-9>`_.
 """
 
+from typing import Any
+
+from jsonargparse import Namespace
 from lightning.pytorch.cli import LightningCLI
 
 from cellarium.ml.data import DistributedAnnDataCollectionDataModule
@@ -40,7 +43,11 @@ class _LightningCLIWithLinks(LightningCLI):
         parser.link_arguments("data.var_names", "model.module.init_args.feature_schema", apply_on="instantiate")
 
 
-def main(args=None):
+def main(args: list[str] | dict[str, Any] | Namespace | None = None):
+    """
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
     _LightningCLIWithLinks(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,

@@ -48,6 +48,9 @@ Example run::
    <https://openreview.net/pdf?id=r1xaVLUYuE>`_.
 """
 
+from typing import Any
+
+from jsonargparse import Namespace
 from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
 
 from cellarium.ml.data import DistributedAnnDataCollectionDataModule
@@ -62,7 +65,11 @@ class _LightningCLIWithLinks(LightningCLI):
         parser.link_arguments("data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate")
 
 
-def main(args=None):
+def main(args: list[str] | dict[str, Any] | Namespace | None = None):
+    """
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
     _LightningCLIWithLinks(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,
