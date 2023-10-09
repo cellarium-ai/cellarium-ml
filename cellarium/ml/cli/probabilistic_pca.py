@@ -22,7 +22,7 @@ There are two flavors of probabilistic PCA model that are available:
 
 Example run::
 
-    python examples/probabilistic_pca.py fit \
+    probabilistic_pca fit \
         --model.module.class_path cellarium.ml.module.ProbabilisticPCAFromCLI \
         --model.module.init_args.mean_var_std_ckpt_path \
         "runs/onepass/lightning_logs/version_0/checkpoints/module_checkpoint.pt" \
@@ -48,33 +48,25 @@ Example run::
    <https://openreview.net/pdf?id=r1xaVLUYuE>`_.
 """
 
-from typing import Any
 
-from jsonargparse import Namespace
-from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
+from lightning.pytorch.cli import ArgsType
 
-from cellarium.ml.data import DistributedAnnDataCollectionDataModule
-from cellarium.ml.train import TrainingPlan
+from cellarium.ml.cli.lightning_cli import lightning_cli_factory
 
 
-class _LightningCLIWithLinks(LightningCLI):
-    """LightningCLI with custom argument linking."""
-
-    def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
-        parser.link_arguments("data.n_obs", "model.module.init_args.n_cells", apply_on="instantiate")
-        parser.link_arguments("data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate")
-
-
-def main(args: list[str] | dict[str, Any] | Namespace | None = None):
+def main(args: ArgsType = None) -> None:
     """
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    _LightningCLIWithLinks(
-        TrainingPlan,
-        DistributedAnnDataCollectionDataModule,
-        args=args,
+    cli = lightning_cli_factory(
+        "cellarium.ml.module.ProbabilisticPCAFromCLI",
+        link_arguments=[
+            ("data.n_obs", "model.module.init_args.n_cells"),
+            ("data.n_vars", "model.module.init_args.g_genes"),
+        ],
     )
+    cli(args)
 
 
 if __name__ == "__main__":

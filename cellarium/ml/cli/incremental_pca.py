@@ -10,7 +10,7 @@ model [1, 2].
 
 Example run::
 
-    python incremental_pca.py fit \
+    incremental_pca fit \
         --model.module cellarium.ml.module.IncrementalPCAFromCLI \
         --model.module.init_args.k_components 50 \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
@@ -31,33 +31,28 @@ Example run::
    <https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf>`_.
 """
 
-from typing import Any
+from lightning.pytorch.cli import ArgsType
 
-from jsonargparse import Namespace
-from lightning.pytorch.cli import LightningCLI
-
-from cellarium.ml.data import DistributedAnnDataCollectionDataModule
-from cellarium.ml.train.training_plan import TrainingPlan
+from cellarium.ml.cli.lightning_cli import lightning_cli_factory
 
 
-class _LightningCLIWithLinks(LightningCLI):
-    """LightningCLI with custom argument linking."""
-
-    def add_arguments_to_parser(self, parser):
-        parser.link_arguments("data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate")
-
-
-def main(args: list[str] | dict[str, Any] | Namespace | None = None):
+def main(args: ArgsType = None) -> None:
     """
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    _LightningCLIWithLinks(
-        TrainingPlan,
-        DistributedAnnDataCollectionDataModule,
-        trainer_defaults={"max_epochs": 1},  # one pass
-        args=args,
+    cli = lightning_cli_factory(
+        "cellarium.ml.module.IncrementalPCAFromCLI",
+        link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
+        trainer_defaults={
+            "max_epochs": 1,  # one pass
+            "strategy": {
+                "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                "init_args": {"broadcast_buffers": False},
+            },
+        },
     )
+    cli(args)
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@ typehints_defaults = "comma"
 # -- Convert scripts to notebooks
 
 sphinx_gallery_conf = {
-    "examples_dirs": ["../../examples"],
+    "examples_dirs": ["../../cellarium/ml/cli"],
     "gallery_dirs": ["examples"],
     # not display Total running time of the script because we do not execute it
     "min_reported_time": 1,

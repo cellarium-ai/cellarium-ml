@@ -9,7 +9,7 @@ This example shows how to fit feature count data to the Geneformer model [1].
 
 Example run::
 
-    python geneformer.py fit \
+    geneformer fit \
         --model.module cellarium.ml.module.GeneformerFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
         --data.shard_size 100 \
@@ -27,32 +27,21 @@ Example run::
    <https://www.nature.com/articles/s41586-023-06139-9>`_.
 """
 
-from typing import Any
+from lightning.pytorch.cli import ArgsType
 
-from jsonargparse import Namespace
-from lightning.pytorch.cli import LightningCLI
-
-from cellarium.ml.data import DistributedAnnDataCollectionDataModule
-from cellarium.ml.train.training_plan import TrainingPlan
+from cellarium.ml.cli.lightning_cli import lightning_cli_factory
 
 
-class _LightningCLIWithLinks(LightningCLI):
-    """LightningCLI with custom argument linking."""
-
-    def add_arguments_to_parser(self, parser):
-        parser.link_arguments("data.var_names", "model.module.init_args.feature_schema", apply_on="instantiate")
-
-
-def main(args: list[str] | dict[str, Any] | Namespace | None = None):
+def main(args: ArgsType = None) -> None:
     """
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    _LightningCLIWithLinks(
-        TrainingPlan,
-        DistributedAnnDataCollectionDataModule,
-        args=args,
+    cli = lightning_cli_factory(
+        "cellarium.ml.module.GeneformerFromCLI",
+        link_arguments=[("data.var_names", "model.module.init_args.feature_schema")],
     )
+    cli(args)
 
 
 if __name__ == "__main__":
