@@ -40,10 +40,11 @@ class _LightningCLIWithLinks(LightningCLI):
         parser.link_arguments("data.var_names", "model.module.init_args.feature_schema", apply_on="instantiate")
 
 
-def main():
+def main(args=None):
     _LightningCLIWithLinks(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,
+        args=args,
     )
 
 

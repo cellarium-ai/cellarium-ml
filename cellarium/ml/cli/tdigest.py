@@ -41,11 +41,12 @@ class _LightningCLIWithLinks(LightningCLI):
         parser.link_arguments("data.n_vars", "model.module.init_args.g_genes", apply_on="instantiate")
 
 
-def main():
+def main(args=None):
     _LightningCLIWithLinks(
         TrainingPlan,
         DistributedAnnDataCollectionDataModule,
         trainer_defaults={"max_epochs": 1},  # one pass
+        args=args,
     )
 
 
