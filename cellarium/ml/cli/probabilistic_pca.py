@@ -23,7 +23,6 @@ There are two flavors of probabilistic PCA model that are available:
 Example run::
 
     probabilistic_pca fit \
-        --model.module.class_path cellarium.ml.module.ProbabilisticPCAFromCLI \
         --model.module.init_args.mean_var_std_ckpt_path \
         "runs/onepass/lightning_logs/version_0/checkpoints/module_checkpoint.pt" \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \

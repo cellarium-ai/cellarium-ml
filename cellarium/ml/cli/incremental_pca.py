@@ -11,7 +11,6 @@ model [1, 2].
 Example run::
 
     incremental_pca fit \
-        --model.module cellarium.ml.module.IncrementalPCAFromCLI \
         --model.module.init_args.k_components 50 \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
         --data.shard_size 100 \

@@ -11,7 +11,6 @@ feature count data in one pass [1].
 Example run::
 
     onepass_mean_var_std fit \
-        --model.module cellarium.ml.module.OnePassMeanVarStdFromCLI \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
         --data.shard_size 100 \
         --data.max_cache_size 2 \
