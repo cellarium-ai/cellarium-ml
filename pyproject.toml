@@ -56,11 +56,11 @@ docs = [
 dev = ["cellarium-ml[docs,lint,mypy,test]"]
 
 [project.scripts]
-geneformer = "cellarium.ml.cli.geneformer:main"
-incremental_pca = "cellarium.ml.cli.incremental_pca:main"
-onepass_mean_var_std = "cellarium.ml.cli.onepass_mean_var_std:main"
-probabilistic_pca = "cellarium.ml.cli.probabilistic_pca:main"
-tdigest = "cellarium.ml.cli.tdigest:main"
+cellarium-geneformer = "cellarium.ml.cli.geneformer:main"
+cellarium-incremental-pca = "cellarium.ml.cli.incremental_pca:main"
+cellarium-onepass-mean-var-std = "cellarium.ml.cli.onepass_mean_var_std:main"
+cellarium-probabilistic-pca = "cellarium.ml.cli.probabilistic_pca:main"
+cellarium-tdigest = "cellarium.ml.cli.tdigest:main"
 
 [project.urls]
 "Homepage" = "https://cellarium-ai.github.io/cellarium-ml"

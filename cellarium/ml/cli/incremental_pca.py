@@ -10,7 +10,7 @@ model [1, 2].
 
 Example run::
 
-    incremental_pca fit \
+    cellarium-incremental-pca fit \
         --model.module.init_args.k_components 50 \
         --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
         --data.shard_size 100 \
