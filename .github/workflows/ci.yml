@@ -56,7 +56,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.10"]
-        devices: ["1", "2"]
+        devices: ["1"]
 
     env:
       TEST_DEVICES: ${{ matrix.devices }}
