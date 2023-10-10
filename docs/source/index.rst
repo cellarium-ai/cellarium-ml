@@ -21,7 +21,6 @@ Table of Contents
    :caption: Documentation
 
    callbacks
-   cli
    data
    module
    optim

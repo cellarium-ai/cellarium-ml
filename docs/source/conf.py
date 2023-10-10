@@ -45,6 +45,7 @@ sphinx_gallery_conf = {
     "gallery_dirs": ["examples"],
     # not display Total running time of the script because we do not execute it
     "min_reported_time": 1,
+    "ignore_pattern": "__init__.py|lightning_cli.py",
 }
 
 

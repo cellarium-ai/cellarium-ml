@@ -3,7 +3,7 @@
 
 from typing import Any
 
-from lightning.pytorch.cli import LightningArgumentParser, LightningCLI
+from lightning.pytorch.cli import LightningArgumentParser, LightningCLI, ArgsType
 
 from cellarium.ml.data import DistributedAnnDataCollectionDataModule
 from cellarium.ml.train.training_plan import TrainingPlan
@@ -19,7 +19,7 @@ def lightning_cli_factory(
     """
 
     class NewLightningCLI(LightningCLI):
-        def __init__(self, args) -> None:
+        def __init__(self, args: ArgsType = None) -> None:
             super().__init__(
                 TrainingPlan,
                 DistributedAnnDataCollectionDataModule,
