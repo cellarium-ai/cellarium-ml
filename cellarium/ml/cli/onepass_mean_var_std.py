@@ -48,7 +48,7 @@ def main(args: ArgsType = None) -> None:
             },
         },
     )
-    cli(args)
+    cli(args=args)
 
 
 if __name__ == "__main__":

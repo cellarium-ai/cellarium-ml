@@ -40,7 +40,7 @@ def main(args: ArgsType = None) -> None:
         "cellarium.ml.module.GeneformerFromCLI",
         link_arguments=[("data.var_names", "model.module.init_args.feature_schema")],
     )
-    cli(args)
+    cli(args=args)
 
 
 if __name__ == "__main__":

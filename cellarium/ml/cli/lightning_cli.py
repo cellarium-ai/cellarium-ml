@@ -3,7 +3,7 @@
 
 from typing import Any
 
-from lightning.pytorch.cli import LightningArgumentParser, LightningCLI, ArgsType
+from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 
 from cellarium.ml.data import DistributedAnnDataCollectionDataModule
 from cellarium.ml.train.training_plan import TrainingPlan
@@ -13,7 +13,7 @@ def lightning_cli_factory(
     model: str,
     link_arguments: list[tuple[str, str]] | None = None,
     trainer_defaults: dict[str, Any] | None = None,
-) -> LightningCLI:
+) -> type[LightningCLI]:
     """
     Factory function for creating a LightningCLI with a preset model and custom argument linking.
     """

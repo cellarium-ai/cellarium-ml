@@ -65,7 +65,7 @@ def main(args: ArgsType = None) -> None:
             ("data.n_vars", "model.module.init_args.g_genes"),
         ],
     )
-    cli(args)
+    cli(args=args)
 
 
 if __name__ == "__main__":

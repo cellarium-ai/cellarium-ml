@@ -44,7 +44,7 @@ def main(args: ArgsType = None) -> None:
             "max_epochs": 1,  # one pass
         },
     )
-    cli(args)
+    cli(args=args)
 
 
 if __name__ == "__main__":

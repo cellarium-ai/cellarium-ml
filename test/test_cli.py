@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from importlib import import_module
+from typing import Any
 
 import pytest
 
@@ -176,7 +177,7 @@ CONFIGS = [
 
 
 @pytest.mark.parametrize("config", CONFIGS)
-def test_cpu(config: dict[str, str]):
+def test_cpu(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
     cli = import_module(config.pop("cli"))
