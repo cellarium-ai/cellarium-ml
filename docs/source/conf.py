@@ -23,7 +23,6 @@ extensions = [
     "sphinx_autodoc_typehints",
     "sphinx_copybutton",
     "sphinx_rtd_theme",
-    "sphinx_gallery.gen_gallery",
 ]
 
 templates_path = ["_templates"]
@@ -32,21 +31,11 @@ exclude_patterns = []
 # Disable documentation inheritance
 
 autodoc_inherit_docstrings = False
+autodoc_member_order = "bysource"
 
 # Add a default annotation
 
 typehints_defaults = "comma"
-
-
-# -- Convert scripts to notebooks
-
-sphinx_gallery_conf = {
-    "examples_dirs": ["../../examples"],
-    "gallery_dirs": ["examples"],
-    # not display Total running time of the script because we do not execute it
-    "min_reported_time": 1,
-}
-
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
