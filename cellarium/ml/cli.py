@@ -24,7 +24,7 @@ def register_model(model: Callable[[ArgsType], None]):
 
 
 def lightning_cli_factory(
-    model: str,
+    model_class_path: str,
     link_arguments: list[tuple[str, str]] | None = None,
     trainer_defaults: dict[str, Any] | None = None,
 ) -> type[LightningCLI]:
@@ -46,9 +46,8 @@ def lightning_cli_factory(
         )
 
     Args:
-        model:
-            A string representation of the importable model class
-            (e.g., ``"cellarium.ml.module.IncrementalPCAFromCLI"``).
+        model_class_path:
+            A string representation of the model class path (e.g., ``"cellarium.ml.module.IncrementalPCAFromCLI"``).
         link_arguments:
             A list of tuples of the form ``(arg1, arg2)`` where ``arg1`` is linked to ``arg2``.
         trainer_defaults:
