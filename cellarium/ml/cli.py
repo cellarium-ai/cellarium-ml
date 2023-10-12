@@ -70,7 +70,7 @@ def lightning_cli_factory(
             if link_arguments is not None:
                 for arg1, arg2 in link_arguments:
                     parser.link_arguments(arg1, arg2, apply_on="instantiate")
-            parser.set_defaults({"model.module": model})
+            parser.set_defaults({"model.module": model_class_path})
 
     return NewLightningCLI
 
