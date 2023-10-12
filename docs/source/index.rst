@@ -8,19 +8,10 @@ Table of Contents
 
 .. toctree::
    :maxdepth: 1
-   :caption: Examples:
-
-   examples/geneformer
-   examples/incremental_pca
-   examples/onepass_mean_var_std
-   examples/probabilistic_pca
-   examples/tdigest
-
-.. toctree::
-   :maxdepth: 1
    :caption: Documentation
 
    callbacks
+   cli
    data
    module
    optim
