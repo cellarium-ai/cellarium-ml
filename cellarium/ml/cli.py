@@ -29,7 +29,33 @@ def lightning_cli_factory(
     trainer_defaults: dict[str, Any] | None = None,
 ) -> type[LightningCLI]:
     """
-    Factory function for creating a LightningCLI with a preset model and custom argument linking.
+    Factory function for creating a :class:`LightningCLI` with a preset model and custom argument linking.
+
+    Example::
+
+        cli = lightning_cli_factory(
+            "cellarium.ml.module.IncrementalPCAFromCLI",
+            link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
+            trainer_defaults={
+                "max_epochs": 1,  # one pass
+                "strategy": {
+                    "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                    "init_args": {"broadcast_buffers": False},
+                },
+            },
+        )
+
+    Args:
+        model:
+            A string representation of the importable model class
+            (e.g., ``"cellarium.ml.module.IncrementalPCAFromCLI"``).
+        link_arguments:
+            A list of tuples of the form ``(arg1, arg2)`` where ``arg1`` is linked to ``arg2``.
+        trainer_defaults:
+            Default values for the trainer.
+
+    Returns:
+        A :class:`LightningCLI` class with the given model and argument linking.
     """
 
     class NewLightningCLI(LightningCLI):
@@ -53,8 +79,7 @@ def lightning_cli_factory(
 @register_model
 def geneformer(args: ArgsType = None) -> None:
     r"""
-    Example: Geneformer
-    ===================
+    CLI to run the :class:`cellarium.ml.module.GeneformerFromCLI` model.
 
     This example shows how to fit feature count data to the Geneformer model [1].
 
@@ -89,8 +114,7 @@ def geneformer(args: ArgsType = None) -> None:
 @register_model
 def incremental_pca(args: ArgsType = None) -> None:
     r"""
-    Example: Incremental PCA
-    ========================
+    CLI to run the :class:`cellarium.ml.module.IncrementalPCAFromCLI` model.
 
     This example shows how to fit feature count data to incremental PCA
     model [1, 2].
@@ -136,8 +160,7 @@ def incremental_pca(args: ArgsType = None) -> None:
 @register_model
 def onepass_mean_var_std(args: ArgsType = None) -> None:
     r"""
-    Example: One-pass calculation of feature mean, variance, and standard deviation
-    ===============================================================================
+    CLI to run the :class:`cellarium.ml.module.OnePassMeanVarStdFromCLI` model.
 
     This example shows how to calculate mean, variance, and standard deviation of log normalized
     feature count data in one pass [1].
@@ -180,8 +203,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
 @register_model
 def probabilistic_pca(args: ArgsType = None) -> None:
     r"""
-    Example: Probabilistic PCA
-    ==========================
+    CLI to run the :class:`cellarium.ml.module.ProbabilisticPCAFromCLI` model.
 
     This example shows how to fit feature count data to probabilistic PCA
     model [1].
@@ -240,15 +262,14 @@ def probabilistic_pca(args: ArgsType = None) -> None:
 @register_model
 def tdigest(args: ArgsType = None) -> None:
     r"""
-    Example: One-pass calculation of feature median using t-digest statistics
-    =========================================================================
+    CLI to run the :class:`cellarium.ml.module.TDigestFromCLI` model.
 
     This example shows how to calculate non-zero median of normalized feature count
     data in one pass [1].
 
     Example run::
 
-        cellarium-tdigest fit \
+        cellarium-ml tdigest fit \
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
             --data.max_cache_size 2 \
@@ -279,12 +300,12 @@ def tdigest(args: ArgsType = None) -> None:
 
 def main(args: ArgsType = None) -> None:
     """
-    Dispatches to the appropriate model based on the model name in ``args`` and runs it.
+    CLI that dispatches to the appropriate model cli based on the model name in ``args`` and runs it.
 
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
             The model name is expected to be the first argument if ``args`` is a list
-            or as the ``model_name`` key if ``args`` is a dictionary or ``Namespace``.
+            or the ``model_name`` key if ``args`` is a dictionary or ``Namespace``.
     """
     if isinstance(args, (dict, Namespace)):
         model_name = args.pop("model_name")
@@ -292,8 +313,8 @@ def main(args: ArgsType = None) -> None:
         model_name = args.pop(0)
     elif args is None:
         model_name = sys.argv.pop(1)
-    model = REGISTERED_MODELS[model_name]
-    model(args)  # run the model
+    model_cli = REGISTERED_MODELS[model_name]
+    model_cli(args)  # run the model
 
 
 if __name__ == "__main__":
