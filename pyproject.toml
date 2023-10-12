@@ -48,7 +48,6 @@ test = [
 docs = [
   "Pillow",
   "sphinx",
-  "sphinx_gallery",
   "sphinx_rtd_theme",
   "sphinx-autodoc-typehints",
   "sphinx-copybutton",
@@ -56,11 +55,7 @@ docs = [
 dev = ["cellarium-ml[docs,lint,mypy,test]"]
 
 [project.scripts]
-cellarium-geneformer = "cellarium.ml.cli.geneformer:main"
-cellarium-incremental-pca = "cellarium.ml.cli.incremental_pca:main"
-cellarium-onepass-mean-var-std = "cellarium.ml.cli.onepass_mean_var_std:main"
-cellarium-probabilistic-pca = "cellarium.ml.cli.probabilistic_pca:main"
-cellarium-tdigest = "cellarium.ml.cli.tdigest:main"
+cellarium-ml = "cellarium.ml.cli:main"
 
 [project.urls]
 "Homepage" = "https://cellarium-ai.github.io/cellarium-ml"

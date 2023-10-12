@@ -1,16 +1,17 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from importlib import import_module
 from typing import Any
 
 import pytest
+
+from cellarium.ml.cli import main
 
 from .common import requires_crick
 
 CONFIGS = [
     {
-        "cli": "cellarium.ml.cli.geneformer",
+        "model_name": "geneformer",
         "subcommand": "fit",
         "fit": {
             "model": {
@@ -34,7 +35,7 @@ CONFIGS = [
         },
     },
     {
-        "cli": "cellarium.ml.cli.geneformer",
+        "model_name": "geneformer",
         "subcommand": "predict",
         "predict": {
             "model": {
@@ -60,7 +61,7 @@ CONFIGS = [
         },
     },
     {
-        "cli": "cellarium.ml.cli.probabilistic_pca",
+        "model_name": "probabilistic_pca",
         "subcommand": "fit",
         "fit": {
             "model": {
@@ -82,7 +83,7 @@ CONFIGS = [
         },
     },
     {
-        "cli": "cellarium.ml.cli.onepass_mean_var_std",
+        "model_name": "onepass_mean_var_std",
         "subcommand": "fit",
         "fit": {
             "model": {
@@ -102,7 +103,7 @@ CONFIGS = [
         },
     },
     {
-        "cli": "cellarium.ml.cli.incremental_pca",
+        "model_name": "incremental_pca",
         "subcommand": "fit",
         "fit": {
             "model": {
@@ -125,7 +126,7 @@ CONFIGS = [
         },
     },
     {
-        "cli": "cellarium.ml.cli.incremental_pca",
+        "model_name": "incremental_pca",
         "subcommand": "predict",
         "predict": {
             "model": {
@@ -154,7 +155,7 @@ CONFIGS = [
     },
     pytest.param(
         {
-            "cli": "cellarium.ml.cli.tdigest",
+            "model_name": "tdigest",
             "subcommand": "fit",
             "fit": {
                 "model": {"module": "cellarium.ml.module.TDigestFromCLI"},
@@ -180,5 +181,4 @@ CONFIGS = [
 def test_cpu(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
-    cli = import_module(config.pop("cli"))
-    cli.main(config)
+    main(config)
