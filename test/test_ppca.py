@@ -147,7 +147,7 @@ def test_variance_monitor(x_ng: np.ndarray):
 )
 def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
+    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3).reshape(-1, 1)))
     # model
     model = ProbabilisticPCAFromCLI(3, 1, 1, "marginalized", target_count=10)
     training_plan = TrainingPlan(model)
