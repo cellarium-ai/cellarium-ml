@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from functools import cache
+from typing import Any
 
 import numpy as np
 import torch
@@ -36,20 +37,21 @@ class DivideByScale(nn.Module):
     def forward(
         self,
         x_ng: torch.Tensor,
-        feature_list: np.ndarray | None = None,
+        feature_g: np.ndarray | None = None,
     ) -> torch.Tensor:
         """
         Args:
-            x_ng: Gene counts.
-            feature_list:
+            x_ng:
+                Gene counts.
+            feature_g:
                 The list of the variable names in the input data. If ``None``, no validation is performed.
 
         Returns:
             Gene counts divided by scale.
         """
-        if self.feature_schema is not None and feature_list is not None:
-            assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
-            assert np.array_equal(self.feature_schema, feature_list), "feature_list must match the feature_schema."
+        if self.feature_schema is not None and feature_g is not None:
+            assert x_ng.shape[1] == len(feature_g), "The number of x_ng columns must match the feature_g length."
+            assert np.array_equal(self.feature_schema, feature_g), "feature_g must match the feature_schema."
 
         return x_ng / (self.scale_g + self.eps)
 
@@ -78,29 +80,31 @@ class Filter(nn.Module):
         self.filter_list = filter_list
 
     @cache
-    def filter(self, feature_list: np.ndarray) -> np.ndarray[bool]:
+    def filter(self, feature_g: tuple) -> np.ndarray[Any, np.dtype[np.bool_]]:
         """
         Args:
-            feature_list: The list of the variable names in the input data.
+            feature_g: The list of the variable names in the input data.
 
         Returns:
             A boolean mask of the features to filter by.
         """
-        return np.isin(feature_list, self.filter_list)
+        return np.isin(feature_g, self.filter_list)
 
-    def forward(self, x_ng: torch.Tensor, feature_list: np.ndarray) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> torch.Tensor:
         """
         Args:
-            x_ng: Gene counts.
-            feature_list: The list of the variable names in the input data.
+            x_ng:
+                Gene counts.
+            feature_g:
+                The list of the variable names in the input data.
 
         Returns:
             Filtered gene counts.
         """
-        assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
+        assert x_ng.shape[1] == len(feature_g), "The number of x_ng columns must match the feature_g length."
 
-        mask = self.filter(feature_list)
-        return x_ng[:, mask]
+        filter_mask = self.filter(tuple(feature_g.tolist()))
+        return x_ng[:, filter_mask]
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(filter_list={self.filter_list})"
@@ -217,20 +221,21 @@ class ZScore(nn.Module):
     def forward(
         self,
         x_ng: torch.Tensor,
-        feature_list: np.ndarray | None = None,
+        feature_g: np.ndarray | None = None,
     ) -> torch.Tensor:
         """
         Args:
-            x_ng: Gene counts.
-            feature_list:
+            x_ng:
+                Gene counts.
+            feature_g:
                 The list of the variable names in the input data. If ``None``, no validation is performed.
 
         Returns:
             Z-scored gene counts.
         """
-        if self.feature_schema is not None and feature_list is not None:
-            assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
-            assert np.array_equal(self.feature_schema, feature_list), "feature_list must match the feature_schema."
+        if self.feature_schema is not None and feature_g is not None:
+            assert x_ng.shape[1] == len(feature_g), "The number of x_ng columns must match the feature_g length."
+            assert np.array_equal(self.feature_schema, feature_g), "feature_g must match the feature_schema."
 
         return (x_ng - self.mean_g) / (self.std_g + self.eps)
 
