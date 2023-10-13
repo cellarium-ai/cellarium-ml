@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -31,7 +32,11 @@ class NormalizeTotal(nn.Module):
         self.target_count = target_count
         self.eps = eps
 
-    def forward(self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x_ng: torch.Tensor,
+        total_mrna_umis_n: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Args:
             x_ng:
@@ -63,26 +68,41 @@ class DivideByScale(nn.Module):
             A scale for each gene.
         eps:
             A value added to the denominator for numerical stability.
+        feature_schema:
+            The variable names schema. If ``None``, no validation is performed.
     """
 
-    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6):
+    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6, feature_schema: np.ndarray | None = None):
         super().__init__()
         self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)
         self.eps = eps
+        self.feature_schema = feature_schema
 
-    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x_ng: torch.Tensor,
+        feature_list: np.ndarray | None = None,
+    ) -> torch.Tensor:
         """
         Args:
             x_ng: Gene counts.
+            feature_list:
+                The list of the variable names in the input data. If ``None``, no validation is performed.
 
         Returns:
             Gene counts divided by scale.
         """
+        if self.feature_schema is not None and feature_list is not None:
+            assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
+            assert np.array_equal(self.feature_schema, feature_list), "feature_list must match the feature_schema."
+
         return x_ng / (self.scale_g + self.eps)
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(scale_g={self.scale_g}, eps={self.eps})"
+        return (
+            f"{self.__class__.__name__}(scale_g={self.scale_g}, eps={self.eps}, feature_schema={self.feature_schema})"
+        )
 
 
 class Log1p(nn.Module):
@@ -126,6 +146,8 @@ class ZScore(nn.Module):
             Standard deviations for each gene.
         eps:
             A value added to the denominator for numerical stability.
+        feature_schema:
+            The variable names schema. If ``None``, no validation is performed.
     """
 
     def __init__(
@@ -133,21 +155,36 @@ class ZScore(nn.Module):
         mean_g: torch.Tensor | float,
         std_g: torch.Tensor | float,
         eps: float = 1e-6,
+        feature_schema: np.ndarray | None = None,
     ):
         super().__init__()
         self.mean_g = mean_g
         self.std_g = std_g
         self.eps = eps
+        self.feature_schema = feature_schema
 
-    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x_ng: torch.Tensor,
+        feature_list: np.ndarray | None = None,
+    ) -> torch.Tensor:
         """
         Args:
             x_ng: Gene counts.
+            feature_list:
+                The list of the variable names in the input data. If ``None``, no validation is performed.
 
         Returns:
             Z-scored gene counts.
         """
+        if self.feature_schema is not None and feature_list is not None:
+            assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
+            assert np.array_equal(self.feature_schema, feature_list), "feature_list must match the feature_schema."
+
         return (x_ng - self.mean_g) / (self.std_g + self.eps)
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(mean_g={self.mean_g}, std_g={self.std_g}, eps={self.eps})"
+        return (
+            f"{self.__class__.__name__}(mean_g={self.mean_g}, std_g={self.std_g}, eps={self.eps}, "
+            f"feature_schema={self.feature_schema})"
+        )
