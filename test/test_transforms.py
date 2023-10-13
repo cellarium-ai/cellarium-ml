@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from cellarium.ml.transforms import ZScoreLog1pNormalize
+from cellarium.ml.transforms import Log1p, NormalizeTotal, ZScore
 
 n, g, target_count = 100, 3, 10_000
 
@@ -25,16 +25,20 @@ def log_normalize(x_ng: torch.Tensor):
     y_ng = torch.log1p(target_count * x_ng / l_n1)
     mean_g = y_ng.mean(dim=0)
     std_g = y_ng.std(dim=0)
-    transform = ZScoreLog1pNormalize(mean_g, std_g, True, target_count)
+    transform = torch.nn.Sequential(
+        NormalizeTotal(target_count),
+        Log1p(),
+        ZScore(mean_g, std_g),
+    )
     return transform
 
 
-def test_log_normalize_shape(x_ng: torch.Tensor, log_normalize: ZScoreLog1pNormalize):
+def test_log_normalize_shape(x_ng: torch.Tensor, log_normalize: torch.nn.Module):
     new_x_ng = log_normalize(x_ng)
     assert x_ng.shape == new_x_ng.shape
 
 
-def test_log_normalize_mean_std(x_ng: torch.Tensor, log_normalize: ZScoreLog1pNormalize):
+def test_log_normalize_mean_std(x_ng: torch.Tensor, log_normalize: torch.nn.Module):
     new_x_ng = log_normalize(x_ng)
 
     actual_mean = new_x_ng.mean(dim=0)

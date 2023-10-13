@@ -16,7 +16,7 @@ from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedA
 from cellarium.ml.data.util import collate_fn
 from cellarium.ml.module import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
 from cellarium.ml.train import TrainingPlan
-from cellarium.ml.transforms import ZScoreLog1pNormalize
+from cellarium.ml.transforms import Log1p, NormalizeTotal
 
 from .common import TestDataset
 
@@ -65,7 +65,7 @@ def test_onepass_mean_var_std_multi_device(
         num_workers=num_workers,
         collate_fn=collate_fn,
     )
-    transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=10_000)
+    transform = torch.nn.Sequential(NormalizeTotal(target_count=10_000), Log1p())
 
     # fit
     model = OnePassMeanVarStd(g_genes=dadc.n_vars, transform=transform)
@@ -122,7 +122,7 @@ def test_onepass_mean_var_std_multi_device(
 )
 def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
+    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3).reshape(3, 1)))
     # model
     model = OnePassMeanVarStdFromCLI(g_genes=1, target_count=10)
     training_plan = TrainingPlan(model)
@@ -141,9 +141,11 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
     loaded_model: OnePassMeanVarStdFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
-    assert isinstance(model.transform, ZScoreLog1pNormalize)
-    assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)
-    assert model.transform.target_count == loaded_model.transform.target_count
+    assert isinstance(model.transform, torch.nn.Sequential) and len(model.transform) == 2
+    assert isinstance(loaded_model.transform, torch.nn.Sequential) and len(loaded_model.transform) == 2
+    assert isinstance(model.transform[0], NormalizeTotal)
+    assert isinstance(loaded_model.transform[0], NormalizeTotal)
+    assert model.transform[0].target_count == loaded_model.transform[0].target_count
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g)

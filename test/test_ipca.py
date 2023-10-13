@@ -13,7 +13,7 @@ from lightning.pytorch.strategies import DDPStrategy
 from cellarium.ml.callbacks import ModuleCheckpoint
 from cellarium.ml.module import IncrementalPCA, IncrementalPCAFromCLI
 from cellarium.ml.train import TrainingPlan
-from cellarium.ml.transforms import ZScoreLog1pNormalize
+from cellarium.ml.transforms import NormalizeTotal
 
 from .common import TestDataset
 
@@ -125,9 +125,11 @@ def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
     assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
     loaded_model: IncrementalPCAFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
     # assert
-    assert isinstance(model.transform, ZScoreLog1pNormalize)
-    assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)
-    assert model.transform.target_count == loaded_model.transform.target_count
+    assert isinstance(model.transform, torch.nn.Sequential) and len(model.transform) == 2
+    assert isinstance(loaded_model.transform, torch.nn.Sequential) and len(loaded_model.transform) == 2
+    assert isinstance(model.transform[0], NormalizeTotal)
+    assert isinstance(loaded_model.transform[0], NormalizeTotal)
+    assert model.transform[0].target_count == loaded_model.transform[0].target_count
     np.testing.assert_allclose(model.V_kg.detach(), loaded_model.V_kg.detach())
     np.testing.assert_allclose(model.S_k.detach(), loaded_model.S_k.detach())
     np.testing.assert_allclose(model.x_size.detach(), loaded_model.x_size.detach())
