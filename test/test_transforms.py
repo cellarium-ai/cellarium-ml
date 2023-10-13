@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from cellarium.ml.transforms import Log1p, NormalizeTotal, ZScore
+from cellarium.ml.transforms import Filter, Log1p, NormalizeTotal, ZScore
 
 n, g, target_count = 100, 3, 10_000
 
@@ -46,3 +46,15 @@ def test_log_normalize_mean_std(x_ng: torch.Tensor, log_normalize: torch.nn.Sequ
 
     np.testing.assert_allclose(0, actual_mean, atol=1e-5)
     np.testing.assert_allclose(1, actual_std, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "filter_list",
+    [["gene_0"], ["gene_0", "gene_1"], ["gene_0", "gene_2"]],
+)
+def test_filter(x_ng: torch.Tensor, filter_list: list[str]):
+    transform = Filter(np.array(filter_list))
+    feature_list = [f"gene_{i}" for i in range(g)]
+    new_x_ng = transform(x_ng, feature_list)
+    assert new_x_ng.shape[1] == len(filter_list)
+    assert new_x_ng.shape[0] == x_ng.shape[0]

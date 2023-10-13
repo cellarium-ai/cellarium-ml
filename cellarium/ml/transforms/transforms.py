@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from functools import cache
+
 import numpy as np
 import torch
 from torch import nn
@@ -12,9 +14,9 @@ class NormalizeTotal(nn.Module):
 
     .. math::
 
-        total\\_mrna\\_umis_n = \\sum_{g=1}^G x_{ng}
+        \\mathrm{total\\_mrna\\_umis}_n = \\sum_{g=1}^G x_{ng}
 
-        x_{ng} = \\frac{target\\_count \\times x_{ng}}{total\\_mrna\\_umis_n + eps}
+        y_{ng} = \\frac{\\mathrm{target\\_count} \\times x_{ng}}{\\mathrm{total\\_mrna\\_umis}_n + \\mathrm{eps}}
 
     Args:
         target_count:
@@ -61,7 +63,7 @@ class DivideByScale(nn.Module):
 
     .. math::
 
-        x_{ng} = \\frac{x_{ng}}{scale_g + eps}
+        y_{ng} = \\frac{x_{ng}}{\\mathrm{scale}_g + \\mathrm{eps}}
 
     Args:
         scale_g:
@@ -69,7 +71,8 @@ class DivideByScale(nn.Module):
         eps:
             A value added to the denominator for numerical stability.
         feature_schema:
-            The variable names schema. If ``None``, no validation is performed.
+            The variable names schema for the input data validation.
+            If ``None``, no validation is performed.
     """
 
     def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6, feature_schema: np.ndarray | None = None) -> None:
@@ -111,7 +114,7 @@ class Log1p(nn.Module):
 
     .. math::
 
-        x_{ng} = \\log(1 + x_{ng})
+        y_{ng} = \\log(1 + x_{ng})
     """
 
     def __init__(self) -> None:
@@ -137,7 +140,7 @@ class ZScore(nn.Module):
 
     .. math::
 
-        x_{ng} = \\frac{x_{ng} - mean_g}{std_g + eps}
+        y_{ng} = \\frac{x_{ng} - \\mathrm{mean}_g}{\\mathrm{std}_g + \\mathrm{eps}}
 
     Args:
         mean_g:
@@ -147,7 +150,8 @@ class ZScore(nn.Module):
         eps:
             A value added to the denominator for numerical stability.
         feature_schema:
-            The variable names schema. If ``None``, no validation is performed.
+            The variable names schema for the input data validation.
+            If ``None``, no validation is performed.
     """
 
     def __init__(
@@ -188,3 +192,47 @@ class ZScore(nn.Module):
             f"{self.__class__.__name__}(mean_g={self.mean_g}, std_g={self.std_g}, eps={self.eps}, "
             f"feature_schema={self.feature_schema})"
         )
+
+
+class Filter(nn.Module):
+    """
+    Filter gene counts by a list of features.
+
+    .. math::
+
+        \\mathrm{mask}_g = \\mathrm{feature}_g \\in \\mathrm{filter\\_list}
+
+        y_{ng} = x_{ng}[:, \\mathrm{mask}_g]
+
+    Args:
+        filter_list: A list of features to filter by.
+    """
+
+    def __init__(self, filter_list: np.ndarray) -> None:
+        super().__init__()
+        self.filter_list = filter_list
+
+    @cache
+    def filter(self, feature_list: np.ndarray) -> np.ndarray[bool]:
+        """
+        Args:
+            feature_list: The list of the variable names in the input data.
+
+        Returns:
+            A boolean mask of the features to filter by.
+        """
+        return np.isin(feature_list, self.filter_list)
+
+    def forward(self, x_ng: torch.Tensor, feature_list: np.ndarray) -> torch.Tensor:
+        """
+        Args:
+            x_ng: Gene counts.
+            feature_list: The list of the variable names in the input data.
+
+        Returns:
+            Filtered gene counts.
+        """
+        assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
+
+        mask = self.filter(feature_list)
+        return x_ng[:, mask]
