@@ -72,7 +72,7 @@ class DivideByScale(nn.Module):
             The variable names schema. If ``None``, no validation is performed.
     """
 
-    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6, feature_schema: np.ndarray | None = None):
+    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6, feature_schema: np.ndarray | None = None) -> None:
         super().__init__()
         self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)
@@ -114,7 +114,7 @@ class Log1p(nn.Module):
         x_{ng} = \\log(1 + x_{ng})
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
     def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
@@ -156,7 +156,7 @@ class ZScore(nn.Module):
         std_g: torch.Tensor | float,
         eps: float = 1e-6,
         feature_schema: np.ndarray | None = None,
-    ):
+    ) -> None:
         super().__init__()
         self.mean_g = mean_g
         self.std_g = std_g
