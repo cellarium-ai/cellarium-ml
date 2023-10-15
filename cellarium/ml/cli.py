@@ -66,6 +66,24 @@ def lightning_cli_factory(
                 args=args,
             )
 
+        def instantiate_classes(self) -> None:
+            super().instantiate_classes()
+            if link_arguments is not None:
+                config = self.config[self.subcommand]
+                config_init = self.config_init[self.subcommand]
+                for source, target in link_arguments:
+                    source_key, *source_attrs = source.split(".")
+                    value = config_init[source_key]
+                    for attr in source_attrs:
+                        value = getattr(value, attr)
+
+                    target_keys = target.split(".")
+                    for key in target_keys[:-1]:
+                        config = config[key]
+                    config[target_keys[-1]] = value
+
+            self.model.config = self.config[self.subcommand]
+
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
             if link_arguments is not None:
                 for arg1, arg2 in link_arguments:
