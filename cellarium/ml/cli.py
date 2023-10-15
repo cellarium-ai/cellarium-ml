@@ -82,7 +82,7 @@ def lightning_cli_factory(
                         config = config[key]
                     config[target_keys[-1]] = value
 
-            self.model.config = self.config[self.subcommand]
+            self.model._set_hparams(self.config[self.subcommand])
 
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
             if link_arguments is not None:

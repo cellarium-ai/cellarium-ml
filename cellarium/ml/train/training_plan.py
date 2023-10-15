@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Any
+from typing import IO, Any
+from unittest.mock import patch
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
+from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 
+from cellarium.ml.core.saving import _load_state
 from cellarium.ml.module import BaseModule, PredictMixin
 
 
@@ -70,27 +73,23 @@ class TrainingPlan(pl.LightningModule):
         self.scheduler_fn = scheduler_fn
         self.scheduler_kwargs = scheduler_kwargs
 
-        self.config: dict | None = None
-
     @classmethod
-    def from_checkpoint(cls, ckpt_path: str) -> TrainingPlan:
-        from jsonargparse import ArgumentParser
-
-        parser = ArgumentParser()
-        parser.add_class_arguments(cls, "model")
-        ckpt = torch.load(ckpt_path)
-        cfg = ckpt["state_dict"]["_extra_state"]["config"]
-        with torch.device("meta"):
-            cfg_init = parser.instantiate_classes(cfg)
-        plan = cfg_init.model
-        plan.load_state_dict(ckpt["state_dict"])
-        return plan
-
-    def get_extra_state(self) -> dict[str, Any]:
-        return {"config": self.config}
-
-    def set_extra_state(self, state: dict[str, Any]) -> None:
-        self.config = state["config"]
+    @patch("lightning.pytorch.core.saving._load_state", new=_load_state)
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: _PATH | IO,
+        map_location: _MAP_LOCATION_TYPE = None,
+        hparams_file: _PATH | None = None,
+        strict: bool = True,
+        **kwargs: Any,
+    ) -> TrainingPlan:
+        return super().load_from_checkpoint(
+            checkpoint_path=checkpoint_path,
+            map_location=map_location,
+            hparams_file=hparams_file,
+            strict=strict,
+            **kwargs,
+        )
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
