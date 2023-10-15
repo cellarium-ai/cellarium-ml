@@ -9,8 +9,6 @@ import lightning.pytorch as pl
 from jsonargparse import ArgumentParser
 from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
-# from torchdistx.deferred_init import deferred_init, materialize_module
-
 
 def _load_state(
     cls: type[pl.LightningModule],
@@ -18,6 +16,11 @@ def _load_state(
     strict: bool | None = None,
     **cls_kwargs_new: Any,
 ) -> pl.LightningModule:
+    """
+    Re-implementation of :func:`lightning.pytorch.core.saving._load_state` that instantiates the model
+    using the configuration saved in the checkpoint.
+    """
+    ### cellarium.ml - this part is modified from the original
     parser = ArgumentParser()
     parser.add_class_arguments(cls, "model")
 
@@ -28,9 +31,9 @@ def _load_state(
         cfg = parser.get_defaults()
 
     # instantiate the model
-    # with torch.device("meta"):
     cfg_init = parser.instantiate_classes(cfg)
     obj = cfg_init.model
+    ### cellarium.ml - end of modification
 
     # load the state_dict on the model automatically
     assert strict is not None

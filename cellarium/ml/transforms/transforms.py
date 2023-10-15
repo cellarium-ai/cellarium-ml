@@ -1,16 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from dataclasses import dataclass
-
 import torch
 from torch import nn
-
-
-@dataclass
-class TensorDict:
-    ckpt_path: str
-    attr: str
 
 
 class NormalizeTotal(nn.Module):
@@ -51,15 +43,8 @@ class DivideByScale(nn.Module):
             A value added to the denominator for numerical stability.
     """
 
-    def __init__(self, scale_g: torch.Tensor | TensorDict, eps: float = 1e-6) -> None:
+    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6):
         super().__init__()
-        if isinstance(scale_g, TensorDict):
-            from cellarium.ml.train import TrainingPlan
-
-            obj = TrainingPlan.from_checkpoint(scale_g.ckpt_path)
-            for attr in scale_g.attr.split("."):
-                obj = getattr(obj, attr)
-            scale_g = obj
         self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)
         self.eps = eps
