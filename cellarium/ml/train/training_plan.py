@@ -37,7 +37,8 @@ class TrainingPlan(pl.LightningModule):
         default_lr:
             Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
         config:
-            A dictionary or :class:`jsonargparse.Namespace` containing the hyperparameters.
+            A dictionary or :class:`jsonargparse.Namespace` containing the initialization hyperparameters.
+            If provided, the configuration will be saved as hyperparameters in the checkpoint.
     """
 
     def __init__(
@@ -90,6 +91,76 @@ class TrainingPlan(pl.LightningModule):
         strict: bool = True,
         **kwargs: Any,
     ) -> TrainingPlan:
+        r"""
+        Primary way of loading a model from a checkpoint. When Cellarium ML saves a checkpoint it stores the config
+        argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``. This is also done
+        automatically when :module:`cellarium.ml.cli` module is used to train a model.
+
+        Any arguments specified through \*\*kwargs will override args stored in ``"hyper_parameters"``.
+
+        Args:
+            checkpoint_path:
+                Path to checkpoint. This can also be a URL, or file-like object
+            map_location:
+                If your checkpoint saved a GPU model and you now load on CPUs
+                or a different number of GPUs, use this to map to the new setup.
+                The behaviour is the same as in :func:`torch.load`.
+            hparams_file:
+                Optional path to a ``.yaml`` or ``.csv`` file with hierarchical structure as in this example::
+
+                    model:
+                      module:
+                        class_path: cellarium.ml.module.OnePassMeanVarStdFromCLI
+                        init_args:
+                          g_genes: 36350
+                          target_count: 10000
+                      optim_fn: null
+                      optim_kwargs: null
+                      scheduler_fn: null
+                      scheduler_kwargs: null
+                      default_lr: 0.001
+
+                If you train a model using :module:`cellarium.ml.cli` module you most likely won't need this
+                since Cellarium ML CLI will always save the hyperparameters to the checkpoint.
+
+                However, if your checkpoint weights don't have the hyperparameters saved,
+                use this method to pass in a ``.yaml`` file with the hparams you'd like to use.
+                These will be converted into a :class:`~dict` and passed into your
+                :class:`TrainingPlan` for use.
+            strict:
+                Whether to strictly enforce that the keys in :attr:`checkpoint_path` match the keys
+                returned by this module's state dict.
+            \**kwargs: Any extra keyword args needed to init the model. Can also be used to override saved
+                hyperparameter values.
+
+        Return:
+            :class:`TrainingPlan` instance with loaded weights and hyperparameters.
+
+        Example::
+
+            # load weights without mapping ...
+            model = TrainingPlan.load_from_checkpoint("path/to/checkpoint.ckpt")
+
+            # or load weights mapping all weights from GPU 1 to GPU 0 ...
+            map_location = {"cuda:1": "cuda:0"}
+            model = TrainingPlan.load_from_checkpoint(
+                "path/to/checkpoint.ckpt",
+                map_location=map_location
+            )
+
+            # or load weights and hyperparameters from separate files.
+            model = TrainingPlan.load_from_checkpoint(
+                "path/to/checkpoint.ckpt",
+                hparams_file="/path/to/config.yaml"
+            )
+
+            # override some of the params with new values
+            model = TrainingPlan.load_from_checkpoint(
+                "path/to/checkpoint.ckpt",
+                optim_fn=torch.optim.AdamW,
+                default_lr=0.0001,
+            )
+        """
         return super().load_from_checkpoint(
             checkpoint_path=checkpoint_path,
             map_location=map_location,

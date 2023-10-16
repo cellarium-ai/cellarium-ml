@@ -28,6 +28,9 @@ def _load_state(
     else:
         cfg = parser.get_defaults()
 
+    for key, value in cls_kwargs_new.items():
+        cfg["model"][key] = value
+
     # instantiate the model
     cfg_init = parser.instantiate_classes(cfg)
     obj = cfg_init.model
