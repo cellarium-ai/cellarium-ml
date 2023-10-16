@@ -88,7 +88,7 @@ def test_module_checkpoint(tmp_path: Path):
     train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(6).reshape(3, 2)))
     # model
     init_args = {"g_genes": 2, "k_components": 1, "perform_mean_correction": True, "target_count": 10}
-    model = IncrementalPCAFromCLI(**init_args)
+    model = IncrementalPCAFromCLI(**init_args)  # type: ignore[arg-type]
     training_plan = TrainingPlan(model)
     config = {
         "model": {

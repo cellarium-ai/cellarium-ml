@@ -136,7 +136,7 @@ def test_module_checkpoint(tmp_path: Path):
         "ppca_flavor": "marginalized",
         "target_count": 10,
     }
-    model = ProbabilisticPCAFromCLI(**init_args)
+    model = ProbabilisticPCAFromCLI(**init_args)  # type: ignore[arg-type]
     training_plan = TrainingPlan(model)
     config = {
         "model": {
