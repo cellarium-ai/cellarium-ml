@@ -99,8 +99,9 @@ def test_onepass_mean_var_std_multi_device(
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
 
 
-def test_module_checkpoint(tmp_path: Path):
+def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 3, 2
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         TestDataset(np.arange(n * g).reshape(n, g)),
@@ -119,14 +120,22 @@ def test_module_checkpoint(tmp_path: Path):
     }
     training_plan = TrainingPlan(model, config=config)
     # trainer
+    strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
         max_epochs=1,
         accelerator="cpu",
+        strategy=strategy,  # type: ignore[arg-type]
+        devices=devices,
         log_every_n_steps=1,
         default_root_dir=tmp_path,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
+
+    # run tests only for rank 0
+    if trainer.global_rank != 0:
+        return
+
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={n}.ckpt"
     assert ckpt_path.is_file()

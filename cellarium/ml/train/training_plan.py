@@ -38,7 +38,7 @@ class TrainingPlan(pl.LightningModule):
             Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
         config:
             A dictionary or :class:`jsonargparse.Namespace` containing the initialization hyperparameters.
-            If provided, the configuration will be saved as hyperparameters in the checkpoint.
+            If not ``None``, the configuration will be saved as ``"hyper_parameters"`` in the checkpoint.
     """
 
     def __init__(
@@ -93,10 +93,9 @@ class TrainingPlan(pl.LightningModule):
     ) -> TrainingPlan:
         r"""
         Primary way of loading a model from a checkpoint. When Cellarium ML saves a checkpoint it stores the config
-        argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``. This is also done
-        automatically when :module:`cellarium.ml.cli` module is used to train a model.
+        argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.
 
-        Any arguments specified through \*\*kwargs will override args stored in ``"hyper_parameters"``.
+        Any arguments specified through ``**kwargs`` will override args stored in ``"hyper_parameters"``.
 
         Args:
             checkpoint_path:
@@ -120,12 +119,12 @@ class TrainingPlan(pl.LightningModule):
                       scheduler_kwargs: null
                       default_lr: 0.001
 
-                If you train a model using :module:`cellarium.ml.cli` module you most likely won't need this
+                If you train a model using :mod:`cellarium.ml.cli` module you most likely won't need this
                 since Cellarium ML CLI will always save the hyperparameters to the checkpoint.
 
                 However, if your checkpoint weights don't have the hyperparameters saved,
                 use this method to pass in a ``.yaml`` file with the hparams you'd like to use.
-                These will be converted into a :class:`~dict` and passed into your
+                These will be converted into a :class:`dict` and passed into your
                 :class:`TrainingPlan` for use.
             strict:
                 Whether to strictly enforce that the keys in :attr:`checkpoint_path` match the keys

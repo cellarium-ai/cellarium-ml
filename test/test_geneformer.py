@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -14,9 +15,10 @@ from cellarium.ml.train import TrainingPlan
 from .common import TestDataset
 
 
-def test_module_checkpoint(tmp_path: Path):
+def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 4, 3
     var_names = np.array([f"gene_{i}" for i in range(g)])
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         TestDataset(
@@ -48,11 +50,17 @@ def test_module_checkpoint(tmp_path: Path):
     trainer = pl.Trainer(
         max_epochs=1,
         accelerator="cpu",
+        devices=devices,
         log_every_n_steps=1,
         default_root_dir=tmp_path,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
+
+    # run tests only for rank 0
+    if trainer.global_rank != 0:
+        return
+
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={n}.ckpt"
     assert ckpt_path.is_file()
