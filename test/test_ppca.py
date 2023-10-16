@@ -112,7 +112,11 @@ def test_variance_monitor(x_ng: np.ndarray):
     n, g = x_ng.shape
     k = 3
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(x_ng), batch_size=n // 2)
+    train_loader = torch.utils.data.DataLoader(
+        TestDataset(x_ng),
+        batch_size=n // 2,
+        collate_fn=collate_fn,
+    )
     # model
     ppca = ProbabilisticPCA(n, g, k, "marginalized")
     training_plan = TrainingPlan(ppca)

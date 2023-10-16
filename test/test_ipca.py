@@ -79,7 +79,7 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
     assert ipca.x_size == n
     np.testing.assert_allclose(
         ipca.x_mean_g,
-        (x_ng if perform_mean_correction else x_ng_centered).mean(axis=0),
+        (x_ng if perform_mean_correction else x_ng_centered).mean(dim=0),
         atol=1e-5,
     )
 
