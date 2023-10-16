@@ -72,18 +72,18 @@ def lightning_cli_factory(
             # impute linked arguments after instantiation
             if link_arguments is not None:
                 for source, target in link_arguments:
-                    config = self.config[self.subcommand]
-                    config_init = self.config_init[self.subcommand]
-                    # e.g., source = "data.var_names"
+                    # e.g., source == "data.var_names"
                     source_key, *source_attrs = source.split(".")
                     # note that config_init is initialized, so value is an instance
+                    config_init = self.config_init[self.subcommand]
                     value = config_init[source_key]
                     for attr in source_attrs:
                         value = getattr(value, attr)
 
-                    # e.g., target = "model.module.init_args.feature_schema"
-                    # note that config is dict-like, so assign the value to the last key
+                    # e.g., target == "model.module.init_args.feature_schema"
                     target_keys = target.split(".")
+                    # note that config is dict-like, so assign the value to the last key
+                    config = self.config[self.subcommand]
                     for key in target_keys[:-1]:
                         config = config[key]
                     config[target_keys[-1]] = value
