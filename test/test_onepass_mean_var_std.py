@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import math
 import os
 from pathlib import Path
 
@@ -137,7 +138,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         return
 
     # load model from checkpoint
-    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={n}.ckpt"
+    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
     loaded_model: OnePassMeanVarStdFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert

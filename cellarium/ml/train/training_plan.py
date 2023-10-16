@@ -105,7 +105,9 @@ class TrainingPlan(pl.LightningModule):
                 or a different number of GPUs, use this to map to the new setup.
                 The behaviour is the same as in :func:`torch.load`.
             hparams_file:
-                Optional path to a ``.yaml`` or ``.csv`` file with hierarchical structure as in this example::
+                Optional path to a ``.yaml`` or ``.csv`` file with hierarchical structure as in this example:
+
+                .. code-block:: yaml
 
                     model:
                       module:
