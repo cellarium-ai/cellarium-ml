@@ -10,6 +10,7 @@ from unittest.mock import patch
 import lightning.pytorch as pl
 import numpy as np
 import torch
+from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 
@@ -35,6 +36,8 @@ class TrainingPlan(pl.LightningModule):
             Keyword arguments for lr scheduler.
         default_lr:
             Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
+        config:
+            A dictionary or :class:`jsonargparse.Namespace` containing the hyperparameters.
     """
 
     def __init__(
@@ -45,6 +48,7 @@ class TrainingPlan(pl.LightningModule):
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
         scheduler_kwargs: dict | None = None,
         default_lr: float = 1e-3,
+        config: dict[str, Any] | Namespace | None = None,
     ) -> None:
         super().__init__()
         self.module = module
@@ -72,6 +76,9 @@ class TrainingPlan(pl.LightningModule):
         self.optim_kwargs = optim_kwargs
         self.scheduler_fn = scheduler_fn
         self.scheduler_kwargs = scheduler_kwargs
+
+        if config is not None:
+            self._set_hparams(config)
 
     @classmethod
     @patch("lightning.pytorch.core.saving._load_state", new=_load_state)

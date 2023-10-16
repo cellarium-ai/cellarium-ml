@@ -116,7 +116,6 @@ def test_module_checkpoint(tmp_path: Path):
     # model
     init_args = {"g_genes": g, "target_count": 10}
     model = TDigestFromCLI(**init_args)
-    training_plan = TrainingPlan(model)
     config = {
         "model": {
             "module": {
@@ -125,7 +124,7 @@ def test_module_checkpoint(tmp_path: Path):
             }
         }
     }
-    training_plan._set_hparams(config)
+    training_plan = TrainingPlan(model, config=config)
     # trainer
     trainer = pl.Trainer(
         max_epochs=1,

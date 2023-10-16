@@ -19,7 +19,7 @@ from .common import TestDataset
 
 
 @pytest.fixture
-def x_ng() -> torch.Tensor:
+def x_ng():
     n, g = 10000, 100
     rng = torch.Generator()
     rng.manual_seed(1465)
@@ -33,7 +33,7 @@ def x_ng() -> torch.Tensor:
 @pytest.mark.parametrize("k", [30, 50, 80])
 def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correction: bool, batch_size: int, k: int):
     n, g = x_ng.shape
-    x_ng_centered = x_ng - x_ng.mean(axis=0)
+    x_ng_centered = x_ng - x_ng.mean(dim=0)
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     batch_size = batch_size // devices
 
@@ -94,7 +94,6 @@ def test_module_checkpoint(tmp_path: Path):
     # model
     init_args = {"g_genes": g, "k_components": 1, "perform_mean_correction": True, "target_count": 10}
     model = IncrementalPCAFromCLI(**init_args)  # type: ignore[arg-type]
-    training_plan = TrainingPlan(model)
     config = {
         "model": {
             "module": {
@@ -103,7 +102,7 @@ def test_module_checkpoint(tmp_path: Path):
             }
         }
     }
-    training_plan._set_hparams(config)
+    training_plan = TrainingPlan(model, config=config)
     # trainer
     trainer = pl.Trainer(
         max_epochs=1,

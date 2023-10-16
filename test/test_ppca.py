@@ -145,7 +145,6 @@ def test_module_checkpoint(tmp_path: Path):
         "target_count": 10,
     }
     model = ProbabilisticPCAFromCLI(**init_args)  # type: ignore[arg-type]
-    training_plan = TrainingPlan(model)
     config = {
         "model": {
             "module": {
@@ -154,7 +153,7 @@ def test_module_checkpoint(tmp_path: Path):
             }
         }
     }
-    training_plan._set_hparams(config)
+    training_plan = TrainingPlan(model, config=config)
     # trainer
     trainer = pl.Trainer(
         max_epochs=1,

@@ -35,7 +35,6 @@ def test_module_checkpoint(tmp_path: Path):
         "max_position_embeddings": 2,
     }
     model = GeneformerFromCLI(**init_args)  # type: ignore[arg-type]
-    training_plan = TrainingPlan(model)
     config = {
         "model": {
             "module": {
@@ -44,7 +43,7 @@ def test_module_checkpoint(tmp_path: Path):
             }
         }
     }
-    training_plan._set_hparams(config)
+    training_plan = TrainingPlan(model, config=config)
     # trainer
     trainer = pl.Trainer(
         max_epochs=1,
