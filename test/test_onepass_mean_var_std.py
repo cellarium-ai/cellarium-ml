@@ -11,7 +11,6 @@ import torch
 from anndata import AnnData
 from lightning.pytorch.strategies import DDPStrategy
 
-from cellarium.ml.callbacks import ModuleCheckpoint
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.data.util import collate_fn
 from cellarium.ml.module import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
@@ -100,46 +99,35 @@ def test_onepass_mean_var_std_multi_device(
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
 
 
-@pytest.mark.parametrize(
-    "checkpoint_kwargs",
-    [
-        {
-            "save_on_train_end": True,
-            "save_on_train_epoch_end": False,
-            "save_on_train_batch_end": False,
-        },
-        {
-            "save_on_train_end": False,
-            "save_on_train_epoch_end": True,
-            "save_on_train_batch_end": False,
-        },
-        {
-            "save_on_train_end": False,
-            "save_on_train_epoch_end": False,
-            "save_on_train_batch_end": True,
-        },
-    ],
-)
-def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
+def test_module_checkpoint(tmp_path: Path):
     # dataloader
     train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
     # model
-    model = OnePassMeanVarStdFromCLI(g_genes=1, target_count=10)
+    init_args = {"g_genes": 1, "target_count": 10}
+    model = OnePassMeanVarStdFromCLI(**init_args)
     training_plan = TrainingPlan(model)
+    config = {
+        "model": {
+            "module": {
+                "class_path": "cellarium.ml.module.OnePassMeanVarStdFromCLI",
+                "init_args": init_args,
+            }
+        }
+    }
+    training_plan._set_hparams(config)
     # trainer
-    checkpoint_kwargs["dirpath"] = tmp_path
-    module_checkpoint = ModuleCheckpoint(**checkpoint_kwargs)
     trainer = pl.Trainer(
         max_epochs=1,
         accelerator="cpu",
-        callbacks=[module_checkpoint],
         log_every_n_steps=1,
+        default_root_dir=tmp_path,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
-    assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model: OnePassMeanVarStdFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    ckpt_path = os.path.join(tmp_path, "lightning_logs/version_0/checkpoints/epoch=0-step=3.ckpt")
+    assert os.path.exists(ckpt_path)
+    loaded_model: OnePassMeanVarStdFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert
     assert isinstance(model.transform, ZScoreLog1pNormalize)
     assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)

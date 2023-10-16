@@ -10,7 +10,6 @@ import pytest
 import torch
 from anndata import AnnData
 
-from cellarium.ml.callbacks import ModuleCheckpoint
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
@@ -106,47 +105,35 @@ def test_tdigest_multi_device(
         np.testing.assert_allclose(expected_median, actual_median, rtol=0.01)
 
 
-@requires_crick
-@pytest.mark.parametrize(
-    "checkpoint_kwargs",
-    [
-        {
-            "save_on_train_end": True,
-            "save_on_train_epoch_end": False,
-            "save_on_train_batch_end": False,
-        },
-        {
-            "save_on_train_end": False,
-            "save_on_train_epoch_end": True,
-            "save_on_train_batch_end": False,
-        },
-        {
-            "save_on_train_end": False,
-            "save_on_train_epoch_end": False,
-            "save_on_train_batch_end": True,
-        },
-    ],
-)
-def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
+def test_module_checkpoint(tmp_path: Path):
     # dataloader
     train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(12).reshape(4, 3)))
     # model
-    model = TDigestFromCLI(g_genes=3, target_count=10)
+    init_args = {"g_genes": 3, "target_count": 10}
+    model = TDigestFromCLI(**init_args)
     training_plan = TrainingPlan(model)
+    config = {
+        "model": {
+            "module": {
+                "class_path": "cellarium.ml.module.TDigestFromCLI",
+                "init_args": init_args,
+            }
+        }
+    }
+    training_plan._set_hparams(config)
     # trainer
-    checkpoint_kwargs["dirpath"] = tmp_path
-    module_checkpoint = ModuleCheckpoint(**checkpoint_kwargs)
     trainer = pl.Trainer(
         max_epochs=1,
         accelerator="cpu",
-        callbacks=[module_checkpoint],
         log_every_n_steps=1,
+        default_root_dir=tmp_path,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
-    assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model: TDigestFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    ckpt_path = os.path.join(tmp_path, "lightning_logs/version_0/checkpoints/epoch=0-step=4.ckpt")
+    assert os.path.exists(ckpt_path)
+    loaded_model: TDigestFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert
     assert isinstance(model.transform, NormalizeTotal)
     assert isinstance(loaded_model.transform, NormalizeTotal)

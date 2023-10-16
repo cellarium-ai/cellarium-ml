@@ -20,7 +20,7 @@ def _load_state(
     Re-implementation of :func:`lightning.pytorch.core.saving._load_state` that instantiates the model
     using the configuration saved in the checkpoint.
     """
-    ### cellarium.ml - this part is modified from the original
+    ### cellarium.ml - this part is different from the original
     parser = ArgumentParser()
     parser.add_class_arguments(cls, "model")
 

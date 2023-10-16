@@ -89,7 +89,7 @@ def lightning_cli_factory(
                         config = config[key]
                     config[target_keys[-1]] = value
 
-            # `model.hparams` are stored within the model checkpoint as `hyper_parameters` key
+            # save the config to the :attr:`model.hparams` to be able to load the model checkpoint
             self.model._set_hparams(self.config[self.subcommand])
 
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
