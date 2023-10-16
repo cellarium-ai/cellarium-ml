@@ -24,7 +24,7 @@ from .common import TestDataset, requires_crick
 
 @pytest.fixture
 def adata():
-    n_cell, g_gene = (1000, 5)
+    n_cell, g_gene = 1000, 5
     rng = np.random.default_rng(1465)
     X = rng.integers(100, size=(n_cell, g_gene))
     return AnnData(X, dtype=X.dtype)
@@ -107,14 +107,14 @@ def test_tdigest_multi_device(
 
 @requires_crick
 def test_module_checkpoint(tmp_path: Path):
-    n = 4
+    n, g = 4, 3
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(np.arange(n * 3).reshape(-1, 3)),
+        TestDataset(np.arange(n * g).reshape(n, g)),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"g_genes": 3, "target_count": 10}
+    init_args = {"g_genes": g, "target_count": 10}
     model = TDigestFromCLI(**init_args)
     training_plan = TrainingPlan(model)
     config = {

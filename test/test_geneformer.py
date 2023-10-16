@@ -15,12 +15,12 @@ from .common import TestDataset
 
 
 def test_module_checkpoint(tmp_path: Path):
-    n = 4
-    var_names = np.array(["a", "b", "c"])
+    n, g = 4, 3
+    var_names = np.array([f"gene_{i}" for i in range(g)])
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         TestDataset(
-            np.arange(n * 3).reshape(-1, 3),
+            np.arange(n * g).reshape(n, g),
             var_names=var_names,
         ),
         collate_fn=collate_fn,

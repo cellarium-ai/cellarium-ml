@@ -22,7 +22,7 @@ from .common import TestDataset
 
 @pytest.fixture
 def adata():
-    n_cell, g_gene = (10, 5)
+    n_cell, g_gene = 10, 5
     rng = np.random.default_rng(1465)
     X = rng.integers(10, size=(n_cell, g_gene))
     return AnnData(X, dtype=X.dtype)
@@ -100,14 +100,14 @@ def test_onepass_mean_var_std_multi_device(
 
 
 def test_module_checkpoint(tmp_path: Path):
-    n = 3
+    n, g = 3, 2
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(np.arange(n).reshape(-1, 1)),
+        TestDataset(np.arange(n * g).reshape(n, g)),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"g_genes": 1, "target_count": 10}
+    init_args = {"g_genes": g, "target_count": 10}
     model = OnePassMeanVarStdFromCLI(**init_args)
     training_plan = TrainingPlan(model)
     config = {

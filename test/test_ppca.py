@@ -18,11 +18,10 @@ from cellarium.ml.transforms import ZScoreLog1pNormalize
 
 from .common import TestDataset
 
-n, g, k = 1000, 10, 3
-
 
 @pytest.fixture
 def x_ng():
+    n, g, k = 1000, 10, 3
     rng = np.random.default_rng(0)
     z_nk = rng.standard_normal(size=(n, k), dtype=np.float32)
     w_kg = rng.standard_normal(size=(k, g), dtype=np.float32)
@@ -37,6 +36,7 @@ def x_ng():
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
 def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_flavor: str, learn_mean: bool):
     n, g = x_ng.shape
+    k = 3
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     if learn_mean:
         x_mean_g = None
@@ -49,6 +49,7 @@ def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_
         TestDataset(x_ng),
         batch_size=batch_size,
         shuffle=False,
+        collate_fn=collate_fn,
     )
     # model
     pyro.clear_param_store()
@@ -108,6 +109,8 @@ def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_
 
 
 def test_variance_monitor(x_ng: np.ndarray):
+    n, g = x_ng.shape
+    k = 3
     # dataloader
     train_loader = torch.utils.data.DataLoader(TestDataset(x_ng), batch_size=n // 2)
     # model
@@ -127,16 +130,16 @@ def test_variance_monitor(x_ng: np.ndarray):
 
 
 def test_module_checkpoint(tmp_path: Path):
-    n = 3
+    n, g = 3, 2
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(np.arange(n).reshape(-1, 1)),
+        TestDataset(np.arange(n * g).reshape(n, g)),
         collate_fn=collate_fn,
     )
     # model
     init_args = {
         "n_cells": n,
-        "g_genes": 1,
+        "g_genes": g,
         "k_components": 1,
         "ppca_flavor": "marginalized",
         "target_count": 10,

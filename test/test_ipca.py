@@ -17,11 +17,10 @@ from cellarium.ml.transforms import ZScoreLog1pNormalize
 
 from .common import TestDataset
 
-n, g = 10000, 100
-
 
 @pytest.fixture
-def x_ng():
+def x_ng() -> torch.Tensor:
+    n, g = 10000, 100
     rng = torch.Generator()
     rng.manual_seed(1465)
     mean_g = torch.randn((g,), generator=rng)
@@ -32,7 +31,7 @@ def x_ng():
 @pytest.mark.parametrize("perform_mean_correction", [False, True])
 @pytest.mark.parametrize("batch_size", [10_000, 5000, 1000, 500, 250])
 @pytest.mark.parametrize("k", [30, 50, 80])
-def test_incremental_pca_multi_device(x_ng: np.ndarray, perform_mean_correction: bool, batch_size: int, k: int):
+def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correction: bool, batch_size: int, k: int):
     n, g = x_ng.shape
     x_ng_centered = x_ng - x_ng.mean(axis=0)
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -40,9 +39,10 @@ def test_incremental_pca_multi_device(x_ng: np.ndarray, perform_mean_correction:
 
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(x_ng if perform_mean_correction else x_ng_centered),
+        TestDataset((x_ng if perform_mean_correction else x_ng_centered).numpy()),
         batch_size=batch_size,
         shuffle=False,
+        collate_fn=collate_fn,
     )
     # model
     ipca = IncrementalPCA(
@@ -85,14 +85,14 @@ def test_incremental_pca_multi_device(x_ng: np.ndarray, perform_mean_correction:
 
 
 def test_module_checkpoint(tmp_path: Path):
-    n = 3
+    n, g = 3, 2
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(np.arange(n * 2).reshape(-1, 2)),
+        TestDataset(np.arange(n * g).reshape(n, g)),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"g_genes": 2, "k_components": 1, "perform_mean_correction": True, "target_count": 10}
+    init_args = {"g_genes": g, "k_components": 1, "perform_mean_correction": True, "target_count": 10}
     model = IncrementalPCAFromCLI(**init_args)  # type: ignore[arg-type]
     training_plan = TrainingPlan(model)
     config = {
