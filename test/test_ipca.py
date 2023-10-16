@@ -10,6 +10,7 @@ import pytest
 import torch
 from lightning.pytorch.strategies import DDPStrategy
 
+from cellarium.ml.data.util import collate_fn
 from cellarium.ml.module import IncrementalPCA, IncrementalPCAFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import ZScoreLog1pNormalize
@@ -84,8 +85,12 @@ def test_incremental_pca_multi_device(x_ng: np.ndarray, perform_mean_correction:
 
 
 def test_module_checkpoint(tmp_path: Path):
+    n = 3
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(6).reshape(3, 2)))
+    train_loader = torch.utils.data.DataLoader(
+        TestDataset(np.arange(n * 2).reshape(-1, 2)),
+        collate_fn=collate_fn,
+    )
     # model
     init_args = {"g_genes": 2, "k_components": 1, "perform_mean_correction": True, "target_count": 10}
     model = IncrementalPCAFromCLI(**init_args)  # type: ignore[arg-type]
@@ -109,8 +114,8 @@ def test_module_checkpoint(tmp_path: Path):
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
-    ckpt_path = os.path.join(tmp_path, "lightning_logs/version_0/checkpoints/epoch=0-step=3.ckpt")
-    assert os.path.exists(ckpt_path)
+    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={n}.ckpt"
+    assert ckpt_path.is_file()
     loaded_model: IncrementalPCAFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert
     assert isinstance(model.transform, ZScoreLog1pNormalize)

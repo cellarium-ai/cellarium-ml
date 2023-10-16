@@ -100,8 +100,12 @@ def test_onepass_mean_var_std_multi_device(
 
 
 def test_module_checkpoint(tmp_path: Path):
+    n = 3
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3)))
+    train_loader = torch.utils.data.DataLoader(
+        TestDataset(np.arange(n).reshape(-1, 1)),
+        collate_fn=collate_fn,
+    )
     # model
     init_args = {"g_genes": 1, "target_count": 10}
     model = OnePassMeanVarStdFromCLI(**init_args)
@@ -125,8 +129,8 @@ def test_module_checkpoint(tmp_path: Path):
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
-    ckpt_path = os.path.join(tmp_path, "lightning_logs/version_0/checkpoints/epoch=0-step=3.ckpt")
-    assert os.path.exists(ckpt_path)
+    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={n}.ckpt"
+    assert ckpt_path.is_file()
     loaded_model: OnePassMeanVarStdFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert
     assert isinstance(model.transform, ZScoreLog1pNormalize)

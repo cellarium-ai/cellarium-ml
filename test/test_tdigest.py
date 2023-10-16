@@ -105,9 +105,14 @@ def test_tdigest_multi_device(
         np.testing.assert_allclose(expected_median, actual_median, rtol=0.01)
 
 
+@requires_crick
 def test_module_checkpoint(tmp_path: Path):
+    n = 4
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(12).reshape(4, 3)))
+    train_loader = torch.utils.data.DataLoader(
+        TestDataset(np.arange(n * 3).reshape(-1, 3)),
+        collate_fn=collate_fn,
+    )
     # model
     init_args = {"g_genes": 3, "target_count": 10}
     model = TDigestFromCLI(**init_args)
@@ -131,8 +136,8 @@ def test_module_checkpoint(tmp_path: Path):
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
-    ckpt_path = os.path.join(tmp_path, "lightning_logs/version_0/checkpoints/epoch=0-step=4.ckpt")
-    assert os.path.exists(ckpt_path)
+    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={n}.ckpt"
+    assert ckpt_path.is_file()
     loaded_model: TDigestFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert
     assert isinstance(model.transform, NormalizeTotal)

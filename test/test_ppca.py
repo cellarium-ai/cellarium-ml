@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from cellarium.ml.callbacks import VarianceMonitor
+from cellarium.ml.data.util import collate_fn
 from cellarium.ml.module import ProbabilisticPCA, ProbabilisticPCAFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import ZScoreLog1pNormalize
@@ -126,11 +127,15 @@ def test_variance_monitor(x_ng: np.ndarray):
 
 
 def test_module_checkpoint(tmp_path: Path):
+    n = 3
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(3).reshape(3, 1)))
+    train_loader = torch.utils.data.DataLoader(
+        TestDataset(np.arange(n).reshape(-1, 1)),
+        collate_fn=collate_fn,
+    )
     # model
     init_args = {
-        "n_cells": 3,
+        "n_cells": n,
         "g_genes": 1,
         "k_components": 1,
         "ppca_flavor": "marginalized",
@@ -157,8 +162,8 @@ def test_module_checkpoint(tmp_path: Path):
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
     # load model from checkpoint
-    ckpt_path = os.path.join(tmp_path, "lightning_logs/version_0/checkpoints/epoch=0-step=3.ckpt")
-    assert os.path.exists(ckpt_path)
+    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={n}.ckpt"
+    assert ckpt_path.is_file()
     loaded_model: ProbabilisticPCAFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert
     assert isinstance(model.transform, ZScoreLog1pNormalize)
