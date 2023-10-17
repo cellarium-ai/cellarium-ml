@@ -50,7 +50,7 @@ def lightning_cli_factory(
         model_class_path:
             A string representation of the model class path (e.g., ``"cellarium.ml.module.IncrementalPCAFromCLI"``).
         link_arguments:
-            A list of tuples of the form ``(arg1, arg2)`` where ``arg1`` is linked to ``arg2``.
+            A list of tuples of the form ``(source, target)`` where ``source`` is linked to ``target``.
         trainer_defaults:
             Default values for the trainer.
 
@@ -66,6 +66,31 @@ def lightning_cli_factory(
                 trainer_defaults=trainer_defaults,
                 args=args,
             )
+
+        def instantiate_classes(self) -> None:
+            super().instantiate_classes()
+
+            # impute linked arguments after instantiation
+            if link_arguments is not None:
+                for source, target in link_arguments:
+                    # e.g., source == "data.var_names"
+                    source_key, *source_attrs = source.split(".")
+                    # note that config_init is initialized, so value is an instance
+                    config_init = self.config_init[self.subcommand]
+                    value = config_init[source_key]
+                    for attr in source_attrs:
+                        value = getattr(value, attr)
+
+                    # e.g., target == "model.module.init_args.feature_schema"
+                    target_keys = target.split(".")
+                    # note that config is dict-like, so assign the value to the last key
+                    config = self.config[self.subcommand]
+                    for key in target_keys[:-1]:
+                        config = config[key]
+                    config[target_keys[-1]] = value
+
+            # save the config to the :attr:`model.hparams` to be able to load the model checkpoint
+            self.model._set_hparams(self.config[self.subcommand])
 
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
             if link_arguments is not None:

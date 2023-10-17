@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import math
 import os
 from pathlib import Path
 
@@ -10,7 +11,6 @@ import pytest
 import torch
 from anndata import AnnData
 
-from cellarium.ml.callbacks import ModuleCheckpoint
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
@@ -25,7 +25,7 @@ from .common import TestDataset, requires_crick
 
 @pytest.fixture
 def adata():
-    n_cell, g_gene = (1000, 5)
+    n_cell, g_gene = 1000, 5
     rng = np.random.default_rng(1465)
     X = rng.integers(100, size=(n_cell, g_gene))
     return AnnData(X, dtype=X.dtype)
@@ -107,46 +107,44 @@ def test_tdigest_multi_device(
 
 
 @requires_crick
-@pytest.mark.parametrize(
-    "checkpoint_kwargs",
-    [
-        {
-            "save_on_train_end": True,
-            "save_on_train_epoch_end": False,
-            "save_on_train_batch_end": False,
-        },
-        {
-            "save_on_train_end": False,
-            "save_on_train_epoch_end": True,
-            "save_on_train_batch_end": False,
-        },
-        {
-            "save_on_train_end": False,
-            "save_on_train_epoch_end": False,
-            "save_on_train_batch_end": True,
-        },
-    ],
-)
-def test_module_checkpoint(tmp_path: Path, checkpoint_kwargs: dict):
+def test_load_from_checkpoint_multi_device(tmp_path: Path):
+    n, g = 4, 3
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
-    train_loader = torch.utils.data.DataLoader(TestDataset(np.arange(12).reshape(4, 3)))
+    train_loader = torch.utils.data.DataLoader(
+        TestDataset(np.arange(n * g).reshape(n, g)),
+        collate_fn=collate_fn,
+    )
     # model
-    model = TDigestFromCLI(g_genes=3, target_count=10)
-    training_plan = TrainingPlan(model)
+    init_args = {"g_genes": g, "target_count": 10}
+    model = TDigestFromCLI(**init_args)
+    config = {
+        "model": {
+            "module": {
+                "class_path": "cellarium.ml.module.TDigestFromCLI",
+                "init_args": init_args,
+            }
+        }
+    }
+    training_plan = TrainingPlan(model, config=config)
     # trainer
-    checkpoint_kwargs["dirpath"] = tmp_path
-    module_checkpoint = ModuleCheckpoint(**checkpoint_kwargs)
     trainer = pl.Trainer(
-        max_epochs=1,
         accelerator="cpu",
-        callbacks=[module_checkpoint],
-        log_every_n_steps=1,
+        devices=devices,
+        max_epochs=1,
+        default_root_dir=tmp_path,
     )
     # fit
     trainer.fit(training_plan, train_dataloaders=train_loader)
+
+    # run tests only for rank 0
+    if trainer.global_rank != 0:
+        return
+
     # load model from checkpoint
-    assert os.path.exists(os.path.join(tmp_path, "module_checkpoint.pt"))
-    loaded_model: TDigestFromCLI = torch.load(os.path.join(tmp_path, "module_checkpoint.pt"))
+    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
+    assert ckpt_path.is_file()
+    loaded_model: TDigestFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert
     assert isinstance(model.transform, NormalizeTotal)
     assert isinstance(loaded_model.transform, NormalizeTotal)
