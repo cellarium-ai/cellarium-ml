@@ -63,7 +63,10 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.test_mode = test_mode
 
     def __len__(self) -> int:
-        rank, num_replicas = get_rank_and_num_replicas()
+        """
+        Returns the number of batches per replica.
+        """
+        _, num_replicas = get_rank_and_num_replicas()
 
         if self.drop_last and len(self.dadc) % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
@@ -71,8 +74,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             per_replica = len(self.dadc) // num_replicas
         else:
             per_replica = math.ceil(len(self.dadc) / num_replicas)
-        batches_per_replica = math.ceil(per_replica / float(self.batch_size))
-        return batches_per_replica
+        return math.ceil(per_replica / float(self.batch_size))
 
     def set_epoch(self, epoch: int) -> None:
         r"""
