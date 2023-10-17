@@ -108,11 +108,10 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
-        max_epochs=1,
         accelerator="cpu",
         strategy=strategy,  # type: ignore[arg-type]
         devices=devices,
-        log_every_n_steps=1,
+        max_epochs=1,
         default_root_dir=tmp_path,
     )
     # fit

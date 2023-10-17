@@ -129,10 +129,9 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     training_plan = TrainingPlan(model, config=config)
     # trainer
     trainer = pl.Trainer(
-        max_epochs=1,
         accelerator="cpu",
         devices=devices,
-        log_every_n_steps=1,
+        max_epochs=1,
         default_root_dir=tmp_path,
     )
     # fit
