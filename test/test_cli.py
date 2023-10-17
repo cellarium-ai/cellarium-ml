@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
 from typing import Any
 
 import pytest
@@ -8,6 +9,8 @@ import pytest
 from cellarium.ml.cli import main
 
 from .common import requires_crick
+
+devices = os.environ.get("TEST_DEVICES", "1")
 
 CONFIGS = [
     {
@@ -17,7 +20,13 @@ CONFIGS = [
             "model": {
                 "module": {
                     "class_path": "cellarium.ml.module.GeneformerFromCLI",
-                    "init_args": {"num_hidden_layers": "1", "num_attention_heads": "1"},
+                    "init_args": {
+                        "hidden_size": "2",
+                        "num_hidden_layers": "1",
+                        "num_attention_heads": "1",
+                        "intermediate_size": "4",
+                        "max_position_embeddings": "2",
+                    },
                 },
             },
             "data": {
@@ -29,7 +38,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
                 "max_steps": "1",
             },
         },
@@ -41,7 +50,13 @@ CONFIGS = [
             "model": {
                 "module": {
                     "class_path": "cellarium.ml.module.GeneformerFromCLI",
-                    "init_args": {"num_hidden_layers": "1", "num_attention_heads": "1"},
+                    "init_args": {
+                        "hidden_size": "2",
+                        "num_hidden_layers": "1",
+                        "num_attention_heads": "1",
+                        "intermediate_size": "4",
+                        "max_position_embeddings": "2",
+                    },
                 },
             },
             "data": {
@@ -53,7 +68,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
                 "max_steps": "1",
                 "limit_predict_batches": "1",
             },
@@ -77,7 +92,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
                 "max_steps": "4",
             },
         },
@@ -98,7 +113,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
             },
         },
     },
@@ -121,7 +136,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
             },
         },
     },
@@ -144,7 +159,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
                 "callbacks": {
                     "class_path": "cellarium.ml.callbacks.PredictionWriter",
                     "init_args": {"output_dir": "./output"},
@@ -168,7 +183,7 @@ CONFIGS = [
                 },
                 "trainer": {
                     "accelerator": "cpu",
-                    "devices": "1",
+                    "devices": devices,
                 },
             },
         },
@@ -178,7 +193,7 @@ CONFIGS = [
 
 
 @pytest.mark.parametrize("config", CONFIGS)
-def test_cpu(config: dict[str, Any]):
+def test_cpu_multi_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
     main(config)
