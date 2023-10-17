@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from numpy.typing import ArrayLike
 from torch import nn
 
 
@@ -27,11 +28,13 @@ class DivideByScale(nn.Module):
             If ``None``, no validation is performed.
     """
 
-    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6, feature_schema: np.ndarray | None = None) -> None:
+    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6, feature_schema: ArrayLike | None = None) -> None:
         super().__init__()
         self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)
         self.eps = eps
+        if feature_schema is not None:
+            feature_schema = np.array(feature_schema)
         self.feature_schema = feature_schema
 
     def forward(
@@ -75,9 +78,9 @@ class Filter(nn.Module):
         filter_list: A list of features to filter by.
     """
 
-    def __init__(self, filter_list: np.ndarray) -> None:
+    def __init__(self, filter_list: ArrayLike) -> None:
         super().__init__()
-        self.filter_list = filter_list
+        self.filter_list = np.array(filter_list)
 
     @cache
     def filter(self, feature_g: tuple) -> np.ndarray[Any, np.dtype[np.bool_]]:
@@ -210,12 +213,14 @@ class ZScore(nn.Module):
         mean_g: torch.Tensor | float,
         std_g: torch.Tensor | float,
         eps: float = 1e-6,
-        feature_schema: np.ndarray | None = None,
+        feature_schema: ArrayLike | None = None,
     ) -> None:
         super().__init__()
         self.mean_g = mean_g
         self.std_g = std_g
         self.eps = eps
+        if feature_schema is not None:
+            feature_schema = np.array(feature_schema)
         self.feature_schema = feature_schema
 
     def forward(

@@ -53,7 +53,7 @@ def test_log_normalize_mean_std(x_ng: torch.Tensor, log_normalize: torch.nn.Sequ
     [["gene_0"], ["gene_0", "gene_1"], ["gene_0", "gene_2"]],
 )
 def test_filter(x_ng: torch.Tensor, filter_list: list[str]):
-    transform = Filter(np.array(filter_list))
+    transform = Filter(filter_list)
     feature_list = np.array([f"gene_{i}" for i in range(g)])
     new_x_ng = transform(x_ng, feature_list)
     assert new_x_ng.shape[1] == len(filter_list)
