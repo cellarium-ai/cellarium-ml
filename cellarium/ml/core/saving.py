@@ -4,7 +4,7 @@
 from typing import Any
 
 import lightning.pytorch as pl
-from jsonargparse import ArgumentParser
+from jsonargparse import ArgumentParser, Namespace
 from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
 
@@ -22,18 +22,22 @@ def _load_state(
     parser = ArgumentParser()
     parser.add_class_arguments(cls, "model")
 
+    cfg = Namespace(model={})
+
     # pass in the values we saved automatically
     if cls.CHECKPOINT_HYPER_PARAMS_KEY in checkpoint:
         cfg = checkpoint[cls.CHECKPOINT_HYPER_PARAMS_KEY]
-    else:
-        cfg = parser.get_defaults()
 
+    # update cfg with cls_kwargs_new, such that new has higher priority
     for key, value in cls_kwargs_new.items():
         cfg["model"][key] = value
 
     # instantiate the model
     cfg_init = parser.instantiate_classes(cfg)
     obj = cfg_init.model
+
+    # save the cfg to the :attr:`obj.hparams` to be able to load the model checkpoint
+    obj._set_hparams(cfg)
     ### cellarium.ml - end of modification
 
     # load the state_dict on the model automatically
