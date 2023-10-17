@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
@@ -98,3 +99,9 @@ class TDigest(BaseModule):
         os.makedirs(ckpt_path, exist_ok=True)
 
         return ckpt_path
+
+    def get_extra_state(self) -> dict[str, Any]:
+        return {"tdigests": self.tdigests}
+
+    def set_extra_state(self, state: dict[str, Any]) -> None:
+        self.tdigests = state["tdigests"]
