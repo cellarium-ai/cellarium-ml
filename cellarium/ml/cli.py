@@ -6,6 +6,7 @@ Command line interface for Cellarium ML.
 """
 
 import sys
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -311,9 +312,13 @@ def main(args: ArgsType = None) -> None:
     elif isinstance(args, list):
         model_name = args.pop(0)
     elif args is None:
-        model_name = sys.argv.pop(1)
+        args = sys.argv[1:].copy()
+        model_name = args.pop(0)
     model_cli = REGISTERED_MODELS[model_name]
-    model_cli(args)  # run the model
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="LightningCLI's args parameter is intended to run from within Python")
+        warnings.filterwarnings("ignore", message="Your `IterableDataset` has `__len__` defined.")
+        model_cli(args)  # run the model
 
 
 if __name__ == "__main__":
