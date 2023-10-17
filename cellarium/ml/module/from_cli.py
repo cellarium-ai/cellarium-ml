@@ -27,7 +27,7 @@ class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
             Target gene expression count.
     """
 
-    def __init__(self, g_genes, target_count: int = 10_000) -> None:
+    def __init__(self, g_genes: int, target_count: int = 10_000) -> None:
         transform = torch.nn.Sequential(NormalizeTotal(target_count), Log1p())
         super().__init__(g_genes, transform=transform)
 
@@ -154,7 +154,7 @@ class TDigestFromCLI(TDigest):
             A value added to the denominator for numerical stability.
     """
 
-    def __init__(self, g_genes, target_count: int = 10_000, eps: float = 1e-6) -> None:
+    def __init__(self, g_genes: int, target_count: int = 10_000, eps: float = 1e-6) -> None:
         transform = NormalizeTotal(target_count=target_count, eps=eps)
         super().__init__(g_genes, transform=transform)
 
