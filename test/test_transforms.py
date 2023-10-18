@@ -54,7 +54,24 @@ def test_log_normalize_mean_std(x_ng: torch.Tensor, log_normalize: torch.nn.Sequ
 )
 def test_filter(x_ng: torch.Tensor, filter_list: list[str]):
     transform = Filter(filter_list)
-    feature_list = np.array([f"gene_{i}" for i in range(g)])
-    new_x_ng = transform(x_ng, feature_list)
+    feature_g = np.array([f"gene_{i}" for i in range(g)])
+    new_x_ng = transform(x_ng, feature_g)
     assert new_x_ng.shape[1] == len(filter_list)
     assert new_x_ng.shape[0] == x_ng.shape[0]
+
+
+def test_filter_cache():
+    filter_list = ["gene_0", "gene_1"]
+    transform = Filter(filter_list)
+    transform.filter.cache_clear()
+
+    m = 4
+    for g in range(1, 1 + m):
+        feature_g = np.array([f"gene_{i}" for i in range(g)])
+        x_ng = torch.zeros((2, g))
+        for _ in range(g):
+            transform(x_ng, feature_g)
+
+    assert transform.filter.cache_info().currsize == m
+    assert transform.filter.cache_info().misses == m
+    assert transform.filter.cache_info().hits == m * (m - 1) / 2
