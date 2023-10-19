@@ -15,6 +15,7 @@ from cellarium.ml.data import (
     IterableDistributedAnnDataCollectionDataset,
     read_h5ad_file,
 )
+from cellarium.ml.data.util import identity, pandas_to_numpy
 
 
 @pytest.fixture
@@ -181,7 +182,10 @@ def test_indexing_dataset(
     cache_size_strictly_enforced = dat.cache_size_strictly_enforced
     oidx, n_adatas = row_select
 
-    dataset = IterableDistributedAnnDataCollectionDataset(dat)
+    dataset = IterableDistributedAnnDataCollectionDataset(
+        dat,
+        {"X": identity, "obs_names": pandas_to_numpy},
+    )
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
         with pytest.raises(AssertionError, match="Expected the number of anndata files"):
@@ -197,7 +201,10 @@ def test_indexing_dataset(
 
 
 def test_pickle_dataset(dat: DistributedAnnDataCollection):
-    dataset = IterableDistributedAnnDataCollectionDataset(dat)
+    dataset = IterableDistributedAnnDataCollectionDataset(
+        dat,
+        {"X": identity, "obs_names": pandas_to_numpy},
+    )
     new_dataset = pickle.loads(pickle.dumps(dataset))
 
     assert len(new_dataset.dadc.cache) == 0

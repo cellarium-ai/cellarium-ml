@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
 from typing import Any
 
 import pytest
@@ -8,6 +9,8 @@ import pytest
 from cellarium.ml.cli import main
 
 from .common import requires_crick
+
+devices = os.environ.get("TEST_DEVICES", "1")
 
 CONFIGS = [
     {
@@ -17,19 +20,29 @@ CONFIGS = [
             "model": {
                 "module": {
                     "class_path": "cellarium.ml.module.GeneformerFromCLI",
-                    "init_args": {"num_hidden_layers": "1", "num_attention_heads": "1"},
+                    "init_args": {
+                        "hidden_size": "2",
+                        "num_hidden_layers": "1",
+                        "num_attention_heads": "1",
+                        "intermediate_size": "4",
+                        "max_position_embeddings": "2",
+                    },
                 },
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
+                "convert": {
+                    "X": "cellarium.ml.data.util.densify",
+                    "var_names": "cellarium.ml.data.util.pandas_to_numpy",
+                },
                 "batch_size": "5",
                 "num_workers": "1",
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
                 "max_steps": "1",
             },
         },
@@ -41,19 +54,30 @@ CONFIGS = [
             "model": {
                 "module": {
                     "class_path": "cellarium.ml.module.GeneformerFromCLI",
-                    "init_args": {"num_hidden_layers": "1", "num_attention_heads": "1"},
+                    "init_args": {
+                        "hidden_size": "2",
+                        "num_hidden_layers": "1",
+                        "num_attention_heads": "1",
+                        "intermediate_size": "4",
+                        "max_position_embeddings": "2",
+                    },
                 },
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
+                "convert": {
+                    "X": "cellarium.ml.data.util.densify",
+                    "var_names": "cellarium.ml.data.util.pandas_to_numpy",
+                    "obs_names": "cellarium.ml.data.util.pandas_to_numpy",
+                },
                 "batch_size": "5",
                 "num_workers": "1",
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
                 "max_steps": "1",
                 "limit_predict_batches": "1",
             },
@@ -71,13 +95,16 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
+                "convert": {
+                    "X": "cellarium.ml.data.util.densify",
+                },
                 "batch_size": "50",
                 "shuffle": "true",
                 "num_workers": "2",
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
                 "max_steps": "4",
             },
         },
@@ -93,12 +120,15 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
+                "convert": {
+                    "X": "cellarium.ml.data.util.densify",
+                },
                 "batch_size": "50",
                 "num_workers": "2",
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
             },
         },
     },
@@ -116,12 +146,15 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
+                "convert": {
+                    "X": "cellarium.ml.data.util.densify",
+                },
                 "batch_size": "50",
                 "num_workers": "2",
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
             },
         },
     },
@@ -139,12 +172,16 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
+                "convert": {
+                    "X": "cellarium.ml.data.util.densify",
+                    "obs_names": "cellarium.ml.data.util.pandas_to_numpy",
+                },
                 "batch_size": "50",
                 "num_workers": "2",
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": "1",
+                "devices": devices,
                 "callbacks": {
                     "class_path": "cellarium.ml.callbacks.PredictionWriter",
                     "init_args": {"output_dir": "./output"},
@@ -163,12 +200,15 @@ CONFIGS = [
                     "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                     "shard_size": "100",
                     "max_cache_size": "2",
+                    "convert": {
+                        "X": "cellarium.ml.data.util.densify",
+                    },
                     "batch_size": "50",
                     "num_workers": "2",
                 },
                 "trainer": {
                     "accelerator": "cpu",
-                    "devices": "1",
+                    "devices": devices,
                 },
             },
         },
@@ -178,7 +218,7 @@ CONFIGS = [
 
 
 @pytest.mark.parametrize("config", CONFIGS)
-def test_cpu(config: dict[str, Any]):
+def test_cpu_multi_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
     main(config)
