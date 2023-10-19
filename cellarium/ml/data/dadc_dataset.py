@@ -5,10 +5,9 @@ import math
 
 import numpy as np
 import torch
-from scipy.sparse import issparse
 from torch.utils.data import IterableDataset
 
-from .distributed_anndata import DistributedAnnDataCollection
+from .distributed_anndata import ConvertType, DistributedAnnDataCollection
 from .util import get_rank_and_num_replicas, get_worker_info
 
 
@@ -27,9 +26,20 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     cells coming from the same tissue or experiment), then this assumption is violated. It is
     the user's responsibility to prepare appropriately shuffled data shards.
 
+    Example of ``convert``::
+
+        {
+            "X": cellarium.ml.data.util.densify,
+            "obs_names": cellarium.ml.data.util.pandas_to_numpy,
+            "var_names": cellarium.ml.data.util.pandas_to_numpy,
+        }
+
     Args:
         dadc:
             DistributedAnnDataCollection from which to load the data.
+        convert:
+            Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
+            in the ``__getitem__`` method and how to convert them.
         batch_size:
             How many samples per batch to load.
         shuffle:
@@ -48,6 +58,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
+        convert: ConvertType,
         batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
@@ -55,6 +66,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
+        self.dadc.convert = convert
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -85,16 +97,16 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
         r"""
-        Returns a dictionary containing the data and metadata for the given index ``idx``.
-
-        If the count data ``X`` is sparse then it is densified.
+        Returns a dictionary containing the data from the :attr:`dadc` with keys specified by its :attr:`dadc.convert`
+        at the given index ``idx``.
         """
-        X = self.dadc[idx].X
 
         data = {}
-        data["X"] = X.toarray() if issparse(X) else X
-        data["obs_names"] = self.dadc[idx].obs_names.values.copy()
-        data["var_names"] = self.dadc.var_names.values.copy()
+        for attr, fn_or_dict in self.dadc.convert.items():
+            if callable(fn_or_dict):
+                data[attr] = getattr(self.dadc[idx], attr)
+            elif isinstance(fn_or_dict, dict):
+                data |= {key: getattr(self.dadc[idx], attr)[key] for key in fn_or_dict}
 
         # for testing purposes
         if self.test_mode:

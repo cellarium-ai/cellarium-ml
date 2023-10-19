@@ -13,7 +13,7 @@ from anndata import AnnData
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.data.util import collate_fn
+from cellarium.ml.data.util import collate_fn, identity
 from cellarium.ml.module import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import ZScoreLog1pNormalize
@@ -59,7 +59,7 @@ def test_onepass_mean_var_std_multi_device(
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
-    dataset = IterableDistributedAnnDataCollectionDataset(dadc, batch_size=batch_size, shuffle=shuffle)
+    dataset = IterableDistributedAnnDataCollectionDataset(dadc, {"X": identity}, batch_size=batch_size, shuffle=shuffle)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
