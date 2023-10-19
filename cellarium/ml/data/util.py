@@ -4,6 +4,8 @@
 import warnings
 
 import numpy as np
+import pandas as pd
+import scipy
 import torch
 import torch.distributed as dist
 from torch.utils.data import get_worker_info as _get_worker_info
@@ -76,3 +78,25 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
         else:
             collated_batch[key] = torch.cat([torch.from_numpy(data[key]) for data in batch], dim=0)
     return collated_batch
+
+
+def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
+    """
+    Convert a sparse matrix to a dense matrix.
+    """
+    return x.toarray()
+
+
+def identity(x: np.ndarray) -> np.ndarray:
+    """
+    Identity function.
+    """
+    return x
+
+
+def pandas_to_numpy(x: pd.Index | pd.Series | pd.DataFrame) -> np.ndarray:
+    """
+    Convert a pandas Index/Series/DataFrame object to a numpy array.
+    Returned array is always a copy.
+    """
+    return x.to_numpy(copy=True)
