@@ -63,7 +63,18 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.test_mode = test_mode
 
     def __len__(self) -> int:
-        return len(self.dadc)
+        """
+        Returns the number of batches per replica.
+        """
+        _, num_replicas = get_rank_and_num_replicas()
+
+        if self.drop_last and len(self.dadc) % num_replicas != 0:
+            # Split to nearest available length that is evenly divisible.
+            # This is to ensure each rank receives the same amount of data.
+            per_replica = len(self.dadc) // num_replicas
+        else:
+            per_replica = math.ceil(len(self.dadc) / num_replicas)
+        return math.ceil(per_replica / float(self.batch_size))
 
     def set_epoch(self, epoch: int) -> None:
         r"""
@@ -261,12 +272,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         # replicas
         rank, num_replicas = get_rank_and_num_replicas()
 
-        if self.drop_last and len(self) % num_replicas != 0:
+        if self.drop_last and len(self.dadc) % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data.
-            per_replica = len(self) // num_replicas
+            per_replica = len(self.dadc) // num_replicas
         else:
-            per_replica = math.ceil(len(self) / num_replicas)
+            per_replica = math.ceil(len(self.dadc) / num_replicas)
         total_size = per_replica * num_replicas
         batches_per_replica = math.ceil(per_replica / float(self.batch_size))
 
@@ -293,7 +304,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 # shuffle cells within shards
                 indices.extend((torch.randperm(upper - lower, generator=rng) + lower).tolist())
         else:
-            indices = list(range(len(self)))
+            indices = list(range(len(self.dadc)))
 
         if not self.drop_last:
             # add extra samples to make it evenly divisible
