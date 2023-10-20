@@ -253,6 +253,7 @@ class GeneformerFromCLI(Geneformer):
                 ),
                 DivideByScale(
                     scale_g=tdigest.median_g,
+                    feature_schema=feature_schema,
                     eps=tdigest.transform.eps,
                 ),
             )

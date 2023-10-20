@@ -9,6 +9,13 @@ import torch
 from numpy.typing import ArrayLike
 from torch import nn
 
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+    assert_nonnegative,
+    assert_positive,
+)
+
 
 class DivideByScale(nn.Module):
     """
@@ -21,21 +28,19 @@ class DivideByScale(nn.Module):
     Args:
         scale_g:
             A scale for each gene.
-        eps:
-            A value added to the denominator for numerical stability.
         feature_schema:
             The variable names schema for the input data validation.
-            If ``None``, no validation is performed.
+        eps:
+            A value added to the denominator for numerical stability.
     """
 
-    def __init__(self, scale_g: torch.Tensor, eps: float = 1e-6, feature_schema: ArrayLike | None = None) -> None:
+    def __init__(self, scale_g: torch.Tensor, feature_schema: ArrayLike, eps: float = 1e-6) -> None:
         super().__init__()
         self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)
+        self.feature_schema = np.array(feature_schema)
+        assert_nonnegative("eps", eps)
         self.eps = eps
-        if feature_schema is not None:
-            feature_schema = np.array(feature_schema)
-        self.feature_schema = feature_schema
 
     def forward(
         self,
@@ -52,15 +57,15 @@ class DivideByScale(nn.Module):
         Returns:
             Gene counts divided by scale.
         """
-        if self.feature_schema is not None and feature_g is not None:
-            assert x_ng.shape[1] == len(feature_g), "The number of x_ng columns must match the feature_g length."
-            assert np.array_equal(self.feature_schema, feature_g), "feature_g must match the feature_schema."
+        if feature_g is not None:
+            assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+            assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
         return x_ng / (self.scale_g + self.eps)
 
     def __repr__(self) -> str:
         return (
-            f"{self.__class__.__name__}(scale_g={self.scale_g}, eps={self.eps}, feature_schema={self.feature_schema})"
+            f"{self.__class__.__name__}(scale_g={self.scale_g}, feature_schema={self.feature_schema}, eps={self.eps})"
         )
 
 
@@ -81,6 +86,8 @@ class Filter(nn.Module):
     def __init__(self, filter_list: ArrayLike) -> None:
         super().__init__()
         self.filter_list = np.array(filter_list)
+        if len(self.filter_list) == 0:
+            raise ValueError(f"`filter_list` must not be empty. Got {self.filter_list}")
 
     @cache
     def filter(self, feature_g: tuple) -> np.ndarray[Any, np.dtype[np.bool_]]:
@@ -91,7 +98,10 @@ class Filter(nn.Module):
         Returns:
             A boolean mask of the features to filter by.
         """
-        return np.isin(feature_g, self.filter_list)
+        mask = np.isin(feature_g, self.filter_list)
+        if not np.any(mask):
+            raise AssertionError("No features in `feature_g` matched the `filter_list`")
+        return mask
 
     def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> torch.Tensor:
         """
@@ -104,7 +114,7 @@ class Filter(nn.Module):
         Returns:
             Filtered gene counts.
         """
-        assert x_ng.shape[1] == len(feature_g), "The number of x_ng columns must match the feature_g length."
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
 
         filter_mask = self.filter(tuple(feature_g.tolist()))
         return x_ng[:, filter_mask]
@@ -162,7 +172,9 @@ class NormalizeTotal(nn.Module):
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
+        assert_positive("target_count", target_count)
         self.target_count = target_count
+        assert_nonnegative("eps", eps)
         self.eps = eps
 
     def forward(
@@ -201,27 +213,25 @@ class ZScore(nn.Module):
             Means for each gene.
         std_g:
             Standard deviations for each gene.
-        eps:
-            A value added to the denominator for numerical stability.
         feature_schema:
             The variable names schema for the input data validation.
-            If ``None``, no validation is performed.
+        eps:
+            A value added to the denominator for numerical stability.
     """
 
     def __init__(
         self,
         mean_g: torch.Tensor | float,
         std_g: torch.Tensor | float,
+        feature_schema: ArrayLike,
         eps: float = 1e-6,
-        feature_schema: ArrayLike | None = None,
     ) -> None:
         super().__init__()
         self.mean_g = mean_g
         self.std_g = std_g
+        self.feature_schema = np.array(feature_schema)
+        assert_nonnegative("eps", eps)
         self.eps = eps
-        if feature_schema is not None:
-            feature_schema = np.array(feature_schema)
-        self.feature_schema = feature_schema
 
     def forward(
         self,
@@ -238,14 +248,14 @@ class ZScore(nn.Module):
         Returns:
             Z-scored gene counts.
         """
-        if self.feature_schema is not None and feature_g is not None:
-            assert x_ng.shape[1] == len(feature_g), "The number of x_ng columns must match the feature_g length."
-            assert np.array_equal(self.feature_schema, feature_g), "feature_g must match the feature_schema."
+        if feature_g is not None:
+            assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+            assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
         return (x_ng - self.mean_g) / (self.std_g + self.eps)
 
     def __repr__(self) -> str:
         return (
-            f"{self.__class__.__name__}(mean_g={self.mean_g}, std_g={self.std_g}, eps={self.eps}, "
-            f"feature_schema={self.feature_schema})"
+            f"{self.__class__.__name__}(mean_g={self.mean_g}, std_g={self.std_g}, "
+            f"feature_schema={self.feature_schema}), eps={self.eps}"
         )

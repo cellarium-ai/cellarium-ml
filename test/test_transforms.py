@@ -25,10 +25,11 @@ def log_normalize(x_ng: torch.Tensor):
     y_ng = torch.log1p(target_count * x_ng / l_n1)
     mean_g = y_ng.mean(dim=0)
     std_g = y_ng.std(dim=0)
+    feature_schema = [f"gene_{i}" for i in range(g)]
     transform = torch.nn.Sequential(
         NormalizeTotal(target_count),
         Log1p(),
-        ZScore(mean_g, std_g),
+        ZScore(mean_g, std_g, feature_schema),
     )
     return transform
 
