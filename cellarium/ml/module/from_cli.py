@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import torch
 from transformers import BertConfig, BertForMaskedLM
 
-from cellarium.ml.transforms import DivideByScale, NormalizeTotal, ZScoreLog1pNormalize
+from cellarium.ml.transforms import DivideByScale, Log1p, NormalizeTotal
 
 from .geneformer import Geneformer
 from .incremental_pca import IncrementalPCA
@@ -28,7 +28,7 @@ class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
     """
 
     def __init__(self, g_genes: int, target_count: int = 10_000) -> None:
-        transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=target_count)
+        transform = torch.nn.Sequential(NormalizeTotal(target_count), Log1p())
         super().__init__(g_genes, transform=transform)
 
 
@@ -81,7 +81,8 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
         else:
             # load OnePassMeanVarStdFromCLI from checkpoint
             onepass: OnePassMeanVarStdFromCLI = torch.load(mean_var_std_ckpt_path)
-            assert isinstance(onepass.transform, ZScoreLog1pNormalize)
+            assert isinstance(onepass.transform, torch.nn.Sequential)
+            assert isinstance(onepass.transform[0], NormalizeTotal)
             assert target_count == onepass.transform.target_count
             assert g_genes == onepass.g_genes
             # compute W_init_scale and sigma_init_scale
@@ -90,7 +91,7 @@ class ProbabilisticPCAFromCLI(ProbabilisticPCA):
             sigma_init_scale = math.sqrt(sigma_init_variance_ratio * total_variance / g_genes)
             mean_g = onepass.mean_g
         # create transform
-        transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=target_count)
+        transform = torch.nn.Sequential(NormalizeTotal(target_count), Log1p())
         self.mean_var_std_ckpt_path = mean_var_std_ckpt_path
         super().__init__(
             n_cells=n_cells,
@@ -130,7 +131,7 @@ class IncrementalPCAFromCLI(IncrementalPCA):
         perform_mean_correction: bool = False,
         target_count: int = 10_000,
     ) -> None:
-        transform = ZScoreLog1pNormalize(mean_g=0, std_g=None, perform_scaling=False, target_count=target_count)
+        transform = torch.nn.Sequential(NormalizeTotal(target_count), Log1p())
         super().__init__(
             g_genes=g_genes,
             k_components=k_components,
@@ -252,6 +253,7 @@ class GeneformerFromCLI(Geneformer):
                 ),
                 DivideByScale(
                     scale_g=tdigest.median_g,
+                    feature_schema=feature_schema,
                     eps=tdigest.transform.eps,
                 ),
             )

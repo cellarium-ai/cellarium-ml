@@ -15,7 +15,7 @@ from cellarium.ml.callbacks import VarianceMonitor
 from cellarium.ml.data.util import collate_fn
 from cellarium.ml.module import ProbabilisticPCA, ProbabilisticPCAFromCLI
 from cellarium.ml.train import TrainingPlan
-from cellarium.ml.transforms import ZScoreLog1pNormalize
+from cellarium.ml.transforms import NormalizeTotal
 
 from .common import TestDataset
 
@@ -179,9 +179,11 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     assert ckpt_path.is_file()
     loaded_model: ProbabilisticPCAFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
     # assert
-    assert isinstance(model.transform, ZScoreLog1pNormalize)
-    assert isinstance(loaded_model.transform, ZScoreLog1pNormalize)
-    assert model.transform.target_count == loaded_model.transform.target_count
+    assert isinstance(model.transform, torch.nn.Sequential) and len(model.transform) == 2
+    assert isinstance(loaded_model.transform, torch.nn.Sequential) and len(loaded_model.transform) == 2
+    assert isinstance(model.transform[0], NormalizeTotal)
+    assert isinstance(loaded_model.transform[0], NormalizeTotal)
+    assert model.transform[0].target_count == loaded_model.transform[0].target_count
     np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())
     np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())
     np.testing.assert_allclose(model.mean_g.detach(), loaded_model.mean_g.detach())
