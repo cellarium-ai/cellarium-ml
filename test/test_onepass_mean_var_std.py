@@ -14,7 +14,7 @@ from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.data.util import collate_fn, identity
-from cellarium.ml.module import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
+from cellarium.ml.models import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import Log1p, NormalizeTotal
 
@@ -114,7 +114,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     config = {
         "model": {
             "module": {
-                "class_path": "cellarium.ml.module.OnePassMeanVarStdFromCLI",
+                "class_path": "cellarium.ml.models.OnePassMeanVarStdFromCLI",
                 "init_args": init_args,
             }
         }

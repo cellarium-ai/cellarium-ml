@@ -13,7 +13,7 @@ Table of Contents
    callbacks
    cli
    data
-   module
+   models
    optim
    trainer
    transforms

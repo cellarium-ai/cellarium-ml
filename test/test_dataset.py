@@ -16,7 +16,7 @@ from cellarium.ml.data import (
     IterableDistributedAnnDataCollectionDataset,
 )
 from cellarium.ml.data.util import collate_fn, get_rank_and_num_replicas, identity
-from cellarium.ml.module import BaseModule, GatherLayer
+from cellarium.ml.models import CellariumModel, GatherLayer
 from cellarium.ml.train import TrainingPlan
 
 # RuntimeError: Too many open files. Communication with the workers is no longer possible.
@@ -25,9 +25,9 @@ from cellarium.ml.train import TrainingPlan
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 
-class TestModule(BaseModule):
+class BoringModel(CellariumModel):
     """
-    This module appends a batch input to an :attr:`iter_data` list at each iteration.
+    This model appends a batch input to an :attr:`iter_data` list at each iteration.
     Its intended use is for testing purposes where batch inputs can be inspected after
     iteration over the dataset with ``Trainer.fit()``. Batch input would typically contain
     feature counts, worker info, torch.distributed info, cache info, etc.
@@ -134,7 +134,7 @@ def test_iterable_dataset_multi_device(
     )
 
     # fit
-    model = TestModule()
+    model = BoringModel()
     training_plan = TrainingPlan(model)
     trainer = pl.Trainer(
         barebones=True,
@@ -196,7 +196,7 @@ def test_iterable_dataset_set_epoch_multi_device(
     )
 
     # fit
-    model = TestModule()
+    model = BoringModel()
     training_plan = TrainingPlan(model)
     trainer = pl.Trainer(
         barebones=True,

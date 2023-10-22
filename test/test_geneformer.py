@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from cellarium.ml.data.util import collate_fn
-from cellarium.ml.module import GeneformerFromCLI
+from cellarium.ml.models import GeneformerFromCLI
 from cellarium.ml.train import TrainingPlan
 
 from .common import TestDataset
@@ -41,7 +41,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     config = {
         "model": {
             "module": {
-                "class_path": "cellarium.ml.module.GeneformerFromCLI",
+                "class_path": "cellarium.ml.models.GeneformerFromCLI",
                 "init_args": init_args,
             }
         }

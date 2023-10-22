@@ -11,10 +11,10 @@ import torch.distributed as dist
 import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
-from cellarium.ml.module import BaseModule, PredictMixin
+from .model import CellariumModel, PredictMixin
 
 
-class IncrementalPCA(BaseModule, PredictMixin):
+class IncrementalPCA(CellariumModel, PredictMixin):
     """
     Distributed and Incremental PCA.
 

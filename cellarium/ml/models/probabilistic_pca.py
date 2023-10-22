@@ -10,10 +10,10 @@ import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
 
-from .base_module import BasePyroModule
+from .model import CellariumPyroModel
 
 
-class ProbabilisticPCA(BasePyroModule):
+class ProbabilisticPCA(CellariumPyroModel):
     """
     Probabilistic PCA implemented in Pyro.
 

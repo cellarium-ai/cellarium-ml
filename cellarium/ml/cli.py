@@ -35,7 +35,7 @@ def lightning_cli_factory(
     Example::
 
         cli = lightning_cli_factory(
-            "cellarium.ml.module.IncrementalPCAFromCLI",
+            "cellarium.ml.models.IncrementalPCAFromCLI",
             link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
@@ -48,7 +48,7 @@ def lightning_cli_factory(
 
     Args:
         model_class_path:
-            A string representation of the model class path (e.g., ``"cellarium.ml.module.IncrementalPCAFromCLI"``).
+            A string representation of the model class path (e.g., ``"cellarium.ml.models.IncrementalPCAFromCLI"``).
         link_arguments:
             A list of tuples of the form ``(source, target)`` where ``source`` is linked to ``target``.
         trainer_defaults:
@@ -104,7 +104,7 @@ def lightning_cli_factory(
 @register_model
 def geneformer(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.GeneformerFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.GeneformerFromCLI` model.
 
     This example shows how to fit feature count data to the Geneformer model [1].
 
@@ -130,7 +130,7 @@ def geneformer(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.GeneformerFromCLI",
+        "cellarium.ml.models.GeneformerFromCLI",
         link_arguments=[("data.var_names", "model.module.init_args.feature_schema")],
     )
     cli(args=args)
@@ -139,7 +139,7 @@ def geneformer(args: ArgsType = None) -> None:
 @register_model
 def incremental_pca(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.IncrementalPCAFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.IncrementalPCAFromCLI` model.
 
     This example shows how to fit feature count data to incremental PCA
     model [1, 2].
@@ -169,7 +169,7 @@ def incremental_pca(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.IncrementalPCAFromCLI",
+        "cellarium.ml.models.IncrementalPCAFromCLI",
         link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
         trainer_defaults={
             "max_epochs": 1,  # one pass
@@ -185,7 +185,7 @@ def incremental_pca(args: ArgsType = None) -> None:
 @register_model
 def onepass_mean_var_std(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.OnePassMeanVarStdFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.OnePassMeanVarStdFromCLI` model.
 
     This example shows how to calculate mean, variance, and standard deviation of log normalized
     feature count data in one pass [1].
@@ -212,7 +212,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.OnePassMeanVarStdFromCLI",
+        "cellarium.ml.models.OnePassMeanVarStdFromCLI",
         link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
         trainer_defaults={
             "max_epochs": 1,  # one pass
@@ -228,7 +228,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
 @register_model
 def probabilistic_pca(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.ProbabilisticPCAFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.ProbabilisticPCAFromCLI` model.
 
     This example shows how to fit feature count data to probabilistic PCA
     model [1].
@@ -275,7 +275,7 @@ def probabilistic_pca(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.ProbabilisticPCAFromCLI",
+        "cellarium.ml.models.ProbabilisticPCAFromCLI",
         link_arguments=[
             ("data.n_obs", "model.module.init_args.n_cells"),
             ("data.n_vars", "model.module.init_args.g_genes"),
@@ -287,7 +287,7 @@ def probabilistic_pca(args: ArgsType = None) -> None:
 @register_model
 def tdigest(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.TDigestFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.TDigestFromCLI` model.
 
     This example shows how to calculate non-zero median of normalized feature count
     data in one pass [1].
@@ -314,7 +314,7 @@ def tdigest(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.TDigestFromCLI",
+        "cellarium.ml.models.TDigestFromCLI",
         link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
         trainer_defaults={
             "max_epochs": 1,  # one pass

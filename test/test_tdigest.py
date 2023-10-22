@@ -16,7 +16,7 @@ from cellarium.ml.data import (
     IterableDistributedAnnDataCollectionDataset,
 )
 from cellarium.ml.data.util import collate_fn, identity
-from cellarium.ml.module import TDigest, TDigestFromCLI
+from cellarium.ml.models import TDigest, TDigestFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import NormalizeTotal
 
@@ -121,7 +121,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     config = {
         "model": {
             "module": {
-                "class_path": "cellarium.ml.module.TDigestFromCLI",
+                "class_path": "cellarium.ml.models.TDigestFromCLI",
                 "init_args": init_args,
             }
         }

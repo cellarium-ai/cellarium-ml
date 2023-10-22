@@ -10,10 +10,10 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from .base_module import BaseModule
+from .model import CellariumModel
 
 
-class TDigest(BaseModule):
+class TDigest(CellariumModel):
     """
     Compute an approximate non-zero histogram of the distribution of each gene in a batch of
     cells using t-digests.

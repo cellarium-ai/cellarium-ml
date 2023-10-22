@@ -13,7 +13,7 @@ import torch
 
 from cellarium.ml.callbacks import VarianceMonitor
 from cellarium.ml.data.util import collate_fn
-from cellarium.ml.module import ProbabilisticPCA, ProbabilisticPCAFromCLI
+from cellarium.ml.models import ProbabilisticPCA, ProbabilisticPCAFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import NormalizeTotal
 
@@ -154,7 +154,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     config = {
         "model": {
             "module": {
-                "class_path": "cellarium.ml.module.ProbabilisticPCAFromCLI",
+                "class_path": "cellarium.ml.models.ProbabilisticPCAFromCLI",
                 "init_args": init_args,
             }
         }

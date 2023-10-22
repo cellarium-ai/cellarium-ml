@@ -19,7 +19,7 @@ CONFIGS = [
         "fit": {
             "model": {
                 "module": {
-                    "class_path": "cellarium.ml.module.GeneformerFromCLI",
+                    "class_path": "cellarium.ml.models.GeneformerFromCLI",
                     "init_args": {
                         "hidden_size": "2",
                         "num_hidden_layers": "1",
@@ -53,7 +53,7 @@ CONFIGS = [
         "predict": {
             "model": {
                 "module": {
-                    "class_path": "cellarium.ml.module.GeneformerFromCLI",
+                    "class_path": "cellarium.ml.models.GeneformerFromCLI",
                     "init_args": {
                         "hidden_size": "2",
                         "num_hidden_layers": "1",
@@ -89,7 +89,7 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "module": "cellarium.ml.module.ProbabilisticPCAFromCLI",
+                "module": "cellarium.ml.models.ProbabilisticPCAFromCLI",
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
@@ -114,7 +114,7 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "module": "cellarium.ml.module.OnePassMeanVarStdFromCLI",
+                "module": "cellarium.ml.models.OnePassMeanVarStdFromCLI",
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
@@ -138,7 +138,7 @@ CONFIGS = [
         "fit": {
             "model": {
                 "module": {
-                    "class_path": "cellarium.ml.module.IncrementalPCAFromCLI",
+                    "class_path": "cellarium.ml.models.IncrementalPCAFromCLI",
                     "init_args": {"k_components": "50"},
                 },
             },
@@ -164,7 +164,7 @@ CONFIGS = [
         "predict": {
             "model": {
                 "module": {
-                    "class_path": "cellarium.ml.module.IncrementalPCAFromCLI",
+                    "class_path": "cellarium.ml.models.IncrementalPCAFromCLI",
                     "init_args": {"k_components": "50"},
                 },
             },
@@ -195,7 +195,7 @@ CONFIGS = [
             "model_name": "tdigest",
             "subcommand": "fit",
             "fit": {
-                "model": {"module": "cellarium.ml.module.TDigestFromCLI"},
+                "model": {"module": "cellarium.ml.models.TDigestFromCLI"},
                 "data": {
                     "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                     "shard_size": "100",

@@ -8,10 +8,10 @@ import torch.distributed as dist
 import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
-from .base_module import BaseModule
+from .model import CellariumModel
 
 
-class OnePassMeanVarStd(BaseModule):
+class OnePassMeanVarStd(CellariumModel):
     """
     Calculate the mean, variance, and standard deviation of the data in one pass (epoch)
     using running sums and running squared sums.

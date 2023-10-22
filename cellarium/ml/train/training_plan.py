@@ -15,7 +15,7 @@ from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 
 from cellarium.ml.core.saving import _load_state
-from cellarium.ml.module import BaseModule, PredictMixin
+from cellarium.ml.models import CellariumModel, PredictMixin
 
 
 class TrainingPlan(pl.LightningModule):
@@ -24,7 +24,7 @@ class TrainingPlan(pl.LightningModule):
 
     Args:
         module:
-            A ``cellarium.ml`` module to train.
+            A :class:`cellarium.ml.models.CellariumModel` to train.
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
@@ -43,7 +43,7 @@ class TrainingPlan(pl.LightningModule):
 
     def __init__(
         self,
-        module: BaseModule,
+        module: CellariumModel,
         optim_fn: type[torch.optim.Optimizer] | str | None = None,
         optim_kwargs: dict | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,

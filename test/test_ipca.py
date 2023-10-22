@@ -12,7 +12,7 @@ import torch
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.data.util import collate_fn
-from cellarium.ml.module import IncrementalPCA, IncrementalPCAFromCLI
+from cellarium.ml.models import IncrementalPCA, IncrementalPCAFromCLI
 from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import NormalizeTotal
 
@@ -99,7 +99,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     config = {
         "model": {
             "module": {
-                "class_path": "cellarium.ml.module.IncrementalPCAFromCLI",
+                "class_path": "cellarium.ml.models.IncrementalPCAFromCLI",
                 "init_args": init_args,
             }
         }

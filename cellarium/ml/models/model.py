@@ -10,9 +10,9 @@ import pyro
 import torch
 
 
-class BaseModule(torch.nn.Module, metaclass=ABCMeta):
+class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
     """
-    Base module for all cellarium-ml modules.
+    Base class for Cellarium ML compatible models.
     """
 
     __call__: Callable[..., torch.Tensor | None]
@@ -31,15 +31,15 @@ class PyroABCMeta(pyro.nn.module._PyroModuleMeta, ABCMeta):
     """
 
 
-class BasePyroModule(pyro.nn.PyroModule, BaseModule, metaclass=PyroABCMeta):
+class CellariumPyroModel(pyro.nn.PyroModule, CellariumModel, metaclass=PyroABCMeta):
     """
-    Base module for all cellarium-ml Pyro modules.
+    Base class for Cellarium ML compatible Pyro models.
     """
 
 
 class PredictMixin(metaclass=ABCMeta):
     """
-    Abstract mixin class for modules that can perform prediction.
+    Abstract mixin class for models that can perform prediction.
     """
 
     @abstractmethod

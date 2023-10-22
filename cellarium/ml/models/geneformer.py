@@ -8,10 +8,10 @@ import numpy as np
 import torch
 from transformers import BertForMaskedLM
 
-from .base_module import BaseModule, PredictMixin
+from .model import CellariumModel, PredictMixin
 
 
-class Geneformer(BaseModule, PredictMixin):
+class Geneformer(CellariumModel, PredictMixin):
     """
     Geneformer model.
 
