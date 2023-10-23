@@ -8,7 +8,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
-from .model import CellariumModel
+from cellarium.ml.models.model import CellariumModel
 
 
 class OnePassMeanVarStd(CellariumModel):

@@ -15,7 +15,7 @@ from cellarium.ml.data import (
     IterableDistributedAnnDataCollectionDataset,
     read_h5ad_file,
 )
-from cellarium.ml.data.util import identity, pandas_to_numpy
+from cellarium.ml.utilities.data import identity, pandas_to_numpy
 
 
 @pytest.fixture

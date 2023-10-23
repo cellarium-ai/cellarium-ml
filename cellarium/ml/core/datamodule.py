@@ -7,9 +7,9 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 
-from cellarium.ml.data.dadc_dataset import IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.data.distributed_anndata import ConvertType, DistributedAnnDataCollection
-from cellarium.ml.data.util import collate_fn
+from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.utilities.data import collate_fn
+from cellarium.ml.utilities.types import ConvertType
 
 
 class CellariumAnnDataDataModule(pl.LightningDataModule):

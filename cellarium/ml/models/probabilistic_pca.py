@@ -10,7 +10,7 @@ import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
 
-from .model import CellariumPyroModel
+from cellarium.ml.models.model import CellariumPyroModel
 
 
 class ProbabilisticPCA(CellariumPyroModel):

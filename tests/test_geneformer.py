@@ -10,10 +10,9 @@ import numpy as np
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.data.util import collate_fn
 from cellarium.ml.models import GeneformerFromCLI
-
-from .common import BoringDataset
+from cellarium.ml.utilities.data import collate_fn
+from tests.common import BoringDataset
 
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):

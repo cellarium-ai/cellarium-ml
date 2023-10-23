@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import gc
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 
 import pandas as pd
@@ -17,8 +17,9 @@ from anndata.experimental.multi_files._anncollection import (
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
-from .fileio import read_h5ad_file
-from .schema import AnnDataSchema
+from cellarium.ml.data.fileio import read_h5ad_file
+from cellarium.ml.data.schema import AnnDataSchema
+from cellarium.ml.utilities.types import ConvertType
 
 
 class getattr_mode:
@@ -26,8 +27,6 @@ class getattr_mode:
 
 
 _GETATTR_MODE = getattr_mode()
-
-ConvertType = dict[str, Callable | dict[str, Callable]]
 
 
 @contextmanager

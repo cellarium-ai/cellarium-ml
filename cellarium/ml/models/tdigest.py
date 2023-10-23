@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from .model import CellariumModel
+from cellarium.ml.models.model import CellariumModel
 
 
 class TDigest(CellariumModel):

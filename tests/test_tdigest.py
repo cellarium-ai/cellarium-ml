@@ -16,11 +16,10 @@ from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.data.util import collate_fn, identity
 from cellarium.ml.models import TDigest, TDigestFromCLI
 from cellarium.ml.transforms import NormalizeTotal
-
-from .common import BoringDataset, requires_crick
+from cellarium.ml.utilities.data import collate_fn, identity
+from tests.common import BoringDataset, requires_crick
 
 
 @pytest.fixture

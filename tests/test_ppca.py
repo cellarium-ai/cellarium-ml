@@ -13,11 +13,10 @@ import torch
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.callbacks import VarianceMonitor
-from cellarium.ml.data.util import collate_fn
 from cellarium.ml.models import ProbabilisticPCA, ProbabilisticPCAFromCLI
 from cellarium.ml.transforms import NormalizeTotal
-
-from .common import BoringDataset
+from cellarium.ml.utilities.data import collate_fn
+from tests.common import BoringDataset
 
 
 @pytest.fixture

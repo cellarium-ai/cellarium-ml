@@ -16,8 +16,8 @@ from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.data.util import collate_fn, get_rank_and_num_replicas, identity
 from cellarium.ml.models import CellariumModel, GatherLayer
+from cellarium.ml.utilities.data import collate_fn, get_rank_and_num_replicas, identity
 
 # RuntimeError: Too many open files. Communication with the workers is no longer possible.
 # Please increase the limit using `ulimit -n` in the shell or change the sharing strategy

@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from transformers import BertForMaskedLM
 
-from .model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 
 
 class Geneformer(CellariumModel, PredictMixin):

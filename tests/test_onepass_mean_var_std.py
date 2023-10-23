@@ -14,11 +14,10 @@ from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.data.util import collate_fn, identity
 from cellarium.ml.models import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
 from cellarium.ml.transforms import Log1p, NormalizeTotal
-
-from .common import BoringDataset
+from cellarium.ml.utilities.data import collate_fn, identity
+from tests.common import BoringDataset
 
 
 @pytest.fixture
