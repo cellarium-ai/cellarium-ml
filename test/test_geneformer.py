@@ -9,9 +9,9 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 
+from cellarium.ml import CellariumModule
 from cellarium.ml.data.util import collate_fn
 from cellarium.ml.models import GeneformerFromCLI
-from cellarium.ml.train import TrainingPlan
 
 from .common import TestDataset
 
@@ -40,13 +40,13 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     model = GeneformerFromCLI(**init_args)  # type: ignore[arg-type]
     config = {
         "model": {
-            "module": {
+            "model": {
                 "class_path": "cellarium.ml.models.GeneformerFromCLI",
                 "init_args": init_args,
             }
         }
     }
-    training_plan = TrainingPlan(model, config=config)
+    module = CellariumModule(model, config=config)
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",
@@ -55,7 +55,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         default_root_dir=tmp_path,
     )
     # fit
-    trainer.fit(training_plan, train_dataloaders=train_loader)
+    trainer.fit(module, train_dataloaders=train_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
@@ -64,7 +64,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: GeneformerFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
+    loaded_model: GeneformerFromCLI = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
     assert np.array_equal(model.feature_schema, loaded_model.feature_schema)
     np.testing.assert_allclose(model.feature_ids, loaded_model.feature_ids)

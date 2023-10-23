@@ -11,13 +11,13 @@ import pytest
 import torch
 from anndata import AnnData
 
+from cellarium.ml import CellariumModule
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
 from cellarium.ml.data.util import collate_fn, identity
 from cellarium.ml.models import TDigest, TDigestFromCLI
-from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import NormalizeTotal
 
 from .common import TestDataset, requires_crick
@@ -78,14 +78,14 @@ def test_tdigest_multi_device(
 
     # fit
     model = TDigest(g_genes=dadc.n_vars, transform=transform)
-    training_plan = TrainingPlan(model)
+    module = CellariumModule(model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
         devices=devices,
         max_epochs=1,  # one pass
     )
-    trainer.fit(training_plan, train_dataloaders=data_loader)
+    trainer.fit(module, train_dataloaders=data_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
@@ -120,13 +120,13 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     model = TDigestFromCLI(**init_args)
     config = {
         "model": {
-            "module": {
+            "model": {
                 "class_path": "cellarium.ml.models.TDigestFromCLI",
                 "init_args": init_args,
             }
         }
     }
-    training_plan = TrainingPlan(model, config=config)
+    module = CellariumModule(model, config=config)
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",
@@ -135,7 +135,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         default_root_dir=tmp_path,
     )
     # fit
-    trainer.fit(training_plan, train_dataloaders=train_loader)
+    trainer.fit(module, train_dataloaders=train_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
@@ -144,7 +144,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: TDigestFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
+    loaded_model: TDigestFromCLI = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
     assert isinstance(model.transform, NormalizeTotal)
     assert isinstance(loaded_model.transform, NormalizeTotal)

@@ -12,10 +12,10 @@ import torch
 from anndata import AnnData
 from lightning.pytorch.strategies import DDPStrategy
 
+from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.data.util import collate_fn, identity
 from cellarium.ml.models import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
-from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import Log1p, NormalizeTotal
 
 from .common import TestDataset
@@ -69,7 +69,7 @@ def test_onepass_mean_var_std_multi_device(
 
     # fit
     model = OnePassMeanVarStd(g_genes=dadc.n_vars, transform=transform)
-    training_plan = TrainingPlan(model)
+    module = CellariumModule(model)
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
         barebones=True,
@@ -78,7 +78,7 @@ def test_onepass_mean_var_std_multi_device(
         max_epochs=1,  # one pass
         strategy=strategy,  # type: ignore[arg-type]
     )
-    trainer.fit(training_plan, train_dataloaders=data_loader)
+    trainer.fit(module, train_dataloaders=data_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
@@ -113,13 +113,13 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     model = OnePassMeanVarStdFromCLI(**init_args)
     config = {
         "model": {
-            "module": {
+            "model": {
                 "class_path": "cellarium.ml.models.OnePassMeanVarStdFromCLI",
                 "init_args": init_args,
             }
         }
     }
-    training_plan = TrainingPlan(model, config=config)
+    module = CellariumModule(model, config=config)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -130,7 +130,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         default_root_dir=tmp_path,
     )
     # fit
-    trainer.fit(training_plan, train_dataloaders=train_loader)
+    trainer.fit(module, train_dataloaders=train_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
@@ -139,7 +139,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: OnePassMeanVarStdFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
+    loaded_model: OnePassMeanVarStdFromCLI = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
     assert isinstance(model.transform, torch.nn.Sequential) and len(model.transform) == 2
     assert isinstance(loaded_model.transform, torch.nn.Sequential) and len(loaded_model.transform) == 2

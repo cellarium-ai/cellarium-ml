@@ -12,10 +12,10 @@ Table of Contents
 
    callbacks
    cli
+   core
    data
    models
    optim
-   trainer
    transforms
    utils
 

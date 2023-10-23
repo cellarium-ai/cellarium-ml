@@ -26,11 +26,11 @@ class VarianceMonitor(pl.Callback):
         Called when the train begins.
 
         Raises:
-            AssertionError: If ``pl_module.module`` is not a ``ProbabilisticPCA`` instance.
+            AssertionError: If ``pl_module.model`` is not a ``ProbabilisticPCA`` instance.
             MisconfigurationException: If ``Trainer`` has no ``logger``.
         """
         assert isinstance(
-            pl_module.module, ProbabilisticPCA
+            pl_module.model, ProbabilisticPCA
         ), "VarianceMonitor callback should only be used in conjunction with ProbabilisticPCA"
 
         if not trainer.loggers:
@@ -38,7 +38,7 @@ class VarianceMonitor(pl.Callback):
                 "Cannot use `LearningRateMonitor` callback with `Trainer` that has no logger."
             )
         # attempt to get the total variance from the checkpoint
-        ppca = pl_module.module
+        ppca = pl_module.model
         mean_var_std_ckpt_path = getattr(ppca, "mean_var_std_ckpt_path", None)
         if self.total_variance is None and mean_var_std_ckpt_path is not None:
             onepass = torch.load(mean_var_std_ckpt_path)
@@ -53,9 +53,9 @@ class VarianceMonitor(pl.Callback):
         **kwargs: Any,
     ) -> None:
         """Called when the train batch ends."""
-        assert isinstance(pl_module.module, ProbabilisticPCA)  # make mypy happy
-        W_variance = pl_module.module.W_variance
-        sigma_variance = pl_module.module.sigma_variance
+        assert isinstance(pl_module.model, ProbabilisticPCA)  # make mypy happy
+        W_variance = pl_module.model.W_variance
+        sigma_variance = pl_module.model.sigma_variance
 
         variance_stats = {}
         variance_stats["total_explained_variance"] = W_variance + sigma_variance

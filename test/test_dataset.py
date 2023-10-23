@@ -11,13 +11,13 @@ import pytest
 import torch
 from anndata import AnnData
 
+from cellarium.ml import CellariumModule
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
 from cellarium.ml.data.util import collate_fn, get_rank_and_num_replicas, identity
 from cellarium.ml.models import CellariumModel, GatherLayer
-from cellarium.ml.train import TrainingPlan
 
 # RuntimeError: Too many open files. Communication with the workers is no longer possible.
 # Please increase the limit using `ulimit -n` in the shell or change the sharing strategy
@@ -135,14 +135,14 @@ def test_iterable_dataset_multi_device(
 
     # fit
     model = BoringModel()
-    training_plan = TrainingPlan(model)
+    module = CellariumModule(model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
         devices=devices,
         max_epochs=1,  # one pass
     )
-    trainer.fit(training_plan, data_loader)
+    trainer.fit(module, data_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
@@ -197,7 +197,7 @@ def test_iterable_dataset_set_epoch_multi_device(
 
     # fit
     model = BoringModel()
-    training_plan = TrainingPlan(model)
+    module = CellariumModule(model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
@@ -205,7 +205,7 @@ def test_iterable_dataset_set_epoch_multi_device(
         max_epochs=epochs,
         strategy="ddp",
     )
-    trainer.fit(training_plan, data_loader)
+    trainer.fit(module, data_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:

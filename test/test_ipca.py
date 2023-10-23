@@ -11,9 +11,9 @@ import pytest
 import torch
 from lightning.pytorch.strategies import DDPStrategy
 
+from cellarium.ml import CellariumModule
 from cellarium.ml.data.util import collate_fn
 from cellarium.ml.models import IncrementalPCA, IncrementalPCAFromCLI
-from cellarium.ml.train import TrainingPlan
 from cellarium.ml.transforms import NormalizeTotal
 
 from .common import TestDataset
@@ -51,7 +51,7 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
         k_components=k,
         perform_mean_correction=perform_mean_correction,
     )
-    training_plan = TrainingPlan(ipca)
+    module = CellariumModule(ipca)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -62,7 +62,7 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
         strategy=strategy,  # type: ignore[arg-type]
     )
     # fit
-    trainer.fit(training_plan, train_dataloaders=train_loader)
+    trainer.fit(module, train_dataloaders=train_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
@@ -98,13 +98,13 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     model = IncrementalPCAFromCLI(**init_args)  # type: ignore[arg-type]
     config = {
         "model": {
-            "module": {
+            "model": {
                 "class_path": "cellarium.ml.models.IncrementalPCAFromCLI",
                 "init_args": init_args,
             }
         }
     }
-    training_plan = TrainingPlan(model, config=config)
+    module = CellariumModule(model, config=config)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -115,7 +115,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         default_root_dir=tmp_path,
     )
     # fit
-    trainer.fit(training_plan, train_dataloaders=train_loader)
+    trainer.fit(module, train_dataloaders=train_loader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
@@ -124,7 +124,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: IncrementalPCAFromCLI = TrainingPlan.load_from_checkpoint(ckpt_path).module
+    loaded_model: IncrementalPCAFromCLI = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
     assert isinstance(model.transform, torch.nn.Sequential) and len(model.transform) == 2
     assert isinstance(loaded_model.transform, torch.nn.Sequential) and len(loaded_model.transform) == 2

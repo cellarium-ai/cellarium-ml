@@ -18,12 +18,18 @@ from cellarium.ml.core.saving import _load_state
 from cellarium.ml.models import CellariumModel, PredictMixin
 
 
-class TrainingPlan(pl.LightningModule):
+class CellariumModule(pl.LightningModule):
     """
-    Lightning module task to train ``cellarium.ml`` modules.
+    ``CellariumModule`` organizes code into following sections:
+
+        * :attr:`model`: A :class:`cellarium.ml.models.CellariumModel` to train with
+          :meth:`training_step` method and epoch end hooks.
+        * :attr:`optim_fn` and :attr:`optim_kwargs`: A Pytorch optimizer class and its keyword arguments.
+        * :attr:`scheduler_fn` and :attr:`scheduler_kwargs`: A Pytorch lr scheduler class and its
+          keyword arguments.
 
     Args:
-        module:
+        model:
             A :class:`cellarium.ml.models.CellariumModel` to train.
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
@@ -43,7 +49,7 @@ class TrainingPlan(pl.LightningModule):
 
     def __init__(
         self,
-        module: CellariumModel,
+        model: CellariumModel,
         optim_fn: type[torch.optim.Optimizer] | str | None = None,
         optim_kwargs: dict | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
@@ -52,7 +58,7 @@ class TrainingPlan(pl.LightningModule):
         config: dict[str, Any] | Namespace | None = None,
     ) -> None:
         super().__init__()
-        self.module = module
+        self.model = model
 
         # set up optimizer and scheduler
         if isinstance(optim_fn, str):
@@ -90,7 +96,7 @@ class TrainingPlan(pl.LightningModule):
         hparams_file: _PATH | None = None,
         strict: bool = True,
         **kwargs: Any,
-    ) -> TrainingPlan:
+    ) -> CellariumModule:
         r"""
         Primary way of loading a model from a checkpoint. When Cellarium ML saves a checkpoint it stores the config
         argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.
@@ -110,8 +116,8 @@ class TrainingPlan(pl.LightningModule):
                 .. code-block:: yaml
 
                     model:
-                      module:
-                        class_path: cellarium.ml.module.OnePassMeanVarStdFromCLI
+                      model:
+                        class_path: cellarium.ml.models.OnePassMeanVarStdFromCLI
                         init_args:
                           g_genes: 36350
                           target_count: 10000
@@ -127,7 +133,7 @@ class TrainingPlan(pl.LightningModule):
                 However, if your checkpoint weights don't have the hyperparameters saved,
                 use this method to pass in a ``.yaml`` file with the hparams you'd like to use.
                 These will be converted into a :class:`dict` and passed into your
-                :class:`TrainingPlan` for use.
+                :class:`CellariumModule` for use.
             strict:
                 Whether to strictly enforce that the keys in :attr:`checkpoint_path` match the keys
                 returned by this module's state dict.
@@ -135,28 +141,28 @@ class TrainingPlan(pl.LightningModule):
                 hyperparameter values.
 
         Return:
-            :class:`TrainingPlan` instance with loaded weights and hyperparameters.
+            :class:`CellariumModule` instance with loaded weights and hyperparameters.
 
         Example::
 
             # load weights without mapping ...
-            model = TrainingPlan.load_from_checkpoint("path/to/checkpoint.ckpt")
+            module = CellariumModule.load_from_checkpoint("path/to/checkpoint.ckpt")
 
             # or load weights mapping all weights from GPU 1 to GPU 0 ...
             map_location = {"cuda:1": "cuda:0"}
-            model = TrainingPlan.load_from_checkpoint(
+            module = CellariumModule.load_from_checkpoint(
                 "path/to/checkpoint.ckpt",
                 map_location=map_location
             )
 
             # or load weights and hyperparameters from separate files.
-            model = TrainingPlan.load_from_checkpoint(
+            module = CellariumModule.load_from_checkpoint(
                 "path/to/checkpoint.ckpt",
                 hparams_file="/path/to/config.yaml"
             )
 
             # override some of the params with new values
-            model = TrainingPlan.load_from_checkpoint(
+            module = CellariumModule.load_from_checkpoint(
                 "path/to/checkpoint.ckpt",
                 optim_fn=torch.optim.AdamW,
                 default_lr=0.0001,
@@ -173,8 +179,8 @@ class TrainingPlan(pl.LightningModule):
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
-        args, kwargs = self.module._get_fn_args_from_batch(batch)
-        loss = self.module(*args, **kwargs)
+        args, kwargs = self.model._get_fn_args_from_batch(batch)
+        loss = self.model(*args, **kwargs)
         if loss is not None:
             # Logging to TensorBoard by default
             self.log("train_loss", loss)
@@ -182,14 +188,14 @@ class TrainingPlan(pl.LightningModule):
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor | dict[str, torch.Tensor | None]:
         """Forward pass of the model."""
-        assert isinstance(self.module, PredictMixin)
-        args, kwargs = self.module._get_fn_args_from_batch(batch)
-        return self.module.predict(*args, **kwargs)
+        assert isinstance(self.model, PredictMixin)
+        args, kwargs = self.model._get_fn_args_from_batch(batch)
+        return self.model.predict(*args, **kwargs)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         """Configure optimizers for the model."""
         optim_config: OptimizerLRSchedulerConfig = {
-            "optimizer": self.optim_fn(self.module.parameters(), **self.optim_kwargs)
+            "optimizer": self.optim_fn(self.model.parameters(), **self.optim_kwargs)
         }
         if self.scheduler_fn is not None:
             assert self.scheduler_kwargs is not None
@@ -219,20 +225,20 @@ class TrainingPlan(pl.LightningModule):
 
     def on_train_start(self) -> None:
         """
-        Calls the ``on_train_start`` method on the module.
-        If the module has ``on_train_start`` method defined, then
+        Calls the ``on_train_start`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_train_start`` method defined, then
         ``on_train_start`` must be called at the beginning of training.
         """
-        on_train_start = getattr(self.module, "on_train_start", None)
+        on_train_start = getattr(self.model, "on_train_start", None)
         if callable(on_train_start):
             on_train_start(self.trainer)
 
     def on_train_epoch_end(self) -> None:
         """
-        Calls the ``on_epoch_end`` method on the module.
-        If the module has ``on_epoch_end`` method defined, then
+        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
         ``on_epoch_end`` must be called at the end of every epoch.
         """
-        on_epoch_end = getattr(self.module, "on_epoch_end", None)
+        on_epoch_end = getattr(self.model, "on_epoch_end", None)
         if callable(on_epoch_end):
             on_epoch_end(self.trainer)
