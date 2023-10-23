@@ -111,17 +111,72 @@ class Geneformer(BaseModule, PredictMixin):
         return output.loss
 
     def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> dict[str, torch.Tensor | None]:
+        """
+        Send raw count data through the transformer and return outputs.
+        Optionally perform in silico perturbations.
+
+        NOTE:
+            In silico perturbations can be achieved in one of three ways:
+            1. use feature_map to replace a feature token with MASK (1) or PAD (0)
+                e.g. feature_map={"ENSG0001": 0} will remove feature_schema feature
+                ENSG0001 from the cell's inputs, replacing it with a PAD token
+            2. use feature_deletion to remove a feature from the cell's
+                inputs, which instead of adding a PAD or MASK token, will allow
+                another feature to take its place.
+                e.g. feature_zero_expression=["ENSG0001"] will remove feature_schema
+                feature ENSG0001 from the cell's inputs, and allow a new feature
+                token to take its place
+            3.
+            Number (2) and (3) are described in the Geneformer paper under
+            "In silico perturbation" in the Methods section.
+
+        Args:
+            x_ng: cell by feature tensor to use for prediction
+            **kwargs:
+                feature_list: feature ids that specify order in x_ng
+                feature_map: (optional) specify a mapping for in silico perturbations
+                feature_deletion: (optional) specify features whose expression
+                    should be set to zero before tokenization (remove from inputs)
+                feature_activation: (optional) specify features whose expression
+                    should be set to 1 + max(x_ng) before tokenization (front of inputs)
+                output_hidden_states: (optional) True (default) to output the hidden states
+                output_attentions: (optional) True (default) to output the attentions
+        """
+
         assert "feature_list" in kwargs, "feature_list must be provided."
         feature_list: Sequence = kwargs.pop("feature_list")
+        feature_map: dict[int, int] = kwargs.pop("feature_map", None)
+        feature_deletion: Sequence = kwargs.pop("feature_deletion", None)
+        feature_activation: Sequence = kwargs.pop("feature_activation", None)
         output_hidden_states: bool = kwargs.pop("output_hidden_states", True)
         output_attentions: bool = kwargs.pop("output_attentions", True)
 
         if self.validate_input:
             assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
             assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
+            if feature_map:
+                for key in feature_map.keys():
+                    assert key in self.feature_schema, f"feature_map key {key} is not in the feature_schema."
+            if feature_deletion:
+                assert all([f in self.feature_schema for f in feature_deletion]), \
+                    "Elements of feature_deletion are not all in feature_schema"
+            if feature_activation:
+                assert all([f in self.feature_schema for f in feature_activation]), \
+                    "Elements of feature_activation are not all in feature_schema"
+
+        if feature_deletion:
+            x_ng[:, np.array([f in feature_deletion for f in self.feature_schema])] = 0
+
+        if feature_activation:
+            large_value = x_ng.max() + 1
+            x_ng[:, np.array([f in feature_activation for f in self.feature_schema])] = large_value
 
         if self.transform is not None:
             x_ng = self.transform(x_ng)
+
+        if feature_map:
+            # elementwise, apply map if entry is a key, otherwise do nothing
+            x_ng.apply_(lambda x: feature_map.get(x, x))
 
         input_ids, attention_mask = self.tokenize(x_ng, feature_list)
 
