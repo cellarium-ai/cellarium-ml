@@ -159,11 +159,13 @@ class Geneformer(BaseModule, PredictMixin):
                 for key in feature_map.keys():
                     assert key in self.feature_ids, f"feature_map key {key} is not in the feature_ids."
             if feature_deletion:
-                assert all([f in self.feature_schema for f in feature_deletion]), \
-                    "Elements of feature_deletion are not all in feature_schema"
+                assert all(
+                    [f in self.feature_schema for f in feature_deletion]
+                ), "Elements of feature_deletion are not all in feature_schema"
             if feature_activation:
-                assert all([f in self.feature_schema for f in feature_activation]), \
-                    "Elements of feature_activation are not all in feature_schema"
+                assert all(
+                    [f in self.feature_schema for f in feature_activation]
+                ), "Elements of feature_activation are not all in feature_schema"
 
         if self.transform is not None:
             x_ng = self.transform(x_ng)
