@@ -134,7 +134,8 @@ class Geneformer(BaseModule, PredictMixin):
             x_ng: cell by feature tensor to use for prediction
             **kwargs:
                 feature_list: feature ids that specify order in x_ng
-                feature_map: (optional) specify a mapping for in silico perturbations
+                feature_map: (optional) specify a mapping for in silico perturbations,
+                    using the geneformer.feature_ids integers
                 feature_deletion: (optional) specify features whose expression
                     should be set to zero before tokenization (remove from inputs)
                 feature_activation: (optional) specify features whose expression
@@ -156,7 +157,7 @@ class Geneformer(BaseModule, PredictMixin):
             assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
             if feature_map:
                 for key in feature_map.keys():
-                    assert key in self.feature_schema, f"feature_map key {key} is not in the feature_schema."
+                    assert key in self.feature_ids, f"feature_map key {key} is not in the feature_ids."
             if feature_deletion:
                 assert all([f in self.feature_schema for f in feature_deletion]), \
                     "Elements of feature_deletion are not all in feature_schema"
