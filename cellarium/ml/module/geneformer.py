@@ -164,6 +164,9 @@ class Geneformer(BaseModule, PredictMixin):
                 assert all([f in self.feature_schema for f in feature_activation]), \
                     "Elements of feature_activation are not all in feature_schema"
 
+        if self.transform is not None:
+            x_ng = self.transform(x_ng)
+
         if feature_deletion:
             x_ng[:, np.array([f in feature_deletion for f in self.feature_schema])] = 0
 
@@ -171,14 +174,11 @@ class Geneformer(BaseModule, PredictMixin):
             large_value = x_ng.max() + 1
             x_ng[:, np.array([f in feature_activation for f in self.feature_schema])] = large_value
 
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
+        input_ids, attention_mask = self.tokenize(x_ng, feature_list)
 
         if feature_map:
             # elementwise, apply map if entry is a key, otherwise do nothing
-            x_ng.apply_(lambda x: feature_map.get(x, x))
-
-        input_ids, attention_mask = self.tokenize(x_ng, feature_list)
+            input_ids.apply_(lambda feature_id: feature_map.get(feature_id, feature_id))
 
         output = self.model(
             input_ids=input_ids,
