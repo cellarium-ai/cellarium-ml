@@ -7,3 +7,5 @@ eggs/
 *.egg*
 lightning_logs/
 output/
+.idea/
+build/
