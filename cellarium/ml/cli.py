@@ -13,8 +13,7 @@ from typing import Any
 from jsonargparse import Namespace
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 
-from cellarium.ml import CellariumModule
-from cellarium.ml.data import DistributedAnnDataCollectionDataModule
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 
 REGISTERED_MODELS = {}
 
@@ -62,7 +61,7 @@ def lightning_cli_factory(
         def __init__(self, args: ArgsType = None) -> None:
             super().__init__(
                 CellariumModule,
-                DistributedAnnDataCollectionDataModule,
+                CellariumAnnDataDataModule,
                 trainer_defaults=trainer_defaults,
                 args=args,
             )
