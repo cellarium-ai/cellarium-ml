@@ -18,7 +18,7 @@ format: license FORCE
 	black .
 
 typecheck: FORCE
-	mypy cellarium test
+	mypy cellarium tests
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)

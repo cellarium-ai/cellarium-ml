@@ -6,7 +6,7 @@ import pytest
 import torch
 
 
-class TestDataset(torch.utils.data.Dataset):
+class BoringDataset(torch.utils.data.Dataset):
     """A simple dataset for testing purposes."""
 
     def __init__(self, data: np.ndarray, var_names: np.ndarray | None = None) -> None:

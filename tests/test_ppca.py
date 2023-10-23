@@ -17,7 +17,7 @@ from cellarium.ml.data.util import collate_fn
 from cellarium.ml.models import ProbabilisticPCA, ProbabilisticPCAFromCLI
 from cellarium.ml.transforms import NormalizeTotal
 
-from .common import TestDataset
+from .common import BoringDataset
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_
     # dataloader
     batch_size = n // 2 if minibatch else n
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(x_ng),
+        BoringDataset(x_ng),
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
@@ -114,7 +114,7 @@ def test_variance_monitor(x_ng: np.ndarray):
     k = 3
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(x_ng),
+        BoringDataset(x_ng),
         batch_size=n // 2,
         collate_fn=collate_fn,
     )
@@ -139,7 +139,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(np.arange(n * g).reshape(n, g)),
+        BoringDataset(np.arange(n * g).reshape(n, g)),
         collate_fn=collate_fn,
     )
     # model

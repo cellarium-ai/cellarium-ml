@@ -16,7 +16,7 @@ from cellarium.ml.data.util import collate_fn
 from cellarium.ml.models import IncrementalPCA, IncrementalPCAFromCLI
 from cellarium.ml.transforms import NormalizeTotal
 
-from .common import TestDataset
+from .common import BoringDataset
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
 
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset((x_ng if perform_mean_correction else x_ng_centered).numpy()),
+        BoringDataset((x_ng if perform_mean_correction else x_ng_centered).numpy()),
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
@@ -90,7 +90,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(np.arange(n * g).reshape(n, g)),
+        BoringDataset(np.arange(n * g).reshape(n, g)),
         collate_fn=collate_fn,
     )
     # model

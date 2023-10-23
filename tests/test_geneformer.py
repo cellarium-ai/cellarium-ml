@@ -13,7 +13,7 @@ from cellarium.ml import CellariumModule
 from cellarium.ml.data.util import collate_fn
 from cellarium.ml.models import GeneformerFromCLI
 
-from .common import TestDataset
+from .common import BoringDataset
 
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
@@ -22,7 +22,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        TestDataset(
+        BoringDataset(
             np.arange(n * g).reshape(n, g),
             var_names=var_names,
         ),
