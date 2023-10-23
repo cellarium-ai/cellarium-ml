@@ -180,7 +180,7 @@ class Geneformer(BaseModule, PredictMixin):
         input_ids, attention_mask = self.tokenize(x_ng, feature_list)
 
         if feature_map:
-            for key, value in feature_map:
+            for key, value in feature_map.items():
                 input_ids[input_ids == key] = value
 
         output = self.model(
