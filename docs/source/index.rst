@@ -14,8 +14,8 @@ Table of Contents
    cli
    core
    data
+   lr_schedulers
    models
-   optim
    transforms
    utils
 
