@@ -1,5 +1,5 @@
-Cellarium Data
-==============
+Data
+====
 
 .. automodule:: cellarium.ml.data
    :members:

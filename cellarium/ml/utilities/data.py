@@ -1,6 +1,13 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""
+Data utilities
+--------------
+
+This module contains helper functions for data loading and processing.
+"""
+
 import warnings
 
 import numpy as np
@@ -17,6 +24,9 @@ def get_rank_and_num_replicas() -> tuple[int, int]:
     the number of processes in the default process group. If distributed
     package is not available or default process group has not been initialized
     then it returns ``rank=0`` and ``num_replicas=1``.
+
+    Returns:
+        Tuple of ``rank`` and ``num_replicas``.
     """
     if not dist.is_available():
         num_replicas = 1
@@ -42,6 +52,9 @@ def get_worker_info() -> tuple[int, int]:
     """
     This helper function returns ``worker_id`` and ``num_workers``. If it is running
     in the main process then it returns ``worker_id=0`` and ``num_workers=1``.
+
+    Returns:
+        Tuple of ``worker_id`` and ``num_workers``.
     """
     worker_info = _get_worker_info()
     if worker_info is None:
@@ -59,6 +72,13 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
     dictionaries, where each dictionary has the same keys. The values of each key are converted
     to a :class:`torch.Tensor` and concatenated along the first dimension. If the key is ``obs_names``,
     the values are concatenated along the first dimension without converting to a :class:`torch.Tensor`.
+
+    Args:
+        batch: List of dictionaries.
+
+    Returns:
+        Dictionary with the same keys as the input dictionaries, but with values concatenated along
+        the batch dimension.
     """
     keys = batch[0].keys()
     collated_batch = {}
@@ -83,6 +103,12 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
 def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
     """
     Convert a sparse matrix to a dense matrix.
+
+    Args:
+        x: Sparse matrix.
+
+    Returns:
+        Dense matrix.
     """
     return x.toarray()
 
@@ -90,6 +116,12 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
 def identity(x: np.ndarray) -> np.ndarray:
     """
     Identity function.
+
+    Args:
+        x: Input array.
+
+    Returns:
+        Input array.
     """
     return x
 
@@ -98,5 +130,11 @@ def pandas_to_numpy(x: pd.Index | pd.Series | pd.DataFrame) -> np.ndarray:
     """
     Convert a pandas Index/Series/DataFrame object to a numpy array.
     Returned array is always a copy.
+
+    Args:
+        x: Pandas Index/Series/DataFrame object.
+
+    Returns:
+        Numpy array.
     """
     return x.to_numpy(copy=True)

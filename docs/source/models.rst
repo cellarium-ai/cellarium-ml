@@ -1,5 +1,5 @@
-Cellarium Models
-================
+Models
+======
 
 .. automodule:: cellarium.ml.models
    :members:

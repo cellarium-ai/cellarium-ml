@@ -17,7 +17,8 @@ Table of Contents
    lr_schedulers
    models
    transforms
-   utils
+   preprocessing
+   utilities
 
 Indices and tables
 ==================

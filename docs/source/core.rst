@@ -1,5 +1,5 @@
-Cellarium Core
-==============
+Core
+====
 
 .. automodule:: cellarium.ml.core
    :members:
