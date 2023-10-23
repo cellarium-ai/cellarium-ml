@@ -17,7 +17,7 @@ from anndata.experimental.multi_files._anncollection import (
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
-from .read import read_h5ad_file
+from .fileio import read_h5ad_file
 from .schema import AnnDataSchema
 
 
@@ -289,7 +289,7 @@ class DistributedAnnDataCollection(AnnCollection):
 
 class LazyAnnData:
     """
-    Lazy AnnData backed by a file.
+    Lazy :class:`~anndata.AnnData` backed by a file.
 
     Accessing attributes under :func:`lazy_getattr` context returns schema attributes.
 

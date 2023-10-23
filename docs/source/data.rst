@@ -1,5 +1,5 @@
-Datasets & Data Loaders
-=======================
+Cellarium Data
+==============
 
 .. automodule:: cellarium.ml.data
    :members:
