@@ -42,7 +42,7 @@ class Geneformer(BaseModule, PredictMixin):
         validate_input: bool = True,
     ):
         super().__init__()
-        self.feature_schema = feature_schema
+        self.feature_schema = np.array(feature_schema)
         self.model = model
         self.mlm_probability = mlm_probability
         self.transform = transform
@@ -189,4 +189,6 @@ class Geneformer(BaseModule, PredictMixin):
             output_hidden_states=output_hidden_states,
             output_attentions=output_attentions,
         )
+        output["input_ids"] = input_ids
+        output["attention_mask"] = attention_mask
         return output
