@@ -49,7 +49,6 @@ docs = [
   "Pillow",
   "sphinx",
   "sphinx_rtd_theme",
-  "sphinx-autodoc-typehints",
   "sphinx-copybutton",
 ]
 dev = ["cellarium-ml[docs,lint,mypy,test]"]

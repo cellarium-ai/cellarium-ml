@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from importlib import import_module
 from typing import IO, Any
 from unittest.mock import patch
 
 import lightning.pytorch as pl
-import numpy as np
 import torch
 from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
@@ -16,6 +16,7 @@ from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 
 from cellarium.ml.core.saving import _load_state
 from cellarium.ml.models import CellariumModel, PredictMixin
+from cellarium.ml.utilities.types import BatchDict
 
 
 class CellariumModule(pl.LightningModule):
@@ -50,6 +51,7 @@ class CellariumModule(pl.LightningModule):
     def __init__(
         self,
         model: CellariumModel,
+        transforms: Iterable[torch.nn.Module] | None = None,
         optim_fn: type[torch.optim.Optimizer] | str | None = None,
         optim_kwargs: dict | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
@@ -59,6 +61,7 @@ class CellariumModule(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.model = model
+        self.transforms = torch.nn.ModuleList(transforms)
 
         # set up optimizer and scheduler
         if isinstance(optim_fn, str):
@@ -176,21 +179,45 @@ class CellariumModule(pl.LightningModule):
             **kwargs,
         )
 
-    def training_step(  # type: ignore[override]
-        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
-    ) -> torch.Tensor | None:
-        args, kwargs = self.model._get_fn_args_from_batch(batch)
-        loss = self.model(*args, **kwargs)
-        if loss is not None:
-            # Logging to TensorBoard by default
-            self.log("train_loss", loss)
-        return loss
+    def training_step(self, batch: BatchDict, batch_idx: int) -> BatchDict:  # type: ignore[override]
+        """
+        Forward pass for training step.
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor | dict[str, torch.Tensor | None]:
-        """Forward pass of the model."""
+        Args:
+            batch: A dictionary containing the batch data.
+
+        Returns:
+            A dictionary containing the batch data and forward pass results.
+        """
+        for transform in self.transforms:
+            ann = transform.forward.__annotations__
+            batch |= transform(**{key: batch[key] for key in ann if key != "return"})
+
+        ann = self.model.forward.__annotations__
+        batch |= self.model(**{key: batch[key] for key in ann if key != "return"})
+        if "loss" in batch:
+            # Logging to TensorBoard by default
+            self.log("train_loss", batch["loss"])
+        return batch
+
+    def forward(self, batch: BatchDict) -> BatchDict:
+        """
+        Forward pass for inference step.
+
+        Args:
+            batch: A dictionary containing the batch data.
+
+        Returns:
+            A dictionary containing the batch data and inference results.
+        """
+        for transform in self.transforms:
+            ann = transform.forward.__annotations__
+            batch |= transform(**{key: batch[key] for key in ann if key != "return"})
+
         assert isinstance(self.model, PredictMixin)
-        args, kwargs = self.model._get_fn_args_from_batch(batch)
-        return self.model.predict(*args, **kwargs)
+        ann = self.model.predict.__annotations__
+        batch |= self.model.predict(**{key: batch[key] for key in ann if key != "return"})
+        return batch
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         """Configure optimizers for the model."""

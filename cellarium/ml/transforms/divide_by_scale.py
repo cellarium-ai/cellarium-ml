@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
 
 import numpy as np
 import torch
@@ -12,6 +13,7 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
     assert_nonnegative,
 )
+from cellarium.ml.utilities.types import BatchDict
 
 
 class DivideByScale(nn.Module):
@@ -43,7 +45,7 @@ class DivideByScale(nn.Module):
         self,
         x_ng: torch.Tensor,
         feature_g: np.ndarray | None = None,
-    ) -> torch.Tensor:
+    ) -> BatchDict:
         """
         Args:
             x_ng:
@@ -58,7 +60,9 @@ class DivideByScale(nn.Module):
             assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
             assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
-        return x_ng / (self.scale_g + self.eps)
+        x_ng = x_ng / (self.scale_g + self.eps)
+
+        return BatchDict(x_ng=x_ng)
 
     def __repr__(self) -> str:
         return (

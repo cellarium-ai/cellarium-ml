@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from functools import cache
 from typing import Any
 
@@ -12,6 +14,7 @@ from torch import nn
 from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
+from cellarium.ml.utilities.types import BatchDict
 
 
 class Filter(nn.Module):
@@ -48,7 +51,7 @@ class Filter(nn.Module):
             raise AssertionError("No features in `feature_g` matched the `filter_list`")
         return mask
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
         """
         Args:
             x_ng:
@@ -57,12 +60,15 @@ class Filter(nn.Module):
                 The list of the variable names in the input data.
 
         Returns:
-            Filtered gene counts.
+            Gene counts and features list filtered by :attr:`filter_list`.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
 
         filter_mask = self.filter(tuple(feature_g.tolist()))
-        return x_ng[:, filter_mask]
+        x_ng = x_ng[:, filter_mask]
+        feature_g = feature_g[filter_mask]
+
+        return BatchDict(x_ng=x_ng, feature_g=feature_g)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(filter_list={self.filter_list})"

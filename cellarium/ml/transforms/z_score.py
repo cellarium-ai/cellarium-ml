@@ -12,6 +12,7 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
     assert_nonnegative,
 )
+from cellarium.ml.utilities.types import BatchDict
 
 
 class ZScore(nn.Module):
@@ -51,7 +52,7 @@ class ZScore(nn.Module):
         self,
         x_ng: torch.Tensor,
         feature_g: np.ndarray | None = None,
-    ) -> torch.Tensor:
+    ) -> BatchDict:
         """
         Args:
             x_ng:
@@ -66,7 +67,8 @@ class ZScore(nn.Module):
             assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
             assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
-        return (x_ng - self.mean_g) / (self.std_g + self.eps)
+        x_ng = (x_ng - self.mean_g) / (self.std_g + self.eps)
+        return BatchDict(x_ng=x_ng)
 
     def __repr__(self) -> str:
         return (

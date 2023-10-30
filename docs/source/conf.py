@@ -20,7 +20,6 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
-    "sphinx_autodoc_typehints",
     "sphinx_copybutton",
     "sphinx_rtd_theme",
 ]
@@ -32,10 +31,8 @@ exclude_patterns = []
 
 autodoc_inherit_docstrings = False
 autodoc_member_order = "bysource"
-
-# Add a default annotation
-
-typehints_defaults = "comma"
+autodoc_typehints = "description"
+autodoc_typehints_format = "fully-qualified"
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output

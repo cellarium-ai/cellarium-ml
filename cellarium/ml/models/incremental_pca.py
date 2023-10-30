@@ -12,6 +12,7 @@ import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.utilities.types import BatchDict
 
 
 class IncrementalPCA(CellariumModel, PredictMixin):
@@ -36,8 +37,6 @@ class IncrementalPCA(CellariumModel, PredictMixin):
             If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
-        transform:
-            If not ``None`` is used to transform the input data.
     """
 
     def __init__(
@@ -46,14 +45,12 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         k_components: int,
         svd_lowrank_niter: int = 2,
         perform_mean_correction: bool = False,
-        transform: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.g_genes = g_genes
         self.k_components = k_components
         self.svd_lowrank_niter = svd_lowrank_niter
         self.perform_mean_correction = perform_mean_correction
-        self.transform = transform
         self.V_kg: torch.Tensor
         self.S_k: torch.Tensor
         self.x_mean_g: torch.Tensor
@@ -69,13 +66,10 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         x = tensor_dict["X"]
         return (x,), {}
 
-    def forward(self, x_ng: torch.Tensor) -> None:
+    def forward(self, x_ng: torch.Tensor) -> BatchDict:
         """
         Incrementally update partial SVD with new data.
         """
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
-
         g = self.g_genes
         k = self.k_components
         niter = self.svd_lowrank_niter
@@ -114,6 +108,8 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.x_size = total_X_size
         if self.perform_mean_correction:
             self.x_mean_g = self_X_mean * self_X_size / total_X_size + other_X_mean * other_X_size / total_X_size
+
+        return BatchDict()
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -229,10 +225,11 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> BatchDict:
         r"""
         Centering and embedding of the input data ``x_ng`` into the principal component space.
         """
         if self.transform is not None:
             x_ng = self.transform(x_ng)
-        return (x_ng - self.x_mean_g) @ self.V_kg.T
+        z_nk = (x_ng - self.x_mean_g) @ self.V_kg.T
+        return BatchDict(z_nk=z_nk)

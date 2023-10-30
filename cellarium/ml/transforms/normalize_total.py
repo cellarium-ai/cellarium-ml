@@ -9,6 +9,7 @@ from cellarium.ml.utilities.testing import (
     assert_nonnegative,
     assert_positive,
 )
+from cellarium.ml.utilities.types import BatchDict
 
 
 class NormalizeTotal(nn.Module):
@@ -43,7 +44,7 @@ class NormalizeTotal(nn.Module):
         self,
         x_ng: torch.Tensor,
         total_mrna_umis_n: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> BatchDict:
         """
         Args:
             x_ng:
@@ -56,7 +57,8 @@ class NormalizeTotal(nn.Module):
         """
         if total_mrna_umis_n is None:
             total_mrna_umis_n = x_ng.sum(dim=-1)
-        return self.target_count * x_ng / (total_mrna_umis_n[:, None] + self.eps)
+        x_ng = self.target_count * x_ng / (total_mrna_umis_n[:, None] + self.eps)
+        return BatchDict(x_ng=x_ng)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(target_count={self.target_count}, eps={self.eps})"
