@@ -5,7 +5,6 @@ import math
 from typing import Any
 
 import lightning.pytorch as pl
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -60,11 +59,6 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.register_buffer("x_mean_g", torch.zeros(g_genes))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = nn.Parameter(torch.tensor(0.0))
-
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        x = tensor_dict["X"]
-        return (x,), {}
 
     def forward(self, x_ng: torch.Tensor) -> BatchDict:
         """

@@ -8,14 +8,50 @@ Data utilities
 This module contains helper functions for data loading and processing.
 """
 
+from __future__ import annotations
+
 import warnings
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import scipy
 import torch
 import torch.distributed as dist
+from anndata import AnnData
+from anndata.experimental import AnnCollection
 from torch.utils.data import get_worker_info as _get_worker_info
+
+
+@dataclass
+class AnnDataField:
+    attr: str
+    key: str | None = None
+    convert_fn: Callable[[Any], np.ndarray] | None = None
+
+    def __call__(self, adata: AnnData | AnnCollection) -> AnnDataField:
+        self.adata = adata
+        return self
+
+    def __getitem__(self, idx: int | list[int] | slice) -> np.ndarray:
+        if self.adata is None:
+            raise ValueError("Must call AnnDataField with an AnnData or AnnCollection first")
+
+        value = getattr(self.adata[idx], self.attr)
+        if self.key is not None:
+            value = value[self.key]
+
+        if self.convert_fn is not None:
+            value = self.convert_fn(value)
+
+        return value
+
+    @property
+    def obs_column(self) -> str | None:
+        if self.attr == "obs":
+            return self.key
 
 
 def get_rank_and_num_replicas() -> tuple[int, int]:

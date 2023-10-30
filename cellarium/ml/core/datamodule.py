@@ -8,8 +8,7 @@ import numpy as np
 import torch
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.utilities.data import collate_fn
-from cellarium.ml.utilities.types import ConvertType
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 
 class CellariumAnnDataDataModule(pl.LightningDataModule):
@@ -42,21 +41,16 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             Whether to make the index unique by using the keys. If provided, this
             is the delimeter between ``{orig_idx}{index_unique}{key}``. When ``None``,
             the original indices are kept.
-        convert:
-            You can pass a function or a Mapping of functions which will be applied
-            to the values of attributes (:attr:`obs`, :attr:`obsm`, :attr:`layers`, :attr:`X`) or to specific
-            keys of these attributes in the subset object.
-            Specify an attribute and a key (if needed) as keys of the passed Mapping
-            and a function to be applied as a value.
         indices_strict:
             If  ``True``, arrays from the subset objects will always have the same order
             of indices as in selection used to subset.
             This parameter can be set to ``False`` if the order in the returned arrays
             is not important, for example, when using them for stochastic gradient descent.
             In this case the performance of subsetting can be a bit better.
-        obs_columns:
-            Subset of columns to validate in the :attr:`obs` attribute.
-            If ``None``, all columns are validated.
+        batch_keys:
+            Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
+            in the ``__getitem__`` method and how to convert them. Keys must correspond to
+            the inputs of the transforms or the model.
         batch_size:
             How many samples per batch to load.
         shuffle:
@@ -87,9 +81,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         keys: Sequence[str] | None = None,
         index_unique: str | None = None,
         indices_strict: bool = True,
-        obs_columns: Sequence | None = None,
         # IterableDistributedAnnDataCollectionDataset args
-        convert: ConvertType | None = None,
+        batch_keys: dict[str, AnnDataField] | None = None,
         batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
@@ -110,9 +103,9 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.keys = keys
         self.index_unique = index_unique
         self.indices_strict = indices_strict
-        self.obs_columns = obs_columns
+        self.obs_columns = [value.obs_column for value in batch_keys.values() if value.obs_column is not None]
         # IterableDistributedAnnDataCollectionDataset args
-        self.convert = convert or {}
+        self.batch_keys = batch_keys or {}
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -155,7 +148,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         """
         self.dataset = IterableDistributedAnnDataCollectionDataset(
             dadc=self.dadc,
-            convert=self.convert,
+            batch_keys=self.batch_keys,
             batch_size=self.batch_size,
             shuffle=self.shuffle,
             seed=self.seed,

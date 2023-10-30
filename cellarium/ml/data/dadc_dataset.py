@@ -10,8 +10,7 @@ import torch
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
-from cellarium.ml.utilities.data import get_rank_and_num_replicas, get_worker_info
-from cellarium.ml.utilities.types import ConvertType
+from cellarium.ml.utilities.data import AnnDataField, get_rank_and_num_replicas, get_worker_info
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
@@ -29,20 +28,30 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     cells coming from the same tissue or experiment), then this assumption is violated. It is
     the user's responsibility to prepare appropriately shuffled data shards.
 
-    Example of ``convert``::
+    Example of ``batch_keys``::
 
         {
-            "X": cellarium.ml.utilities.data.densify,
-            "obs_names": cellarium.ml.utilities.data.pandas_to_numpy,
-            "var_names": cellarium.ml.utilities.data.pandas_to_numpy,
+            "x_ng": AnnDataField(
+                "X",
+                convert_fn=cellarium.ml.utilities.data.densify,
+            ),
+            "obs_names": AnnDataField(
+                "obs_names",
+                convert_fn=cellarium.ml.utilities.data.pandas_to_numpy,
+            ),
+            "var_names": AnnDataField(
+                "var_names",
+                convert_fn=cellarium.ml.utilities.data.pandas_to_numpy,
+            ),
         }
 
     Args:
         dadc:
             DistributedAnnDataCollection from which to load the data.
-        convert:
+        batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
-            in the ``__getitem__`` method and how to convert them.
+            in the ``__getitem__`` method and how to convert them. Keys must correspond to
+            the inputs of the transforms or the model.
         batch_size:
             How many samples per batch to load.
         shuffle:
@@ -61,7 +70,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
-        convert: ConvertType,
+        batch_keys: dict[str, AnnDataField],
         batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
@@ -69,7 +78,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
-        self.dadc.convert = convert
+        self.batch_keys = batch_keys
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -104,25 +113,22 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         at the given index ``idx``.
         """
 
-        data = {}
-        for attr, fn_or_dict in self.dadc.convert.items():
-            if callable(fn_or_dict):
-                data[attr] = getattr(self.dadc[idx], attr)
-            elif isinstance(fn_or_dict, dict):
-                data |= {key: getattr(self.dadc[idx], attr)[key] for key in fn_or_dict}
+        batch = {}
+        for key, field in self.batch_keys.items():
+            batch[key] = field(self.dadc)[idx]
 
         # for testing purposes
         if self.test_mode:
             rank, num_replicas = get_rank_and_num_replicas()
             worker_id, num_workers = get_worker_info()
-            data["rank"] = np.array([rank])
-            data["num_replicas"] = np.array([num_replicas])
-            data["worker_id"] = np.array([worker_id])
-            data["num_workers"] = np.array([num_workers])
-            data["miss_count"] = np.array([self.dadc.cache.miss_count])
-            data["epoch"] = np.array([self.epoch])
+            batch["rank"] = np.array([rank])
+            batch["num_replicas"] = np.array([num_replicas])
+            batch["worker_id"] = np.array([worker_id])
+            batch["num_workers"] = np.array([num_workers])
+            batch["miss_count"] = np.array([self.dadc.cache.miss_count])
+            batch["epoch"] = np.array([self.epoch])
 
-        return data
+        return batch
 
     def __iter__(self):
         r"""
