@@ -15,6 +15,34 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
     """
     DataModule for :class:`~cellarium.ml.data.IterableDistributedAnnDataCollectionDataset`.
 
+    Example::
+
+        >>> from cellarium.ml import CellariumAnnDataDataModule
+
+        >>> dm = CellariumAnnDataDataModule(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10_000,
+        ...     max_cache_size=2,
+        ...     batch_keys={
+        ...         "x_ng": AnnDataField(
+        ...             attr="X",
+        ...             convert_fn=cellarium.ml.utilities.data.densify,
+        ...         ),
+        ...         "feature_g": AnnDataField(
+        ...             attr="var_names",
+        ...             convert_fn=cellarium.ml.utilities.data.pandas_to_numpy,
+        ...         ),
+        ...     },
+        ...     batch_size=5000,
+        ...     shuffle=True,
+        ...     seed=0,
+        ...     drop_last=True,
+        ...     num_workers=4,
+        ... )
+        >>> dm.setup()
+        >>> for batch in dm.train_dataloader():
+        ...     print(batch.keys())
+
     Args:
         filenames:
             Names of anndata files.
@@ -49,8 +77,9 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             In this case the performance of subsetting can be a bit better.
         batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
-            in the ``__getitem__`` method and how to convert them. Keys must correspond to
-            the inputs of the transforms or the model.
+            in the batch data and how to convert them. Keys must correspond to
+            the input keys of the transforms or the model. Values must be instances of
+            :class:`cellarium.ml.utilities.data.AnnDataField`.
         batch_size:
             How many samples per batch to load.
         shuffle:

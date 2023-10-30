@@ -28,30 +28,46 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     cells coming from the same tissue or experiment), then this assumption is violated. It is
     the user's responsibility to prepare appropriately shuffled data shards.
 
-    Example of ``batch_keys``::
+    Example::
 
-        {
-            "x_ng": AnnDataField(
-                "X",
-                convert_fn=cellarium.ml.utilities.data.densify,
-            ),
-            "obs_names": AnnDataField(
-                "obs_names",
-                convert_fn=cellarium.ml.utilities.data.pandas_to_numpy,
-            ),
-            "var_names": AnnDataField(
-                "var_names",
-                convert_fn=cellarium.ml.utilities.data.pandas_to_numpy,
-            ),
-        }
+        >>> from cellarium.ml.data import (
+        ...     DistributedAnnDataCollection,
+        ...     IterableDistributedAnnDataCollectionDataset,
+        ... )
+        >>> from cellarium.ml.utilities.data import AnnDataField
+
+        >>> dadc = DistributedAnnDataCollection(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10_000,
+        ...     max_cache_size=2)
+
+        >>> dataset = IterableDistributedAnnDataCollectionDataset(
+        ...     dadc,
+        ...     batch_keys={
+        ...         "x_ng": AnnDataField(
+        ...             attr="X",
+        ...             convert_fn=cellarium.ml.utilities.data.densify,
+        ...         ),
+        ...         "feature_g": AnnDataField(
+        ...             attr="var_names",
+        ...             convert_fn=cellarium.ml.utilities.data.pandas_to_numpy,
+        ...         ),
+        ...     },
+        ...     batch_size=5000,
+        ...     shuffle=True,
+        ...     seed=0,
+        ...     drop_last=True,
+        ... )
+
 
     Args:
         dadc:
             DistributedAnnDataCollection from which to load the data.
         batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
-            in the ``__getitem__`` method and how to convert them. Keys must correspond to
-            the inputs of the transforms or the model.
+            in the batch data and how to convert them. Keys must correspond to
+            the input keys of the transforms or the model. Values must be instances of
+            :class:`cellarium.ml.utilities.data.AnnDataField`.
         batch_size:
             How many samples per batch to load.
         shuffle:
