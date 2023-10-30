@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import torch
 
+from cellarium.ml.utilities.types import BatchDict
+
 
 def write_prediction(
     prediction: torch.Tensor,
@@ -65,18 +67,19 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        prediction: torch.Tensor,
+        prediction: BatchDict,
         batch_indices: Sequence[int] | None,
         batch: dict[str, np.ndarray | torch.Tensor],
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
+        embedding = prediction["z_nk"]
         if self.prediction_size is not None:
-            prediction = prediction[:, : self.prediction_size]
+            embedding = embedding[:, : self.prediction_size]
 
         assert isinstance(batch["obs_names"], np.ndarray)
         write_prediction(
-            prediction=prediction,
+            prediction=embedding,
             ids=batch["obs_names"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,

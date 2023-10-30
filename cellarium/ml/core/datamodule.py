@@ -18,20 +18,15 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
     Example::
 
         >>> from cellarium.ml import CellariumAnnDataDataModule
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify, pandas_to_numpy
 
         >>> dm = CellariumAnnDataDataModule(
         ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
         ...     shard_size=10_000,
         ...     max_cache_size=2,
         ...     batch_keys={
-        ...         "x_ng": AnnDataField(
-        ...             attr="X",
-        ...             convert_fn=cellarium.ml.utilities.data.densify,
-        ...         ),
-        ...         "feature_g": AnnDataField(
-        ...             attr="var_names",
-        ...             convert_fn=cellarium.ml.utilities.data.pandas_to_numpy,
-        ...         ),
+        ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
+        ...         "feature_g": AnnDataField(attr="var_names", convert_fn=pandas_to_numpy),
         ...     },
         ...     batch_size=5000,
         ...     shuffle=True,
@@ -41,7 +36,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ... )
         >>> dm.setup()
         >>> for batch in dm.train_dataloader():
-        ...     print(batch.keys())
+        ...     print(batch.keys())  # x_ng, feature_g
 
     Args:
         filenames:
@@ -132,7 +127,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.keys = keys
         self.index_unique = index_unique
         self.indices_strict = indices_strict
-        self.obs_columns = [value.obs_column for value in batch_keys.values() if value.obs_column is not None]
         # IterableDistributedAnnDataCollectionDataset args
         self.batch_keys = batch_keys or {}
         self.batch_size = batch_size
@@ -143,6 +137,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         # DataLoader args
         self.num_workers = num_workers
         # DistributedAnnDataCollection
+        obs_columns = [value.obs_column for value in self.batch_keys.values() if value.obs_column is not None]
         self.dadc = DistributedAnnDataCollection(
             filenames=self.filenames,
             limits=self.limits,
@@ -154,7 +149,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             keys=self.keys,
             index_unique=self.index_unique,
             indices_strict=self.indices_strict,
-            obs_columns=self.obs_columns,
+            obs_columns=obs_columns,
         )
 
     @property

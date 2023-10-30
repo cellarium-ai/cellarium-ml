@@ -3,10 +3,7 @@
 
 from cellarium.ml.models.from_cli import (
     GeneformerFromCLI,
-    IncrementalPCAFromCLI,
-    OnePassMeanVarStdFromCLI,
     ProbabilisticPCAFromCLI,
-    TDigestFromCLI,
 )
 from cellarium.ml.models.gather import GatherLayer
 from cellarium.ml.models.geneformer import Geneformer
@@ -23,12 +20,9 @@ __all__ = [
     "Geneformer",
     "GeneformerFromCLI",
     "IncrementalPCA",
-    "IncrementalPCAFromCLI",
     "OnePassMeanVarStd",
-    "OnePassMeanVarStdFromCLI",
     "PredictMixin",
     "ProbabilisticPCA",
     "ProbabilisticPCAFromCLI",
     "TDigest",
-    "TDigestFromCLI",
 ]

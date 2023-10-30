@@ -34,7 +34,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         ...     DistributedAnnDataCollection,
         ...     IterableDistributedAnnDataCollectionDataset,
         ... )
-        >>> from cellarium.ml.utilities.data import AnnDataField
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify, pandas_to_numpy
 
         >>> dadc = DistributedAnnDataCollection(
         ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
@@ -44,14 +44,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         >>> dataset = IterableDistributedAnnDataCollectionDataset(
         ...     dadc,
         ...     batch_keys={
-        ...         "x_ng": AnnDataField(
-        ...             attr="X",
-        ...             convert_fn=cellarium.ml.utilities.data.densify,
-        ...         ),
-        ...         "feature_g": AnnDataField(
-        ...             attr="var_names",
-        ...             convert_fn=cellarium.ml.utilities.data.pandas_to_numpy,
-        ...         ),
+        ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
+        ...         "feature_g": AnnDataField(attr="var_names", convert_fn=pandas_to_numpy),
         ...     },
         ...     batch_size=5000,
         ...     shuffle=True,

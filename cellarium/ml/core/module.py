@@ -32,6 +32,8 @@ class CellariumModule(pl.LightningModule):
     Args:
         model:
             A :class:`cellarium.ml.models.CellariumModel` to train.
+        transforms:
+            A list of transforms to apply to the input data before passing it to the model.
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
@@ -191,10 +193,16 @@ class CellariumModule(pl.LightningModule):
         """
         for transform in self.transforms:
             ann = transform.forward.__annotations__
-            batch |= transform(**{key: batch[key] for key in ann if key != "return"})
+            ann.pop("return")
+            if frozenset(ann) - BatchDict.__optional_keys__:
+                raise ValueError(
+                    "Transforms used in training_step must have forward method with only the following arguments:"
+                    f" {BatchDict.__optional_keys__}"
+                )
+            batch |= transform(**{key: batch[key] for key in ann})  # type: ignore[literal-required]
 
         ann = self.model.forward.__annotations__
-        batch |= self.model(**{key: batch[key] for key in ann if key != "return"})
+        batch |= self.model(**{key: batch[key] for key in ann if key != "return"})  # type: ignore[literal-required]
         if "loss" in batch:
             # Logging to TensorBoard by default
             self.log("train_loss", batch["loss"])
@@ -212,11 +220,11 @@ class CellariumModule(pl.LightningModule):
         """
         for transform in self.transforms:
             ann = transform.forward.__annotations__
-            batch |= transform(**{key: batch[key] for key in ann if key != "return"})
+            batch |= transform(**{key: batch[key] for key in ann if key != "return"})  # type: ignore[literal-required]
 
         assert isinstance(self.model, PredictMixin)
         ann = self.model.predict.__annotations__
-        batch |= self.model.predict(**{key: batch[key] for key in ann if key != "return"})
+        batch |= self.model.predict(**{key: batch[key] for key in ann if key != "return"})  # type: ignore[literal-required]
         return batch
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:

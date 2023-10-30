@@ -1,14 +1,18 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
-from typing import Any
 
 import numpy as np
 import torch
-from transformers import BertForMaskedLM
+from numpy.typing import ArrayLike
+from transformers import BertConfig, BertForMaskedLM
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
+from cellarium.ml.utilities.types import BatchDict
 
 
 class Geneformer(CellariumModel, PredictMixin):
@@ -23,45 +27,88 @@ class Geneformer(CellariumModel, PredictMixin):
     Args:
         feature_schema:
             The list of the variable names in the input data.
-        model:
-            The bert model.
+        hidden_size:
+            Dimensionality of the encoder layers and the pooler layer.
+        num_hidden_layers:
+            Number of hidden layers in the Transformer encoder.
+        num_attention_heads:
+            Number of attention heads for each attention layer in the Transformer encoder.
+        intermediate_size:
+            Dimensionality of the "intermediate" (often named feed-forward) layer in the Transformer encoder.
+        hidden_act:
+            The non-linear activation function (function or string) in the encoder and pooler. If string, ``"gelu"``,
+            ``"relu"``, ``"silu"`` and ``"gelu_new"`` are supported.
+        hidden_dropout_prob:
+            The dropout probability for all fully connected layers in the embeddings, encoder, and pooler.
+        attention_probs_dropout_prob:
+            The dropout ratio for the attention probabilities.
+        max_position_embeddings:
+            The maximum sequence length that this model might ever be used with. Typically set this to something large
+            just in case (e.g., 512 or 1024 or 2048).
+        type_vocab_size:
+            The vocabulary size of the ``token_type_ids`` passed when calling :class:`transformers.BertModel`.
+        initializer_range:
+            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
+        position_embedding_type:
+            Type of position embedding. Choose one of ``"absolute"``, ``"relative_key"``, ``"relative_key_query"``. For
+            positional embeddings use ``"absolute"``. For more information on ``"relative_key"``, please refer to
+            `Self-Attention with Relative Position Representations (Shaw et al.) <https://arxiv.org/abs/1803.02155>`_.
+            For more information on ``"relative_key_query"``, please refer to *Method 4* in `Improve Transformer Models
+            with Better Relative Position Embeddings (Huang et al.) <https://arxiv.org/abs/2009.13658>`_.
+        layer_norm_eps:
+            The epsilon used by the layer normalization layers.
         mlm_probability:
             Ratio of tokens to mask for masked language modeling loss.
-        transform:
-            If not ``None`` is used to transform the input data.
-        validate_input:
-            If ``True`` the input data is validated.
     """
 
     def __init__(
         self,
-        feature_schema: Sequence,
-        model: BertForMaskedLM,
-        mlm_probability: float,
-        transform: torch.nn.Module | None = None,
-        validate_input: bool = True,
+        feature_schema: ArrayLike,
+        hidden_size: int = 256,
+        num_hidden_layers: int = 6,
+        num_attention_heads: int = 4,
+        intermediate_size: int = 512,
+        hidden_act: str = "relu",
+        hidden_dropout_prob: float = 0.02,
+        attention_probs_dropout_prob: float = 0.02,
+        max_position_embeddings: int = 2048,
+        type_vocab_size: int = 2,
+        initializer_range: float = 0.02,
+        position_embedding_type: str = "absolute",
+        layer_norm_eps: float = 1e-12,
+        mlm_probability: float = 0.15,
     ):
         super().__init__()
-        self.feature_schema = feature_schema
-        self.model = model
+        self.feature_schema = np.array(feature_schema)
+        # model configuration
+        config = {
+            "vocab_size": len(self.feature_schema) + 2,  # number of genes + 2 for <mask> and <pad> tokens
+            "hidden_size": hidden_size,
+            "num_hidden_layers": num_hidden_layers,
+            "num_attention_heads": num_attention_heads,
+            "intermediate_size": intermediate_size,
+            "hidden_act": hidden_act,
+            "attention_probs_dropout_prob": attention_probs_dropout_prob,
+            "hidden_dropout_prob": hidden_dropout_prob,
+            "max_position_embeddings": max_position_embeddings,
+            "type_vocab_size": type_vocab_size,
+            "initializer_range": initializer_range,
+            "position_embedding_type": position_embedding_type,
+            "layer_norm_eps": layer_norm_eps,
+            "pad_token_id": 0,
+        }
+        config = BertConfig(**config)
+        self.bert = BertForMaskedLM(config)
         self.mlm_probability = mlm_probability
-        self.transform = transform
-        self.validate_input = validate_input
         self.feature_ids: torch.Tensor
         # ids for the features, 0 is for padding, 1 is for mask
-        self.register_buffer("feature_ids", torch.arange(2, len(feature_schema) + 2))
+        self.register_buffer("feature_ids", torch.arange(2, len(self.feature_schema) + 2))
 
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        x = tensor_dict["X"]
-        feature_list = tensor_dict["var_names"]
-        return (x,), {"feature_list": feature_list}
-
-    def tokenize(self, x_ng: torch.Tensor, feature_list: Sequence) -> tuple[torch.Tensor, torch.Tensor]:
+    def tokenize(self, x_ng: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         tokens = self.feature_ids.expand(x_ng.shape)
         # sort by median-scaled gene values
         sorted_indices = torch.argsort(x_ng, dim=1, descending=True)
-        sorted_indices = sorted_indices[:, : self.model.config.max_position_embeddings]
+        sorted_indices = sorted_indices[:, : self.bert.config.max_position_embeddings]
         ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
         input_ids = tokens[ndx[:, None], sorted_indices]
         # mask out genes with zero expression
@@ -71,18 +118,21 @@ class Geneformer(CellariumModel, PredictMixin):
         input_ids[~attention_mask] = 0
         return input_ids, attention_mask
 
-    def forward(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-        assert "feature_list" in kwargs, "feature_list must be provided."
-        feature_list: Sequence = kwargs.pop("feature_list")
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
+        """
+        Args:
+            x_ng:
+                Gene counts matrix.
+            feature_g:
+                The list of the variable names in the input data.
 
-        if self.validate_input:
-            assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
-            assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
+        Returns:
+            An empty dictionary.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
-
-        input_ids, attention_mask = self.tokenize(x_ng, feature_list)
+        input_ids, attention_mask = self.tokenize(x_ng)
 
         labels = input_ids.clone()
         labels_probs = torch.full(labels.shape, self.mlm_probability, device=x_ng.device)
@@ -103,29 +153,36 @@ class Geneformer(CellariumModel, PredictMixin):
         random_words = torch.randint(x_ng.shape[1], labels.shape, dtype=torch.long, device=x_ng.device)
         input_ids[indices_random] = random_words[indices_random]
 
-        output = self.model(
+        output = self.bert(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
         )
-        return output.loss
+        return BatchDict(loss=output.loss)
 
-    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> dict[str, torch.Tensor | None]:
-        assert "feature_list" in kwargs, "feature_list must be provided."
-        feature_list: Sequence = kwargs.pop("feature_list")
-        output_hidden_states: bool = kwargs.pop("output_hidden_states", True)
-        output_attentions: bool = kwargs.pop("output_attentions", True)
+    def predict(
+        self,
+        x_ng: torch.Tensor,
+        feature_g: np.ndarray,
+        output_hidden_states: bool = True,
+        output_attentions: bool = True,
+    ) -> BatchDict:
+        """
+        Args:
+            x_ng:
+                Gene counts matrix.
+            feature_g:
+                The list of the variable names in the input data.
 
-        if self.validate_input:
-            assert x_ng.shape[1] == len(feature_list), "The number of x_ng columns must match the feature_list length."
-            assert np.array_equal(feature_list, self.feature_schema), "feature_list must match the feature_schema."
+        Returns:
+            An empty dictionary.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
+        input_ids, attention_mask = self.tokenize(x_ng)
 
-        input_ids, attention_mask = self.tokenize(x_ng, feature_list)
-
-        output = self.model(
+        output = self.bert(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=output_hidden_states,

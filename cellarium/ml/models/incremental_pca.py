@@ -2,15 +2,20 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-from typing import Any
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
+from numpy.typing import ArrayLike
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
 from cellarium.ml.utilities.types import BatchDict
 
 
@@ -26,8 +31,8 @@ class IncrementalPCA(CellariumModel, PredictMixin):
        <https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf>`_.
 
     Args:
-        g_genes:
-            Number of genes.
+        feature_schema:
+            The variable names schema for the input data validation.
         k_components:
             Number of principal components.
         svd_lowrank_niter:
@@ -40,13 +45,14 @@ class IncrementalPCA(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        g_genes: int,
+        feature_schema: ArrayLike,
         k_components: int,
         svd_lowrank_niter: int = 2,
         perform_mean_correction: bool = False,
     ) -> None:
         super().__init__()
-        self.g_genes = g_genes
+        self.feature_schema = np.array(feature_schema)
+        self.g_genes = len(self.feature_schema)
         self.k_components = k_components
         self.svd_lowrank_niter = svd_lowrank_niter
         self.perform_mean_correction = perform_mean_correction
@@ -54,16 +60,28 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.S_k: torch.Tensor
         self.x_mean_g: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("V_kg", torch.zeros(k_components, g_genes))
+        self.register_buffer("V_kg", torch.zeros(k_components, self.g_genes))
         self.register_buffer("S_k", torch.zeros(k_components))
-        self.register_buffer("x_mean_g", torch.zeros(g_genes))
+        self.register_buffer("x_mean_g", torch.zeros(self.g_genes))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x_ng: torch.Tensor) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
         """
         Incrementally update partial SVD with new data.
+
+        Args:
+            x_ng:
+                Gene counts matrix.
+            feature_g:
+                The list of the variable names in the input data.
+
+        Returns:
+            An empty dictionary.
         """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+
         g = self.g_genes
         k = self.k_components
         niter = self.svd_lowrank_niter
@@ -103,7 +121,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         if self.perform_mean_correction:
             self.x_mean_g = self_X_mean * self_X_size / total_X_size + other_X_mean * other_X_size / total_X_size
 
-        return BatchDict()
+        return {}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -219,11 +237,15 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> BatchDict:
-        r"""
-        Centering and embedding of the input data ``x_ng`` into the principal component space.
+    def predict(self, x_ng: torch.Tensor) -> BatchDict:
         """
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
+        Centering and embedding of the input data ``x_ng`` into the principal component space.
+
+        Args:
+            x_ng: Input data.
+
+        Returns:
+            BatchDict with ``z_nk`` containing the embedded data.
+        """
         z_nk = (x_ng - self.x_mean_g) @ self.V_kg.T
         return BatchDict(z_nk=z_nk)

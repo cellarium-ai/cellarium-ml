@@ -13,7 +13,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,8 @@ import torch.distributed as dist
 from anndata import AnnData
 from anndata.experimental import AnnCollection
 from torch.utils.data import get_worker_info as _get_worker_info
+
+from cellarium.ml import CellariumModule
 
 
 @dataclass
@@ -50,8 +52,25 @@ class AnnDataField:
 
     @property
     def obs_column(self) -> str | None:
+        result = None
         if self.attr == "obs":
-            return self.key
+            result = self.key
+        return result
+
+
+T = TypeVar("T")
+
+
+@dataclass
+class CellariumModuleField(Generic[T]):
+    checkpoint: str
+    attr: str
+
+    def __call__(self) -> T:
+        value = CellariumModule.load_from_checkpoint(self.checkpoint)
+        for attr in self.attr.split("."):
+            value = getattr(value, attr)
+        return value
 
 
 def get_rank_and_num_replicas() -> tuple[int, int]:

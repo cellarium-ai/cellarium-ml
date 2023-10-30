@@ -12,5 +12,6 @@ ConvertType = dict[str, Callable | dict[str, Callable]]
 
 class BatchDict(TypedDict, total=False):
     x_ng: torch.Tensor
+    z_nk: torch.Tensor
     feature_g: np.ndarray
     loss: torch.Tensor
