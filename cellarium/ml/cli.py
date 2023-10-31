@@ -34,8 +34,8 @@ def lightning_cli_factory(
     Example::
 
         cli = lightning_cli_factory(
-            "cellarium.ml.models.IncrementalPCAFromCLI",
-            link_arguments=[("data.n_vars", "model.model.init_args.g_genes")],
+            "cellarium.ml.models.IncrementalPCA",
+            link_arguments=[("data.var_names", "model.model.init_args.feature_schema")],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
                 "strategy": {
@@ -47,7 +47,7 @@ def lightning_cli_factory(
 
     Args:
         model_class_path:
-            A string representation of the model class path (e.g., ``"cellarium.ml.models.IncrementalPCAFromCLI"``).
+            A string representation of the model class path (e.g., ``"cellarium.ml.models.IncrementalPCA"``).
         link_arguments:
             A list of tuples of the form ``(source, target)`` where ``source`` is linked to ``target``.
         trainer_defaults:
@@ -225,7 +225,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
 @register_model
 def probabilistic_pca(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.models.ProbabilisticPCAFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.ProbabilisticPCA` model.
 
     This example shows how to fit feature count data to probabilistic PCA
     model [1].
@@ -272,10 +272,10 @@ def probabilistic_pca(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.models.ProbabilisticPCAFromCLI",
+        "cellarium.ml.models.ProbabilisticPCA",
         link_arguments=[
             ("data.n_obs", "model.model.init_args.n_cells"),
-            ("data.n_vars", "model.model.init_args.g_genes"),
+            ("data.var_names", "model.model.init_args.feature_schema"),
         ],
     )
     cli(args=args)

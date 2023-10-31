@@ -1,10 +1,12 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
 from transformers import BertConfig, BertForMaskedLM
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
@@ -26,7 +28,7 @@ class Geneformer(CellariumModel, PredictMixin):
 
     Args:
         feature_schema:
-            The list of the variable names in the input data.
+            The variable names schema for the input data validation.
         hidden_size:
             Dimensionality of the encoder layers and the pooler layer.
         num_hidden_layers:
@@ -63,7 +65,7 @@ class Geneformer(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        feature_schema: ArrayLike,
+        feature_schema: Sequence[str],
         hidden_size: int = 256,
         num_hidden_layers: int = 6,
         num_attention_heads: int = 4,
@@ -77,7 +79,7 @@ class Geneformer(CellariumModel, PredictMixin):
         position_embedding_type: str = "absolute",
         layer_norm_eps: float = 1e-12,
         mlm_probability: float = 0.15,
-    ):
+    ) -> None:
         super().__init__()
         self.feature_schema = np.array(feature_schema)
         # model configuration
@@ -158,7 +160,7 @@ class Geneformer(CellariumModel, PredictMixin):
             attention_mask=attention_mask,
             labels=labels,
         )
-        return BatchDict(loss=output.loss)
+        return {"loss": output.loss}
 
     def predict(
         self,

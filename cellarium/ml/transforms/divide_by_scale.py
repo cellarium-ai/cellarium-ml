@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
 from torch import nn
 
 from cellarium.ml.utilities.testing import (
@@ -33,7 +34,7 @@ class DivideByScale(nn.Module):
             A value added to the denominator for numerical stability.
     """
 
-    def __init__(self, scale_g: torch.Tensor, feature_schema: ArrayLike, eps: float = 1e-6) -> None:
+    def __init__(self, scale_g: torch.Tensor, feature_schema: Sequence[str], eps: float = 1e-6) -> None:
         super().__init__()
         self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)

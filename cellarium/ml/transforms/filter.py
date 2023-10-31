@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import cache
 from typing import Any
 
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
 from torch import nn
 
 from cellarium.ml.utilities.testing import (
@@ -31,7 +31,7 @@ class Filter(nn.Module):
         filter_list: A list of features to filter by.
     """
 
-    def __init__(self, filter_list: ArrayLike) -> None:
+    def __init__(self, filter_list: Sequence[str]) -> None:
         super().__init__()
         self.filter_list = np.array(filter_list)
         if len(self.filter_list) == 0:

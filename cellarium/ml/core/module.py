@@ -13,9 +13,11 @@ import torch
 from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
+from typing_extensions import override
 
+from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.core.saving import _load_state
-from cellarium.ml.models import CellariumModel, PredictMixin
+from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.types import BatchDict
 
 
@@ -62,8 +64,9 @@ class CellariumModule(pl.LightningModule):
         config: dict[str, Any] | Namespace | None = None,
     ) -> None:
         super().__init__()
-        self.model = model
-        self.transforms = torch.nn.ModuleList(transforms)
+
+        self.pipeline = CellariumPipeline(transforms)
+        self.pipeline.append(model)
 
         # set up optimizer and scheduler
         if isinstance(optim_fn, str):
@@ -91,6 +94,14 @@ class CellariumModule(pl.LightningModule):
 
         if config is not None:
             self._set_hparams(config)
+
+    @property
+    def model(self) -> CellariumModel:
+        return self.pipeline[-1]
+
+    @property
+    def transforms(self) -> CellariumPipeline:
+        return self.pipeline[:-1]
 
     @classmethod
     @patch("lightning.pytorch.core.saving._load_state", new=_load_state)
@@ -181,7 +192,8 @@ class CellariumModule(pl.LightningModule):
             **kwargs,
         )
 
-    def training_step(self, batch: BatchDict, batch_idx: int) -> BatchDict:  # type: ignore[override]
+    @override
+    def training_step(self, batch: BatchDict, batch_idx: int) -> torch.Tensor | None:
         """
         Forward pass for training step.
 
@@ -191,22 +203,12 @@ class CellariumModule(pl.LightningModule):
         Returns:
             A dictionary containing the batch data and forward pass results.
         """
-        for transform in self.transforms:
-            ann = transform.forward.__annotations__
-            ann.pop("return")
-            if frozenset(ann) - BatchDict.__optional_keys__:
-                raise ValueError(
-                    "Transforms used in training_step must have forward method with only the following arguments:"
-                    f" {BatchDict.__optional_keys__}"
-                )
-            batch |= transform(**{key: batch[key] for key in ann})  # type: ignore[literal-required]
-
-        ann = self.model.forward.__annotations__
-        batch |= self.model(**{key: batch[key] for key in ann if key != "return"})  # type: ignore[literal-required]
-        if "loss" in batch:
+        batch = self.pipeline(batch)
+        loss = batch.get("loss")
+        if loss is not None:
             # Logging to TensorBoard by default
-            self.log("train_loss", batch["loss"])
-        return batch
+            self.log("train_loss", loss)
+        return loss
 
     def forward(self, batch: BatchDict) -> BatchDict:
         """
@@ -218,14 +220,7 @@ class CellariumModule(pl.LightningModule):
         Returns:
             A dictionary containing the batch data and inference results.
         """
-        for transform in self.transforms:
-            ann = transform.forward.__annotations__
-            batch |= transform(**{key: batch[key] for key in ann if key != "return"})  # type: ignore[literal-required]
-
-        assert isinstance(self.model, PredictMixin)
-        ann = self.model.predict.__annotations__
-        batch |= self.model.predict(**{key: batch[key] for key in ann if key != "return"})  # type: ignore[literal-required]
-        return batch
+        return self.pipeline.predict(batch)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         """Configure optimizers for the model."""

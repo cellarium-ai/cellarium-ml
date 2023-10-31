@@ -12,8 +12,7 @@ import torch
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models import IncrementalPCA, IncrementalPCAFromCLI
-from cellarium.ml.transforms import NormalizeTotal
+from cellarium.ml.models import IncrementalPCA
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDataset
 
@@ -39,14 +38,17 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
 
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        BoringDataset((x_ng if perform_mean_correction else x_ng_centered).numpy()),
+        BoringDataset(
+            (x_ng if perform_mean_correction else x_ng_centered).numpy(),
+            np.array([f"gene_{i}" for i in range(g)]),
+        ),
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
     )
     # model
     ipca = IncrementalPCA(
-        g_genes=g,
+        feature_schema=[f"gene_{i}" for i in range(g)],
         k_components=k,
         perform_mean_correction=perform_mean_correction,
     )
@@ -89,16 +91,23 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        BoringDataset(np.arange(n * g).reshape(n, g)),
+        BoringDataset(
+            np.random.randn(n, g),
+            np.array([f"gene_{i}" for i in range(g)]),
+        ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"g_genes": g, "k_components": 1, "perform_mean_correction": True, "target_count": 10}
-    model = IncrementalPCAFromCLI(**init_args)  # type: ignore[arg-type]
+    init_args = {
+        "feature_schema": [f"gene_{i}" for i in range(g)],
+        "k_components": 1,
+        "perform_mean_correction": True,
+    }
+    model = IncrementalPCA(**init_args)  # type: ignore[arg-type]
     config = {
         "model": {
             "model": {
-                "class_path": "cellarium.ml.models.IncrementalPCAFromCLI",
+                "class_path": "cellarium.ml.models.IncrementalPCA",
                 "init_args": init_args,
             }
         }
@@ -123,13 +132,9 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: IncrementalPCAFromCLI = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
-    assert isinstance(model.transform, torch.nn.Sequential) and len(model.transform) == 2
-    assert isinstance(loaded_model.transform, torch.nn.Sequential) and len(loaded_model.transform) == 2
-    assert isinstance(model.transform[0], NormalizeTotal)
-    assert isinstance(loaded_model.transform[0], NormalizeTotal)
-    assert model.transform[0].target_count == loaded_model.transform[0].target_count
+    assert isinstance(loaded_model, IncrementalPCA)
     np.testing.assert_allclose(model.V_kg.detach(), loaded_model.V_kg.detach())
     np.testing.assert_allclose(model.S_k.detach(), loaded_model.S_k.detach())
     np.testing.assert_allclose(model.x_size.detach(), loaded_model.x_size.detach())

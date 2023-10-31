@@ -13,7 +13,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -23,8 +23,6 @@ import torch.distributed as dist
 from anndata import AnnData
 from anndata.experimental import AnnCollection
 from torch.utils.data import get_worker_info as _get_worker_info
-
-from cellarium.ml import CellariumModule
 
 
 @dataclass
@@ -58,19 +56,19 @@ class AnnDataField:
         return result
 
 
-T = TypeVar("T")
-
-
-@dataclass
-class CellariumModuleField(Generic[T]):
-    checkpoint: str
-    attr: str
-
-    def __call__(self) -> T:
-        value = CellariumModule.load_from_checkpoint(self.checkpoint)
-        for attr in self.attr.split("."):
-            value = getattr(value, attr)
-        return value
+#  T = TypeVar("T")
+#
+#
+#  @dataclass
+#  class CellariumModuleField(Generic[T]):
+#      checkpoint: str
+#      attr: str
+#
+#      def __call__(self) -> T:
+#          value = CellariumModule.load_from_checkpoint(self.checkpoint)
+#          for attr in self.attr.split("."):
+#              value = getattr(value, attr)
+#          return value
 
 
 def get_rank_and_num_replicas() -> tuple[int, int]:
@@ -142,7 +140,7 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
     for key in keys:
         if key == "obs_names":
             collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
-        elif key == "var_names":
+        elif key == "feature_g":
             # Check that all var_names are the same
             if len(batch) > 1:
                 assert all(

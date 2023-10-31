@@ -1,12 +1,15 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
+from collections.abc import Sequence
+
 import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
-from numpy.typing import ArrayLike
 
 from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.utilities.testing import (
@@ -30,7 +33,7 @@ class OnePassMeanVarStd(CellariumModel):
         feature_schema: The variable names schema for the input data validation.
     """
 
-    def __init__(self, feature_schema: ArrayLike) -> None:
+    def __init__(self, feature_schema: Sequence[str]) -> None:
         super().__init__()
         self.feature_schema = np.array(feature_schema)
         self.g_genes = len(self.feature_schema)

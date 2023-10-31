@@ -15,7 +15,7 @@ from cellarium.ml.data import (
     IterableDistributedAnnDataCollectionDataset,
     read_h5ad_file,
 )
-from cellarium.ml.utilities.data import identity, pandas_to_numpy
+from cellarium.ml.utilities.data import AnnDataField, pandas_to_numpy
 
 
 @pytest.fixture
@@ -184,15 +184,18 @@ def test_indexing_dataset(
 
     dataset = IterableDistributedAnnDataCollectionDataset(
         dat,
-        {"X": identity, "obs_names": pandas_to_numpy},
+        batch_keys={
+            "x_ng": AnnDataField("X"),
+            "obs_names": AnnDataField("obs_names", convert_fn=pandas_to_numpy),
+        },
     )
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
         with pytest.raises(AssertionError, match="Expected the number of anndata files"):
-            dataset_X = dataset[oidx]["X"]
+            dataset_X = dataset[oidx]["x_ng"]
     else:
         adt_X = adt[oidx].X
-        dataset_X = dataset[oidx]["X"]
+        dataset_X = dataset[oidx]["x_ng"]
         np.testing.assert_array_equal(adt_X, dataset_X)
 
         adt_obs_names = adt[oidx].obs_names
@@ -203,11 +206,14 @@ def test_indexing_dataset(
 def test_pickle_dataset(dat: DistributedAnnDataCollection):
     dataset = IterableDistributedAnnDataCollectionDataset(
         dat,
-        {"X": identity, "obs_names": pandas_to_numpy},
+        batch_keys={
+            "x_ng": AnnDataField("X"),
+            "obs_names": AnnDataField("obs_names", convert_fn=pandas_to_numpy),
+        },
     )
     new_dataset = pickle.loads(pickle.dumps(dataset))
 
     assert len(new_dataset.dadc.cache) == 0
 
-    np.testing.assert_array_equal(new_dataset[:2]["X"], dataset[:2]["X"])
+    np.testing.assert_array_equal(new_dataset[:2]["x_ng"], dataset[:2]["x_ng"])
     np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])

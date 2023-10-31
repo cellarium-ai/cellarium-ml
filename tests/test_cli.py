@@ -18,7 +18,7 @@ CONFIGS = [
         "fit": {
             "model": {
                 "model": {
-                    "class_path": "cellarium.ml.models.GeneformerFromCLI",
+                    "class_path": "cellarium.ml.models.Geneformer",
                     "init_args": {
                         "hidden_size": "2",
                         "num_hidden_layers": "1",
@@ -32,9 +32,15 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
-                    "var_names": "cellarium.ml.utilities.data.pandas_to_numpy",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "feature_g": {
+                        "attr": "var_names",
+                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                    },
                 },
                 "batch_size": "5",
                 "num_workers": "1",
@@ -52,7 +58,7 @@ CONFIGS = [
         "predict": {
             "model": {
                 "model": {
-                    "class_path": "cellarium.ml.models.GeneformerFromCLI",
+                    "class_path": "cellarium.ml.models.Geneformer",
                     "init_args": {
                         "hidden_size": "2",
                         "num_hidden_layers": "1",
@@ -66,10 +72,19 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
-                    "var_names": "cellarium.ml.utilities.data.pandas_to_numpy",
-                    "obs_names": "cellarium.ml.utilities.data.pandas_to_numpy",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "feature_g": {
+                        "attr": "var_names",
+                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                    },
+                    "obs_names": {
+                        "attr": "obs_names",
+                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                    },
                 },
                 "batch_size": "5",
                 "num_workers": "1",
@@ -88,14 +103,27 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "model": "cellarium.ml.models.ProbabilisticPCAFromCLI",
+                "model": {
+                    "class_path": "cellarium.ml.models.ProbabilisticPCA",
+                    "init_args": {
+                        "k_components": "2",
+                        "ppca_flavor": "marginalized",
+                    },
+                },
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "feature_g": {
+                        "attr": "var_names",
+                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                    },
                 },
                 "batch_size": "50",
                 "shuffle": "true",
@@ -113,14 +141,21 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "model": "cellarium.ml.models.OnePassMeanVarStdFromCLI",
+                "model": "cellarium.ml.models.OnePassMeanVarStd",
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "feature_g": {
+                        "attr": "var_names",
+                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -137,7 +172,7 @@ CONFIGS = [
         "fit": {
             "model": {
                 "model": {
-                    "class_path": "cellarium.ml.models.IncrementalPCAFromCLI",
+                    "class_path": "cellarium.ml.models.IncrementalPCA",
                     "init_args": {"k_components": "50"},
                 },
             },
@@ -145,8 +180,15 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "feature_g": {
+                        "attr": "var_names",
+                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -163,7 +205,7 @@ CONFIGS = [
         "predict": {
             "model": {
                 "model": {
-                    "class_path": "cellarium.ml.models.IncrementalPCAFromCLI",
+                    "class_path": "cellarium.ml.models.IncrementalPCA",
                     "init_args": {"k_components": "50"},
                 },
             },
@@ -171,9 +213,19 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
-                    "obs_names": "cellarium.ml.utilities.data.pandas_to_numpy",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "feature_g": {
+                        "attr": "var_names",
+                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                    },
+                    "obs_names": {
+                        "attr": "obs_names",
+                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -194,13 +246,20 @@ CONFIGS = [
             "model_name": "tdigest",
             "subcommand": "fit",
             "fit": {
-                "model": {"model": "cellarium.ml.models.TDigestFromCLI"},
+                "model": {"model": "cellarium.ml.models.TDigest"},
                 "data": {
                     "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                     "shard_size": "100",
                     "max_cache_size": "2",
-                    "convert": {
-                        "X": "cellarium.ml.utilities.data.densify",
+                    "batch_keys": {
+                        "x_ng": {
+                            "attr": "X",
+                            "convert_fn": "cellarium.ml.utilities.data.densify",
+                        },
+                        "feature_g": {
+                            "attr": "var_names",
+                            "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
+                        },
                     },
                     "batch_size": "50",
                     "num_workers": "2",

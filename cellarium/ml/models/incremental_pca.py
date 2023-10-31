@@ -1,7 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import math
+from collections.abc import Sequence
 
 import lightning.pytorch as pl
 import numpy as np
@@ -9,7 +12,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
-from numpy.typing import ArrayLike
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
@@ -45,7 +47,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        feature_schema: ArrayLike,
+        feature_schema: Sequence[str],
         k_components: int,
         svd_lowrank_niter: int = 2,
         perform_mean_correction: bool = False,

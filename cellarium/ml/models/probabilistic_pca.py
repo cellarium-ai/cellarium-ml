@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+from __future__ import annotations
+
+from collections.abc import Sequence
+
 import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
-from numpy.typing import ArrayLike
 from pyro.nn import PyroParam
 from torch.distributions import constraints
 
@@ -58,7 +61,7 @@ class ProbabilisticPCA(CellariumPyroModel, PredictMixin):
     def __init__(
         self,
         n_cells: int,
-        feature_schema: ArrayLike,
+        feature_schema: Sequence[str],
         k_components: int,
         ppca_flavor: str,
         mean_g: float | torch.Tensor | None = None,
@@ -109,7 +112,8 @@ class ProbabilisticPCA(CellariumPyroModel, PredictMixin):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
         assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
-        return self.elbo.differentiable_loss(self.model, self.guide, x_ng)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng)
+        return {"loss": loss}
 
     def model(self, x_ng: torch.Tensor) -> None:
         with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):

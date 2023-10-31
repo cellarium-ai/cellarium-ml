@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
 from torch import nn
 
 from cellarium.ml.utilities.testing import (
@@ -39,7 +40,7 @@ class ZScore(nn.Module):
         self,
         mean_g: torch.Tensor | float,
         std_g: torch.Tensor | float,
-        feature_schema: ArrayLike,
+        feature_schema: Sequence[str],
         eps: float = 1e-6,
     ) -> None:
         super().__init__()

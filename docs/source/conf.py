@@ -32,7 +32,7 @@ exclude_patterns = []
 autodoc_inherit_docstrings = False
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
-autodoc_typehints_format = "fully-qualified"
+autodoc_typehints_format = "short"
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output

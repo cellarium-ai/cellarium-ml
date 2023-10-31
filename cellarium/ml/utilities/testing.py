@@ -8,6 +8,8 @@ Testing utilities
 This module contains helper functions for testing.
 """
 
+from collections.abc import Callable
+
 import numpy as np
 import torch
 
@@ -87,3 +89,9 @@ def assert_arrays_equal(
     """
     if not np.array_equal(a1, a2):
         raise ValueError(f"`{a1_name}` must match `{a2_name}`. " f"Got {a1} != {a2}")
+
+
+def assert_only_allowed_args(func: Callable, allowed_args: set):
+    for arg in func.__annotations__:
+        if arg != "return" and arg not in allowed_args:
+            raise ValueError(f"{func.__qualname__} can have only the following arguments: {allowed_args}. Got {arg}")
