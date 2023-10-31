@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from __future__ import annotations
-
 import math
 from collections.abc import Sequence
 
@@ -68,7 +66,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> None:
         """
         Incrementally update partial SVD with new data.
 
@@ -123,7 +121,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         if self.perform_mean_correction:
             self.x_mean_g = self_X_mean * self_X_size / total_X_size + other_X_mean * other_X_size / total_X_size
 
-        return {}
+        # return {}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:

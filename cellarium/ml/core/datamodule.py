@@ -137,7 +137,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         # DataLoader args
         self.num_workers = num_workers
         # DistributedAnnDataCollection
-        obs_columns = [value.obs_column for value in self.batch_keys.values() if value.obs_column is not None]
+        obs_columns = [field.obs_column for field in self.batch_keys.values() if field.obs_column is not None]
         self.dadc = DistributedAnnDataCollection(
             filenames=self.filenames,
             limits=self.limits,

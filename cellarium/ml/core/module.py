@@ -36,6 +36,7 @@ class CellariumModule(pl.LightningModule):
             A :class:`cellarium.ml.models.CellariumModel` to train.
         transforms:
             A list of transforms to apply to the input data before passing it to the model.
+            If ``None``, no transforms are applied.
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
@@ -64,7 +65,6 @@ class CellariumModule(pl.LightningModule):
         config: dict[str, Any] | Namespace | None = None,
     ) -> None:
         super().__init__()
-
         self.pipeline = CellariumPipeline(transforms)
         self.pipeline.append(model)
 
@@ -97,10 +97,12 @@ class CellariumModule(pl.LightningModule):
 
     @property
     def model(self) -> CellariumModel:
+        """The model"""
         return self.pipeline[-1]
 
     @property
     def transforms(self) -> CellariumPipeline:
+        """The transforms pipeline"""
         return self.pipeline[:-1]
 
     @classmethod
@@ -201,10 +203,10 @@ class CellariumModule(pl.LightningModule):
             batch: A dictionary containing the batch data.
 
         Returns:
-            A dictionary containing the batch data and forward pass results.
+            Loss tensor or ``None`` if no loss.
         """
-        batch = self.pipeline(batch)
-        loss = batch.get("loss")
+        output = self.pipeline(batch)
+        loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
             self.log("train_loss", loss)

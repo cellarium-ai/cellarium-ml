@@ -9,6 +9,7 @@ This module contains helper functions for testing.
 """
 
 from collections.abc import Callable
+from typing import get_type_hints
 
 import numpy as np
 import torch
@@ -95,3 +96,8 @@ def assert_only_allowed_args(func: Callable, allowed_args: set):
     for arg in func.__annotations__:
         if arg != "return" and arg not in allowed_args:
             raise ValueError(f"{func.__qualname__} can have only the following arguments: {allowed_args}. Got {arg}")
+
+
+def assert_return_type(func: Callable, return_type: type):
+    if (rt := get_type_hints(func)["return"]) != return_type:
+        raise ValueError(f"{func.__qualname__} must return {return_type}. Got {rt}")
