@@ -38,6 +38,7 @@ CONFIGS = [
                     "var_names": "cellarium.ml.data.util.pandas_to_numpy",
                 },
                 "batch_size": "5",
+                "obs_columns": [],
                 "num_workers": "1",
             },
             "trainer": {
@@ -73,6 +74,7 @@ CONFIGS = [
                     "obs_names": "cellarium.ml.data.util.pandas_to_numpy",
                 },
                 "batch_size": "5",
+                "obs_columns": [],
                 "num_workers": "1",
             },
             "trainer": {
@@ -100,6 +102,7 @@ CONFIGS = [
                 },
                 "batch_size": "50",
                 "shuffle": "true",
+                "obs_columns": [],
                 "num_workers": "2",
             },
             "trainer": {
@@ -124,6 +127,7 @@ CONFIGS = [
                     "X": "cellarium.ml.data.util.densify",
                 },
                 "batch_size": "50",
+                "obs_columns": [],
                 "num_workers": "2",
             },
             "trainer": {
@@ -150,6 +154,7 @@ CONFIGS = [
                     "X": "cellarium.ml.data.util.densify",
                 },
                 "batch_size": "50",
+                "obs_columns": [],
                 "num_workers": "2",
             },
             "trainer": {
@@ -177,6 +182,7 @@ CONFIGS = [
                     "obs_names": "cellarium.ml.data.util.pandas_to_numpy",
                 },
                 "batch_size": "50",
+                "obs_columns": [],
                 "num_workers": "2",
             },
             "trainer": {
@@ -188,6 +194,33 @@ CONFIGS = [
                 },
             },
             "return_predictions": "false",
+        },
+    },
+    {
+        "model_name": "logistic_regression",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "module": "cellarium.ml.module.LogisticRegression",
+            },
+            "data": {
+                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                "shard_size": "100",
+                "max_cache_size": "2",
+                "convert": {
+                    "X": "cellarium.ml.data.util.densify",
+                    "obs": {"cell_type": "cellarium.ml.data.util.codes_to_numpy"},
+                },
+                "batch_size": "50",
+                "shuffle": "true",
+                "obs_columns": ["cell_type"],
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "4",
+            },
         },
     },
     pytest.param(
@@ -204,6 +237,7 @@ CONFIGS = [
                         "X": "cellarium.ml.data.util.densify",
                     },
                     "batch_size": "50",
+                    "obs_columns": [],
                     "num_workers": "2",
                 },
                 "trainer": {

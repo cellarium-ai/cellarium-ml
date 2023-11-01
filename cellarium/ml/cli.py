@@ -183,6 +183,37 @@ def incremental_pca(args: ArgsType = None) -> None:
 
 
 @register_model
+def logistic_regression(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.module.LogisticRegression` model.
+
+    Example run::
+
+        cellarium-ml logistic_regression fit \
+            --model.module.init_args.k_components 50 \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.module.IncrementalPCAFromCLI",
+        link_arguments=[
+            ("data.n_obs", "model.module.init_args.n_cells"),
+            ("data.n_vars", "model.module.init_args.g_genes"),
+            ("data.n_cell_types", "model.module.init_args.k_cell_types"),
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
 def onepass_mean_var_std(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.module.OnePassMeanVarStdFromCLI` model.

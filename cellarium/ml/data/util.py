@@ -8,7 +8,6 @@ import pandas as pd
 import scipy
 import torch
 import torch.distributed as dist
-from scipy.sparse import issparse
 from torch.utils.data import get_worker_info as _get_worker_info
 
 
@@ -101,3 +100,11 @@ def pandas_to_numpy(x: pd.Index | pd.Series | pd.DataFrame) -> np.ndarray:
     Returned array is always a copy.
     """
     return x.to_numpy(copy=True)
+
+
+def codes_to_numpy(x: pd.Series) -> np.ndarray:
+    """
+    Convert a pandas Index/Series/DataFrame object to a numpy array.
+    Returned array is always a copy.
+    """
+    return x.cat.codes.to_numpy(copy=True)
