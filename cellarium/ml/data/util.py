@@ -4,6 +4,8 @@
 import warnings
 
 import numpy as np
+import pandas as pd
+import scipy
 import torch
 import torch.distributed as dist
 from scipy.sparse import issparse
@@ -79,13 +81,23 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
     return collated_batch
 
 
-def densify(data):
-    return data.toarray() if issparse(data) else data
+def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
+    """
+    Convert a sparse matrix to a dense matrix.
+    """
+    return x.toarray()
 
 
-def get_codes(data):
-    return data.values.codes.copy()
+def identity(x: np.ndarray) -> np.ndarray:
+    """
+    Identity function.
+    """
+    return x
 
 
-def get_values(data):
-    return data.values.copy()
+def pandas_to_numpy(x: pd.Index | pd.Series | pd.DataFrame) -> np.ndarray:
+    """
+    Convert a pandas Index/Series/DataFrame object to a numpy array.
+    Returned array is always a copy.
+    """
+    return x.to_numpy(copy=True)

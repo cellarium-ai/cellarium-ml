@@ -1,28 +1,44 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from importlib import import_module
+from typing import IO, Any
+from unittest.mock import patch
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
+from jsonargparse import Namespace
+from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 
+from cellarium.ml.core.saving import _load_state
 from cellarium.ml.module import BaseModule, PredictMixin
 
 
 class TrainingPlan(pl.LightningModule):
     """
-    Lightning module task to train cellarium-ml modules.
+    Lightning module task to train ``cellarium.ml`` modules.
 
     Args:
-        module: A cellarium.ml module to train.
-        optim_fn: A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
+        module:
+            A ``cellarium.ml`` module to train.
+        optim_fn:
+            A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
-        optim_kwargs: Keyword arguments for optimiser. If ``None``, defaults to ``default_lr``.
-        scheduler_fn: A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
-        scheduler_kwargs: Keyword arguments for lr scheduler.
-        default_lr: Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
+        optim_kwargs:
+            Keyword arguments for optimiser. If ``None``, defaults to ``default_lr``.
+        scheduler_fn:
+            A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
+        scheduler_kwargs:
+            Keyword arguments for lr scheduler.
+        default_lr:
+            Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
+        config:
+            A dictionary or :class:`jsonargparse.Namespace` containing the initialization hyperparameters.
+            If not ``None``, the configuration will be saved as ``"hyper_parameters"`` in the checkpoint.
     """
 
     def __init__(
@@ -33,6 +49,7 @@ class TrainingPlan(pl.LightningModule):
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
         scheduler_kwargs: dict | None = None,
         default_lr: float = 1e-3,
+        config: dict[str, Any] | Namespace | None = None,
     ) -> None:
         super().__init__()
         self.module = module
@@ -60,6 +77,98 @@ class TrainingPlan(pl.LightningModule):
         self.optim_kwargs = optim_kwargs
         self.scheduler_fn = scheduler_fn
         self.scheduler_kwargs = scheduler_kwargs
+
+        if config is not None:
+            self._set_hparams(config)
+
+    @classmethod
+    @patch("lightning.pytorch.core.saving._load_state", new=_load_state)
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: _PATH | IO,
+        map_location: _MAP_LOCATION_TYPE = None,
+        hparams_file: _PATH | None = None,
+        strict: bool = True,
+        **kwargs: Any,
+    ) -> TrainingPlan:
+        r"""
+        Primary way of loading a model from a checkpoint. When Cellarium ML saves a checkpoint it stores the config
+        argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.
+
+        Any arguments specified through ``**kwargs`` will override args stored in ``"hyper_parameters"``.
+
+        Args:
+            checkpoint_path:
+                Path to checkpoint. This can also be a URL, or file-like object
+            map_location:
+                If your checkpoint saved a GPU model and you now load on CPUs
+                or a different number of GPUs, use this to map to the new setup.
+                The behaviour is the same as in :func:`torch.load`.
+            hparams_file:
+                Optional path to a ``.yaml`` or ``.csv`` file with hierarchical structure as in this example:
+
+                .. code-block:: yaml
+
+                    model:
+                      module:
+                        class_path: cellarium.ml.module.OnePassMeanVarStdFromCLI
+                        init_args:
+                          g_genes: 36350
+                          target_count: 10000
+                      optim_fn: null
+                      optim_kwargs: null
+                      scheduler_fn: null
+                      scheduler_kwargs: null
+                      default_lr: 0.001
+
+                If you train a model using :mod:`cellarium.ml.cli` module you most likely won't need this
+                since Cellarium ML CLI will always save the hyperparameters to the checkpoint.
+
+                However, if your checkpoint weights don't have the hyperparameters saved,
+                use this method to pass in a ``.yaml`` file with the hparams you'd like to use.
+                These will be converted into a :class:`dict` and passed into your
+                :class:`TrainingPlan` for use.
+            strict:
+                Whether to strictly enforce that the keys in :attr:`checkpoint_path` match the keys
+                returned by this module's state dict.
+            \**kwargs: Any extra keyword args needed to init the model. Can also be used to override saved
+                hyperparameter values.
+
+        Return:
+            :class:`TrainingPlan` instance with loaded weights and hyperparameters.
+
+        Example::
+
+            # load weights without mapping ...
+            model = TrainingPlan.load_from_checkpoint("path/to/checkpoint.ckpt")
+
+            # or load weights mapping all weights from GPU 1 to GPU 0 ...
+            map_location = {"cuda:1": "cuda:0"}
+            model = TrainingPlan.load_from_checkpoint(
+                "path/to/checkpoint.ckpt",
+                map_location=map_location
+            )
+
+            # or load weights and hyperparameters from separate files.
+            model = TrainingPlan.load_from_checkpoint(
+                "path/to/checkpoint.ckpt",
+                hparams_file="/path/to/config.yaml"
+            )
+
+            # override some of the params with new values
+            model = TrainingPlan.load_from_checkpoint(
+                "path/to/checkpoint.ckpt",
+                optim_fn=torch.optim.AdamW,
+                default_lr=0.0001,
+            )
+        """
+        return super().load_from_checkpoint(
+            checkpoint_path=checkpoint_path,
+            map_location=map_location,
+            hparams_file=hparams_file,
+            strict=strict,
+            **kwargs,
+        )
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int

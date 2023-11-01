@@ -18,14 +18,14 @@ format: license FORCE
 	black .
 
 typecheck: FORCE
-	mypy cellarium test examples
+	mypy cellarium test
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)
 	pytest -v -k multi_device
-else ifeq (${TEST_DEVICES}, 1)
+else
 	# default
-	pytest -v -n auto
+	pytest -v
 endif
 
 FORCE:

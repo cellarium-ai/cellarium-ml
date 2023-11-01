@@ -15,7 +15,7 @@ from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.data.util import collate_fn, get_rank_and_num_replicas
+from cellarium.ml.data.util import collate_fn, get_rank_and_num_replicas, identity
 from cellarium.ml.module import BaseModule, GatherLayer
 from cellarium.ml.train import TrainingPlan
 
@@ -40,8 +40,6 @@ class TestModule(BaseModule):
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        tensor_dict.pop("obs_names", None)
-        tensor_dict.pop("var_names", None)
         return (), tensor_dict
 
     def forward(self, **batch: torch.Tensor) -> None:
@@ -80,7 +78,9 @@ def dadc(tmp_path: Path, request: pytest.FixtureRequest):
 @pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
 def test_iterable_dataset(dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int):
     n_obs = len(dadc)
-    dataset = IterableDistributedAnnDataCollectionDataset(dadc, batch_size=batch_size, shuffle=shuffle, test_mode=True)
+    dataset = IterableDistributedAnnDataCollectionDataset(
+        dadc, convert={"X": identity}, batch_size=batch_size, shuffle=shuffle, test_mode=True
+    )
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
@@ -121,6 +121,7 @@ def test_iterable_dataset_multi_device(
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
+        convert={"X": identity},
         batch_size=batch_size,
         shuffle=shuffle,
         drop_last=drop_last,
@@ -182,6 +183,7 @@ def test_iterable_dataset_set_epoch_multi_device(
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
+        convert={"X": identity},
         batch_size=1,
         shuffle=True,
         test_mode=True,

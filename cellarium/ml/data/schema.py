@@ -25,9 +25,11 @@ class AnnDataSchema:
         >>> schema.validate_anndata(adata)
 
     Args:
-        adata: Reference AnnData object.
-        obs_columns: Subset of columns to validate in the ``.obs`` attribute.
-            If ``None``, all columns are validated. Defaults to ``None``.
+        adata:
+            Reference AnnData object.
+        obs_columns:
+            Subset of columns to validate in the ``.obs`` attribute.
+            If ``None``, all columns are validated.
     """
 
     attrs = ["obs", "obsm", "var", "varm", "varp", "var_names", "layers"]

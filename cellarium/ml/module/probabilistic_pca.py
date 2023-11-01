@@ -20,26 +20,35 @@ class ProbabilisticPCA(BasePyroModule):
     Two flavors of probabilistic PCA are available - marginalized pPCA [1]
     and linear VAE [2].
 
-    **Reference:**
+    **References:**
 
-    1. *Probabilistic Principal Component Analysis*,
-       Tipping, Michael E., and Christopher M. Bishop. 1999.
-       (https://www.robots.ox.ac.uk/~cvrg/hilary2006/ppca.pdf)
-    2. *Understanding Posterior Collapse in Generative Latent Variable Models*,
-       James Lucas, George Tucker, Roger Grosse, Mohammad Norouzi. 2019.
-       (https://openreview.net/pdf?id=r1xaVLUYuE)
+    1. `Probabilistic Principal Component Analysis (Tipping et al.)
+       <https://www.robots.ox.ac.uk/~cvrg/hilary2006/ppca.pdf>`_.
+    2. `Understanding Posterior Collapse in Generative Latent Variable Models (Lucas et al.)
+       <https://openreview.net/pdf?id=r1xaVLUYuE>`_.
 
     Args:
-        n_cells: Number of cells.
-        g_genes: Number of genes.
-        k_components: Number of principal components.
-        ppca_flavor: Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
-        mean_g: Mean gene expression of the input data.
-        W_init_scale: Scale of the random initialization of the `W_kg` parameter.
-        sigma_init_scale: Initialization value of the `sigma` parameter.
-        seed: Random seed used to initialize parameters. Default: ``0``.
-        transform: If not ``None`` is used to transform the input data.
-        elbo: ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
+        n_cells:
+            Number of cells.
+        g_genes:
+            Number of genes.
+        k_components:
+            Number of principal components.
+        ppca_flavor:
+            Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
+        mean_g:
+            Mean gene expression of the input data. If ``None`` then the mean is
+            set to a learnable parameter.
+        W_init_scale:
+            Scale of the random initialization of the `W_kg` parameter.
+        sigma_init_scale:
+            Initialization value of the `sigma` parameter.
+        seed:
+            Random seed used to initialize parameters.
+        transform:
+            If not ``None`` is used to transform the input data.
+        elbo:
+            ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
             If ``None``, defaults to :class:`~pyro.infer.Trace_ELBO`.
     """
 

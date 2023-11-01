@@ -48,10 +48,14 @@ test = [
 docs = [
   "Pillow",
   "sphinx",
-  "sphinx_gallery",
   "sphinx_rtd_theme",
+  "sphinx-autodoc-typehints",
+  "sphinx-copybutton",
 ]
 dev = ["cellarium-ml[docs,lint,mypy,test]"]
+
+[project.scripts]
+cellarium-ml = "cellarium.ml.cli:main"
 
 [project.urls]
 "Homepage" = "https://cellarium-ai.github.io/cellarium-ml"

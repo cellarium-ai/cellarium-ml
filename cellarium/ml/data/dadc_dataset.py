@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from .distributed_anndata import DistributedAnnDataCollection
+from .distributed_anndata import ConvertType, DistributedAnnDataCollection
 from .util import get_rank_and_num_replicas, get_worker_info
 
 
@@ -26,21 +26,39 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     cells coming from the same tissue or experiment), then this assumption is violated. It is
     the user's responsibility to prepare appropriately shuffled data shards.
 
+    Example of ``convert``::
+
+        {
+            "X": cellarium.ml.data.util.densify,
+            "obs_names": cellarium.ml.data.util.pandas_to_numpy,
+            "var_names": cellarium.ml.data.util.pandas_to_numpy,
+        }
+
     Args:
-        dadc: DistributedAnnDataCollection from which to load the data.
-        batch_size: How many samples per batch to load. Default: ``1``.
-        shuffle: Set to ``True`` to have the data reshuffled at every epoch. Default: ``False``.
-        seed: Random seed used to shuffle the sampler if :attr:`shuffle=True`. Default: ``0``.
-        drop_last: If ``True``, then the sampler will drop the tail of the data
+        dadc:
+            DistributedAnnDataCollection from which to load the data.
+        convert:
+            Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
+            in the ``__getitem__`` method and how to convert them.
+        batch_size:
+            How many samples per batch to load.
+        shuffle:
+            If ``True``, the data is reshuffled at every epoch.
+        seed:
+            Random seed used to shuffle the sampler if :attr:`shuffle=True`.
+        drop_last:
+            If ``True``, then the sampler will drop the tail of the data
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
-            the replicas. Default: ``False``.
-        test_mode: If ``True`` enables tracking of cache and worker informations.
+            the replicas.
+        test_mode:
+            If ``True``, then tracking of cache and worker informations will be enabled.
     """
 
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
+        convert: ConvertType,
         batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
@@ -48,6 +66,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
+        self.dadc.convert = convert
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -56,7 +75,18 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.test_mode = test_mode
 
     def __len__(self) -> int:
-        return len(self.dadc)
+        """
+        Returns the number of batches per replica.
+        """
+        _, num_replicas = get_rank_and_num_replicas()
+
+        if self.drop_last and len(self.dadc) % num_replicas != 0:
+            # Split to nearest available length that is evenly divisible.
+            # This is to ensure each rank receives the same amount of data.
+            per_replica = len(self.dadc) // num_replicas
+        else:
+            per_replica = math.ceil(len(self.dadc) / num_replicas)
+        return math.ceil(per_replica / float(self.batch_size))
 
     def set_epoch(self, epoch: int) -> None:
         r"""
@@ -67,20 +97,16 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
         r"""
-        Return feature counts for cells at idx.
-
-        If the count data ``X`` is sparse then it is densified.
+        Returns a dictionary containing the data from the :attr:`dadc` with keys specified by its :attr:`dadc.convert`
+        at the given index ``idx``.
         """
 
         data = {}
-        for attr, value in self.dadc.convert.items():
-            if callable(value):
+        for attr, fn_or_dict in self.dadc.convert.items():
+            if callable(fn_or_dict):
                 data[attr] = getattr(self.dadc[idx], attr)
-                continue
-            if isinstance(value, dict):
-                for key, v in value.items():
-                    data[key] = getattr(self.dadc[idx], attr)[key]
-                continue
+            elif isinstance(fn_or_dict, dict):
+                data |= {key: getattr(self.dadc[idx], attr)[key] for key in fn_or_dict}
 
         # for testing purposes
         if self.test_mode:
@@ -258,12 +284,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         # replicas
         rank, num_replicas = get_rank_and_num_replicas()
 
-        if self.drop_last and len(self) % num_replicas != 0:
+        if self.drop_last and len(self.dadc) % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data.
-            per_replica = len(self) // num_replicas
+            per_replica = len(self.dadc) // num_replicas
         else:
-            per_replica = math.ceil(len(self) / num_replicas)
+            per_replica = math.ceil(len(self.dadc) / num_replicas)
         total_size = per_replica * num_replicas
         batches_per_replica = math.ceil(per_replica / float(self.batch_size))
 
@@ -290,7 +316,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 # shuffle cells within shards
                 indices.extend((torch.randperm(upper - lower, generator=rng) + lower).tolist())
         else:
-            indices = list(range(len(self)))
+            indices = list(range(len(self.dadc)))
 
         if not self.drop_last:
             # add extra samples to make it evenly divisible

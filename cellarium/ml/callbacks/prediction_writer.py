@@ -21,10 +21,14 @@ def write_prediction(
     Write prediction to a CSV file.
 
     Args:
-        prediction: The prediction to write.
-        ids: The IDs of the cells.
-        output_dir: The directory to write the prediction to.
-        postfix: A postfix to add to the CSV file name.
+        prediction:
+            The prediction to write.
+        ids:
+            The IDs of the cells.
+        output_dir:
+            The directory to write the prediction to.
+        postfix:
+            A postfix to add to the CSV file name.
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
@@ -45,8 +49,10 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         :class:`~lightning.pytorch.Trainer` to ``False``.
 
     Args:
-        output_dir: The directory to write the predictions to.
-        prediction_size: The size of the prediction. If ``None``, the entire prediction will be
+        output_dir:
+            The directory to write the predictions to.
+        prediction_size:
+            The size of the prediction. If ``None``, the entire prediction will be
             written. If not ``None``, only the first ``prediction_size`` columns will be written.
     """
 
