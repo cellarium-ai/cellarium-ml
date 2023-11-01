@@ -15,7 +15,8 @@ from cellarium.ml.data import (
     IterableDistributedAnnDataCollectionDataset,
     read_h5ad_file,
 )
-from cellarium.ml.data.util import identity, pandas_to_numpy
+from cellarium.ml.data.util import pandas_to_numpy
+from cellarium.ml.utilities.data import AnnDataField
 
 
 @pytest.fixture
@@ -184,7 +185,10 @@ def test_indexing_dataset(
 
     dataset = IterableDistributedAnnDataCollectionDataset(
         dat,
-        {"X": identity, "obs_names": pandas_to_numpy},
+        batch_keys={
+            "X": AnnDataField("X"),
+            "obs_names": AnnDataField("obs_names", convert_fn=pandas_to_numpy),
+        },
     )
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
@@ -203,7 +207,10 @@ def test_indexing_dataset(
 def test_pickle_dataset(dat: DistributedAnnDataCollection):
     dataset = IterableDistributedAnnDataCollectionDataset(
         dat,
-        {"X": identity, "obs_names": pandas_to_numpy},
+        batch_keys={
+            "X": AnnDataField("X"),
+            "obs_names": AnnDataField("obs_names", convert_fn=pandas_to_numpy),
+        },
     )
     new_dataset = pickle.loads(pickle.dumps(dataset))
 

@@ -7,14 +7,39 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 
+from cellarium.ml.utilities.data import AnnDataField
+
 from .dadc_dataset import IterableDistributedAnnDataCollectionDataset
-from .distributed_anndata import ConvertType, DistributedAnnDataCollection
+from .distributed_anndata import DistributedAnnDataCollection
 from .util import collate_fn
 
 
 class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
     """
     DataModule for :class:`~cellarium.ml.data.dadc_dataset.IterableDistributedAnnDataCollectionDataset`.
+
+    Example::
+
+        >>> from cellarium.ml import CellariumAnnDataDataModule
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify, pandas_to_numpy
+
+        >>> dm = CellariumAnnDataDataModule(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10_000,
+        ...     max_cache_size=2,
+        ...     batch_keys={
+        ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
+        ...         "feature_g": AnnDataField(attr="var_names", convert_fn=pandas_to_numpy),
+        ...     },
+        ...     batch_size=5000,
+        ...     shuffle=True,
+        ...     seed=0,
+        ...     drop_last=True,
+        ...     num_workers=4,
+        ... )
+        >>> dm.setup()
+        >>> for batch in dm.train_dataloader():
+        ...     print(batch.keys())  # x_ng, feature_g
 
     Args:
         filenames:
@@ -42,21 +67,17 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
             Whether to make the index unique by using the keys. If provided, this
             is the delimeter between ``{orig_idx}{index_unique}{key}``. When ``None``,
             the original indices are kept.
-        convert:
-            You can pass a function or a Mapping of functions which will be applied
-            to the values of attributes (:attr:`obs`, :attr:`obsm`, :attr:`layers`, :attr:`X`) or to specific
-            keys of these attributes in the subset object.
-            Specify an attribute and a key (if needed) as keys of the passed Mapping
-            and a function to be applied as a value.
         indices_strict:
             If  ``True``, arrays from the subset objects will always have the same order
             of indices as in selection used to subset.
             This parameter can be set to ``False`` if the order in the returned arrays
             is not important, for example, when using them for stochastic gradient descent.
             In this case the performance of subsetting can be a bit better.
-        obs_columns:
-            Subset of columns to validate in the :attr:`obs` attribute.
-            If ``None``, all columns are validated.
+        batch_keys:
+            Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
+            in the batch data and how to convert them. Keys must correspond to
+            the input keys of the transforms or the model. Values must be instances of
+            :class:`cellarium.ml.utilities.data.AnnDataField`.
         batch_size:
             How many samples per batch to load.
         shuffle:
@@ -87,9 +108,8 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         keys: Sequence[str] | None = None,
         index_unique: str | None = None,
         indices_strict: bool = True,
-        obs_columns: Sequence | None = None,
         # IterableDistributedAnnDataCollectionDataset args
-        convert: ConvertType | None = None,
+        batch_keys: dict[str, AnnDataField] | None = None,
         batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
@@ -110,9 +130,8 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         self.keys = keys
         self.index_unique = index_unique
         self.indices_strict = indices_strict
-        self.obs_columns = obs_columns
         # IterableDistributedAnnDataCollectionDataset args
-        self.convert = convert or {}
+        self.batch_keys = batch_keys or {}
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -121,6 +140,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         # DataLoader args
         self.num_workers = num_workers
         # DistributedAnnDataCollection
+        obs_columns = [field.obs_column for field in self.batch_keys.values() if field.obs_column is not None]
         self.dadc = DistributedAnnDataCollection(
             filenames=self.filenames,
             limits=self.limits,
@@ -132,7 +152,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
             keys=self.keys,
             index_unique=self.index_unique,
             indices_strict=self.indices_strict,
-            obs_columns=self.obs_columns,
+            obs_columns=obs_columns,
         )
 
     @property
@@ -155,7 +175,7 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
         """
         self.dataset = IterableDistributedAnnDataCollectionDataset(
             dadc=self.dadc,
-            convert=self.convert,
+            batch_keys=self.batch_keys,
             batch_size=self.batch_size,
             shuffle=self.shuffle,
             seed=self.seed,

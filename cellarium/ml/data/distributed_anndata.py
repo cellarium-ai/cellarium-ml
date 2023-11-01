@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import gc
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 
 import pandas as pd
@@ -13,6 +13,7 @@ from anndata._core.index import Index, _normalize_indices
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
     AnnCollectionView,
+    ConvertType,
 )
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
@@ -26,8 +27,6 @@ class getattr_mode:
 
 
 _GETATTR_MODE = getattr_mode()
-
-ConvertType = dict[str, Callable | dict[str, Callable]]
 
 
 @contextmanager

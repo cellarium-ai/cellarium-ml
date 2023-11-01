@@ -15,9 +15,10 @@ from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.data.util import collate_fn, get_rank_and_num_replicas, identity
+from cellarium.ml.data.util import collate_fn, get_rank_and_num_replicas
 from cellarium.ml.module import BaseModule, GatherLayer
 from cellarium.ml.train import TrainingPlan
+from cellarium.ml.utilities.data import AnnDataField
 
 # RuntimeError: Too many open files. Communication with the workers is no longer possible.
 # Please increase the limit using `ulimit -n` in the shell or change the sharing strategy
@@ -79,7 +80,11 @@ def dadc(tmp_path: Path, request: pytest.FixtureRequest):
 def test_iterable_dataset(dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int):
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
-        dadc, convert={"X": identity}, batch_size=batch_size, shuffle=shuffle, test_mode=True
+        dadc,
+        batch_keys={"X": AnnDataField("X")},
+        batch_size=batch_size,
+        shuffle=shuffle,
+        test_mode=True,
     )
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -121,7 +126,7 @@ def test_iterable_dataset_multi_device(
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
-        convert={"X": identity},
+        batch_keys={"X": AnnDataField("X")},
         batch_size=batch_size,
         shuffle=shuffle,
         drop_last=drop_last,
@@ -183,7 +188,7 @@ def test_iterable_dataset_set_epoch_multi_device(
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
-        convert={"X": identity},
+        batch_keys={"X": AnnDataField("X")},
         batch_size=1,
         shuffle=True,
         test_mode=True,
