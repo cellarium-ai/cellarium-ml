@@ -56,21 +56,6 @@ class AnnDataField:
         return result
 
 
-#  T = TypeVar("T")
-#
-#
-#  @dataclass
-#  class CellariumModuleField(Generic[T]):
-#      checkpoint: str
-#      attr: str
-#
-#      def __call__(self) -> T:
-#          value = CellariumModule.load_from_checkpoint(self.checkpoint)
-#          for attr in self.attr.split("."):
-#              value = getattr(value, attr)
-#          return value
-
-
 def get_rank_and_num_replicas() -> tuple[int, int]:
     """
     This helper function returns the rank of the current process and

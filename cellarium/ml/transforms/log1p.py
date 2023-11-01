@@ -29,7 +29,7 @@ class Log1p(nn.Module):
             Log1p transformed gene counts.
         """
         x_ng = torch.log1p(x_ng)
-        return BatchDict(x_ng=x_ng)
+        return {"x_ng": x_ng}
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"

@@ -68,7 +68,7 @@ class ZScore(nn.Module):
             assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
         x_ng = (x_ng - self.mean_g) / (self.std_g + self.eps)
-        return BatchDict(x_ng=x_ng)
+        return {"x_ng": x_ng}
 
     def __repr__(self) -> str:
         return (

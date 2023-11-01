@@ -66,7 +66,7 @@ class Filter(nn.Module):
         x_ng = x_ng[:, filter_mask]
         feature_g = feature_g[filter_mask]
 
-        return BatchDict(x_ng=x_ng, feature_g=feature_g)
+        return {"x_ng": x_ng, "feature_g": feature_g}
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(filter_list={self.filter_list})"
