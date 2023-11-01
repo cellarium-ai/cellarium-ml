@@ -20,6 +20,30 @@ from anndata.experimental import AnnCollection
 
 @dataclass
 class AnnDataField:
+    """
+    Helper class for accessing fields of a AnnData-like object.
+
+    Example::
+
+        >>> from cellarium.ml.data import DistributedAnnDataCollection
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify
+
+        >>> dadc = DistributedAnnDataCollection(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10_000,
+        ...     max_cache_size=2)
+        >>> field = AnnDataField(attr="X", convert_fn=densify)
+        >>> X = field(dadc)[:100]
+
+    Args:
+        attr:
+            The attribute of the AnnData-like object to access.
+        key:
+            The key of the attribute to access. If ``None``, the entire attribute is returned.
+        convert_fn:
+            A function to apply to the attribute before returning it. If ``None``, no conversion is applied.
+    """
+
     attr: str
     key: str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
@@ -30,7 +54,7 @@ class AnnDataField:
 
     def __getitem__(self, idx: int | list[int] | slice) -> np.ndarray:
         if self.adata is None:
-            raise ValueError("Must call AnnDataField with an AnnData or AnnCollection first")
+            raise ValueError("Must call AnnDataField with an AnnData-like object first")
 
         value = getattr(self.adata[idx], self.attr)
         if self.key is not None:

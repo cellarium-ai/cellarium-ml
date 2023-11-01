@@ -218,3 +218,39 @@ def test_pickle_dataset(dat: DistributedAnnDataCollection):
 
     np.testing.assert_array_equal(new_dataset[:2]["X"], dataset[:2]["X"])
     np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])
+
+
+@pytest.fixture
+def dadc(adatas_path: Path):
+    # distributed anndata
+    filenames = str(os.path.join(adatas_path, "adata.{000..002}.h5ad"))
+    limits = [2, 5, 10]
+    dadc = DistributedAnnDataCollection(
+        filenames,
+        limits,
+        max_cache_size=2,
+    )
+    return dadc
+
+
+@pytest.mark.parametrize(
+    "attr,key,convert_fn",
+    [
+        ("X", None, None),
+        ("obs", "A", None),
+        ("obs_names", None, pandas_to_numpy),
+        ("var_names", None, pandas_to_numpy),
+        ("layers", "L", None),
+    ],
+)
+def test_anndata_field(dadc, attr, key, convert_fn):
+    expected = getattr(dadc[:5], attr)
+    if key is not None:
+        expected = expected[key]
+    if convert_fn is not None:
+        expected = convert_fn(expected)
+
+    field = AnnDataField(attr, key, convert_fn)
+    actual = field(dadc)[:5]
+
+    np.testing.assert_array_equal(expected, actual)
