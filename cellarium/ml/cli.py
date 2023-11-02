@@ -190,7 +190,6 @@ def logistic_regression(args: ArgsType = None) -> None:
     Example run::
 
         cellarium-ml logistic_regression fit \
-            --model.module.init_args.k_components 50 \
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
             --data.max_cache_size 2 \
@@ -198,16 +197,17 @@ def logistic_regression(args: ArgsType = None) -> None:
             --data.num_workers 4 \
             --trainer.accelerator gpu \
             --trainer.devices 1 \
+            --trainer.max_steps 1000
 
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.IncrementalPCAFromCLI",
+        "cellarium.ml.module.LogisticRegression",
         link_arguments=[
             ("data.n_obs", "model.module.init_args.n_cells"),
-            ("data.n_vars", "model.module.init_args.g_genes"),
-            ("data.n_cell_types", "model.module.init_args.k_cell_types"),
+            ("data.var_names", "model.module.init_args.feature_schema"),
+            ("data.n_cell_types", "model.module.init_args.c_categories"),
         ],
     )
     cli(args=args)

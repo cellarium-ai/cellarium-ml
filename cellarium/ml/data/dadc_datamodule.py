@@ -145,7 +145,6 @@ class DistributedAnnDataCollectionDataModule(pl.LightningDataModule):
 
     @property
     def n_cell_types(self) -> int:
-        return 666
         return len(self.dadc[0].obs["cell_type"].dtype.categories)
 
     @property
