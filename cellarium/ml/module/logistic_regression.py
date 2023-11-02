@@ -3,6 +3,7 @@
 
 
 from collections.abc import Sequence
+
 import numpy as np
 import pyro
 import pyro.distributions as dist
@@ -12,8 +13,6 @@ from cellarium.ml.module.base_module import BaseModule
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
-    assert_nonnegative,
-    assert_positive,
 )
 
 
@@ -42,9 +41,10 @@ class LogisticRegression(BaseModule):
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        x = tensor_dict["X"]
-        y = tensor_dict["cell_type"]
-        return (x, y), {}
+        x_ng = tensor_dict["X"]
+        feature_g = tensor_dict["var_names"]
+        y_n = tensor_dict["cell_type"]
+        return (x_ng, feature_g, y_n), {}
 
     def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray, y_n: torch.Tensor) -> torch.Tensor:
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)

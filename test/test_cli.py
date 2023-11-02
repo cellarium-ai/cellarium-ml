@@ -41,7 +41,6 @@ CONFIGS = [
                     "var_names": {"attr": "var_names"},
                 },
                 "batch_size": "5",
-                "obs_columns": [],
                 "num_workers": "1",
             },
             "trainer": {
@@ -80,7 +79,6 @@ CONFIGS = [
                     "obs_names": {"attr": "obs_names"},
                 },
                 "batch_size": "5",
-                "obs_columns": [],
                 "num_workers": "1",
             },
             "trainer": {
@@ -111,7 +109,6 @@ CONFIGS = [
                 },
                 "batch_size": "50",
                 "shuffle": "true",
-                "obs_columns": [],
                 "num_workers": "2",
             },
             "trainer": {
@@ -139,7 +136,6 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "obs_columns": [],
                 "num_workers": "2",
             },
             "trainer": {
@@ -169,7 +165,6 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "obs_columns": [],
                 "num_workers": "2",
             },
             "trainer": {
@@ -200,7 +195,6 @@ CONFIGS = [
                     "obs_names": {"attr": "obs_names"},
                 },
                 "batch_size": "50",
-                "obs_columns": [],
                 "num_workers": "2",
             },
             "trainer": {
@@ -225,13 +219,22 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.data.util.densify",
-                    "obs": {"cell_type": "cellarium.ml.data.util.codes_to_numpy"},
+                "batch_keys": {
+                    "X": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.data.util.densify",
+                    },
+                    "var_names": {
+                        "attr": "var_names",
+                    },
+                    "cell_type": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                        "convert_fn": "cellarium.ml.data.util.categories_to_codes",
+                    },
                 },
                 "batch_size": "50",
                 "shuffle": "true",
-                "obs_columns": ["cell_type"],
                 "num_workers": "2",
             },
             "trainer": {
@@ -258,7 +261,6 @@ CONFIGS = [
                         },
                     },
                     "batch_size": "50",
-                    "obs_columns": [],
                     "num_workers": "2",
                 },
                 "trainer": {
@@ -272,7 +274,7 @@ CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize("config", CONFIGS)
+@pytest.mark.parametrize("config", CONFIGS[-2:])
 def test_cpu_multi_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"

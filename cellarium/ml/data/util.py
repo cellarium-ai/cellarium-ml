@@ -102,9 +102,9 @@ def pandas_to_numpy(x: pd.Index | pd.Series | pd.DataFrame) -> np.ndarray:
     return x.to_numpy(copy=True)
 
 
-def codes_to_numpy(x: pd.Series) -> np.ndarray:
+def categories_to_codes(x: pd.Series) -> np.ndarray:
     """
-    Convert a pandas Index/Series/DataFrame object to a numpy array.
+    Convert a pandas Series of categorical data to a numpy array of codes.
     Returned array is always a copy.
     """
-    return x.cat.codes.to_numpy(copy=True)
+    return np.asarray(x.cat.codes)
