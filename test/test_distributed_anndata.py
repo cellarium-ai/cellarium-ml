@@ -3,7 +3,9 @@
 
 import os
 import pickle
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -243,7 +245,12 @@ def dadc(adatas_path: Path):
         ("layers", "L", None),
     ],
 )
-def test_anndata_field(dadc, attr, key, convert_fn):
+def test_anndata_field(
+    dadc: DistributedAnnDataCollection,
+    attr: str,
+    key: str | None,
+    convert_fn: Callable[[Any], np.ndarray] | None,
+):
     expected = getattr(dadc[:5], attr)
     if key is not None:
         expected = expected[key]
