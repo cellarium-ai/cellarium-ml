@@ -26,7 +26,7 @@ class AnnDataField:
     Example::
 
         >>> from cellarium.ml.data import DistributedAnnDataCollection
-        >>> from cellarium.ml.utilities.data import AnnDataField, densify, pandas_to_numpy
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify
 
         >>> dadc = DistributedAnnDataCollection(
         ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
@@ -36,8 +36,8 @@ class AnnDataField:
         >>> field_X = AnnDataField(attr="X", convert_fn=densify)
         >>> X = field_X(dadc)[:100]  # densify(dadc[:100].X)
 
-        >>> field_cell_type = AnnDataField(attr="obs", key="cell_type", convert_fn=pandas_to_numpy)
-        >>> cell_type = field_cell_type(dadc)[:100]  # pandas_to_numpy(dadc[:100].obs["cell_type"])
+        >>> field_cell_type = AnnDataField(attr="obs", key="cell_type")
+        >>> cell_type = field_cell_type(dadc)[:100]  # np.asarray(dadc[:100].obs["cell_type"])
 
     Args:
         attr:
@@ -45,7 +45,9 @@ class AnnDataField:
         key:
             The key of the attribute to access. If ``None``, the entire attribute is returned.
         convert_fn:
-            A function to apply to the attribute before returning it. If ``None``, no conversion is applied.
+            A function to apply to the attribute before returning it.
+            If ``None``, :func:`np.asarray` is used.
+
     """
 
     attr: str
@@ -66,9 +68,8 @@ class AnnDataField:
 
         if self.convert_fn is not None:
             value = self.convert_fn(value)
-
-        if not isinstance(value, np.ndarray):
-            raise ValueError(f"Expected {value} to be a numpy array. Got {type(value)}")
+        else:
+            value = np.asarray(value)
 
         return value
 
