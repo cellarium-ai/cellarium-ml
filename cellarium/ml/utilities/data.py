@@ -21,19 +21,23 @@ from anndata.experimental import AnnCollection
 @dataclass
 class AnnDataField:
     """
-    Helper class for accessing fields of a AnnData-like object.
+    Helper class for accessing fields of an AnnData-like object.
 
     Example::
 
         >>> from cellarium.ml.data import DistributedAnnDataCollection
-        >>> from cellarium.ml.utilities.data import AnnDataField, densify
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify, pandas_to_numpy
 
         >>> dadc = DistributedAnnDataCollection(
         ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
         ...     shard_size=10_000,
         ...     max_cache_size=2)
-        >>> field = AnnDataField(attr="X", convert_fn=densify)
-        >>> X = field(dadc)[:100]
+
+        >>> field_X = AnnDataField(attr="X", convert_fn=densify)
+        >>> X = field_X(dadc)[:100]  # densify(dadc[:100].X)
+
+        >>> field_cell_type = AnnDataField(attr="obs", key="cell_type", convert_fn=pandas_to_numpy)
+        >>> cell_type = field_cell_type(dadc)[:100]  # pandas_to_numpy(dadc[:100].obs["cell_type"])
 
     Args:
         attr:
@@ -62,6 +66,9 @@ class AnnDataField:
 
         if self.convert_fn is not None:
             value = self.convert_fn(value)
+
+        if not isinstance(value, np.ndarray):
+            raise ValueError(f"Expected {value} to be a numpy array. Got {type(value)}")
 
         return value
 
