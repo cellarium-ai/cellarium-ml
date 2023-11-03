@@ -110,7 +110,7 @@ class LogisticRegression(BaseModule):
         for logger in trainer.loggers:
             if isinstance(logger, pl.loggers.TensorBoardLogger):
                 logger.experiment.add_histogram(
-                    "W",
+                    "W_gc",
                     self.W_gc,
                     global_step=trainer.global_step,
                 )
