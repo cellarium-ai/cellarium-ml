@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .base_module import BaseModule, BasePyroModule, PredictMixin
+from .base_module import BaseModule, PredictMixin
 from .from_cli import (
     GeneformerFromCLI,
     IncrementalPCAFromCLI,
@@ -19,7 +19,6 @@ from .tdigest import TDigest
 
 __all__ = [
     "BaseModule",
-    "BasePyroModule",
     "GatherLayer",
     "Geneformer",
     "GeneformerFromCLI",

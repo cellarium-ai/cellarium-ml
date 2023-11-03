@@ -10,10 +10,10 @@ import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
 
-from .base_module import BasePyroModule
+from .base_module import BaseModule
 
 
-class ProbabilisticPCA(BasePyroModule):
+class ProbabilisticPCA(BaseModule):
     """
     Probabilistic PCA implemented in Pyro.
 
@@ -65,7 +65,7 @@ class ProbabilisticPCA(BasePyroModule):
         transform: torch.nn.Module | None = None,
         elbo: pyro.infer.ELBO | None = None,
     ):
-        super().__init__(type(self).__name__)
+        super().__init__()
 
         self.n_cells = n_cells
         self.g_genes = g_genes

@@ -195,6 +195,12 @@ def logistic_regression(args: ArgsType = None) -> None:
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
             --data.max_cache_size 2 \
+            --data.batch_keys.X.attr X \
+            --data.batch_keys.X.convert_fn cellarium.ml.data.util.densify \
+            --data.batch_keys.var_names.attr var_names \
+            --data.batch_keys.y_n.attr obs \
+            --data.batch_keys.y_n.key cell_type \
+            --data.batch_keys.y_n.convert_fn cellarium.ml.data.util.categories_to_codes \
             --data.batch_size 100 \
             --data.num_workers 4 \
             --trainer.accelerator gpu \
@@ -206,7 +212,7 @@ def logistic_regression(args: ArgsType = None) -> None:
     """
 
     def get_c_categories(data: DistributedAnnDataCollectionDataModule) -> int:
-        field = data.batch_keys["cell_type"]
+        field = data.batch_keys["y_n"]
         value = getattr(data.dadc[0], field.attr)
         if field.key is not None:
             value = value[field.key]
@@ -215,7 +221,7 @@ def logistic_regression(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.module.LogisticRegression",
         link_arguments=[
-            ("data.n_obs", "model.module.init_args.n_cells", None),
+            ("data.n_obs", "model.module.init_args.n_obs", None),
             ("data.var_names", "model.module.init_args.feature_schema", None),
             ("data", "model.module.init_args.c_categories", get_c_categories),
         ],

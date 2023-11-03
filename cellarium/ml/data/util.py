@@ -87,21 +87,6 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
     return x.toarray()
 
 
-def identity(x: np.ndarray) -> np.ndarray:
-    """
-    Identity function.
-    """
-    return x
-
-
-def pandas_to_numpy(x: pd.Index | pd.Series | pd.DataFrame) -> np.ndarray:
-    """
-    Convert a pandas Index/Series/DataFrame object to a numpy array.
-    Returned array is always a copy.
-    """
-    return x.to_numpy(copy=True)
-
-
 def categories_to_codes(x: pd.Series) -> np.ndarray:
     """
     Convert a pandas Series of categorical data to a numpy array of codes.
