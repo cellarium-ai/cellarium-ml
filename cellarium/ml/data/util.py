@@ -67,7 +67,7 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
     for key in keys:
         if key == "obs_names":
             collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
-        elif key == "var_names":
+        elif key in ["var_names", "feature_g"]:
             # Check that all var_names are the same
             if len(batch) > 1:
                 assert all(

@@ -220,14 +220,14 @@ CONFIGS = [
                 "shard_size": "100",
                 "max_cache_size": "2",
                 "batch_keys": {
-                    "X": {
+                    "x_ng": {
                         "attr": "X",
                         "convert_fn": "cellarium.ml.data.util.densify",
                     },
-                    "var_names": {
+                    "feature_g": {
                         "attr": "var_names",
                     },
-                    "cell_type": {
+                    "y_n": {
                         "attr": "obs",
                         "key": "cell_type",
                         "convert_fn": "cellarium.ml.data.util.categories_to_codes",
@@ -274,7 +274,7 @@ CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize("config", CONFIGS[-2:])
+@pytest.mark.parametrize("config", CONFIGS)
 def test_cpu_multi_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
