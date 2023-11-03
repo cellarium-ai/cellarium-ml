@@ -195,9 +195,9 @@ def logistic_regression(args: ArgsType = None) -> None:
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
             --data.max_cache_size 2 \
-            --data.batch_keys.X.attr X \
-            --data.batch_keys.X.convert_fn cellarium.ml.data.util.densify \
-            --data.batch_keys.var_names.attr var_names \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.data.util.densify \
+            --data.batch_keys.feature_g.attr var_names \
             --data.batch_keys.y_n.attr obs \
             --data.batch_keys.y_n.key cell_type \
             --data.batch_keys.y_n.convert_fn cellarium.ml.data.util.categories_to_codes \
