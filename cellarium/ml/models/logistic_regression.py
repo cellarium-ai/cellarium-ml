@@ -34,6 +34,8 @@ class LogisticRegression(CellariumModel):
             Initialization scale for the ``W_gc`` parameter.
         seed:
             Random seed used to initialize parameters.
+        log_metrics:
+            Whether to log the histogram of the ``W_gc`` parameter.
     """
 
     def __init__(
@@ -44,6 +46,7 @@ class LogisticRegression(CellariumModel):
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
         seed: int = 0,
+        log_metrics: bool = True,
     ) -> None:
         super().__init__()
 
@@ -63,6 +66,8 @@ class LogisticRegression(CellariumModel):
 
         # loss
         self.elbo = pyro.infer.Trace_ELBO()
+
+        self.log_metrics = log_metrics
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
@@ -102,6 +107,9 @@ class LogisticRegression(CellariumModel):
 
     def on_batch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:
+            return
+
+        if not self.log_metrics:
             return
 
         if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
