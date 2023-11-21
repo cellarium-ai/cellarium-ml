@@ -247,6 +247,6 @@ class CellariumModule(pl.LightningModule):
         """
         Calls the ``on_batch_end`` method on the module.
         """
-        on_batch_end = getattr(self.module, "on_batch_end", None)
+        on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
             on_batch_end(self.trainer)

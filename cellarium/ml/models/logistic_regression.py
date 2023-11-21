@@ -10,14 +10,14 @@ import pyro
 import pyro.distributions as dist
 import torch
 
-from cellarium.ml.module.base_module import BaseModule
+from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class LogisticRegression(BaseModule):
+class LogisticRegression(CellariumModel):
     """
     Logistic regression model.
 

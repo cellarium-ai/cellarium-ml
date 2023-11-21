@@ -157,7 +157,6 @@ def incremental_pca(args: ArgsType = None) -> None:
             --trainer.accelerator gpu \
             --trainer.devices 1 \
             --trainer.default_root_dir runs/ipca \
-            --trainer.callbacks cellarium.ml.callbacks.ModuleCheckpoint
 
     **References:**
 
@@ -186,7 +185,7 @@ def incremental_pca(args: ArgsType = None) -> None:
 @register_model
 def logistic_regression(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.LogisticRegression` model.
+    CLI to run the :class:`cellarium.ml.models.LogisticRegression` model.
 
     Example run::
 
@@ -255,7 +254,6 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
             --trainer.accelerator gpu \
             --trainer.devices 1 \
             --trainer.default_root_dir runs/onepass \
-            --trainer.callbacks cellarium.ml.callbacks.ModuleCheckpoint
 
     **References:**
 
@@ -357,7 +355,6 @@ def tdigest(args: ArgsType = None) -> None:
             --trainer.accelerator cpu \
             --trainer.devices 1 \
             --trainer.default_root_dir runs/tdigest \
-            --trainer.callbacks cellarium.ml.callbacks.ModuleCheckpoint
 
     **References:**
 

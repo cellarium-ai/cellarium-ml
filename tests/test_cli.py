@@ -212,7 +212,7 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "module": "cellarium.ml.module.LogisticRegression",
+                "model": "cellarium.ml.models.LogisticRegression",
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
