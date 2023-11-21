@@ -7,8 +7,9 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from .distributed_anndata import ConvertType, DistributedAnnDataCollection
-from .util import get_rank_and_num_replicas, get_worker_info
+from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
+from cellarium.ml.utilities.data import get_rank_and_num_replicas, get_worker_info
+from cellarium.ml.utilities.types import ConvertType
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
@@ -29,9 +30,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     Example of ``convert``::
 
         {
-            "X": cellarium.ml.data.util.densify,
-            "obs_names": cellarium.ml.data.util.pandas_to_numpy,
-            "var_names": cellarium.ml.data.util.pandas_to_numpy,
+            "X": cellarium.ml.utilities.data.densify,
+            "obs_names": cellarium.ml.utilities.data.pandas_to_numpy,
+            "var_names": cellarium.ml.utilities.data.pandas_to_numpy,
         }
 
     Args:
