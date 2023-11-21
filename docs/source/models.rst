@@ -1,7 +1,7 @@
-Data
-====
+Models
+======
 
-.. automodule:: cellarium.ml.data
+.. automodule:: cellarium.ml.models
    :members:
    :special-members:
    :show-inheritance:

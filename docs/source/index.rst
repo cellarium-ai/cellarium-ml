@@ -12,12 +12,13 @@ Table of Contents
 
    callbacks
    cli
+   core
    data
-   module
-   optim
-   trainer
+   lr_schedulers
+   models
    transforms
-   utils
+   preprocessing
+   utilities
 
 Indices and tables
 ==================

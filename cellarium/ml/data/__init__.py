@@ -1,21 +1,21 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .dadc_datamodule import DistributedAnnDataCollectionDataModule
-from .dadc_dataset import IterableDistributedAnnDataCollectionDataset
-from .distributed_anndata import (
+from cellarium.ml.data.dadc_dataset import IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.data.distributed_anndata import (
     DistributedAnnDataCollection,
     DistributedAnnDataCollectionView,
+    LazyAnnData,
 )
-from .read import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url
-from .schema import AnnDataSchema
+from cellarium.ml.data.fileio import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url
+from cellarium.ml.data.schema import AnnDataSchema
 
 __all__ = [
     "AnnDataSchema",
     "DistributedAnnDataCollection",
     "DistributedAnnDataCollectionView",
-    "DistributedAnnDataCollectionDataModule",
     "IterableDistributedAnnDataCollectionDataset",
+    "LazyAnnData",
     "read_h5ad_file",
     "read_h5ad_gcs",
     "read_h5ad_local",
