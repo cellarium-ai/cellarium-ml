@@ -7,10 +7,8 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from cellarium.ml.utilities.data import AnnDataField
-
-from .distributed_anndata import DistributedAnnDataCollection
-from .util import get_rank_and_num_replicas, get_worker_info
+from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
+from cellarium.ml.utilities.data import AnnDataField, get_rank_and_num_replicas, get_worker_info
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
