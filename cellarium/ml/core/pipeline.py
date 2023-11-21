@@ -1,9 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 import torch
 
 from cellarium.ml.models import PredictMixin
