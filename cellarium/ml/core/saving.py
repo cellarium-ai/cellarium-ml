@@ -1,19 +1,23 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any
+from __future__ import annotations
 
-import lightning.pytorch as pl
+from typing import TYPE_CHECKING, Any
+
 from jsonargparse import ArgumentParser, Namespace
 from lightning.pytorch.utilities.rank_zero import rank_zero_warn
 
+if TYPE_CHECKING:
+    from cellarium.ml.core.module import CellariumModule
+
 
 def _load_state(
-    cls: type[pl.LightningModule],
+    cls: type[CellariumModule],
     checkpoint: dict[str, Any],
     strict: bool | None = None,
     **cls_kwargs_new: Any,
-) -> pl.LightningModule:
+) -> CellariumModule:
     """
     Re-implementation of :func:`lightning.pytorch.core.saving._load_state` that instantiates the model
     using the configuration saved in the checkpoint.

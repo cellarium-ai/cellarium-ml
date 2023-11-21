@@ -1,7 +1,7 @@
-Data
+Core
 ====
 
-.. automodule:: cellarium.ml.data
+.. automodule:: cellarium.ml.core
    :members:
    :special-members:
    :show-inheritance:

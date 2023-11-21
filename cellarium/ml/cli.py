@@ -13,8 +13,7 @@ from typing import Any
 from jsonargparse import Namespace
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 
-from cellarium.ml.data import DistributedAnnDataCollectionDataModule
-from cellarium.ml.train.training_plan import TrainingPlan
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 
 REGISTERED_MODELS = {}
 
@@ -35,8 +34,8 @@ def lightning_cli_factory(
     Example::
 
         cli = lightning_cli_factory(
-            "cellarium.ml.module.IncrementalPCAFromCLI",
-            link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
+            "cellarium.ml.models.IncrementalPCAFromCLI",
+            link_arguments=[("data.n_vars", "model.model.init_args.g_genes")],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
                 "strategy": {
@@ -48,7 +47,7 @@ def lightning_cli_factory(
 
     Args:
         model_class_path:
-            A string representation of the model class path (e.g., ``"cellarium.ml.module.IncrementalPCAFromCLI"``).
+            A string representation of the model class path (e.g., ``"cellarium.ml.models.IncrementalPCAFromCLI"``).
         link_arguments:
             A list of tuples of the form ``(source, target)`` where ``source`` is linked to ``target``.
         trainer_defaults:
@@ -61,8 +60,8 @@ def lightning_cli_factory(
     class NewLightningCLI(LightningCLI):
         def __init__(self, args: ArgsType = None) -> None:
             super().__init__(
-                TrainingPlan,
-                DistributedAnnDataCollectionDataModule,
+                CellariumModule,
+                CellariumAnnDataDataModule,
                 trainer_defaults=trainer_defaults,
                 args=args,
             )
@@ -81,7 +80,7 @@ def lightning_cli_factory(
                     for attr in source_attrs:
                         value = getattr(value, attr)
 
-                    # e.g., target == "model.module.init_args.feature_schema"
+                    # e.g., target == "model.model.init_args.feature_schema"
                     target_keys = target.split(".")
                     # note that config is dict-like, so assign the value to the last key
                     config = self.config[self.subcommand]
@@ -96,7 +95,7 @@ def lightning_cli_factory(
             if link_arguments is not None:
                 for arg1, arg2 in link_arguments:
                     parser.link_arguments(arg1, arg2, apply_on="instantiate")
-            parser.set_defaults({"model.module": model_class_path})
+            parser.set_defaults({"model.model": model_class_path})
 
     return NewLightningCLI
 
@@ -104,7 +103,7 @@ def lightning_cli_factory(
 @register_model
 def geneformer(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.GeneformerFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.GeneformerFromCLI` model.
 
     This example shows how to fit feature count data to the Geneformer model [1].
 
@@ -130,8 +129,8 @@ def geneformer(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.GeneformerFromCLI",
-        link_arguments=[("data.var_names", "model.module.init_args.feature_schema")],
+        "cellarium.ml.models.GeneformerFromCLI",
+        link_arguments=[("data.var_names", "model.model.init_args.feature_schema")],
     )
     cli(args=args)
 
@@ -139,7 +138,7 @@ def geneformer(args: ArgsType = None) -> None:
 @register_model
 def incremental_pca(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.IncrementalPCAFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.IncrementalPCAFromCLI` model.
 
     This example shows how to fit feature count data to incremental PCA
     model [1, 2].
@@ -147,7 +146,7 @@ def incremental_pca(args: ArgsType = None) -> None:
     Example run::
 
         cellarium-ml incremental_pca fit \
-            --model.module.init_args.k_components 50 \
+            --model.model.init_args.k_components 50 \
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
             --data.max_cache_size 2 \
@@ -169,8 +168,8 @@ def incremental_pca(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.IncrementalPCAFromCLI",
-        link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
+        "cellarium.ml.models.IncrementalPCAFromCLI",
+        link_arguments=[("data.n_vars", "model.model.init_args.g_genes")],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -185,7 +184,7 @@ def incremental_pca(args: ArgsType = None) -> None:
 @register_model
 def onepass_mean_var_std(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.OnePassMeanVarStdFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.OnePassMeanVarStdFromCLI` model.
 
     This example shows how to calculate mean, variance, and standard deviation of log normalized
     feature count data in one pass [1].
@@ -212,8 +211,8 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.OnePassMeanVarStdFromCLI",
-        link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
+        "cellarium.ml.models.OnePassMeanVarStdFromCLI",
+        link_arguments=[("data.n_vars", "model.model.init_args.g_genes")],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -228,7 +227,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
 @register_model
 def probabilistic_pca(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.ProbabilisticPCAFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.ProbabilisticPCAFromCLI` model.
 
     This example shows how to fit feature count data to probabilistic PCA
     model [1].
@@ -248,7 +247,7 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     Example run::
 
         cellarium-ml probabilistic_pca fit \
-            --model.module.init_args.mean_var_std_ckpt_path \
+            --model.model.init_args.mean_var_std_ckpt_path \
             "runs/onepass/lightning_logs/version_0/checkpoints/module_checkpoint.pt" \
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
@@ -275,10 +274,10 @@ def probabilistic_pca(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.ProbabilisticPCAFromCLI",
+        "cellarium.ml.models.ProbabilisticPCAFromCLI",
         link_arguments=[
-            ("data.n_obs", "model.module.init_args.n_cells"),
-            ("data.n_vars", "model.module.init_args.g_genes"),
+            ("data.n_obs", "model.model.init_args.n_cells"),
+            ("data.n_vars", "model.model.init_args.g_genes"),
         ],
     )
     cli(args=args)
@@ -287,7 +286,7 @@ def probabilistic_pca(args: ArgsType = None) -> None:
 @register_model
 def tdigest(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.module.TDigestFromCLI` model.
+    CLI to run the :class:`cellarium.ml.models.TDigestFromCLI` model.
 
     This example shows how to calculate non-zero median of normalized feature count
     data in one pass [1].
@@ -314,8 +313,8 @@ def tdigest(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.TDigestFromCLI",
-        link_arguments=[("data.n_vars", "model.module.init_args.g_genes")],
+        "cellarium.ml.models.TDigestFromCLI",
+        link_arguments=[("data.n_vars", "model.model.init_args.g_genes")],
         trainer_defaults={
             "max_epochs": 1,  # one pass
         },
