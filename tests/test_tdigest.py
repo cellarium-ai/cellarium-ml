@@ -18,7 +18,7 @@ from cellarium.ml.data import (
 )
 from cellarium.ml.models import TDigest, TDigestFromCLI
 from cellarium.ml.transforms import NormalizeTotal
-from cellarium.ml.utilities.data import collate_fn, identity
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
 from tests.common import BoringDataset, requires_crick
 
 
@@ -68,7 +68,12 @@ def test_tdigest_multi_device(
     batch_size = batch_size // devices
 
     # prepare dataloader
-    dataset = IterableDistributedAnnDataCollectionDataset(dadc, {"X": identity}, batch_size=batch_size, shuffle=shuffle)
+    dataset = IterableDistributedAnnDataCollectionDataset(
+        dadc,
+        batch_keys={"X": AnnDataField("X")},
+        batch_size=batch_size,
+        shuffle=shuffle,
+    )
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,

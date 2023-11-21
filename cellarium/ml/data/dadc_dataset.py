@@ -8,8 +8,7 @@ import torch
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
-from cellarium.ml.utilities.data import get_rank_and_num_replicas, get_worker_info
-from cellarium.ml.utilities.types import ConvertType
+from cellarium.ml.utilities.data import AnnDataField, get_rank_and_num_replicas, get_worker_info
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
@@ -27,20 +26,39 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     cells coming from the same tissue or experiment), then this assumption is violated. It is
     the user's responsibility to prepare appropriately shuffled data shards.
 
-    Example of ``convert``::
+    Example::
 
-        {
-            "X": cellarium.ml.utilities.data.densify,
-            "obs_names": cellarium.ml.utilities.data.pandas_to_numpy,
-            "var_names": cellarium.ml.utilities.data.pandas_to_numpy,
-        }
+        >>> from cellarium.ml.data import (
+        ...     DistributedAnnDataCollection,
+        ...     IterableDistributedAnnDataCollectionDataset,
+        ... )
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify
+
+        >>> dadc = DistributedAnnDataCollection(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10_000,
+        ...     max_cache_size=2)
+
+        >>> dataset = IterableDistributedAnnDataCollectionDataset(
+        ...     dadc,
+        ...     batch_keys={
+        ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
+        ...         "feature_g": AnnDataField(attr="var_names"),
+        ...     },
+        ...     batch_size=5000,
+        ...     shuffle=True,
+        ...     seed=0,
+        ...     drop_last=True,
+        ... )
 
     Args:
         dadc:
             DistributedAnnDataCollection from which to load the data.
-        convert:
+        batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
-            in the ``__getitem__`` method and how to convert them.
+            in the batch data and how to convert them. Keys must correspond to
+            the input keys of the transforms or the model. Values must be instances of
+            :class:`cellarium.ml.utilities.data.AnnDataField`.
         batch_size:
             How many samples per batch to load.
         shuffle:
@@ -59,7 +77,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection,
-        convert: ConvertType,
+        batch_keys: dict[str, AnnDataField],
         batch_size: int = 1,
         shuffle: bool = False,
         seed: int = 0,
@@ -67,7 +85,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
-        self.dadc.convert = convert
+        self.batch_keys = batch_keys
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
@@ -103,11 +121,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
 
         data = {}
-        for attr, fn_or_dict in self.dadc.convert.items():
-            if callable(fn_or_dict):
-                data[attr] = getattr(self.dadc[idx], attr)
-            elif isinstance(fn_or_dict, dict):
-                data |= {key: getattr(self.dadc[idx], attr)[key] for key in fn_or_dict}
+        for key, field in self.batch_keys.items():
+            data[key] = field(self.dadc)[idx]
 
         # for testing purposes
         if self.test_mode:
