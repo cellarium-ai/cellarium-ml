@@ -154,7 +154,6 @@ CONFIGS = [
                     },
                     "feature_g": {
                         "attr": "var_names",
-                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
                     },
                 },
                 "batch_size": "50",
@@ -187,7 +186,6 @@ CONFIGS = [
                     },
                     "feature_g": {
                         "attr": "var_names",
-                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
                     },
                 },
                 "batch_size": "50",
@@ -220,11 +218,9 @@ CONFIGS = [
                     },
                     "feature_g": {
                         "attr": "var_names",
-                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
                     },
                     "obs_names": {
                         "attr": "obs_names",
-                        "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
                     },
                 },
                 "batch_size": "50",
@@ -258,7 +254,6 @@ CONFIGS = [
                         },
                         "feature_g": {
                             "attr": "var_names",
-                            "convert_fn": "cellarium.ml.utilities.data.pandas_to_numpy",
                         },
                     },
                     "batch_size": "50",

@@ -18,12 +18,9 @@ from cellarium.ml.utilities.types import BatchDict
 class Geneformer(CellariumModel, PredictMixin):
     """
     Geneformer model.
-
     **References:**
-
     1. `Transfer learning enables predictions in network biology (Theodoris et al.)
        <https://www.nature.com/articles/s41586-023-06139-9>`_.
-
     Args:
         feature_schema:
             The variable names schema for the input data validation.
@@ -125,7 +122,6 @@ class Geneformer(CellariumModel, PredictMixin):
                 Gene counts matrix.
             feature_g:
                 The list of the variable names in the input data.
-
         Returns:
             An empty dictionary.
         """
@@ -173,7 +169,6 @@ class Geneformer(CellariumModel, PredictMixin):
                 Gene counts matrix.
             feature_g:
                 The list of the variable names in the input data.
-
         Returns:
             An empty dictionary.
         """

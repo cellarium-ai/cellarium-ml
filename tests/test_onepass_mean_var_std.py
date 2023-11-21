@@ -16,7 +16,7 @@ from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.models import OnePassMeanVarStd
 from cellarium.ml.transforms import Log1p, NormalizeTotal
-from cellarium.ml.utilities.data import AnnDataField, collate_fn, pandas_to_numpy
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
 from tests.common import BoringDataset
 
 
@@ -62,7 +62,7 @@ def test_onepass_mean_var_std_multi_device(
         dadc,
         batch_keys={
             "x_ng": AnnDataField("X"),
-            "feature_g": AnnDataField("var_names", convert_fn=pandas_to_numpy),
+            "feature_g": AnnDataField("var_names"),
         },
         batch_size=batch_size,
         shuffle=shuffle,

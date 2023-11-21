@@ -274,7 +274,7 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.ProbabilisticPCA",
         link_arguments=[
-            ("data.n_obs", "model.model.init_args.n_cells"),
+            ("data.n_obs", "model.model.init_args.n_obs"),
             ("data.var_names", "model.model.init_args.feature_schema"),
         ],
     )

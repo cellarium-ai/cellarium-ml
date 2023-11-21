@@ -18,7 +18,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
     Example::
 
         >>> from cellarium.ml import CellariumAnnDataDataModule
-        >>> from cellarium.ml.utilities.data import AnnDataField, densify, pandas_to_numpy
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify
 
         >>> dm = CellariumAnnDataDataModule(
         ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
@@ -26,7 +26,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ...     max_cache_size=2,
         ...     batch_keys={
         ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
-        ...         "feature_g": AnnDataField(attr="var_names", convert_fn=pandas_to_numpy),
+        ...         "feature_g": AnnDataField(attr="var_names"),
         ...     },
         ...     batch_size=5000,
         ...     shuffle=True,

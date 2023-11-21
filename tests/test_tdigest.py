@@ -18,7 +18,7 @@ from cellarium.ml.data import (
 )
 from cellarium.ml.models import TDigest
 from cellarium.ml.transforms import NormalizeTotal
-from cellarium.ml.utilities.data import AnnDataField, collate_fn, pandas_to_numpy
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
 from tests.common import BoringDataset, requires_crick
 
 
@@ -72,7 +72,7 @@ def test_tdigest_multi_device(
         dadc,
         batch_keys={
             "x_ng": AnnDataField("X"),
-            "feature_g": AnnDataField("var_names", convert_fn=pandas_to_numpy),
+            "feature_g": AnnDataField("var_names"),
         },
         batch_size=batch_size,
         shuffle=shuffle,
