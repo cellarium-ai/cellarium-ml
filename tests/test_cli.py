@@ -237,6 +237,42 @@ CONFIGS = [
             "return_predictions": "false",
         },
     },
+    {
+        "model_name": "logistic_regression",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": "cellarium.ml.models.LogisticRegression",
+            },
+            "data": {
+                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                "shard_size": "100",
+                "max_cache_size": "2",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "feature_g": {
+                        "attr": "var_names",
+                    },
+                    "y_n": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                },
+                "batch_size": "50",
+                "shuffle": "true",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "4",
+            },
+        },
+    },
     pytest.param(
         {
             "model_name": "tdigest",

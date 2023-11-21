@@ -11,7 +11,7 @@ import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
 
-from cellarium.ml.models.model import CellariumPyroModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -19,7 +19,7 @@ from cellarium.ml.utilities.testing import (
 from cellarium.ml.utilities.types import BatchDict
 
 
-class ProbabilisticPCA(CellariumPyroModel, PredictMixin):
+class ProbabilisticPCA(CellariumModel, PredictMixin):
     """
     Probabilistic PCA implemented in Pyro.
 

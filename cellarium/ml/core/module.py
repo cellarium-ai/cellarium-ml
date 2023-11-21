@@ -12,7 +12,7 @@ import lightning.pytorch as pl
 import torch
 from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
-from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
+from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
 from typing_extensions import override
 
 from cellarium.ml.core.pipeline import CellariumPipeline
@@ -274,3 +274,11 @@ class CellariumModule(pl.LightningModule):
         on_epoch_end = getattr(self.model, "on_epoch_end", None)
         if callable(on_epoch_end):
             on_epoch_end(self.trainer)
+
+    def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
+        """
+        Calls the ``on_batch_end`` method on the module.
+        """
+        on_batch_end = getattr(self.model, "on_batch_end", None)
+        if callable(on_batch_end):
+            on_batch_end(self.trainer)

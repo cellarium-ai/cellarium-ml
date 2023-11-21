@@ -154,7 +154,7 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
     for key in keys:
         if key == "obs_names":
             collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
-        elif key == "feature_g":
+        elif key in ["var_names", "feature_g"]:
             # Check that all var_names are the same
             if len(batch) > 1:
                 assert all(
@@ -180,22 +180,9 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
     return x.toarray()
 
 
-def identity(x: np.ndarray) -> np.ndarray:
+def categories_to_codes(x: pd.Series) -> np.ndarray:
     """
-    Identity function.
-
-    Args:
-        x: Input array.
-
-    Returns:
-        Input array.
-    """
-    return x
-
-
-def pandas_to_numpy(x: pd.Index | pd.Series | pd.DataFrame) -> np.ndarray:
-    """
-    Convert a pandas Index/Series/DataFrame object to a numpy array.
+    Convert a pandas Series of categorical data to a numpy array of codes.
     Returned array is always a copy.
 
     Args:
@@ -204,4 +191,4 @@ def pandas_to_numpy(x: pd.Index | pd.Series | pd.DataFrame) -> np.ndarray:
     Returns:
         Numpy array.
     """
-    return x.to_numpy(copy=True)
+    return np.asarray(x.cat.codes)
