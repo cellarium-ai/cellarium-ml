@@ -25,7 +25,7 @@ def register_model(model: Callable[[ArgsType], None]):
 
 def lightning_cli_factory(
     model_class_path: str,
-    link_arguments: list[tuple[str, str, Callable | None]] | None = None,
+    link_arguments: list[tuple[str, str, Callable[[Any], object] | None]] | None = None,
     trainer_defaults: dict[str, Any] | None = None,
 ) -> type[LightningCLI]:
     """
@@ -34,8 +34,8 @@ def lightning_cli_factory(
     Example::
 
         cli = lightning_cli_factory(
-            "cellarium.ml.module.IncrementalPCAFromCLI",
-            link_arguments=[("data.n_vars", "model.module.init_args.g_genes", None)],
+            "cellarium.ml.models.IncrementalPCAFromCLI",
+            link_arguments=[("data.n_vars", "model.model.init_args.g_genes", None)],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
                 "strategy": {
@@ -97,7 +97,7 @@ def lightning_cli_factory(
             if link_arguments is not None:
                 for arg1, arg2, compute_fn in link_arguments:
                     parser.link_arguments(arg1, arg2, compute_fn=compute_fn, apply_on="instantiate")
-            parser.set_defaults({"model.module": model_class_path})
+            parser.set_defaults({"model.model": model_class_path})
 
     return NewLightningCLI
 
@@ -131,8 +131,8 @@ def geneformer(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.GeneformerFromCLI",
-        link_arguments=[("data.var_names", "model.module.init_args.feature_schema", None)],
+        "cellarium.ml.models.GeneformerFromCLI",
+        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
     )
     cli(args=args)
 
@@ -170,8 +170,8 @@ def incremental_pca(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.IncrementalPCAFromCLI",
-        link_arguments=[("data.n_vars", "model.module.init_args.g_genes", None)],
+        "cellarium.ml.models.IncrementalPCAFromCLI",
+        link_arguments=[("data.n_vars", "model.model.init_args.g_genes", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -195,11 +195,11 @@ def logistic_regression(args: ArgsType = None) -> None:
             --data.shard_size 100 \
             --data.max_cache_size 2 \
             --data.batch_keys.x_ng.attr X \
-            --data.batch_keys.x_ng.convert_fn cellarium.ml.data.util.densify \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
             --data.batch_keys.feature_g.attr var_names \
             --data.batch_keys.y_n.attr obs \
             --data.batch_keys.y_n.key cell_type \
-            --data.batch_keys.y_n.convert_fn cellarium.ml.data.util.categories_to_codes \
+            --data.batch_keys.y_n.convert_fn cellarium.ml.utilities.data.categories_to_codes \
             --data.batch_size 100 \
             --data.num_workers 4 \
             --trainer.accelerator gpu \
@@ -210,7 +210,15 @@ def logistic_regression(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
 
-    def get_c_categories(data: DistributedAnnDataCollectionDataModule) -> int:
+    def get_c_categories(data: CellariumAnnDataDataModule) -> int:
+        """
+        Get the number of categories in the target variable.
+
+        E.g. if the target variable is ``obs["cell_type"]`` then this function
+        returns the number of categories in ``obs["cell_type"]``::
+
+            >>> len(data.dadc[0].obs["cell_type"].cat.categories)
+        """
         field = data.batch_keys["y_n"]
         value = getattr(data.dadc[0], field.attr)
         if field.key is not None:
@@ -218,11 +226,11 @@ def logistic_regression(args: ArgsType = None) -> None:
         return len(value.cat.categories)
 
     cli = lightning_cli_factory(
-        "cellarium.ml.module.LogisticRegression",
+        "cellarium.ml.models.LogisticRegression",
         link_arguments=[
-            ("data.n_obs", "model.module.init_args.n_obs", None),
-            ("data.var_names", "model.module.init_args.feature_schema", None),
-            ("data", "model.module.init_args.c_categories", get_c_categories),
+            ("data.n_obs", "model.model.init_args.n_obs", None),
+            ("data.var_names", "model.model.init_args.feature_schema", None),
+            ("data", "model.model.init_args.c_categories", get_c_categories),
         ],
     )
     cli(args=args)
@@ -258,8 +266,8 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.OnePassMeanVarStdFromCLI",
-        link_arguments=[("data.n_vars", "model.module.init_args.g_genes", None)],
+        "cellarium.ml.models.OnePassMeanVarStdFromCLI",
+        link_arguments=[("data.n_vars", "model.model.init_args.g_genes", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -323,8 +331,8 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.ProbabilisticPCAFromCLI",
         link_arguments=[
-            ("data.n_obs", "model.module.init_args.n_cells", None),
-            ("data.n_vars", "model.module.init_args.g_genes", None),
+            ("data.n_obs", "model.model.init_args.n_cells", None),
+            ("data.n_vars", "model.model.init_args.g_genes", None),
         ],
     )
     cli(args=args)
@@ -360,8 +368,8 @@ def tdigest(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.module.TDigestFromCLI",
-        link_arguments=[("data.n_vars", "model.module.init_args.g_genes", None)],
+        "cellarium.ml.models.TDigestFromCLI",
+        link_arguments=[("data.n_vars", "model.model.init_args.g_genes", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
         },

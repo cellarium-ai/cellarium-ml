@@ -221,7 +221,7 @@ CONFIGS = [
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
-                        "convert_fn": "cellarium.ml.data.util.densify",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
                     "feature_g": {
                         "attr": "var_names",
@@ -229,7 +229,7 @@ CONFIGS = [
                     "y_n": {
                         "attr": "obs",
                         "key": "cell_type",
-                        "convert_fn": "cellarium.ml.data.util.categories_to_codes",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
                     },
                 },
                 "batch_size": "50",
