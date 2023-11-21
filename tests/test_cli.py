@@ -32,9 +32,12 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
-                    "var_names": "cellarium.ml.utilities.data.pandas_to_numpy",
+                "batch_keys": {
+                    "X": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names": {"attr": "var_names"},
                 },
                 "batch_size": "5",
                 "num_workers": "1",
@@ -66,10 +69,13 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
-                    "var_names": "cellarium.ml.utilities.data.pandas_to_numpy",
-                    "obs_names": "cellarium.ml.utilities.data.pandas_to_numpy",
+                "batch_keys": {
+                    "X": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names": {"attr": "var_names"},
+                    "obs_names": {"attr": "obs_names"},
                 },
                 "batch_size": "5",
                 "num_workers": "1",
@@ -94,8 +100,11 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
+                "batch_keys": {
+                    "X": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
                 },
                 "batch_size": "50",
                 "shuffle": "true",
@@ -119,8 +128,11 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
+                "batch_keys": {
+                    "X": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -145,8 +157,11 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
+                "batch_keys": {
+                    "X": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -171,9 +186,12 @@ CONFIGS = [
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                 "shard_size": "100",
                 "max_cache_size": "2",
-                "convert": {
-                    "X": "cellarium.ml.utilities.data.densify",
-                    "obs_names": "cellarium.ml.utilities.data.pandas_to_numpy",
+                "batch_keys": {
+                    "X": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "obs_names": {"attr": "obs_names"},
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -199,8 +217,11 @@ CONFIGS = [
                     "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
                     "shard_size": "100",
                     "max_cache_size": "2",
-                    "convert": {
-                        "X": "cellarium.ml.utilities.data.densify",
+                    "batch_keys": {
+                        "X": {
+                            "attr": "X",
+                            "convert_fn": "cellarium.ml.utilities.data.densify",
+                        },
                     },
                     "batch_size": "50",
                     "num_workers": "2",

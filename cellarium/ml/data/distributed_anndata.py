@@ -13,13 +13,13 @@ from anndata._core.index import Index, _normalize_indices
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
     AnnCollectionView,
+    ConvertType,
 )
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
 from cellarium.ml.data.fileio import read_h5ad_file
 from cellarium.ml.data.schema import AnnDataSchema
-from cellarium.ml.utilities.types import ConvertType
 
 
 class getattr_mode:

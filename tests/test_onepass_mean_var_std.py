@@ -16,7 +16,7 @@ from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.models import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
 from cellarium.ml.transforms import Log1p, NormalizeTotal
-from cellarium.ml.utilities.data import collate_fn, identity
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
 from tests.common import BoringDataset
 
 
@@ -58,7 +58,12 @@ def test_onepass_mean_var_std_multi_device(
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
-    dataset = IterableDistributedAnnDataCollectionDataset(dadc, {"X": identity}, batch_size=batch_size, shuffle=shuffle)
+    dataset = IterableDistributedAnnDataCollectionDataset(
+        dadc,
+        batch_keys={"X": AnnDataField("X")},
+        batch_size=batch_size,
+        shuffle=shuffle,
+    )
     data_loader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
