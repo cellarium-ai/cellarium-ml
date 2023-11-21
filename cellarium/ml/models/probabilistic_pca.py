@@ -10,10 +10,10 @@ import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
 
-from cellarium.ml.models.model import CellariumPyroModel
+from cellarium.ml.models.model import CellariumModel
 
 
-class ProbabilisticPCA(CellariumPyroModel):
+class ProbabilisticPCA(CellariumModel):
     """
     Probabilistic PCA implemented in Pyro.
 
@@ -65,7 +65,7 @@ class ProbabilisticPCA(CellariumPyroModel):
         transform: torch.nn.Module | None = None,
         elbo: pyro.infer.ELBO | None = None,
     ):
-        super().__init__(type(self).__name__)
+        super().__init__()
 
         self.n_cells = n_cells
         self.g_genes = g_genes

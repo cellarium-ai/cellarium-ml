@@ -38,6 +38,29 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         >>> for batch in dm.train_dataloader():
         ...     print(batch.keys())  # x_ng, feature_g
 
+    Example::
+
+        >>> from cellarium.ml import CellariumAnnDataDataModule
+        >>> from cellarium.ml.utilities.data import AnnDataField, densify
+
+        >>> dm = CellariumAnnDataDataModule(
+        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...     shard_size=10_000,
+        ...     max_cache_size=2,
+        ...     batch_keys={
+        ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
+        ...         "feature_g": AnnDataField(attr="var_names"),
+        ...     },
+        ...     batch_size=5000,
+        ...     shuffle=True,
+        ...     seed=0,
+        ...     drop_last=True,
+        ...     num_workers=4,
+        ... )
+        >>> dm.setup()
+        >>> for batch in dm.train_dataloader():
+        ...     print(batch.keys())  # x_ng, feature_g
+
     Args:
         filenames:
             Names of anndata files.
