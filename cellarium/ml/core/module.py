@@ -221,7 +221,8 @@ class CellariumModule(pl.LightningModule):
             dataset = dataloader.dataset
             set_epoch = getattr(dataset, "set_epoch", None)
             if callable(set_epoch):
-                set_epoch(self.current_epoch)
+                set_epoch(self.trainer.fit_loop.epoch_progress.current.processed)
+                # set_epoch(self.current_epoch)
 
     def on_train_start(self) -> None:
         """
@@ -242,6 +243,17 @@ class CellariumModule(pl.LightningModule):
         on_epoch_end = getattr(self.model, "on_epoch_end", None)
         if callable(on_epoch_end):
             on_epoch_end(self.trainer)
+        # dataloader is wrapped in a combined loader and can be accessed via
+        # flattened property which returns a list of dataloaders
+        # https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.combined_loader.html
+        combined_loader = self.trainer.fit_loop._combined_loader
+        assert combined_loader is not None
+        dataloaders = combined_loader.flattened
+        for dataloader in dataloaders:
+            dataset = dataloader.dataset
+            set_batch_idx = getattr(dataset, "set_batch_idx", None)
+            if callable(set_batch_idx):
+                set_batch_idx(0)
 
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         """

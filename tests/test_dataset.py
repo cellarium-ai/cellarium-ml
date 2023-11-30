@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
@@ -11,7 +12,7 @@ import pytest
 import torch
 from anndata import AnnData
 
-from cellarium.ml import CellariumModule
+from cellarium.ml import CellariumModule, CellariumAnnDataDataModule
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
@@ -48,6 +49,12 @@ class BoringModel(CellariumModel):
             for key, value in batch.items():
                 batch[key] = torch.cat(GatherLayer.apply(value), dim=0)
         self.iter_data.append(batch)
+
+    def get_extra_state(self) -> dict[str, Any]:
+        return {"iter_data": self.iter_data}
+
+    def set_extra_state(self, state: dict[str, Any]) -> None:
+        self.iter_data = state["iter_data"]
 
 
 @pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])  # limits
@@ -192,7 +199,7 @@ def test_iterable_dataset_set_epoch_multi_device(
         shuffle=True,
         test_mode=True,
     )
-    data_loader = torch.utils.data.DataLoader(
+    data_loader = DataLoader(
         dataset,
         num_workers=num_workers,
         collate_fn=collate_fn,
@@ -221,3 +228,95 @@ def test_iterable_dataset_set_epoch_multi_device(
     expected_epochs = set(range(epochs))
 
     assert set(expected_epochs) == set(actual_epochs)
+
+
+@pytest.mark.parametrize(
+    "num_workers,persistent_workers",
+    [(0, False), (1, False), (1, True), (2, False), (2, True)],
+    ids=[
+        "zero workers",
+        "one not persistent worker",
+        "one persistent worker",
+        "two not persistent workers",
+        "two persistent workers",
+    ],
+)
+@pytest.mark.parametrize("epochs", [0, 1], ids=["zero epochs", "one epoch"])
+@pytest.mark.parametrize("every_n_train_steps_decr", [0, 1, 2])
+def test_resume_iterable_dataset_multi_device(
+    tmp_path: Path,
+    num_workers: int,
+    persistent_workers: bool,
+    epochs: int,
+    every_n_train_steps_decr: int,
+):
+    # datamodule
+    n, g = 3, 1
+    X = np.arange(n).reshape(n, g)
+    adata = AnnData(X, dtype=X.dtype)
+    adata.write(tmp_path / "adata.h5ad")
+    filenames = str(tmp_path / "adata.h5ad")
+    datamodule = CellariumAnnDataDataModule(
+        filenames=filenames,
+        shard_size=n,
+        batch_keys={"X": AnnDataField("X")},
+        batch_size=1,
+        shuffle=False,
+        test_mode=True,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+    )
+
+    # module
+    model = BoringModel()
+    config = {"model": {"model": "BoringModel"}}
+    module = CellariumModule(model, config=config)
+
+    # initial fit
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
+    steps_per_epoch = math.ceil(n / devices)
+    every_n_train_steps = steps_per_epoch - every_n_train_steps_decr
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        every_n_train_steps=every_n_train_steps,
+    )
+    trainer = pl.Trainer(
+        accelerator="cpu",
+        devices=devices,
+        max_epochs=1,
+        # max_steps=3,
+        strategy="ddp",
+        callbacks=[checkpoint_callback],
+        default_root_dir=tmp_path,
+    )
+    trainer.fit(module, datamodule)
+
+    # run tests only for rank 0
+    if trainer.global_rank != 0:
+        return
+
+    # resume fit
+    trainer = pl.Trainer(
+        accelerator="cpu",
+        devices=devices,
+        max_epochs=1,
+        strategy="ddp",
+        default_root_dir=tmp_path,
+    )
+    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={every_n_train_steps}.ckpt"
+    trainer.fit(module, datamodule, ckpt_path=ckpt_path)
+
+    # run tests only for rank 0
+    if trainer.global_rank != 0:
+        return
+
+    ckpt_path = tmp_path / "lightning_logs/version_1/checkpoints/epoch=0-step=13.ckpt"
+    assert ckpt_path.is_file()
+    loaded_model: BoringModel = CellariumModule.load_from_checkpoint(ckpt_path).model
+
+    actual_idx = list(int(i) for batch in loaded_model.iter_data for i in batch["X"])
+    actual_epoch = list(int(i) for batch in loaded_model.iter_data for i in batch["epoch"])
+    expected_idx = list(range(n)) * 2
+    expected_epoch = [0] * n + [1] * n
+    assert actual_idx == expected_idx
+    assert actual_epoch == expected_epoch
+    assert False

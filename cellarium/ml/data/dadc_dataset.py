@@ -1,7 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Any
 import math
+from itertools import islice
+from boltons.iterutils import chunked_iter
 
 import numpy as np
 import torch
@@ -9,7 +12,6 @@ from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
 from cellarium.ml.utilities.data import AnnDataField, get_rank_and_num_replicas, get_worker_info
-
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     r"""
@@ -91,6 +93,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.seed = seed
         self.drop_last = drop_last
         self.epoch = 0
+        self.batch_idx = 0
         self.test_mode = test_mode
 
     def __len__(self) -> int:
@@ -113,6 +116,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         use a different random ordering for each epoch.
         """
         self.epoch = epoch
+
+    def set_batch_idx(self, batch_idx: int) -> None:
+        """
+        Sets the batch index for the iterator (within this epoch).
+        """
+        self.batch_idx = batch_idx
 
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
         r"""
@@ -161,15 +170,19 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             batches_per_worker=2
             per_worker=4
 
-        +----------+-------+---------+
-        |          |batch 0| batch 1 |
         +==========+=======+=========+
-        | worker 0 | (0,1) | (2,3)   |
+        |          |batch 0| batch 3 |
         +----------+-------+---------+
-        | worker 1 | (4,5) | (6,7)   |
+        | worker 0 | (0,1) | (6,7)   |
+        +==========+=======+=========+
+        |          |batch 1| batch 4 |
         +----------+-------+---------+
-        | worker 2 | (8,9) | (10,11) |
+        | worker 1 | (2,4) | (8,9)   |
+        +==========+=======+=========+
+        |          |batch 2| batch 5 |
         +----------+-------+---------+
+        | worker 2 | (4,5) | (10,11) |
+        +==========+=======+=========+
 
 
         Example 2::
@@ -183,13 +196,15 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             batches_per_worker=3
             per_worker=6
 
-        +----------+-------+-------+-------+
-        |          |batch 0|batch 1|batch 2|
         +==========+=======+=======+=======+
-        | worker 0 | (0,1) | (2,3) | (4,5) |
+        |          |batch 0|batch 2|batch 4|
         +----------+-------+-------+-------+
-        | worker 1 | (6,7) | (8,9) | (10,) |
+        | worker 0 | (0,1) | (4,5) | (8,9) |
+        +==========+=======+=======+=======+
+        |          |batch 1|batch 3|batch 5|
         +----------+-------+-------+-------+
+        | worker 1 | (2,4) | (6,7) | (10,) |
+        +==========+=======+=======+=======+
 
 
         Example 3::
@@ -203,13 +218,15 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             batches_per_worker=2
             per_worker=6
 
-        +----------+---------+---------+
-        |          | batch 0 | batch 1 |
         +==========+=========+=========+
-        | worker 0 | (0,1,2) | (3,4,5) |
+        |          | batch 0 | batch 2 |
         +----------+---------+---------+
-        | worker 1 | (6,7)   |         |
+        | worker 0 | (0,1,2) | (6,7)   |
+        +==========+=========+=========+
+        |          | batch 1 | batch 3 |
         +----------+---------+---------+
+        | worker 1 | (3,4,5) |         |
+        +==========+=========+=========+
 
 
         Example 4::
@@ -241,7 +258,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +----------+-------+-------+-------+
         |          |batch 0|batch 1|batch 2|
         +==========+=======+=======+=======+
-        | worker 0 | (0,1) | (2,3) | (4,)  |
+        | worker 0 | (0,1) | (4,5) | (8,)  |
         +----------+-------+-------+-------+
 
         *Replica 2*
@@ -249,7 +266,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +----------+-------+-------+-------+
         |          |batch 0|batch 1|batch 2|
         +==========+=======+=======+=======+
-        | worker 0 | (5,6) | (7,8) | (9,)  |
+        | worker 0 | (2,3) | (6,7) | (9,)  |
         +----------+-------+-------+-------+
 
 
@@ -282,7 +299,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +----------+-------+-------+-------+
         |          |batch 0|batch 1|batch 2|
         +==========+=======+=======+=======+
-        | worker 0 | (0,1) | (2,3) | (4,5) |
+        | worker 0 | (0,2) | (4,6) | (8,10)|
         +----------+-------+-------+-------+
 
         *Replica 2*
@@ -290,7 +307,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +----------+-------+-------+--------+
         |          |batch 0|batch 1|batch 2 |
         +==========+=======+=======+========+
-        | worker 0 | (6,7) | (8,9) | (10,0) |
+        | worker 0 | (1,3) | (5,7) | (9,0)  |
         +----------+-------+-------+--------+
         """
         if self.test_mode:
@@ -314,10 +331,6 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         batches_per_worker = math.ceil(batches_per_replica / float(num_workers))
         per_worker = batches_per_worker * self.batch_size
-
-        # split workload
-        iter_start = worker_id * per_worker
-        iter_end = min(iter_start + per_worker, per_replica)
 
         # indices
         if self.shuffle:
@@ -344,9 +357,19 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
-        indices = indices[rank * per_replica : (rank + 1) * per_replica]
+        # WIP
+        indices = indices[rank:total_size:num_replicas]
         assert len(indices) == per_replica
 
-        yield from (self[indices[i : i + self.batch_size]] for i in range(iter_start, iter_end, self.batch_size))
+        batch_idx = self.batch_idx % batches_per_replica
+        indices = indices[batch_idx * self.batch_size :]
+
+        # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
+        for batch_indices in islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers):
+            yield self[batch_indices]
         # Sets epoch for persistent workers
         self.set_epoch(self.epoch + 1)
+        self.batch_idx = 0
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self.batch_idx = state_dict["batch_idx"]

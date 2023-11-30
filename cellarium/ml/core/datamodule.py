@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Any
 from collections.abc import Iterable, Sequence
 
 import lightning.pytorch as pl
@@ -8,7 +9,18 @@ import numpy as np
 import torch
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.utilities.data import AnnDataField, collate_fn
+from cellarium.ml.utilities.data import AnnDataField, collate_fn, get_worker_info
+
+class DataLoader(torch.utils.data.DataLoader):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stepped_batches = 0
+
+    def __iter__(self):
+        base_iter = super().__iter__()
+        for batch in base_iter:
+            self.stepped_batches += 1
+            yield batch
 
 
 class CellariumAnnDataDataModule(pl.LightningDataModule):
@@ -113,6 +125,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             If ``True`` enables tracking of cache and worker informations.
         num_workers:
             How many subprocesses to use for data loading. ``0`` means that the data will be loaded in the main process.
+        persistent_workers:
+            If ``True``, the data loader will not shutdown the worker processes after a dataset has been consumed once.
     """
 
     def __init__(
@@ -137,6 +151,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         test_mode: bool = False,
         # DataLoader args
         num_workers: int = 0,
+        persistent_workers: bool = False,
     ) -> None:
         super().__init__()
         # DistributedAnnDataCollection args
@@ -159,6 +174,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
+        self.persistent_workers = persistent_workers
         # DistributedAnnDataCollection
         obs_columns = [field.obs_column for field in self.batch_keys.values() if field.obs_column is not None]
         self.dadc = DistributedAnnDataCollection(
@@ -205,16 +221,26 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         """Training dataloader."""
-        return torch.utils.data.DataLoader(
+        self.dataloader = DataLoader(
             self.dataset,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
+            persistent_workers=self.persistent_workers,
         )
+        return self.dataloader
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
         """Prediction dataloader."""
-        return torch.utils.data.DataLoader(
+        self.dataloader = DataLoader(
             self.dataset,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
+            persistent_workers=self.persistent_workers,
         )
+        return self.dataloader
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"batch_idx": self.dataloader.stepped_batches + self.dataset.batch_idx}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self.dataset.load_state_dict(state_dict)
