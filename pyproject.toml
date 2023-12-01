@@ -24,6 +24,7 @@ dependencies = [
   "anndata",
   "boltons",
   "braceexpand",
+  "crick",
   "google-cloud-storage",
   "jsonargparse[signatures]",
   "lightning>=2.0.9",
