@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numpy as np
-import pytest
 import torch
 
 
@@ -21,10 +20,3 @@ class BoringDataset(torch.utils.data.Dataset):
         if self.var_names is not None:
             data["var_names"] = self.var_names
         return data
-
-
-try:
-    import crick
-except ImportError:
-    crick = None
-requires_crick = pytest.mark.skipif(crick is None, reason="crick is not available")

@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from cellarium.ml.cli import main
-from tests.common import requires_crick
 
 devices = os.environ.get("TEST_DEVICES", "1")
 
@@ -243,33 +242,30 @@ CONFIGS = [
             },
         },
     },
-    pytest.param(
-        {
-            "model_name": "tdigest",
-            "subcommand": "fit",
-            "fit": {
-                "model": {"model": "cellarium.ml.models.TDigestFromCLI"},
-                "data": {
-                    "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                    "shard_size": "100",
-                    "max_cache_size": "2",
-                    "batch_keys": {
-                        "X": {
-                            "attr": "X",
-                            "convert_fn": "cellarium.ml.utilities.data.densify",
-                        },
+    {
+        "model_name": "tdigest",
+        "subcommand": "fit",
+        "fit": {
+            "model": {"model": "cellarium.ml.models.TDigestFromCLI"},
+            "data": {
+                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                "shard_size": "100",
+                "max_cache_size": "2",
+                "batch_keys": {
+                    "X": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "batch_size": "50",
-                    "num_workers": "2",
                 },
-                "trainer": {
-                    "accelerator": "cpu",
-                    "devices": devices,
-                },
+                "batch_size": "50",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
             },
         },
-        marks=requires_crick,
-    ),
+    },
 ]
 
 
