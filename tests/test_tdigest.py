@@ -3,6 +3,7 @@
 
 import math
 import os
+import shutil
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -155,3 +156,5 @@ def test_load_from_checkpoint_multi_device():
     assert isinstance(loaded_model.transform, NormalizeTotal)
     assert model.transform.target_count == loaded_model.transform.target_count
     np.testing.assert_allclose(model.median_g, loaded_model.median_g)
+
+    shutil.rmtree(tmp_path)
