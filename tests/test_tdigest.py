@@ -19,7 +19,7 @@ from cellarium.ml.data import (
 from cellarium.ml.models import TDigest, TDigestFromCLI
 from cellarium.ml.transforms import NormalizeTotal
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
-from tests.common import BoringDataset, requires_crick
+from tests.common import BoringDataset
 
 
 @pytest.fixture
@@ -48,7 +48,6 @@ def dadc(adata: AnnData, tmp_path: Path):
     )
 
 
-@requires_crick
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [10, 100])
@@ -110,8 +109,10 @@ def test_tdigest_multi_device(
         np.testing.assert_allclose(expected_median, actual_median, rtol=0.01)
 
 
-@requires_crick
-def test_load_from_checkpoint_multi_device(tmp_path: Path):
+def test_load_from_checkpoint_multi_device():
+    # using pytest tmp_path fixture creates a directory per rank
+    # so we need to use a fixed shared directory
+    tmp_path = Path("/tmp/test_load_from_checkpoint_multi_device")
     n, g = 4, 3
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
