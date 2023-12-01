@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import crick
 import lightning.pytorch as pl
 import numpy as np
 import torch
@@ -31,8 +32,6 @@ class TDigest(CellariumModel):
     """
 
     def __init__(self, g_genes: int, transform: torch.nn.Module | None = None) -> None:
-        import crick
-
         super().__init__()
         self.g_genes = g_genes
         self.transform = transform
@@ -61,10 +60,8 @@ class TDigest(CellariumModel):
 
         # save tdigests
         dirpath = self._resolve_ckpt_dir(trainer)
-        torch.save(
-            self.tdigests,
-            os.path.join(dirpath, f"tdigests_{trainer.global_rank}.pt"),
-        )
+        filepath = os.path.join(dirpath, f"tdigests_{trainer.global_rank}.pt")
+        trainer.strategy.checkpoint_io.save_checkpoint(self.tdigests, filepath)  # type: ignore[arg-type]
         # wait for all processes to save
         dist.barrier()
 
@@ -73,7 +70,8 @@ class TDigest(CellariumModel):
 
         # merge tdigests
         for i in range(1, trainer.world_size):  # iterate over processes
-            new_tdigests = torch.load(os.path.join(dirpath, f"tdigests_{i}.pt"))
+            filepath = os.path.join(dirpath, f"tdigests_{i}.pt")
+            new_tdigests: list = trainer.strategy.checkpoint_io.load_checkpoint(filepath)  # type: ignore[assignment]
             for j in range(len(self.tdigests)):  # iterate over genes
                 self.tdigests[j].merge(new_tdigests[j])
 

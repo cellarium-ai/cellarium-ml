@@ -24,6 +24,7 @@ dependencies = [
   "anndata",
   "boltons",
   "braceexpand",
+  "crick>=0.0.4",
   "google-cloud-storage",
   "jsonargparse[signatures]",
   "lightning>=2.0.9",
@@ -83,3 +84,4 @@ line-length = 120
 [tool.mypy]
 ignore_missing_imports = true
 explicit_package_bases = true
+check_untyped_defs = true
