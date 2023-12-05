@@ -13,6 +13,7 @@ import torch
 from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
+import torchmetrics
 
 from cellarium.ml.core.saving import _load_state
 from cellarium.ml.models import CellariumModel, PredictMixin
@@ -83,6 +84,14 @@ class CellariumModule(pl.LightningModule):
         self.optim_kwargs = optim_kwargs
         self.scheduler_fn = scheduler_fn
         self.scheduler_kwargs = scheduler_kwargs
+        self.accuracy_zero = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=21,
+        )
+        self.accuracy_nonzero = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=21,
+        )
 
         if config is not None:
             self._set_hparams(config)
@@ -180,10 +189,19 @@ class CellariumModule(pl.LightningModule):
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
         args, kwargs = self.model._get_fn_args_from_batch(batch)
-        loss = self.model(*args, **kwargs)
+        output = self.model(*args, **kwargs)
+        loss = output["loss"]
+        self.accuracy_zero(output["zero_logits"], output["zero_labels"])
+        self.accuracy_nonzero(output["nonzero_logits"], output["nonzero_labels"])
+        # loss = (nonzero_loss + zero_loss) / 2  # version_5
+        # loss = (19 * nonzero_loss + zero_loss) / 20  # version_6
         if loss is not None:
             # Logging to TensorBoard by default
             self.log("train_loss", loss)
+            self.log("train_accuracy_zero", self.accuracy_zero)
+            self.log("train_accuracy_nonzero", self.accuracy_nonzero)
+            # self.log("zero_loss", zero_loss)
+            # self.log("nonzero_loss", nonzero_loss)
         return loss
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor | dict[str, torch.Tensor | None]:

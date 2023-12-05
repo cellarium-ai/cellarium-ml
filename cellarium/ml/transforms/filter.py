@@ -62,7 +62,7 @@ class Filter(nn.Module):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
 
         filter_mask = self.filter(tuple(feature_g.tolist()))
-        return x_ng[:, filter_mask]
+        return x_ng[:, filter_mask], feature_g[filter_mask]
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(filter_list={self.filter_list})"

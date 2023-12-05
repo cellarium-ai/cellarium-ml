@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from cellarium.ml.models.cellarium_gpt import CellariumGPT
 from cellarium.ml.models.from_cli import (
     GeneformerFromCLI,
     IncrementalPCAFromCLI,
@@ -18,6 +19,7 @@ from cellarium.ml.models.probabilistic_pca import ProbabilisticPCA
 from cellarium.ml.models.tdigest import TDigest
 
 __all__ = [
+    "CellariumGPT",
     "CellariumModel",
     "GatherLayer",
     "Geneformer",
