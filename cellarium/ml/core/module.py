@@ -190,10 +190,10 @@ class CellariumModule(pl.LightningModule):
     ) -> torch.Tensor | None:
         args, kwargs = self.model._get_fn_args_from_batch(batch)
         output = self.model(*args, **kwargs)
-        loss = output["loss"]
+        # loss = output["loss"]
         self.accuracy_zero(output["zero_logits"], output["zero_labels"])
         self.accuracy_nonzero(output["nonzero_logits"], output["nonzero_labels"])
-        # loss = (nonzero_loss + zero_loss) / 2  # version_5
+        loss = (output["nonzero_loss"] + output["zero_loss"]) / 2  # version_5
         # loss = (19 * nonzero_loss + zero_loss) / 20  # version_6
         if loss is not None:
             # Logging to TensorBoard by default

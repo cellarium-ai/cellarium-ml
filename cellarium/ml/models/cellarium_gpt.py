@@ -346,14 +346,16 @@ class CellariumGPT(CellariumModel):
 
         logits = self.dense(hidden_ngd)
         loss_fn = nn.CrossEntropyLoss()
-        loss = loss_fn(logits.view(-1, self.b_bins + 1), labels.view(-1))
+        # loss = loss_fn(logits.view(-1, self.b_bins + 1), labels.view(-1))
         nonzero_mask = labels > 1
         zero_mask = labels == 1
-        # nonzero_loss = loss_fn(logits[mask], labels[mask])
-        # zero_loss = loss_fn(logits[~mask], labels[~mask])
+        nonzero_loss = loss_fn(logits[nonzero_mask], labels[nonzero_mask])
+        zero_loss = loss_fn(logits[zero_mask], labels[zero_mask])
         # loss = nn.cross_entropy(logits, feature_g)
         return {
-            "loss": loss,
+            # "loss": loss,
+            "nonzero_loss": nonzero_loss,
+            "zero_loss": zero_loss,
             "zero_logits": logits[zero_mask],
             "zero_labels": labels[zero_mask],
             "nonzero_logits": logits[nonzero_mask],
