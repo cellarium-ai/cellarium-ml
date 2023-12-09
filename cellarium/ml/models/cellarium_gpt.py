@@ -7,10 +7,33 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 from torch import nn
+from pykeops.torch import LazyTensor, Vi, Vj
 
 from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.transforms import DivideByScale, NormalizeTotal, Filter
 
+
+class Linear(nn.Linear):
+    def __init__(self, in_features: int, out_features: int, bias: bool = True,
+                 a: float = 0, b: float: 0.5, device=None, dtype=None) -> None:
+        super().__init__(in_features, out_features, bias, device, dtype)
+        self.a = a
+        self.b = b
+
+    def forward(self, input: Tensor) -> Tensor:
+        return F.linear(input, self.weight, self.bias)
+
+    def reset_parameters(self) -> None:
+        # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
+        # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
+        # https://github.com/pytorch/pytorch/issues/57109
+        self.weight.data.normal_(mean=0.0, std=self.b)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            init.uniform_(self.bias, -bound, bound)
 
 class DotProductAttention(nn.Module):  # @save
     """Scaled dot product attention."""
@@ -23,14 +46,35 @@ class DotProductAttention(nn.Module):  # @save
     # Shape of keys: (batch_size, no. of key-value pairs, d)
     # Shape of values: (batch_size, no. of key-value pairs, value dimension)
     # Shape of valid_lens: (batch_size,) or (batch_size, no. of queries)
-    def forward(self, queries_nqd, keys_nsd, values_nsv, attention_mask_nqs):
-        d = queries_nqd.shape[-1]
-        # Swap the last two dimensions of keys with keys.transpose(1, 2)
-        scores_nqs = queries_nqd @ keys_nsd.transpose(1, 2) / math.sqrt(d)
-        scores_nqs[~attention_mask_nqs] = -1e9
-        # scores_nqs = scores_nqs.masked_fill(~attention_mask, -1e9)
-        self.attention_probs_nqs = scores_nqs.softmax(dim=-1)
-        return self.dropout(self.attention_probs_nqs) @ values_nsv  # _nqv
+    def forward(self, queries_nqd, keys_nsd, values_nsv, prefix_len_n, use_keops=False):
+        n, q, d = queries_nqd.shape
+        s = keys_nsd.shape[1]
+        if use_keops:
+            prefix_len_n = LazyTensor(prefix_len_n[:, None, None, None].expand([n, q, 1, 1]).float())
+            q_range = LazyTensor(torch.arange(q, device=keys_nsd.device)[:, None].float(), axis=0)
+            s_range = LazyTensor(torch.arange(s, device=keys_nsd.device)[:, None].float(), axis=1)
+            block_mask = 1 - (prefix_len_n - s_range - 1).step()
+            diag_mask = 1 - (-(q_range - s_range).abs()).step()
+            attention_mask_nqs = block_mask * diag_mask
+            scores_nqs = (
+                LazyTensor(queries_nqd[:, :, None, :].contiguous()) * LazyTensor(keys_nsd[:, None, :, :].contiguous())
+            ).sum(-1) / math.sqrt(d)
+            scores_nqs = scores_nqs - 1e9 * attention_mask_nqs
+            return scores_nqs.sumsoftmaxweight(LazyTensor(values_nsv.unsqueeze(1).contiguous()), dim=2)
+        else:
+            block_mask = (
+                torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
+                < prefix_len_n[:, None, None]
+            )
+            diag_mask = (
+                torch.diag(torch.ones((s,), dtype=torch.bool, device=queries_nqd.device)).bool().expand([n, s, s])
+            )
+            attention_mask_nqs = block_mask | diag_mask
+            # Swap the last two dimensions of keys with keys.transpose(1, 2)
+            scores_nqs = queries_nqd @ keys_nsd.transpose(1, 2) / math.sqrt(d)
+            scores_nqs[~attention_mask_nqs] = -1e9
+            self.attention_probs_nqs = scores_nqs.softmax(dim=-1)
+            return self.dropout(self.attention_probs_nqs) @ values_nsv  # _nqv
 
 
 class MultiHeadAttention(nn.Module):
@@ -78,7 +122,7 @@ class MultiHeadAttention(nn.Module):
         queries_nqd,
         keys_nsd,
         values_nsd,
-        attention_mask_nqs,
+        prefix_len_n,
     ):
         # Shape of queries, keys, or values:
         # (batch_size, no. of queries or key-value pairs, num_hiddens)
@@ -95,11 +139,12 @@ class MultiHeadAttention(nn.Module):
         queries_mqk = self.split_heads(queries_nqd, h_heads)
         keys_msk = self.split_heads(keys_nsd, h_heads)
         values_msk = self.split_heads(values_nsd, h_heads)
-        attention_mask_mqs = self.split_attention_mask(attention_mask_nqs, h_heads)
+        # attention_mask_mqs = self.split_attention_mask(attention_mask_nqs, h_heads)
+        prefix_len_m = prefix_len_n.repeat(1, h_heads).reshape(-1)
 
         # Shape of output: (batch_size * num_heads, no. of queries,
         # num_hiddens / num_heads)
-        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, attention_mask_mqs)
+        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, prefix_len_m)
         # Shape of output_concat: (batch_size, no. of queries, num_hiddens)
         output_nqd = self.merge_heads(output_mqk, h_heads)
         return self.Wo(output_nqd)  # _nqd
@@ -145,8 +190,8 @@ class TransformerBlock(nn.Module):
         self.ffn = PositionWiseFFN(f_hiddens, d_hiddens)
         self.normadd2 = NormAdd(d_hiddens, dropout)
 
-    def forward(self, X, attention_mask):
-        Y = self.normadd1(X, self.attention(X, X, X, attention_mask))
+    def forward(self, X, prefix_len_n):
+        Y = self.normadd1(X, self.attention(X, X, X, prefix_len_n))
         return self.normadd2(Y, self.ffn(Y))
 
 
@@ -222,28 +267,29 @@ class CellariumGPT(CellariumModel):
     def __init__(
         self,
         feature_schema: Sequence[str],
-        b_bins: int = 5,
-        d_hiddens: int = 32,
-        f_hiddens: int = 64,
+        b_bins: int = 20,  # including 0
+        d_hiddens: int = 128,
+        f_hiddens: int = 512,
         h_heads: int = 4,
         num_blocks: int = 6,
-        dropout: float = 0.1,
+        dropout: float = 0.02,
         use_bias: bool = False,
-        max_len: int = 32,
+        c_context: int | None = None,
         tdigest_path: str | None = None,
+        initializer_range: float = 0.02,
     ):
         super().__init__()
         self.feature_schema = np.array(feature_schema)
 
         self.feature_ids: torch.Tensor
         # ids for the features, 0 is for padding, 1 is for mask
-        self.register_buffer("feature_ids", torch.arange(2, len(feature_schema) + 2))
+        self.register_buffer("feature_ids", torch.arange(1, len(feature_schema) + 1))
         self.b_bins = b_bins
         self.g_genes = len(feature_schema)
 
-        self.id_embedding = nn.Embedding(len(feature_schema) + 2, d_hiddens)
+        # +1 for masking
+        self.id_embedding = nn.Embedding(len(feature_schema) + 1, d_hiddens)
         self.value_embedding = nn.Embedding(b_bins + 1, d_hiddens)
-        self.max_len = max_len
 
         self.blocks = nn.ModuleList(
             [
@@ -257,7 +303,8 @@ class CellariumGPT(CellariumModel):
                 for i in range(num_blocks)
             ]
         )
-        self.dense = nn.Linear(d_hiddens, b_bins + 1, bias=False)
+        # no mask token in predictions
+        self.dense = nn.Linear(d_hiddens, b_bins, bias=False)
 
         assert tdigest_path is not None
         from cellarium.ml import CellariumModule
@@ -275,6 +322,7 @@ class CellariumGPT(CellariumModel):
             eps=tdigest.transform.eps,
         )
         self.filter = Filter(self.feature_schema[median_g.isfinite()])
+        self.c_context = c_context or len(self.filter.filter_list)
         normalized_tdigest = TDigest()
         for median, tdigest in zip(median_g, tdigest.tdigests):
             state = tdigest.__getstate__()
@@ -286,6 +334,35 @@ class CellariumGPT(CellariumModel):
         quantiles = np.concatenate([[-1, 0], quantiles, [float("inf")]])
         self.quantiles: torch.Tensor
         self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
+        self.initializer_range = initializer_range
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """Initialize the weights."""
+        if isinstance(module, nn.Linear):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+        # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
+        #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
+        #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
+        #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
+        #
+        # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+        for name, p in module.named_parameters():
+            if name == "c_proj.weight":
+                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
+                p.data.normal_(mean=0.0, std=(self.config.initializer_range / math.sqrt(2 * self.config.n_layer)))
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
@@ -298,21 +375,19 @@ class CellariumGPT(CellariumModel):
         x_ng = self.normalize(x_ng, total_mrna_umis_n)
         x_ng = self.divide(x_ng, feature_g)
         x_ng, feature_g = self.filter(x_ng, feature_g)
-        #  randomize(x_ng)
-        #  clip(x_ng)
-        random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.max_len]
+        random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.c_context]
         ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
         x_ng = x_ng[ndx[:, None], random_indices]
         gene_ids = self.feature_ids[random_indices]
         # right=False: boundaries[i-1] < input[m][n]...[l][x] <= boundaries[i]
-        value_ids = torch.bucketize(x_ng, self.quantiles, right=False)
+        value_ids = torch.bucketize(x_ng, self.quantiles, right=False) - 1
         labels = value_ids.clone()
-        atten_len = torch.randint(1, self.max_len, (x_ng.shape[0],), device=x_ng.device)
+        prefix_len_n = torch.randint(1, self.c_context, (x_ng.shape[0],), device=x_ng.device)
         masked_indices = (
-            torch.arange((self.max_len), dtype=torch.float32, device=x_ng.device)[None, :] >= atten_len[:, None]
+            torch.arange((self.c_context), dtype=torch.float32, device=x_ng.device)[None, :] >= prefix_len_n[:, None]
         )
         labels[~masked_indices] = -100
-        value_ids[masked_indices] = 0
+        value_ids[masked_indices] = self.b_bins
 
         gene_gd = self.id_embedding(gene_ids)
         value_ngd = self.value_embedding(value_ids)
@@ -324,40 +399,30 @@ class CellariumGPT(CellariumModel):
         # 1 1 1 0 0
         # 1 1 1 1 0
         # 1 1 1 0 1
-        block_mask = (
-            torch.arange((self.max_len), dtype=torch.short, device=x_ng.device).expand([self.max_len, self.max_len])
-            < atten_len[:, None, None]
-        )
-        diag_mask = (
-            torch.diag(torch.ones((self.max_len,), dtype=torch.bool, device=x_ng.device))
-            .bool()
-            .expand([x_ng.shape[0], self.max_len, self.max_len])
-        )
-        attention_mask = block_mask | diag_mask
 
         self.attention_weights = [None] * len(self.blocks)
 
         for i, block in enumerate(self.blocks):
             hidden_ngd = block(
                 hidden_ngd,
-                attention_mask=attention_mask,
+                prefix_len_n=prefix_len_n,
             )
-            self.attention_weights[i] = block.attention.attention.attention_probs_nqs
+            # self.attention_weights[i] = block.attention.attention.attention_probs_nqs
 
         logits = self.dense(hidden_ngd)
         loss_fn = nn.CrossEntropyLoss()
-        # loss = loss_fn(logits.view(-1, self.b_bins + 1), labels.view(-1))
+        loss = loss_fn(logits.view(-1, self.b_bins), labels.view(-1))
         nonzero_mask = labels > 1
         zero_mask = labels == 1
         nonzero_loss = loss_fn(logits[nonzero_mask], labels[nonzero_mask])
         zero_loss = loss_fn(logits[zero_mask], labels[zero_mask])
-        # loss = nn.cross_entropy(logits, feature_g)
+        import pdb; pdb.set_trace()
         return {
-            # "loss": loss,
+            "loss": loss,
             "nonzero_loss": nonzero_loss,
             "zero_loss": zero_loss,
-            "zero_logits": logits[zero_mask],
+            "zero_preds": torch.argmax(logits[zero_mask], dim=-1),
             "zero_labels": labels[zero_mask],
-            "nonzero_logits": logits[nonzero_mask],
+            "nonzero_preds": torch.argmax(logits[nonzero_mask], dim=-1),
             "nonzero_labels": labels[nonzero_mask],
         }
