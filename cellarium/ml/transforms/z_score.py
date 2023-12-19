@@ -41,8 +41,10 @@ class ZScore(nn.Module):
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
-        self.mean_g = mean_g
-        self.std_g = std_g
+        self.mean_g: torch.Tensor
+        self.std_g: torch.Tensor
+        self.register_buffer("mean_g", torch.as_tensor(mean_g))
+        self.register_buffer("std_g", torch.as_tensor(std_g))
         self.feature_schema = np.array(feature_schema)
         assert_nonnegative("eps", eps)
         self.eps = eps
