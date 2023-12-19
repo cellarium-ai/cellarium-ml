@@ -29,6 +29,7 @@ dependencies = [
   "jsonargparse[signatures]",
   "lightning>=2.0.9",
   "pyro-ppl",
+  "pytest",
   "torch>=2.0.0",
   "transformers",
 ]
@@ -42,12 +43,13 @@ lint = [
 ]
 mypy = ["mypy"]
 test = [
-  "pytest",
   "pytest-xdist",
   "tensorboard",
 ]
 docs = [
+  "nbsphinx",
   "Pillow",
+  "seaborn>=0.13.0",
   "sphinx",
   "sphinx_rtd_theme",
   "sphinx-autodoc-typehints",
