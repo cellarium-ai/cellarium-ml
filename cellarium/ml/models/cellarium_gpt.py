@@ -13,28 +13,6 @@ from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.transforms import DivideByScale, NormalizeTotal, Filter
 
 
-class Linear(nn.Linear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                 a: float = 0, b: float: 0.5, device=None, dtype=None) -> None:
-        super().__init__(in_features, out_features, bias, device, dtype)
-        self.a = a
-        self.b = b
-
-    def forward(self, input: Tensor) -> Tensor:
-        return F.linear(input, self.weight, self.bias)
-
-    def reset_parameters(self) -> None:
-        # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
-        # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
-        # https://github.com/pytorch/pytorch/issues/57109
-        self.weight.data.normal_(mean=0.0, std=self.b)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        if self.bias is not None:
-            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            init.uniform_(self.bias, -bound, bound)
-
 class DotProductAttention(nn.Module):  # @save
     """Scaled dot product attention."""
 
@@ -304,7 +282,7 @@ class CellariumGPT(CellariumModel):
             ]
         )
         # no mask token in predictions
-        self.dense = nn.Linear(d_hiddens, b_bins, bias=False)
+        self.dense = nn.Linear(d_hiddens, b_bins, bias=True)
 
         assert tdigest_path is not None
         from cellarium.ml import CellariumModule
@@ -412,11 +390,13 @@ class CellariumGPT(CellariumModel):
         logits = self.dense(hidden_ngd)
         loss_fn = nn.CrossEntropyLoss()
         loss = loss_fn(logits.view(-1, self.b_bins), labels.view(-1))
-        nonzero_mask = labels > 1
-        zero_mask = labels == 1
+        nonzero_mask = labels > 0
+        zero_mask = labels == 0
         nonzero_loss = loss_fn(logits[nonzero_mask], labels[nonzero_mask])
         zero_loss = loss_fn(logits[zero_mask], labels[zero_mask])
-        import pdb; pdb.set_trace()
+        #  import pdb
+        #
+        #  pdb.set_trace()
         return {
             "loss": loss,
             "nonzero_loss": nonzero_loss,
