@@ -7,7 +7,6 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 from torch import nn
-from pykeops.torch import LazyTensor, Vi, Vj
 
 from cellarium.ml.models.model import CellariumModel
 # from cellarium.ml.models.mu_linear import MuLinear
@@ -29,6 +28,8 @@ class DotProductAttention(nn.Module):  # @save
         n, q, d = queries_nqd.shape
         s = keys_nsd.shape[1]
         if use_keops:
+            from pykeops.torch import LazyTensor, Vi, Vj
+
             prefix_len_n = LazyTensor(prefix_len_n[:, None, None, None].expand([n, q, 1, 1]).float())
             q_range = LazyTensor(torch.arange(q, device=keys_nsd.device)[:, None].float(), axis=0)
             s_range = LazyTensor(torch.arange(s, device=keys_nsd.device)[:, None].float(), axis=1)
