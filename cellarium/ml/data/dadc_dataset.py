@@ -347,10 +347,10 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         indices = indices[rank * per_replica : (rank + 1) * per_replica]
         assert len(indices) == per_replica
 
-        for i in range(iter_start, iter_end, self.batch_size):
-            j = (i - iter_start) % (self.batch_size * 2)
-            j = iter_start + j * self.batch_size
-            yield self[indices[j : j + self.batch_size]]
-        # yield from (self[indices[i : i + self.batch_size]] for i in range(iter_start, iter_end, self.batch_size))
+        #  for i in range(iter_start, iter_end, self.batch_size):
+        #      j = (i - iter_start) % (self.batch_size * 25)
+        #      j = iter_start + j * self.batch_size
+        #      yield self[indices[j : j + self.batch_size]]
+        yield from (self[indices[i : i + self.batch_size]] for i in range(iter_start, iter_end, self.batch_size))
         # Sets epoch for persistent workers
         self.set_epoch(self.epoch + 1)

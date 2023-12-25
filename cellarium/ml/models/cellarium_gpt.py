@@ -10,6 +10,7 @@ from torch import nn
 from pykeops.torch import LazyTensor, Vi, Vj
 
 from cellarium.ml.models.model import CellariumModel
+# from cellarium.ml.models.mu_linear import MuLinear
 from cellarium.ml.transforms import DivideByScale, NormalizeTotal, Filter
 
 
@@ -58,7 +59,7 @@ class DotProductAttention(nn.Module):  # @save
 class MultiHeadAttention(nn.Module):
     """Multi-head attention."""
 
-    def __init__(self, d_hiddens, h_heads, dropout, bias=False, **kwargs):
+    def __init__(self, d_hiddens, h_heads, dropout, bias=True, **kwargs):
         super().__init__()
         self.h_heads = h_heads
         self.attention = DotProductAttention(dropout)
@@ -133,9 +134,9 @@ class PositionWiseFFN(nn.Module):
 
     def __init__(self, mlp_hiddens, d_hiddens):
         super().__init__()
-        self.dense1 = nn.Linear(d_hiddens, mlp_hiddens)
+        self.dense1 = nn.Linear(d_hiddens, mlp_hiddens, bias=True)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(mlp_hiddens, d_hiddens)
+        self.dense2 = nn.Linear(mlp_hiddens, d_hiddens, bias=True)
 
     def forward(self, X_nd):
         return self.dense2(self.relu(self.dense1(X_nd)))
@@ -251,10 +252,11 @@ class CellariumGPT(CellariumModel):
         h_heads: int = 4,
         num_blocks: int = 6,
         dropout: float = 0.02,
-        use_bias: bool = False,
+        use_bias: bool = True,
         c_context: int | None = None,
         tdigest_path: str | None = None,
         initializer_range: float = 0.02,
+        optimizer: str = "adam",
     ):
         super().__init__()
         self.feature_schema = np.array(feature_schema)
@@ -269,6 +271,7 @@ class CellariumGPT(CellariumModel):
         self.id_embedding = nn.Embedding(len(feature_schema) + 1, d_hiddens)
         self.value_embedding = nn.Embedding(b_bins + 1, d_hiddens)
 
+        self.num_blocks = num_blocks
         self.blocks = nn.ModuleList(
             [
                 TransformerBlock(
@@ -312,8 +315,10 @@ class CellariumGPT(CellariumModel):
         quantiles = np.concatenate([[-1, 0], quantiles, [float("inf")]])
         self.quantiles: torch.Tensor
         self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
+        self.optimizer = optimizer
         self.initializer_range = initializer_range
         self.apply(self._init_weights)
+
 
     def _init_weights(self, module):
         """Initialize the weights."""
@@ -324,6 +329,7 @@ class CellariumGPT(CellariumModel):
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
+            assert self.optimizer == "adam", "Only Adam(W) optimizer is supported for now."
             module.weight.data.normal_(mean=0.0, std=self.initializer_range)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
@@ -338,9 +344,9 @@ class CellariumGPT(CellariumModel):
         #
         # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
         for name, p in module.named_parameters():
-            if name == "c_proj.weight":
+            if name == "dense2.weight" or name == "Wo.weight":
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                p.data.normal_(mean=0.0, std=(self.config.initializer_range / math.sqrt(2 * self.config.n_layer)))
+                p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.num_blocks)))
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
