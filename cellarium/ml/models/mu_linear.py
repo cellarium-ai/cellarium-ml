@@ -10,7 +10,35 @@ import torch.nn as nn
 
 
 @dataclass
-class abdParameter:
+class abcdParameter:
+    """
+    An *abcd*-parametrization is specified by a set of numbers :math:`\\{a, b, c, d\\}` such that:
+
+    a. Parameter is given as :math:`W = \\mathrm{mult\\_scale} \\cdot n^{-a} \\cdot w` where :math:`w` is the learnable parameter.
+    b. Learnable parameter is initialized as :math:`w \\sim \\mathcal{N}(\\mu = 0, \\sigma = \\mathrm{init\\_scale} \\cdot n^{-b})`.
+    c. The learning rate is :math:`\\mathrm{lr} \\cdot n^{-c}` for some global learning rate :math:`\\mathrm{lr}`. In this implementation,
+       :math:`c` is always 0.
+    d. The gradients of :math:`w` are scaled by :math:`(n / n_0)^d` where :math:`n_0` is the base width of the layer.
+
+    Args:
+        data:
+            The tensor data.
+        width:
+            The width of the tensor.
+        a:
+            The :math:`a` parameter.
+        b:
+            The :math:`b` parameter.
+        d:
+            The :math:`d` parameter.
+        mult_scale:
+            The multiplier scaling.
+        init_scale:
+            The initialization scaling.
+        base_width:
+            The base width.
+    """
+
     data: torch.Tensor | None = None
     width: int = 1
     a: float = 0.0
@@ -18,26 +46,49 @@ class abdParameter:
     d: float = 0.0
     mult_scale: float = 1.0
     init_scale: float = 1.0
-    base_d_width: int = 128
+    base_width: int = 256
 
 
 class MuLinear(nn.Module):
-    """
+    r"""
     Linear layer with a maximal update parametrization.
 
-    abcd-Parametrization multiplier scaling:
+    The maximal update parametrization for SGD is defined by:
 
-    .. math::
+    - **Biases**: :math:`W = \mathrm{mult\_scale} \cdot \sqrt{n / n_0} \cdot w` and
+      :math:`w \sim \mathcal{N}(0, \mathrm{init\_scale} \cdot \sqrt{n_0 / n})` where
+      :math:`n = \mathrm{out\_features}` and :math:`n_0 = \mathrm{base\_width}`.
 
-        W = \\mathrm{mult\\_scale} \\cdot n^{-a} \\cdot w
+      .. note::
 
-    Learnable parameter initialization scaling:
+         This is equivalent to :math:`W \sim \mathcal{N}(0, \mathrm{mult\_scale} \cdot \mathrm{init\_scale})`
+         with the parameter specific learning rate :math:`\mathrm{lr} \cdot \mathrm{mult\_scale}^2 \cdot n / n_0`.
 
-    .. math::
+    - **Input layer**: :math:`W = \mathrm{mult\_scale} \cdot \sqrt{n / n_0} \cdot w` and
+      :math:`w \sim \mathcal{N}(0, \mathrm{init\_scale} \cdot \sqrt{n_0 / (n \cdot d_{in})})` where
+      :math:`n = \mathrm{out\_features}`, :math:`n_0 = \mathrm{base\_width}`, and :math:`d_{in} = \mathrm{in\_features}`.
 
-        w \\sim \\mathcal{N}(\\mu = 0, \\sigma = \\mathrm{init\\_scale} \\cdot n^{-b})
+      .. note::
 
-    The maximal update parametrization for SGD is defined by
+         This is equivalent to :math:`W \sim \mathcal{N}(0, \mathrm{mult\_scale} \cdot \mathrm{init\_scale} / \sqrt{d_{in}})`
+         with the parameter specific learning rate :math:`\mathrm{lr} \cdot \mathrm{mult\_scale}^2 \cdot n / n_0`.
+
+    - **Hidden layer**: :math:`W = \mathrm{mult\_scale} \cdot w` and :math:`w \sim \mathcal{N}(0, \mathrm{init\_scale} / \sqrt{n})`
+      where :math:`n = \mathrm{in\_features}`.
+
+      .. note::
+
+         This is equivalent to :math:`W \sim \mathcal{N}(0, \mathrm{mult\_scale} \cdot \mathrm{init\_scale} / \sqrt{n})`
+         with the parameter specific learning rate :math:`\mathrm{lr} \cdot \mathrm{mult\_scale}^2`.
+
+    - **Output layer**: :math:`W = \mathrm{mult\_scale} \cdot \sqrt{n_0 / n} \cdot w` and
+      :math:`w \sim \mathcal{N}(0, \mathrm{init\_scale} / \sqrt{n})` where :math:`n = \mathrm{in\_features}` and
+      :math:`n_0 = \mathrm{base\_width}`.
+
+      .. note::
+
+         This is equivalent to :math:`W \sim \mathcal{N}(0, \mathrm{mult\_scale} \cdot \mathrm{init\_scale} \cdot \sqrt{n_0} / n)`
+         with the parameter specific learning rate :math:`\mathrm{lr} \cdot \mathrm{mult\_scale}^2 \cdot n_0 / n`.
 
     +-----------+----------------+----------------+----------------+
     |           | Input & Biases | Hidden         | Output         |
@@ -92,8 +143,8 @@ class MuLinear(nn.Module):
             Scaling factor for the parameter multiplier.
         init_scale:
             Scaling factor for the parameter initialization.
-        base_d_width:
-            Base width for the parameter ``d``.
+        base_width:
+            Base width of the layer.
 
     Attributes:
         weight:
@@ -119,7 +170,7 @@ class MuLinear(nn.Module):
         optimizer: Literal["sgd", "adam", "adamw"],
         mult_scale: float = 1.0,
         init_scale: float = 1.0,
-        base_d_width: int = 128,
+        base_width: int = 256,
     ) -> None:
         super().__init__()
 
@@ -129,6 +180,11 @@ class MuLinear(nn.Module):
             weight_width = out_features
         else:
             weight_width = in_features
+
+        weight_init_scale = init_scale
+        bias_init_scale = 0.0
+        weight_mult_scale = mult_scale
+        bias_mult_scale = mult_scale
 
         # c = 0 for all layers by design
 
@@ -144,27 +200,44 @@ class MuLinear(nn.Module):
                 weight_a = 0.0
                 weight_b = 0.0
                 weight_d = 1.0
+                # SP 1 / sqrt(d)
+                weight_init_scale /= in_features**0.5
             elif layer == "hidden":
                 # scaling: 1 / sqrt(n)
                 weight_a = 1.0
                 weight_b = -0.5
                 weight_d = 2.0
+                # SP LR
+                weight_init_scale /= base_width
+                weight_mult_scale *= base_width
             elif layer == "output":
                 # scaling: 1 / n
                 weight_a = 1.0
                 weight_b = 0.0
                 weight_d = 1.0
+                # SP 1 / sqrt(n)
+                weight_init_scale /= base_width**0.5
+                weight_mult_scale *= base_width
+
         elif optimizer == "sgd":
             # bias scaling: 1
             bias_a = -0.5
             bias_b = 0.5
             bias_d = 0.0
+            # LR
+            bias_init_scale *= base_width**0.5  # for output layer it should be divided by out_features
+            bias_mult_scale /= base_width**0.5
             # weight
             if layer == "input":
                 # scaling: 1
                 weight_a = -0.5
                 weight_b = 0.5
                 weight_d = 0.0
+                # SP 1 / sqrt(d)
+                weight_init_scale /= in_features**0.5
+                # LR
+                weight_init_scale *= base_width**0.5
+                weight_mult_scale /= base_width**0.5
             elif layer == "hidden":
                 # scaling: 1 / sqrt(n)
                 weight_a = 0.0
@@ -175,6 +248,8 @@ class MuLinear(nn.Module):
                 weight_a = 0.5
                 weight_b = 0.5
                 weight_d = 0.0
+                # SP 1 / sqrt(n)
+                weight_mult_scale *= base_width**0.5  # the power equals weight_a
         else:
             raise ValueError(f"Optimizer must be either 'sgd', 'adam', or 'adamw'. Got {optimizer!r}")
 
@@ -184,29 +259,30 @@ class MuLinear(nn.Module):
         self.optimizer = optimizer
         self.mult_scale = mult_scale
         self.init_scale = init_scale
-        self.base_d_width = base_d_width
-        self.weight = abdParameter(  # type: ignore[assignment]
+        self.base_width = base_width
+        self.weight = abcdParameter(  # type: ignore[assignment]
             torch.empty(out_features, in_features),
             width=weight_width,
             a=weight_a,
             b=weight_b,
             d=weight_d,
-            mult_scale=mult_scale,
-            init_scale=init_scale,
-            base_d_width=base_d_width,
+            init_scale=weight_init_scale,
+            mult_scale=weight_mult_scale,
+            base_width=base_width,
         )
         if bias:
-            self.bias = abdParameter(  # type: ignore[assignment]
+            self.bias = abcdParameter(  # type: ignore[assignment]
                 torch.empty(out_features),
                 width=bias_width,
                 a=bias_a,
                 b=bias_b,
                 d=bias_d,
-                init_scale=0.0,
-                base_d_width=base_d_width,
+                init_scale=bias_init_scale,
+                mult_scale=bias_mult_scale,
+                base_width=base_width,
             )
         else:
-            self.bias = abdParameter(None)  # type: ignore[assignment]
+            self.bias = abcdParameter(None)  # type: ignore[assignment]
 
     @staticmethod
     def scale_grad(base_width: int, width: int, d: float) -> Callable[[torch.Tensor], torch.Tensor]:
@@ -222,15 +298,15 @@ class MuLinear(nn.Module):
         return self.weight_multiplier * self.weight_unscaled
 
     @weight.setter
-    def weight(self, value: abdParameter) -> None:
+    def weight(self, value: abcdParameter) -> None:
         assert value.data is not None
         self.weight_unscaled = nn.Parameter(value.data)
-        self.weight_unscaled.register_hook(self.scale_grad(value.base_d_width, value.width, value.d))
         if value.init_scale == 0:
             self.weight_unscaled.data.zero_()
         else:
             std = value.init_scale / value.width**value.b
             self.weight_unscaled.data.normal_(mean=0.0, std=std)
+        self.weight_unscaled.register_hook(self.scale_grad(value.base_width, value.width, value.d))
         self.weight_multiplier = value.mult_scale / value.width**value.a
 
     @property
@@ -240,17 +316,17 @@ class MuLinear(nn.Module):
         return self.bias_multiplier * self.bias_unscaled
 
     @bias.setter
-    def bias(self, value: abdParameter) -> None:
+    def bias(self, value: abcdParameter) -> None:
         if value.data is None:
             self.register_parameter("bias_unscaled", None)
             return
         self.bias_unscaled = nn.Parameter(value.data)
-        self.bias_unscaled.register_hook(self.scale_grad(value.base_d_width, value.width, value.d))
         if value.init_scale == 0:
             self.bias_unscaled.data.zero_()
         else:
             std = value.init_scale / value.width**value.b
             self.bias_unscaled.data.normal_(mean=0.0, std=std)
+        self.bias_unscaled.register_hook(self.scale_grad(value.base_width, value.width, value.d))
         self.bias_multiplier = value.mult_scale / value.width**value.a
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -260,5 +336,5 @@ class MuLinear(nn.Module):
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
             f", layer={self.layer}, optimizer={self.optimizer}"
-            f", mult_scale={self.mult_scale}, init_scale={self.init_scale}, base_d_width={self.base_d_width}"
+            f", mult_scale={self.mult_scale}, init_scale={self.init_scale}, base_width={self.base_width}"
         )
