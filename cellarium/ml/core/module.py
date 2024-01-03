@@ -86,11 +86,43 @@ class CellariumModule(pl.LightningModule):
         self.scheduler_kwargs = scheduler_kwargs
         self.accuracy_zero = torchmetrics.classification.Accuracy(
             task="multiclass",
-            num_classes=21,
+            num_classes=20,
         )
         self.accuracy_nonzero = torchmetrics.classification.Accuracy(
             task="multiclass",
-            num_classes=21,
+            num_classes=20,
+        )
+        self.accuracy_nonzero_1 = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=20,
+        )
+        self.accuracy_nonzero_2 = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=20,
+        )
+        self.accuracy_nonzero_3 = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=20,
+        )
+        self.accuracy_nonzero_4 = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=20,
+        )
+        self.accuracy_nonzero_5 = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=20,
+        )
+        self.accuracy_nonzero_6 = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=20,
+        )
+        self.accuracy_nonzero_7 = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=20,
+        )
+        self.accuracy_nonzero_8 = torchmetrics.classification.Accuracy(
+            task="multiclass",
+            num_classes=20,
         )
         self.mae_zero = torchmetrics.MeanAbsoluteError()
         self.mae_nonzero = torchmetrics.MeanAbsoluteError()
@@ -194,8 +226,32 @@ class CellariumModule(pl.LightningModule):
         output = self.model(*args, **kwargs)
         loss = output["loss"]
         self.accuracy_zero(output["zero_preds"], output["zero_labels"])
-        self.accuracy_nonzero(output["nonzero_preds"], output["nonzero_labels"])
         self.mae_zero(output["zero_preds"], output["zero_labels"])
+        self.accuracy_nonzero(output["nonzero_preds"], output["nonzero_labels"])
+        mask = output["nonzero_prefix"] == 1
+        if any(mask):
+            self.accuracy_nonzero_1(output["nonzero_preds"][mask], output["nonzero_labels"][mask])
+        mask = output["nonzero_prefix"] == 2
+        if any(mask):
+            self.accuracy_nonzero_2(output["nonzero_preds"][mask], output["nonzero_labels"][mask])
+        mask = output["nonzero_prefix"] == 3
+        if any(mask):
+            self.accuracy_nonzero_3(output["nonzero_preds"][mask], output["nonzero_labels"][mask])
+        mask = output["nonzero_prefix"] == 4
+        if any(mask):
+            self.accuracy_nonzero_4(output["nonzero_preds"][mask], output["nonzero_labels"][mask])
+        mask = output["nonzero_prefix"] == 5
+        if any(mask):
+            self.accuracy_nonzero_5(output["nonzero_preds"][mask], output["nonzero_labels"][mask])
+        mask = output["nonzero_prefix"] == 6
+        if any(mask):
+            self.accuracy_nonzero_6(output["nonzero_preds"][mask], output["nonzero_labels"][mask])
+        mask = output["nonzero_prefix"] == 7
+        if any(mask):
+            self.accuracy_nonzero_7(output["nonzero_preds"][mask], output["nonzero_labels"][mask])
+        mask = output["nonzero_prefix"] == 8
+        if any(mask):
+            self.accuracy_nonzero_8(output["nonzero_preds"][mask], output["nonzero_labels"][mask])
         self.mae_nonzero(output["nonzero_preds"], output["nonzero_labels"])
         # loss = (output["nonzero_loss"] + output["zero_loss"]) / 2  # version_5
         # loss = (19 * nonzero_loss + zero_loss) / 20  # version_6
@@ -204,6 +260,14 @@ class CellariumModule(pl.LightningModule):
             self.log("train_loss", loss)
             self.log("train_accuracy_zero", self.accuracy_zero)
             self.log("train_accuracy_nonzero", self.accuracy_nonzero)
+            self.log("train_accuracy_nonzero_1", self.accuracy_nonzero_1)
+            self.log("train_accuracy_nonzero_2", self.accuracy_nonzero_2)
+            self.log("train_accuracy_nonzero_3", self.accuracy_nonzero_3)
+            self.log("train_accuracy_nonzero_4", self.accuracy_nonzero_4)
+            self.log("train_accuracy_nonzero_5", self.accuracy_nonzero_5)
+            self.log("train_accuracy_nonzero_6", self.accuracy_nonzero_6)
+            self.log("train_accuracy_nonzero_7", self.accuracy_nonzero_7)
+            self.log("train_accuracy_nonzero_8", self.accuracy_nonzero_8)
             self.log("train_mae_zero", self.mae_zero)
             self.log("train_mae_nonzero", self.mae_nonzero)
             self.log("zero_loss", output["zero_loss"])

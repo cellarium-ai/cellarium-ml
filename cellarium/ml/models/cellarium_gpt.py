@@ -9,8 +9,9 @@ import torch
 from torch import nn
 
 from cellarium.ml.models.model import CellariumModel
+
 # from cellarium.ml.models.mu_linear import MuLinear
-from cellarium.ml.transforms import DivideByScale, NormalizeTotal, Filter
+from cellarium.ml.transforms import DivideByScale, Filter, NormalizeTotal
 
 
 class DotProductAttention(nn.Module):  # @save
@@ -289,8 +290,9 @@ class CellariumGPT(CellariumModel):
         self.dense = nn.Linear(d_hiddens, b_bins, bias=True)
 
         assert tdigest_path is not None
-        from cellarium.ml import CellariumModule
         from crick import TDigest
+
+        from cellarium.ml import CellariumModule
 
         tdigest = CellariumModule.load_from_checkpoint(tdigest_path).model
         median_g = tdigest.median_g
@@ -319,7 +321,6 @@ class CellariumGPT(CellariumModel):
         self.optimizer = optimizer
         self.initializer_range = initializer_range
         self.apply(self._init_weights)
-
 
     def _init_weights(self, module):
         """Initialize the weights."""
@@ -362,16 +363,17 @@ class CellariumGPT(CellariumModel):
         x_ng, feature_g = self.filter(x_ng, feature_g)
         random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.c_context]
         ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
-        x_ng = x_ng[ndx[:, None], random_indices]
+        x_nc = x_ng[ndx[:, None], random_indices]
         gene_ids = self.feature_ids[random_indices]
         # right=False: boundaries[i-1] < input[m][n]...[l][x] <= boundaries[i]
-        value_ids = torch.bucketize(x_ng, self.quantiles, right=False) - 1
+        value_ids = torch.bucketize(x_nc, self.quantiles, right=False) - 1
         labels = value_ids.clone()
-        prefix_len_n = torch.randint(1, self.c_context, (x_ng.shape[0],), device=x_ng.device)
+        prefix_len_n = torch.randint(1, self.c_context, (x_nc.shape[0],), device=x_nc.device)
         masked_indices = (
-            torch.arange((self.c_context), dtype=torch.float32, device=x_ng.device)[None, :] >= prefix_len_n[:, None]
+            torch.arange((self.c_context), dtype=torch.float32, device=x_nc.device)[None, :] >= prefix_len_n[:, None]
         )
         labels[~masked_indices] = -100
+        weights = 1 / masked_indices.sum(dim=1, keepdim=True).expand(-1, self.c_context)
         value_ids[masked_indices] = self.b_bins
 
         gene_gd = self.id_embedding(gene_ids)
@@ -395,21 +397,39 @@ class CellariumGPT(CellariumModel):
             # self.attention_weights[i] = block.attention.attention.attention_probs_nqs
 
         logits = self.dense(hidden_ngd)
-        loss_fn = nn.CrossEntropyLoss()
-        loss = loss_fn(logits.view(-1, self.b_bins), labels.view(-1))
-        nonzero_mask = labels > 0
-        zero_mask = labels == 0
-        nonzero_loss = loss_fn(logits[nonzero_mask], labels[nonzero_mask])
-        zero_loss = loss_fn(logits[zero_mask], labels[zero_mask])
-        #  import pdb
-        #
-        #  pdb.set_trace()
+
+        loss_logits = logits[masked_indices]
+        loss_logits = loss_logits - loss_logits.logsumexp(dim=-1, keepdim=True)
+        loss_labels = labels[masked_indices].unsqueeze(-1)
+        loss_weights = weights[masked_indices]
+        log_prob = loss_logits.gather(-1, loss_labels).squeeze(-1)
+        loss = -(log_prob * loss_weights).sum() / loss_weights.sum()
+        #  loss_fn = nn.CrossEntropyLoss(weight=weights.view(-1), ignore_index=-100, reduction="mean")
+        #  loss = loss_fn(logits.view(-1, self.b_bins), labels.view(-1))
+        with torch.no_grad():
+            loss_fn = nn.CrossEntropyLoss()
+            nonzero_mask = labels > 0
+            nonzero_loss = loss_fn(logits[nonzero_mask], labels[nonzero_mask])
+            zero_mask = labels == 0
+            zero_loss = loss_fn(logits[zero_mask], labels[zero_mask])
+            prefix_len_nc = prefix_len_n[:, None].expand(-1, self.c_context)
+            nonzero_prefix_len = prefix_len_nc[nonzero_mask]
+            # split context size of 2048 into 8 parts
+            nonzero_prefix = torch.bucketize(
+                nonzero_prefix_len, torch.arange(0, self.c_context, self.c_context // 8, device=x_nc.device), right=True
+            )
         return {
             "loss": loss,
             "nonzero_loss": nonzero_loss,
             "zero_loss": zero_loss,
+            "logits": logits,
+            "nonzero_mask": nonzero_mask,
+            "zero_mask": zero_mask,
+            "labels": labels,
+            "prefix_len_nc": prefix_len_nc,
             "zero_preds": torch.argmax(logits[zero_mask], dim=-1),
             "zero_labels": labels[zero_mask],
             "nonzero_preds": torch.argmax(logits[nonzero_mask], dim=-1),
             "nonzero_labels": labels[nonzero_mask],
+            "nonzero_prefix": nonzero_prefix,
         }
