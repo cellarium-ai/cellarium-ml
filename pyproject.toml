@@ -45,6 +45,7 @@ mypy = ["mypy"]
 test = [
   "pytest-xdist",
   "tensorboard",
+  "torchvision",
 ]
 docs = [
   "nbsphinx",
