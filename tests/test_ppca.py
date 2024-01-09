@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -33,7 +34,9 @@ def x_ng():
 @pytest.mark.parametrize("ppca_flavor", ["marginalized", "linear_vae"])
 @pytest.mark.parametrize("learn_mean", [False, True])
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
-def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_flavor: str, learn_mean: bool):
+def test_probabilistic_pca_multi_device(
+    x_ng: np.ndarray, minibatch: bool, ppca_flavor: Literal["marginalized", "linear_vae"], learn_mean: bool
+):
     n, g = x_ng.shape
     k = 3
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -151,7 +154,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     )
     # model
     init_args = {
-        "n_cells": n,
+        "n_obs": n,
         "feature_schema": [f"gene_{i}" for i in range(g)],
         "k_components": 1,
         "ppca_flavor": "marginalized",

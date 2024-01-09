@@ -3,6 +3,7 @@
 
 
 from collections.abc import Sequence
+from typing import Literal
 
 import numpy as np
 import pyro
@@ -60,7 +61,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         n_obs: int,
         feature_schema: Sequence[str],
         k_components: int,
-        ppca_flavor: str,
+        ppca_flavor: Literal["marginalized", "linear_vae"],
         mean_g: float | torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
@@ -74,10 +75,6 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         g_genes = len(self.feature_schema)
         self.g_genes = g_genes
         self.k_components = k_components
-        assert ppca_flavor in [
-            "marginalized",
-            "linear_vae",
-        ], "ppca_flavor must be one of 'marginalized' or 'linear_vae'"
         self.ppca_flavor = ppca_flavor
         self.elbo = elbo or pyro.infer.Trace_ELBO()
 

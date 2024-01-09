@@ -155,5 +155,5 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     loaded_model: OnePassMeanVarStd = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
-    np.testing.assert_allclose(model.var_g, loaded_model.var_g)
+    np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g)

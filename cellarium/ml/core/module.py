@@ -25,6 +25,8 @@ class CellariumModule(pl.LightningModule):
 
         * :attr:`model`: A :class:`cellarium.ml.models.CellariumModel` to train with
           :meth:`training_step` method and epoch end hooks.
+        * :attr:`transforms`: A :class:`cellarium.ml.core.pipeline.CellariumPipeline` of transforms to apply to the
+          input data before passing it to the model.
         * :attr:`optim_fn` and :attr:`optim_kwargs`: A Pytorch optimizer class and its keyword arguments.
         * :attr:`scheduler_fn` and :attr:`scheduler_kwargs`: A Pytorch lr scheduler class and its
           keyword arguments.
@@ -198,7 +200,10 @@ class CellariumModule(pl.LightningModule):
         Forward pass for training step.
 
         Args:
-            batch: A dictionary containing the batch data.
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
 
         Returns:
             Loss tensor or ``None`` if no loss.
@@ -218,7 +223,7 @@ class CellariumModule(pl.LightningModule):
             batch: A dictionary containing the batch data.
 
         Returns:
-            A dictionary containing the batch data and inference results.
+            A dictionary containing the batch data and inference outputs.
         """
         return self.pipeline.predict(batch)
 

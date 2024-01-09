@@ -300,8 +300,8 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     Example run::
 
         cellarium-ml probabilistic_pca fit \
-            --model.model.init_args.mean_var_std_ckpt_path \
-            "runs/onepass/lightning_logs/version_0/checkpoints/module_checkpoint.pt" \
+            --model.model.init_args.k_components 256 \
+            --model.model.init_args.ppca_flavor marginalized \
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
             --data.max_cache_size 2 \
@@ -312,9 +312,6 @@ def probabilistic_pca(args: ArgsType = None) -> None:
             --trainer.devices 1 \
             --trainer.max_steps 1000 \
             --trainer.default_root_dir runs/ppca \
-            --trainer.callbacks cellarium.ml.callbacks.VarianceMonitor \
-            --trainer.callbacks.mean_var_std_ckpt_path \
-            "runs/onepass/lightning_logs/version_0/checkpoints/module_checkpoint.pt"
 
     **References:**
 

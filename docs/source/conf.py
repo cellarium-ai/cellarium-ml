@@ -31,7 +31,7 @@ exclude_patterns = []
 
 autodoc_inherit_docstrings = False
 autodoc_member_order = "bysource"
-autodoc_typehints = "description"
+autodoc_typehints = "both"
 autodoc_typehints_format = "short"
 
 # -- Options for HTML output -------------------------------------------------
@@ -39,3 +39,4 @@ autodoc_typehints_format = "short"
 
 html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
