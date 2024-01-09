@@ -29,31 +29,37 @@ class CellariumPipeline(torch.nn.ModuleList):
             Modules to be executed sequentially.
     """
 
-    def forward(self, batch: dict[str, torch.Tensor | np.ndarray]) -> dict[str, torch.Tensor | np.ndarray]:
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
         for module in self:
+            # get the module input keys
             ann = module.forward.__annotations__
             input_keys = {key for key in ann if key != "return" and key in batch}
+            # allow all keys to be passed to the module
             if "kwargs" in ann:
                 input_keys |= batch.keys()
-            batch |= module(**{key: batch[key] for key in input_keys})  # type: ignore[literal-required]
+            batch |= module(**{key: batch[key] for key in input_keys})
 
         return batch
 
-    def predict(self, batch: dict[str, torch.Tensor | np.ndarray]) -> dict[str, torch.Tensor | np.ndarray]:
+    def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         model = self[-1]
         assert isinstance(model, PredictMixin)
 
         for module in self[:-1]:
+            # get the module input keys
             ann = module.forward.__annotations__
             input_keys = {key for key in ann if key != "return" and key in batch}
+            # allow all keys to be passed to the module
             if "kwargs" in ann:
                 input_keys |= batch.keys()
-            batch |= module(**{key: batch[key] for key in input_keys})  # type: ignore[literal-required]
+            batch |= module(**{key: batch[key] for key in input_keys})
 
+        # get the model predict input keys
         ann = model.predict.__annotations__
         input_keys = {key for key in ann if key != "return" and key in batch}
+        # allow all keys to be passed to the predict method
         if "kwargs" in ann:
             input_keys |= batch.keys()
-        batch |= model.predict(**{key: batch[key] for key in input_keys})  # type: ignore[literal-required]
+        batch |= model.predict(**{key: batch[key] for key in input_keys})
 
         return batch

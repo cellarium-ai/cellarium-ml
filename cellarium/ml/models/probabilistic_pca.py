@@ -33,7 +33,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
        <https://openreview.net/pdf?id=r1xaVLUYuE>`_.
 
     Args:
-        n_cells:
+        n_obs:
             Number of cells.
         feature_schema:
             The variable names schema for the input data validation.
@@ -57,7 +57,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        n_cells: int,
+        n_obs: int,
         feature_schema: Sequence[str],
         k_components: int,
         ppca_flavor: str,
@@ -69,7 +69,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
     ):
         super().__init__()
 
-        self.n_cells = n_cells
+        self.n_obs = n_obs
         self.feature_schema = np.array(feature_schema)
         g_genes = len(self.feature_schema)
         self.g_genes = g_genes
@@ -97,7 +97,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((k_components, g_genes), generator=rng))
         self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor]:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
@@ -115,7 +115,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         return {"loss": loss}
 
     def model(self, x_ng: torch.Tensor) -> None:
-        with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
+        with pyro.plate("cells", size=self.n_obs, subsample_size=x_ng.shape[0]):
             if self.ppca_flavor == "marginalized":
                 pyro.sample(
                     "counts",
@@ -141,12 +141,12 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         if self.ppca_flavor == "marginalized":
             return
 
-        with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
+        with pyro.plate("cells", size=self.n_obs, subsample_size=x_ng.shape[0]):
             V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
-    def predict(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | np.ndarray]:
+    def predict(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 

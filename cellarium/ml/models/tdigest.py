@@ -41,7 +41,7 @@ class TDigest(CellariumModel):
         self.tdigests = [crick.tdigest.TDigest() for _ in range(self.g_genes)]
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
@@ -86,6 +86,9 @@ class TDigest(CellariumModel):
 
     @property
     def median_g(self) -> torch.Tensor:
+        """
+        Median of the data.
+        """
         return torch.as_tensor([tdigest.quantile(0.5) for tdigest in self.tdigests])
 
     @staticmethod

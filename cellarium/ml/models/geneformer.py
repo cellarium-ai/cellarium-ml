@@ -171,8 +171,12 @@ class Geneformer(CellariumModel, PredictMixin):
                 Gene counts matrix.
             feature_g:
                 The list of the variable names in the input data.
+            output_hidden_states:
+                Whether to return all hidden-states.
+            output_attentions:
+                Whether to return all attentions.
         Returns:
-            An empty dictionary.
+            A dictionary with the inference results.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
         assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)

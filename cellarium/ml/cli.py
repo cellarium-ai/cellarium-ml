@@ -35,7 +35,7 @@ def lightning_cli_factory(
 
         cli = lightning_cli_factory(
             "cellarium.ml.models.IncrementalPCA",
-            link_arguments=[("data.var_names", "model.model.init_args.feature_schema")],
+            link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
                 "strategy": {

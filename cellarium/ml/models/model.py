@@ -63,7 +63,7 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor | np.ndarray]:
+    def predict(self, *args: Any, **kwargs: Any) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Perform prediction.
         """

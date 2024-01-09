@@ -69,14 +69,7 @@ class LogisticRegression(CellariumModel):
 
         self.log_metrics = log_metrics
 
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        x_ng = tensor_dict["x_ng"]
-        feature_g = tensor_dict["feature_g"]
-        y_n = tensor_dict["y_n"]
-        return (x_ng, feature_g, y_n), {}
-
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray, y_n: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray, y_n: torch.Tensor) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
@@ -87,11 +80,12 @@ class LogisticRegression(CellariumModel):
                 The target data.
 
         Returns:
-            The loss.
+            A dictionary with the loss value.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
         assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
-        return self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
+        return {"loss": loss}
 
     def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         W_gc = pyro.sample(

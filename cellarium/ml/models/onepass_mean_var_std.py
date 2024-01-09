@@ -43,7 +43,7 @@ class OnePassMeanVarStd(CellariumModel):
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
