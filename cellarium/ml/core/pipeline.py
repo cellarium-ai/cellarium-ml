@@ -1,11 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import numpy as np
 import torch
 
 from cellarium.ml.models import PredictMixin
-from cellarium.ml.utilities.testing import assert_only_allowed_args, assert_return_type
-from cellarium.ml.utilities.types import BatchDict
 
 
 class CellariumPipeline(torch.nn.ModuleList):
@@ -30,17 +29,7 @@ class CellariumPipeline(torch.nn.ModuleList):
             Modules to be executed sequentially.
     """
 
-    def add_module(self, name: str, module: torch.nn.Module | None) -> None:
-        if module is not None:
-            allowed_args = set(BatchDict.__optional_keys__)
-            assert_only_allowed_args(module.forward, allowed_args)
-            assert_return_type(module.forward, BatchDict)
-            if isinstance(module, PredictMixin):
-                assert_only_allowed_args(module.predict, allowed_args)
-                assert_return_type(module.predict, BatchDict)
-        super().add_module(name, module)
-
-    def forward(self, batch: BatchDict) -> BatchDict:
+    def forward(self, batch: dict[str, torch.Tensor | np.ndarray]) -> dict[str, torch.Tensor | np.ndarray]:
         for module in self:
             ann = module.forward.__annotations__
             input_keys = {key for key in ann if key != "return" and key in batch}
@@ -50,7 +39,7 @@ class CellariumPipeline(torch.nn.ModuleList):
 
         return batch
 
-    def predict(self, batch: BatchDict) -> BatchDict:
+    def predict(self, batch: dict[str, torch.Tensor | np.ndarray]) -> dict[str, torch.Tensor | np.ndarray]:
         model = self[-1]
         assert isinstance(model, PredictMixin)
 

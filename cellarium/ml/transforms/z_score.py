@@ -12,7 +12,6 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
     assert_nonnegative,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class ZScore(nn.Module):
@@ -53,8 +52,8 @@ class ZScore(nn.Module):
     def forward(
         self,
         x_ng: torch.Tensor,
-        feature_g: np.ndarray | None = None,
-    ) -> BatchDict:
+        feature_g: np.ndarray,
+    ) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
@@ -63,11 +62,12 @@ class ZScore(nn.Module):
                 The list of the variable names in the input data. If ``None``, no validation is performed.
 
         Returns:
-            Z-scored gene counts.
+            A dictionary with the following keys:
+
+            - ``x_ng``: The z-scored gene counts.
         """
-        if feature_g is not None:
-            assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-            assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
         x_ng = (x_ng - self.mean_g) / (self.std_g + self.eps)
         return {"x_ng": x_ng}

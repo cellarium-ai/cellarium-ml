@@ -272,33 +272,31 @@ CONFIGS = [
             },
         },
     },
-    pytest.param(
-        {
-            "model_name": "tdigest",
-            "subcommand": "fit",
-            "fit": {
-                "model": {"model": "cellarium.ml.models.TDigest"},
-                "data": {
-                    "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                    "shard_size": "100",
-                    "max_cache_size": "2",
-                    "batch_keys": {
-                        "x_ng": {
-                            "attr": "X",
-                            "convert_fn": "cellarium.ml.utilities.data.densify",
-                        },
-                        "feature_g": {
-                            "attr": "var_names",
-                        },
+    {
+        "model_name": "tdigest",
+        "subcommand": "fit",
+        "fit": {
+            "model": {"model": "cellarium.ml.models.TDigest"},
+            "data": {
+                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                "shard_size": "100",
+                "max_cache_size": "2",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "feature_g": {
+                        "attr": "var_names",
                     },
                 },
-                "batch_size": "50",
-                "num_workers": "2",
             },
-            "trainer": {
-                "accelerator": "cpu",
-                "devices": devices,
-            },
+            "batch_size": "50",
+            "num_workers": "2",
+        },
+        "trainer": {
+            "accelerator": "cpu",
+            "devices": devices,
         },
     },
 ]

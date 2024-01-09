@@ -5,8 +5,6 @@
 import torch
 from torch import nn
 
-from cellarium.ml.utilities.types import BatchDict
-
 
 class Log1p(nn.Module):
     """
@@ -20,13 +18,15 @@ class Log1p(nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, x_ng: torch.Tensor) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng: Gene counts.
 
         Returns:
-            Log1p transformed gene counts.
+            A dictionary with the following keys:
+
+            - ``x_ng``: The log1p transformed gene counts.
         """
         x_ng = torch.log1p(x_ng)
         return {"x_ng": x_ng}

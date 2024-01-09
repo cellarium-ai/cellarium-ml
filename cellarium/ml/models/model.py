@@ -11,8 +11,6 @@ import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
 
-from cellarium.ml.utilities.types import BatchDict
-
 
 class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
     """
@@ -65,16 +63,7 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, *args: Any, **kwargs: Any) -> BatchDict:
+    def predict(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor | np.ndarray]:
         """
-        Perform prediction on data tensor.
-
-        Args:
-            x_ng:
-                Data tensor.
-            **kwargs:
-                Additional keyword arguments.
-
-        Returns:
-            Prediction tensor or dictionary of prediction tensors.
+        Perform prediction.
         """

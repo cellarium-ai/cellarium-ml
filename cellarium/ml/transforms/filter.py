@@ -12,7 +12,6 @@ from torch import nn
 from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class Filter(nn.Module):
@@ -49,7 +48,7 @@ class Filter(nn.Module):
             raise AssertionError("No features in `feature_g` matched the `filter_list`")
         return mask
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Args:
             x_ng:
@@ -58,7 +57,10 @@ class Filter(nn.Module):
                 The list of the variable names in the input data.
 
         Returns:
-            Gene counts and features list filtered by :attr:`filter_list`.
+            A dictionary with the following keys:
+
+            - ``x_ng``: Gene counts filtered by :attr:`filter_list`.
+            - ``feature_g``: The list of the variable names in the input data filtered by :attr:`filter_list`.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
 

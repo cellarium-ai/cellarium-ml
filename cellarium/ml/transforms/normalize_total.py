@@ -9,7 +9,6 @@ from cellarium.ml.utilities.testing import (
     assert_nonnegative,
     assert_positive,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class NormalizeTotal(nn.Module):
@@ -44,7 +43,7 @@ class NormalizeTotal(nn.Module):
         self,
         x_ng: torch.Tensor,
         total_mrna_umis_n: torch.Tensor | None = None,
-    ) -> BatchDict:
+    ) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
@@ -53,7 +52,9 @@ class NormalizeTotal(nn.Module):
                 Total mRNA UMI counts per cell. If ``None``, it is computed from ``x_ng``.
 
         Returns:
-            Gene counts normalized to target count.
+            A dictionary with the following keys:
+
+            - ``x_ng``: The gene counts normalized to target count.
         """
         if total_mrna_umis_n is None:
             total_mrna_umis_n = x_ng.sum(dim=-1)

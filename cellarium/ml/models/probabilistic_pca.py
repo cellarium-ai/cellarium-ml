@@ -16,7 +16,6 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class ProbabilisticPCA(CellariumModel, PredictMixin):
@@ -72,7 +71,8 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
 
         self.n_cells = n_cells
         self.feature_schema = np.array(feature_schema)
-        self.g_genes = len(self.feature_schema)
+        g_genes = len(self.feature_schema)
+        self.g_genes = g_genes
         self.k_components = k_components
         assert ppca_flavor in [
             "marginalized",
@@ -83,21 +83,21 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (
-                self.g_genes,
-            ), f"Expected meang_g to have a shape ({self.g_genes},) but found {mean_g.shape}."
+                g_genes,
+            ), f"Expected meang_g to have a shape ({g_genes},) but found {mean_g.shape}."
         if mean_g is None:
             # make mean_g a learnable parameter
-            self.mean_g = PyroParam(lambda: torch.zeros(self.g_genes))
+            self.mean_g = PyroParam(lambda: torch.zeros(g_genes))
         else:
             self.register_buffer("mean_g", torch.as_tensor(mean_g))
 
         rng = torch.Generator()
         rng.manual_seed(seed)
         # model parameters
-        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((k_components, self.g_genes), generator=rng))
+        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((k_components, g_genes), generator=rng))
         self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
@@ -110,6 +110,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
         assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng)
         return {"loss": loss}
 
@@ -145,7 +146,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
-    def predict(self, x_ng: torch.Tensor) -> BatchDict:
+    def predict(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 
@@ -153,14 +154,22 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
            Gradients are disabled, used for inference only.
 
         Args:
-            x_ng: Input data.
+            x_ng:
+                Gene counts matrix.
+            feature_g:
+                The list of the variable names in the input data.
 
         Returns:
-            BatchDict with ``z_nk`` containing the embedded data.
+            A dictionary with the following keys:
+
+            - ``z_nk``: Embedding of the input data into the principal component space.
         """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+
         V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
         z_nk = (x_ng - self.mean_g) @ V_gk
-        return BatchDict(z_nk=z_nk)
+        return {"z_nk": z_nk}
 
     @property
     def M_kk(self) -> torch.Tensor:

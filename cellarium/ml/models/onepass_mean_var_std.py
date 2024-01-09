@@ -14,7 +14,6 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class OnePassMeanVarStd(CellariumModel):
@@ -34,16 +33,17 @@ class OnePassMeanVarStd(CellariumModel):
     def __init__(self, feature_schema: Sequence[str]) -> None:
         super().__init__()
         self.feature_schema = np.array(feature_schema)
-        self.g_genes = len(self.feature_schema)
+        g_genes = len(self.feature_schema)
+        self.g_genes = g_genes
         self.x_sums: torch.Tensor
         self.x_squared_sums: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("x_sums", torch.zeros(self.g_genes))
-        self.register_buffer("x_squared_sums", torch.zeros(self.g_genes))
+        self.register_buffer("x_sums", torch.zeros(g_genes))
+        self.register_buffer("x_squared_sums", torch.zeros(g_genes))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict:
         """
         Args:
             x_ng:

@@ -16,7 +16,6 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class IncrementalPCA(CellariumModel, PredictMixin):
@@ -52,7 +51,8 @@ class IncrementalPCA(CellariumModel, PredictMixin):
     ) -> None:
         super().__init__()
         self.feature_schema = np.array(feature_schema)
-        self.g_genes = len(self.feature_schema)
+        g_genes = len(self.feature_schema)
+        self.g_genes = g_genes
         self.k_components = k_components
         self.svd_lowrank_niter = svd_lowrank_niter
         self.perform_mean_correction = perform_mean_correction
@@ -60,13 +60,13 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.S_k: torch.Tensor
         self.x_mean_g: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("V_kg", torch.zeros(k_components, self.g_genes))
+        self.register_buffer("V_kg", torch.zeros(k_components, g_genes))
         self.register_buffer("S_k", torch.zeros(k_components))
-        self.register_buffer("x_mean_g", torch.zeros(self.g_genes))
+        self.register_buffer("x_mean_g", torch.zeros(g_genes))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict:
         """
         Incrementally update partial SVD with new data.
 
@@ -237,15 +237,23 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor) -> BatchDict:
+    def predict(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 
         Args:
-            x_ng: Input data.
+            x_ng:
+                Gene counts matrix.
+            feature_g:
+                The list of the variable names in the input data.
 
         Returns:
-            BatchDict with ``z_nk`` containing the embedded data.
+            A dictionary with the following keys:
+
+            - ``z_nk``: Embedding of the input data into the principal component space.
         """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+
         z_nk = (x_ng - self.x_mean_g) @ self.V_kg.T
-        return BatchDict(z_nk=z_nk)
+        return {"z_nk": z_nk}

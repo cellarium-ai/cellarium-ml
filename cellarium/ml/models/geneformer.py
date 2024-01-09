@@ -12,15 +12,17 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class Geneformer(CellariumModel, PredictMixin):
     """
     Geneformer model.
+
     **References:**
+
     1. `Transfer learning enables predictions in network biology (Theodoris et al.)
        <https://www.nature.com/articles/s41586-023-06139-9>`_.
+
     Args:
         feature_schema:
             The variable names schema for the input data validation.
@@ -115,7 +117,7 @@ class Geneformer(CellariumModel, PredictMixin):
         input_ids[~attention_mask] = 0
         return input_ids, attention_mask
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
@@ -123,7 +125,7 @@ class Geneformer(CellariumModel, PredictMixin):
             feature_g:
                 The list of the variable names in the input data.
         Returns:
-            An empty dictionary.
+            A dictionary with the loss value.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
         assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
@@ -162,7 +164,7 @@ class Geneformer(CellariumModel, PredictMixin):
         feature_g: np.ndarray,
         output_hidden_states: bool = True,
         output_attentions: bool = True,
-    ) -> BatchDict:
+    ) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Args:
             x_ng:

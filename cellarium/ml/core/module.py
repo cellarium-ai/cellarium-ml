@@ -1,14 +1,13 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from __future__ import annotations
-
 from collections.abc import Iterable
 from importlib import import_module
 from typing import IO, Any
 from unittest.mock import patch
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
@@ -18,7 +17,6 @@ from typing_extensions import override
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.core.saving import _load_state
 from cellarium.ml.models import CellariumModel
-from cellarium.ml.utilities.types import BatchDict
 
 
 class CellariumModule(pl.LightningModule):
@@ -114,7 +112,7 @@ class CellariumModule(pl.LightningModule):
         hparams_file: _PATH | None = None,
         strict: bool = True,
         **kwargs: Any,
-    ) -> CellariumModule:
+    ) -> "CellariumModule":
         r"""
         Primary way of loading a model from a checkpoint. When Cellarium ML saves a checkpoint it stores the config
         argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.
@@ -195,7 +193,7 @@ class CellariumModule(pl.LightningModule):
         )
 
     @override
-    def training_step(self, batch: BatchDict, batch_idx: int) -> torch.Tensor | None:
+    def training_step(self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int) -> torch.Tensor | None:
         """
         Forward pass for training step.
 
@@ -212,7 +210,7 @@ class CellariumModule(pl.LightningModule):
             self.log("train_loss", loss)
         return loss
 
-    def forward(self, batch: BatchDict) -> BatchDict:
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Forward pass for inference step.
 

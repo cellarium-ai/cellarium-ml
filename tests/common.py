@@ -6,7 +6,6 @@ import torch
 
 from cellarium.ml.models import CellariumModel, GatherLayer
 from cellarium.ml.utilities.data import get_rank_and_num_replicas
-from cellarium.ml.utilities.types import BatchDict
 
 
 class BoringDataset(torch.utils.data.Dataset):
@@ -39,7 +38,7 @@ class BoringModel(CellariumModel):
         self.iter_data: list = []
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, **kwargs: torch.Tensor) -> BatchDict:
+    def forward(self, **kwargs: torch.Tensor) -> dict:
         _, num_replicas = get_rank_and_num_replicas()
         if num_replicas > 1:
             for key, value in kwargs.items():

@@ -17,7 +17,6 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class TDigest(CellariumModel):
@@ -37,11 +36,12 @@ class TDigest(CellariumModel):
     def __init__(self, feature_schema: Sequence[str]) -> None:
         super().__init__()
         self.feature_schema = np.array(feature_schema)
-        self.g_genes = len(self.feature_schema)
+        g_genes = len(self.feature_schema)
+        self.g_genes = g_genes
         self.tdigests = [crick.tdigest.TDigest() for _ in range(self.g_genes)]
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> BatchDict:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict:
         """
         Args:
             x_ng:

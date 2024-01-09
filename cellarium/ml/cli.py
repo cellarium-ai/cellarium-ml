@@ -132,7 +132,7 @@ def geneformer(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.Geneformer",
-        link_arguments=[("data.var_names", "model.model.init_args.feature_schema")],
+        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
     )
     cli(args=args)
 
@@ -170,7 +170,7 @@ def incremental_pca(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.IncrementalPCA",
-        link_arguments=[("data.var_names", "model.model.init_args.feature_schema")],
+        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -265,7 +265,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.OnePassMeanVarStd",
-        link_arguments=[("data.var_names", "model.model.init_args.feature_schema")],
+        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -329,8 +329,8 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.ProbabilisticPCA",
         link_arguments=[
-            ("data.n_obs", "model.model.init_args.n_obs"),
-            ("data.var_names", "model.model.init_args.feature_schema"),
+            ("data.n_obs", "model.model.init_args.n_obs", None),
+            ("data.var_names", "model.model.init_args.feature_schema", None),
         ],
     )
     cli(args=args)
@@ -366,7 +366,7 @@ def tdigest(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.TDigest",
-        link_arguments=[("data.var_names", "model.model.init_args.feature_schema")],
+        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
         },

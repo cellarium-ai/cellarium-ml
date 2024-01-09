@@ -12,7 +12,6 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
     assert_nonnegative,
 )
-from cellarium.ml.utilities.types import BatchDict
 
 
 class DivideByScale(nn.Module):
@@ -43,8 +42,8 @@ class DivideByScale(nn.Module):
     def forward(
         self,
         x_ng: torch.Tensor,
-        feature_g: np.ndarray | None = None,
-    ) -> BatchDict:
+        feature_g: np.ndarray,
+    ) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
@@ -53,15 +52,16 @@ class DivideByScale(nn.Module):
                 The list of the variable names in the input data. If ``None``, no validation is performed.
 
         Returns:
-            Gene counts divided by scale.
+            A dictionary with the following keys:
+
+            - ``x_ng``: The gene counts divided by the scale.
         """
-        if feature_g is not None:
-            assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-            assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
         x_ng = x_ng / (self.scale_g + self.eps)
 
-        return BatchDict(x_ng=x_ng)
+        return {"x_ng": x_ng}
 
     def __repr__(self) -> str:
         return (

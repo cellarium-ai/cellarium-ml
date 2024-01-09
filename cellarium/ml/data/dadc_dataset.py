@@ -120,22 +120,22 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         at the given index ``idx``.
         """
 
-        batch = {}
+        data = {}
         for key, field in self.batch_keys.items():
-            batch[key] = field(self.dadc)[idx]
+            data[key] = field(self.dadc)[idx]
 
         # for testing purposes
         if self.test_mode:
             rank, num_replicas = get_rank_and_num_replicas()
             worker_id, num_workers = get_worker_info()
-            batch["rank"] = np.array([rank])
-            batch["num_replicas"] = np.array([num_replicas])
-            batch["worker_id"] = np.array([worker_id])
-            batch["num_workers"] = np.array([num_workers])
-            batch["miss_count"] = np.array([self.dadc.cache.miss_count])
-            batch["epoch"] = np.array([self.epoch])
+            data["rank"] = np.array([rank])
+            data["num_replicas"] = np.array([num_replicas])
+            data["worker_id"] = np.array([worker_id])
+            data["num_workers"] = np.array([num_workers])
+            data["miss_count"] = np.array([self.dadc.cache.miss_count])
+            data["epoch"] = np.array([self.epoch])
 
-        return batch
+        return data
 
     def __iter__(self):
         r"""
