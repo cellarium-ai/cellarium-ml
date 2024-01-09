@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 from cellarium.ml.cli import main
-from tests.common import requires_crick
 
 devices = os.environ.get("TEST_DEVICES", "1")
 
@@ -292,17 +291,16 @@ CONFIGS = [
                             "attr": "var_names",
                         },
                     },
-                    "batch_size": "50",
-                    "num_workers": "2",
                 },
-                "trainer": {
-                    "accelerator": "cpu",
-                    "devices": devices,
-                },
+                "batch_size": "50",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
             },
         },
-        marks=requires_crick,
-    ),
+    },
 ]
 
 

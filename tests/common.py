@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numpy as np
-import pytest
 import torch
 
 from cellarium.ml.models import CellariumModel, GatherLayer
@@ -47,10 +46,3 @@ class BoringModel(CellariumModel):
                 kwargs[key] = torch.cat(GatherLayer.apply(value), dim=0)
         self.iter_data.append(kwargs)
         return {}
-
-
-try:
-    import crick
-except ImportError:
-    crick = None
-requires_crick = pytest.mark.skipif(crick is None, reason="crick is not available")
