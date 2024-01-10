@@ -1,13 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from cellarium.ml.models.from_cli import (
-    GeneformerFromCLI,
-    IncrementalPCAFromCLI,
-    OnePassMeanVarStdFromCLI,
-    ProbabilisticPCAFromCLI,
-    TDigestFromCLI,
-)
 from cellarium.ml.models.gather import GatherLayer
 from cellarium.ml.models.geneformer import Geneformer
 from cellarium.ml.models.incremental_pca import IncrementalPCA
@@ -21,15 +14,10 @@ __all__ = [
     "CellariumModel",
     "GatherLayer",
     "Geneformer",
-    "GeneformerFromCLI",
     "IncrementalPCA",
-    "IncrementalPCAFromCLI",
     "LogisticRegression",
     "OnePassMeanVarStd",
-    "OnePassMeanVarStdFromCLI",
     "PredictMixin",
     "ProbabilisticPCA",
-    "ProbabilisticPCAFromCLI",
     "TDigest",
-    "TDigestFromCLI",
 ]

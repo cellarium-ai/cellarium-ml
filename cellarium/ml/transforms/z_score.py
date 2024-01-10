@@ -1,10 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from collections.abc import Sequence
 
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
 from torch import nn
 
 from cellarium.ml.utilities.testing import (
@@ -37,7 +37,7 @@ class ZScore(nn.Module):
         self,
         mean_g: torch.Tensor | float,
         std_g: torch.Tensor | float,
-        feature_schema: ArrayLike,
+        feature_schema: Sequence[str],
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
@@ -52,8 +52,8 @@ class ZScore(nn.Module):
     def forward(
         self,
         x_ng: torch.Tensor,
-        feature_g: np.ndarray | None = None,
-    ) -> torch.Tensor:
+        feature_g: np.ndarray,
+    ) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
@@ -62,13 +62,15 @@ class ZScore(nn.Module):
                 The list of the variable names in the input data. If ``None``, no validation is performed.
 
         Returns:
-            Z-scored gene counts.
-        """
-        if feature_g is not None:
-            assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-            assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+            A dictionary with the following keys:
 
-        return (x_ng - self.mean_g) / (self.std_g + self.eps)
+            - ``x_ng``: The z-scored gene counts.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+
+        x_ng = (x_ng - self.mean_g) / (self.std_g + self.eps)
+        return {"x_ng": x_ng}
 
     def __repr__(self) -> str:
         return (

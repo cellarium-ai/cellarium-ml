@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-from typing import Any
+from collections.abc import Sequence
 
 import lightning.pytorch as pl
 import numpy as np
@@ -12,6 +12,10 @@ import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
 
 
 class IncrementalPCA(CellariumModel, PredictMixin):
@@ -26,8 +30,8 @@ class IncrementalPCA(CellariumModel, PredictMixin):
        <https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf>`_.
 
     Args:
-        g_genes:
-            Number of genes.
+        feature_schema:
+            The variable names schema for the input data validation.
         k_components:
             Number of principal components.
         svd_lowrank_niter:
@@ -36,24 +40,22 @@ class IncrementalPCA(CellariumModel, PredictMixin):
             If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
-        transform:
-            If not ``None`` is used to transform the input data.
     """
 
     def __init__(
         self,
-        g_genes: int,
+        feature_schema: Sequence[str],
         k_components: int,
         svd_lowrank_niter: int = 2,
         perform_mean_correction: bool = False,
-        transform: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        self.feature_schema = np.array(feature_schema)
+        g_genes = len(self.feature_schema)
         self.g_genes = g_genes
         self.k_components = k_components
         self.svd_lowrank_niter = svd_lowrank_niter
         self.perform_mean_correction = perform_mean_correction
-        self.transform = transform
         self.V_kg: torch.Tensor
         self.S_k: torch.Tensor
         self.x_mean_g: torch.Tensor
@@ -64,17 +66,21 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = nn.Parameter(torch.tensor(0.0))
 
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        x = tensor_dict["X"]
-        return (x,), {}
-
-    def forward(self, x_ng: torch.Tensor) -> None:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Incrementally update partial SVD with new data.
+
+        Args:
+            x_ng:
+                Gene counts matrix.
+            feature_g:
+                The list of the variable names in the input data.
+
+        Returns:
+            An empty dictionary.
         """
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
         g = self.g_genes
         k = self.k_components
@@ -114,6 +120,8 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.x_size = total_X_size
         if self.perform_mean_correction:
             self.x_mean_g = self_X_mean * self_X_size / total_X_size + other_X_mean * other_X_size / total_X_size
+
+        return {}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -229,10 +237,23 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-        r"""
-        Centering and embedding of the input data ``x_ng`` into the principal component space.
+    def predict(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
-        return (x_ng - self.x_mean_g) @ self.V_kg.T
+        Centering and embedding of the input data ``x_ng`` into the principal component space.
+
+        Args:
+            x_ng:
+                Gene counts matrix.
+            feature_g:
+                The list of the variable names in the input data.
+
+        Returns:
+            A dictionary with the following keys:
+
+            - ``z_nk``: Embedding of the input data into the principal component space.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+
+        z_nk = (x_ng - self.x_mean_g) @ self.V_kg.T
+        return {"z_nk": z_nk}

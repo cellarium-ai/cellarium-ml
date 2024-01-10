@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models import GeneformerFromCLI
+from cellarium.ml.models import Geneformer
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDataset
 
@@ -36,11 +36,11 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         "intermediate_size": 4,
         "max_position_embeddings": 2,
     }
-    model = GeneformerFromCLI(**init_args)  # type: ignore[arg-type]
+    model = Geneformer(**init_args)  # type: ignore[arg-type]
     config = {
         "model": {
             "model": {
-                "class_path": "cellarium.ml.models.GeneformerFromCLI",
+                "class_path": "cellarium.ml.models.Geneformer",
                 "init_args": init_args,
             }
         }
@@ -63,7 +63,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: GeneformerFromCLI = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model: Geneformer = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
     assert np.array_equal(model.feature_schema, loaded_model.feature_schema)
     np.testing.assert_allclose(model.feature_ids, loaded_model.feature_ids)

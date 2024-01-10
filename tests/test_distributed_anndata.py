@@ -187,17 +187,17 @@ def test_indexing_dataset(
     dataset = IterableDistributedAnnDataCollectionDataset(
         dat,
         batch_keys={
-            "X": AnnDataField("X"),
+            "x_ng": AnnDataField("X"),
             "obs_names": AnnDataField("obs_names"),
         },
     )
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
         with pytest.raises(AssertionError, match="Expected the number of anndata files"):
-            dataset_X = dataset[oidx]["X"]
+            dataset_X = dataset[oidx]["x_ng"]
     else:
         adt_X = adt[oidx].X
-        dataset_X = dataset[oidx]["X"]
+        dataset_X = dataset[oidx]["x_ng"]
         np.testing.assert_array_equal(adt_X, dataset_X)
 
         adt_obs_names = adt[oidx].obs_names
@@ -209,7 +209,7 @@ def test_pickle_dataset(dat: DistributedAnnDataCollection):
     dataset = IterableDistributedAnnDataCollectionDataset(
         dat,
         batch_keys={
-            "X": AnnDataField("X"),
+            "x_ng": AnnDataField("X"),
             "obs_names": AnnDataField("obs_names"),
         },
     )
@@ -217,7 +217,7 @@ def test_pickle_dataset(dat: DistributedAnnDataCollection):
 
     assert len(new_dataset.dadc.cache) == 0
 
-    np.testing.assert_array_equal(new_dataset[:2]["X"], dataset[:2]["X"])
+    np.testing.assert_array_equal(new_dataset[:2]["x_ng"], dataset[:2]["x_ng"])
     np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])
 
 

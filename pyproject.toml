@@ -50,7 +50,6 @@ docs = [
   "Pillow",
   "sphinx",
   "sphinx_rtd_theme",
-  "sphinx-autodoc-typehints",
   "sphinx-copybutton",
 ]
 dev = ["cellarium-ml[docs,lint,mypy,test]"]
@@ -85,3 +84,4 @@ line-length = 120
 ignore_missing_imports = true
 explicit_package_bases = true
 check_untyped_defs = true
+warn_unreachable = true

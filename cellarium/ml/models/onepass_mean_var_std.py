@@ -1,14 +1,19 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from collections.abc import Sequence
+
 import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
 
 
 class OnePassMeanVarStd(CellariumModel):
@@ -22,16 +27,14 @@ class OnePassMeanVarStd(CellariumModel):
        <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
 
     Args:
-        g_genes:
-            Number of genes.
-        transform:
-            If not ``None`` is used to transform the input data.
+        feature_schema: The variable names schema for the input data validation.
     """
 
-    def __init__(self, g_genes: int, transform: nn.Module | None = None) -> None:
+    def __init__(self, feature_schema: Sequence[str]) -> None:
         super().__init__()
+        self.feature_schema = np.array(feature_schema)
+        g_genes = len(self.feature_schema)
         self.g_genes = g_genes
-        self.transform = transform
         self.x_sums: torch.Tensor
         self.x_squared_sums: torch.Tensor
         self.x_size: torch.Tensor
@@ -40,18 +43,24 @@ class OnePassMeanVarStd(CellariumModel):
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        x = tensor_dict["X"]
-        return (x,), {}
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+        """
+        Args:
+            x_ng:
+                Gene counts matrix.
+            feature_g:
+                The list of the variable names in the input data.
 
-    def forward(self, x_ng: torch.Tensor) -> None:
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
+        Returns:
+            An empty dictionary.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
 
         self.x_sums = self.x_sums + x_ng.sum(dim=0)
         self.x_squared_sums = self.x_squared_sums + (x_ng**2).sum(dim=0)
         self.x_size = self.x_size + x_ng.shape[0]
+        return {}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -74,12 +83,21 @@ class OnePassMeanVarStd(CellariumModel):
 
     @property
     def mean_g(self) -> torch.Tensor:
+        """
+        Mean of the data.
+        """
         return self.x_sums / self.x_size
 
     @property
     def var_g(self) -> torch.Tensor:
+        """
+        Variance of the data.
+        """
         return self.x_squared_sums / self.x_size - self.mean_g**2
 
     @property
     def std_g(self) -> torch.Tensor:
+        """
+        Standard deviation of the data.
+        """
         return torch.sqrt(self.var_g)

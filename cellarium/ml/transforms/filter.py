@@ -1,12 +1,12 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from collections.abc import Sequence
 from functools import cache
 from typing import Any
 
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
 from torch import nn
 
 from cellarium.ml.utilities.testing import (
@@ -28,7 +28,7 @@ class Filter(nn.Module):
         filter_list: A list of features to filter by.
     """
 
-    def __init__(self, filter_list: ArrayLike) -> None:
+    def __init__(self, filter_list: Sequence[str]) -> None:
         super().__init__()
         self.filter_list = np.array(filter_list)
         if len(self.filter_list) == 0:
@@ -48,7 +48,7 @@ class Filter(nn.Module):
             raise AssertionError("No features in `feature_g` matched the `filter_list`")
         return mask
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Args:
             x_ng:
@@ -57,12 +57,18 @@ class Filter(nn.Module):
                 The list of the variable names in the input data.
 
         Returns:
-            Filtered gene counts.
+            A dictionary with the following keys:
+
+            - ``x_ng``: Gene counts filtered by :attr:`filter_list`.
+            - ``feature_g``: The list of the variable names in the input data filtered by :attr:`filter_list`.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
 
         filter_mask = self.filter(tuple(feature_g.tolist()))
-        return x_ng[:, filter_mask]
+        x_ng = x_ng[:, filter_mask]
+        feature_g = feature_g[filter_mask]
+
+        return {"x_ng": x_ng, "feature_g": feature_g}
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(filter_list={self.filter_list})"

@@ -3,5 +3,6 @@
 
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.core.module import CellariumModule
+from cellarium.ml.core.pipeline import CellariumPipeline
 
-__all__ = ["CellariumAnnDataDataModule", "CellariumModule"]
+__all__ = ["CellariumAnnDataDataModule", "CellariumModule", "CellariumPipeline"]

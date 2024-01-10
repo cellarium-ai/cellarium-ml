@@ -1,8 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from __future__ import annotations
-
+from collections.abc import Iterable
 from importlib import import_module
 from typing import IO, Any
 from unittest.mock import patch
@@ -13,9 +12,11 @@ import torch
 from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
+from typing_extensions import override
 
+from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.core.saving import _load_state
-from cellarium.ml.models import CellariumModel, PredictMixin
+from cellarium.ml.models import CellariumModel
 
 
 class CellariumModule(pl.LightningModule):
@@ -24,6 +25,8 @@ class CellariumModule(pl.LightningModule):
 
         * :attr:`model`: A :class:`cellarium.ml.models.CellariumModel` to train with
           :meth:`training_step` method and epoch end hooks.
+        * :attr:`transforms`: A :class:`cellarium.ml.core.pipeline.CellariumPipeline` of transforms to apply to the
+          input data before passing it to the model.
         * :attr:`optim_fn` and :attr:`optim_kwargs`: A Pytorch optimizer class and its keyword arguments.
         * :attr:`scheduler_fn` and :attr:`scheduler_kwargs`: A Pytorch lr scheduler class and its
           keyword arguments.
@@ -31,6 +34,9 @@ class CellariumModule(pl.LightningModule):
     Args:
         model:
             A :class:`cellarium.ml.models.CellariumModel` to train.
+        transforms:
+            A list of transforms to apply to the input data before passing it to the model.
+            If ``None``, no transforms are applied.
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
@@ -50,6 +56,7 @@ class CellariumModule(pl.LightningModule):
     def __init__(
         self,
         model: CellariumModel,
+        transforms: Iterable[torch.nn.Module] | None = None,
         optim_fn: type[torch.optim.Optimizer] | str | None = None,
         optim_kwargs: dict | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
@@ -58,7 +65,8 @@ class CellariumModule(pl.LightningModule):
         config: dict[str, Any] | Namespace | None = None,
     ) -> None:
         super().__init__()
-        self.model = model
+        self.pipeline = CellariumPipeline(transforms)
+        self.pipeline.append(model)
 
         # set up optimizer and scheduler
         if isinstance(optim_fn, str):
@@ -87,6 +95,16 @@ class CellariumModule(pl.LightningModule):
         if config is not None:
             self._set_hparams(config)
 
+    @property
+    def model(self) -> CellariumModel:
+        """The model"""
+        return self.pipeline[-1]
+
+    @property
+    def transforms(self) -> CellariumPipeline:
+        """The transforms pipeline"""
+        return self.pipeline[:-1]
+
     @classmethod
     @patch("lightning.pytorch.core.saving._load_state", new=_load_state)
     def load_from_checkpoint(
@@ -96,7 +114,7 @@ class CellariumModule(pl.LightningModule):
         hparams_file: _PATH | None = None,
         strict: bool = True,
         **kwargs: Any,
-    ) -> CellariumModule:
+    ) -> "CellariumModule":
         r"""
         Primary way of loading a model from a checkpoint. When Cellarium ML saves a checkpoint it stores the config
         argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.
@@ -176,21 +194,38 @@ class CellariumModule(pl.LightningModule):
             **kwargs,
         )
 
-    def training_step(  # type: ignore[override]
-        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
-    ) -> torch.Tensor | None:
-        args, kwargs = self.model._get_fn_args_from_batch(batch)
-        loss = self.model(*args, **kwargs)
+    @override
+    def training_step(self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int) -> torch.Tensor | None:
+        """
+        Forward pass for training step.
+
+        Args:
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
+
+        Returns:
+            Loss tensor or ``None`` if no loss.
+        """
+        output = self.pipeline(batch)
+        loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
             self.log("train_loss", loss)
         return loss
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> torch.Tensor | dict[str, torch.Tensor | None]:
-        """Forward pass of the model."""
-        assert isinstance(self.model, PredictMixin)
-        args, kwargs = self.model._get_fn_args_from_batch(batch)
-        return self.model.predict(*args, **kwargs)
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
+        """
+        Forward pass for inference step.
+
+        Args:
+            batch: A dictionary containing the batch data.
+
+        Returns:
+            A dictionary containing the batch data and inference outputs.
+        """
+        return self.pipeline.predict(batch)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         """Configure optimizers for the model."""

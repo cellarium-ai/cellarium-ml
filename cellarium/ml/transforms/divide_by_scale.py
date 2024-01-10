@@ -1,10 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from collections.abc import Sequence
 
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
 from torch import nn
 
 from cellarium.ml.utilities.testing import (
@@ -31,7 +31,7 @@ class DivideByScale(nn.Module):
             A value added to the denominator for numerical stability.
     """
 
-    def __init__(self, scale_g: torch.Tensor, feature_schema: ArrayLike, eps: float = 1e-6) -> None:
+    def __init__(self, scale_g: torch.Tensor, feature_schema: Sequence[str], eps: float = 1e-6) -> None:
         super().__init__()
         self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)
@@ -42,8 +42,8 @@ class DivideByScale(nn.Module):
     def forward(
         self,
         x_ng: torch.Tensor,
-        feature_g: np.ndarray | None = None,
-    ) -> torch.Tensor:
+        feature_g: np.ndarray,
+    ) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
@@ -52,13 +52,16 @@ class DivideByScale(nn.Module):
                 The list of the variable names in the input data. If ``None``, no validation is performed.
 
         Returns:
-            Gene counts divided by scale.
-        """
-        if feature_g is not None:
-            assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-            assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+            A dictionary with the following keys:
 
-        return x_ng / (self.scale_g + self.eps)
+            - ``x_ng``: The gene counts divided by the scale.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
+        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+
+        x_ng = x_ng / (self.scale_g + self.eps)
+
+        return {"x_ng": x_ng}
 
     def __repr__(self) -> str:
         return (
