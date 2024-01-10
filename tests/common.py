@@ -41,7 +41,7 @@ class BoringModel(CellariumModel):
     def forward(self, **kwargs: torch.Tensor) -> dict:
         _, num_replicas = get_rank_and_num_replicas()
         if num_replicas > 1:
-            for key, value in kwargs.items():
+            for key, value in sorted(kwargs.items()):
                 kwargs[key] = torch.cat(GatherLayer.apply(value), dim=0)
         self.iter_data.append(kwargs)
         return {}
