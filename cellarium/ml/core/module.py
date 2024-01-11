@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from __future__ import annotations
-
 from importlib import import_module
 from typing import IO, Any
 from unittest.mock import patch
@@ -96,7 +94,7 @@ class CellariumModule(pl.LightningModule):
         hparams_file: _PATH | None = None,
         strict: bool = True,
         **kwargs: Any,
-    ) -> CellariumModule:
+    ) -> "CellariumModule":
         r"""
         Primary way of loading a model from a checkpoint. When Cellarium ML saves a checkpoint it stores the config
         argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.

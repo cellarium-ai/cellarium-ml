@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from __future__ import annotations
-
 import gc
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
@@ -50,7 +48,7 @@ class DistributedAnnDataCollectionView(AnnCollectionView):
     of :class:`LazyAnnData` objects.
     """
 
-    def __getitem__(self, index: Index) -> DistributedAnnDataCollectionView:
+    def __getitem__(self, index: Index) -> "DistributedAnnDataCollectionView":
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
 
