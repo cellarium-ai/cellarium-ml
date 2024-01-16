@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from importlib import import_module
 from typing import IO, Any
 from unittest.mock import patch
 
@@ -48,10 +47,10 @@ class CellariumModule(pl.LightningModule):
     def __init__(
         self,
         model: CellariumModel,
-        optim_fn: type[torch.optim.Optimizer] | str | None = None,
-        optim_kwargs: dict | None = None,
-        scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | str | None = None,
-        scheduler_kwargs: dict | None = None,
+        optim_fn: type[torch.optim.Optimizer] | None = None,
+        optim_kwargs: dict[str, Any] | None = None,
+        scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | None = None,
+        scheduler_kwargs: dict[str, Any] | None = None,
         default_lr: float = 1e-3,
         config: dict[str, Any] | Namespace | None = None,
     ) -> None:
@@ -59,21 +58,12 @@ class CellariumModule(pl.LightningModule):
         self.model = model
 
         # set up optimizer and scheduler
-        if isinstance(optim_fn, str):
-            class_module, class_name = optim_fn.rsplit(".", 1)
-            optim_module = import_module(class_module)
-            self.optim_fn = getattr(optim_module, class_name)
-        elif optim_fn is None:
+        if optim_fn is None:
             self.optim_fn = torch.optim.Adam
         else:
             self.optim_fn = optim_fn
 
-        if isinstance(scheduler_fn, str):
-            class_module, class_name = scheduler_fn.rsplit(".", 1)
-            scheduler_module = import_module(class_module)
-            self.scheduler_fn = getattr(scheduler_module, class_name)
-        else:
-            self.scheduler_fn = scheduler_fn
+        self.scheduler_fn = scheduler_fn
 
         optim_kwargs = {} if optim_kwargs is None else optim_kwargs
         if "lr" not in optim_kwargs:
