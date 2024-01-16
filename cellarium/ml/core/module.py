@@ -58,6 +58,7 @@ class CellariumModule(pl.LightningModule):
         self.model = model
 
         # set up optimizer and scheduler
+        self.optim_fn: type[torch.optim.Optimizer]
         if optim_fn is None:
             self.optim_fn = torch.optim.Adam
         else:
