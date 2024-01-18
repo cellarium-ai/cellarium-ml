@@ -137,7 +137,10 @@ class MuLinear(nn.Module):
         super().__init__()
 
         # inf dim
-        bias_width = out_features  # TODO: what is the width of the bias of the output layer?
+        if layer == "output":
+            bias_width = base_width
+        else:
+            bias_width = out_features
         if layer == "input":
             weight_width = out_features
         else:
@@ -147,55 +150,45 @@ class MuLinear(nn.Module):
 
         # a, b, d
         if optimizer == "sgd":
-            if layer == "output":
-                bias_a = 0.0
-                bias_b = 0.0
-                bias_d = 0.0
-            else:
-                # bias scaling: 1
-                bias_a = -0.5
-                bias_b = 0.5
-                bias_d = 0.0
+            # bias scaling: Θ(1)
+            bias_a = -0.5
+            bias_b = 0.5
+            bias_d = 0.0
             # weight
             if layer == "input":
-                # scaling: 1
+                # scaling: Θ(1)
                 weight_a = -0.5
                 weight_b = 0.5
                 weight_d = 0.0
             elif layer == "hidden":
-                # scaling: 1 / sqrt(n)
+                # scaling: Θ(1 / sqrt(n))
                 weight_a = 0.0
                 weight_b = 0.5
                 weight_d = 0.0
             elif layer == "output":
-                # scaling: 1 / n
+                # scaling: Θ(1 / n)
                 weight_a = 0.5
                 weight_b = 0.5
                 weight_d = 0.0
 
         elif optimizer in ["adam", "adamw"]:
-            if layer == "output":
-                bias_a = 0.0
-                bias_b = 0.0
-                bias_d = 0.0
-            else:
-                # bias scaling: 1
-                bias_a = 0.0
-                bias_b = 0.0
-                bias_d = 1.0
+            # bias scaling: Θ(1)
+            bias_a = 0.0
+            bias_b = 0.0
+            bias_d = 1.0
             # weight
             if layer == "input":
-                # scaling: 1
+                # scaling: Θ(1)
                 weight_a = 0.0
                 weight_b = 0.0
                 weight_d = 1.0
             elif layer == "hidden":
-                # scaling: 1 / sqrt(n)
+                # scaling: Θ(1 / sqrt(n))
                 weight_a = 1.0
                 weight_b = -0.5
                 weight_d = 2.0
             elif layer == "output":
-                # scaling: 1 / n
+                # scaling: Θ(1 / n)
                 weight_a = 1.0
                 weight_b = 0.0
                 weight_d = 1.0
