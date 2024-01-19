@@ -8,9 +8,14 @@ Command line interface for Cellarium ML.
 import sys
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
+from operator import attrgetter
 from typing import Any
 
+import yaml
 from jsonargparse import Namespace
+from jsonargparse._loaders_dumpers import DefaultLoader
+from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
@@ -21,6 +26,55 @@ REGISTERED_MODELS = {}
 def register_model(model: Callable[[ArgsType], None]):
     REGISTERED_MODELS[model.__name__] = model
     return model
+
+
+@dataclass
+class ObjectLoader:
+    file_path: str
+    loader_fn: Callable[[str], Any]
+    attr: str | None = None
+    convert_fn: Callable[[Any], Any] | None = None
+
+    def __new__(cls, file_path, loader_fn, attr, convert_fn):
+        obj = loader_fn(file_path)
+        if attr is not None:
+            obj = attrgetter(attr)(obj)
+        if isinstance(convert_fn, str):
+            convert_fn = import_object(convert_fn)
+        if convert_fn is not None:
+            obj = convert_fn(obj)
+        return obj
+
+
+@dataclass
+class CheckpointLoader(ObjectLoader):
+    file_path: str
+    attr: str | None = None
+    convert_fn: Callable[[Any], Any] | None = None
+
+    def __new__(cls, file_path, attr, convert_fn):
+        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, convert_fn)
+
+
+def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
+    """Construct an employee."""
+    return CheckpointLoader(**loader.construct_mapping(node))
+
+
+@dataclass
+class ArgumentLinking:
+    source: str
+    target: str
+
+
+def argument_linking_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> ArgumentLinking:
+    """Construct an employee."""
+    return ArgumentLinking(**loader.construct_mapping(node))
+
+
+loader = DefaultLoader
+loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
+loader.add_constructor("!ArgumentLinking", argument_linking_constructor)
 
 
 def lightning_cli_factory(
