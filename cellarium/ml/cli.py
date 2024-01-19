@@ -61,20 +61,14 @@ def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.Mapp
     return CheckpointLoader(**loader.construct_mapping(node))
 
 
-@dataclass
-class ArgumentLinking:
-    source: str
-    target: str
-
-
-def argument_linking_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> ArgumentLinking:
+def object_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> ObjectLoader:
     """Construct an employee."""
-    return ArgumentLinking(**loader.construct_mapping(node))
+    return ObjectLoader(**loader.construct_mapping(node))
 
 
 loader = DefaultLoader
 loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
-loader.add_constructor("!ArgumentLinking", argument_linking_constructor)
+loader.add_constructor("!ObjectLoader", object_loader_constructor)
 
 
 def lightning_cli_factory(
