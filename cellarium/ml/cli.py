@@ -36,6 +36,8 @@ class ObjectLoader:
     convert_fn: Callable[[Any], Any] | None = None
 
     def __new__(cls, file_path, loader_fn, attr, convert_fn):
+        if isinstance(loader_fn, str):
+            loader_fn = import_object(loader_fn)
         obj = loader_fn(file_path)
         if attr is not None:
             obj = attrgetter(attr)(obj)
