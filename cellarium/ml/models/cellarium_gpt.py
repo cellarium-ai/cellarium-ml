@@ -6,12 +6,13 @@ from collections.abc import Sequence
 
 import numpy as np
 import torch
+from scvi.distributions import NegativeBinomial
 from torch import nn
 
 from cellarium.ml.models.model import CellariumModel
 
 # from cellarium.ml.models.mu_linear import MuLinear
-from cellarium.ml.transforms import DivideByScale, Filter, NormalizeTotal
+# from cellarium.ml.transforms import DivideByScale, Filter, NormalizeTotal
 
 
 class DotProductAttention(nn.Module):  # @save
@@ -144,6 +145,19 @@ class PositionWiseFFN(nn.Module):
         return self.dense2(self.relu(self.dense1(X_nd)))
 
 
+class ValueEmbedding(nn.Module):
+    """The positionwise feed-forward network."""
+
+    def __init__(self, d_hiddens):
+        super().__init__()
+        self.dense1 = nn.Linear(1, d_hiddens, bias=True)
+        self.relu = nn.ReLU()
+        self.dense2 = nn.Linear(d_hiddens, d_hiddens, bias=True)
+
+    def forward(self, X_nd):
+        return self.dense2(self.relu(self.dense1(X_nd)))
+
+
 class NormAdd(nn.Module):
     """The residual connection followed by layer normalization."""
 
@@ -248,7 +262,7 @@ class CellariumGPT(CellariumModel):
     def __init__(
         self,
         feature_schema: Sequence[str],
-        b_bins: int = 20,  # including 0
+        # b_bins: int = 20,  # including 0
         d_hiddens: int = 128,
         f_hiddens: int = 512,
         h_heads: int = 4,
@@ -264,14 +278,15 @@ class CellariumGPT(CellariumModel):
         self.feature_schema = np.array(feature_schema)
 
         self.feature_ids: torch.Tensor
-        # ids for the features, 0 is for padding, 1 is for mask
+        # ids for the features, 0 is for cls
         self.register_buffer("feature_ids", torch.arange(1, len(feature_schema) + 1))
-        self.b_bins = b_bins
+        # self.b_bins = b_bins
         self.g_genes = len(feature_schema)
 
         # +1 for masking
         self.id_embedding = nn.Embedding(len(feature_schema) + 1, d_hiddens)
-        self.value_embedding = nn.Embedding(b_bins + 1, d_hiddens)
+        self.mask_embedding = nn.Embedding(1, d_hiddens)
+        self.value_embedding = ValueEmbedding(d_hiddens)
 
         self.num_blocks = num_blocks
         self.blocks = nn.ModuleList(
@@ -287,37 +302,37 @@ class CellariumGPT(CellariumModel):
             ]
         )
         # no mask token in predictions
-        self.dense = nn.Linear(d_hiddens, b_bins, bias=True)
+        self.dense = nn.Linear(d_hiddens, 2)
 
-        assert tdigest_path is not None
-        from crick import TDigest
+        # assert tdigest_path is not None
+        # from crick import TDigest
 
-        from cellarium.ml import CellariumModule
+        # from cellarium.ml import CellariumModule
 
-        tdigest = CellariumModule.load_from_checkpoint(tdigest_path).model
-        median_g = tdigest.median_g
-        self.normalize = NormalizeTotal(
-            target_count=tdigest.transform.target_count,
-            eps=tdigest.transform.eps,
-        )
-        self.divide = DivideByScale(
-            scale_g=median_g,
-            feature_schema=feature_schema,
-            eps=tdigest.transform.eps,
-        )
-        self.filter = Filter(self.feature_schema[median_g.isfinite()])
-        self.c_context = c_context or len(self.filter.filter_list)
-        normalized_tdigest = TDigest()
-        for median, tdigest in zip(median_g, tdigest.tdigests):
-            state = tdigest.__getstate__()
-            state[0]["mean"] = state[0]["mean"] / median
-            tdigest.__setstate__(state)
-            normalized_tdigest.merge(tdigest)
-        probs = np.linspace(0, 1, b_bins)[1:-1]
-        quantiles = normalized_tdigest.quantile(probs)
-        quantiles = np.concatenate([[-1, 0], quantiles, [float("inf")]])
-        self.quantiles: torch.Tensor
-        self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
+        # tdigest = CellariumModule.load_from_checkpoint(tdigest_path).model
+        # median_g = tdigest.median_g
+        # self.normalize = NormalizeTotal(
+        #     target_count=tdigest.transform.target_count,
+        #     eps=tdigest.transform.eps,
+        # )
+        # self.divide = DivideByScale(
+        #     scale_g=median_g,
+        #     feature_schema=feature_schema,
+        #     eps=tdigest.transform.eps,
+        # )
+        # self.filter = Filter(self.feature_schema[median_g.isfinite()])
+        self.c_context = c_context  # or len(self.filter.filter_list)
+        # normalized_tdigest = TDigest()
+        # for median, tdigest in zip(median_g, tdigest.tdigests):
+        #     state = tdigest.__getstate__()
+        #     state[0]["mean"] = state[0]["mean"] / median
+        #     tdigest.__setstate__(state)
+        #     normalized_tdigest.merge(tdigest)
+        # probs = np.linspace(0, 1, b_bins)[1:-1]
+        # quantiles = normalized_tdigest.quantile(probs)
+        # quantiles = np.concatenate([[-1, 0], quantiles, [float("inf")]])
+        # self.quantiles: torch.Tensor
+        # self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
         self.optimizer = optimizer
         self.initializer_range = initializer_range
         self.apply(self._init_weights)
@@ -358,27 +373,33 @@ class CellariumGPT(CellariumModel):
         return (x_ng, feature_g, total_mrna_umis_n), {}
 
     def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
-        x_ng = self.normalize(x_ng, total_mrna_umis_n)
-        x_ng = self.divide(x_ng, feature_g)
-        x_ng, feature_g = self.filter(x_ng, feature_g)
-        random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.c_context]
+        # x_ng = self.normalize(x_ng, total_mrna_umis_n)
+        # x_ng = self.divide(x_ng, feature_g)
+        # x_ng, feature_g = self.filter(x_ng, feature_g)
+        random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.c_context - 1]
         ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
         x_nc = x_ng[ndx[:, None], random_indices]
+        x_nc = torch.cat([total_mrna_umis_n[:, None], x_nc], dim=1)
         gene_ids = self.feature_ids[random_indices]
+        gene_ids = torch.cat([torch.zeros((x_ng.shape[0], 1), dtype=torch.long, device=x_ng.device), gene_ids], dim=1)
         # right=False: boundaries[i-1] < input[m][n]...[l][x] <= boundaries[i]
-        value_ids = torch.bucketize(x_nc, self.quantiles, right=False) - 1
-        labels = value_ids.clone()
+        # value_ids = torch.bucketize(x_nc, self.quantiles, right=False) - 1
+        labels = x_nc.clone()
         prefix_len_n = torch.randint(1, self.c_context, (x_nc.shape[0],), device=x_nc.device)
         masked_indices = (
             torch.arange((self.c_context), dtype=torch.float32, device=x_nc.device)[None, :] >= prefix_len_n[:, None]
         )
         labels[~masked_indices] = -100
         weights = 1 / masked_indices.sum(dim=1, keepdim=True).expand(-1, self.c_context)
-        value_ids[masked_indices] = self.b_bins
+        # value_ids[masked_indices] = self.b_bins
+        value_ids = torch.log1p(x_nc)
 
-        gene_gd = self.id_embedding(gene_ids)
-        value_ngd = self.value_embedding(value_ids)
-        hidden_ngd = gene_gd + value_ngd
+        gene_ncd = self.id_embedding(gene_ids)
+        value_ncd = self.value_embedding(value_ids.unsqueeze(-1))
+        mask_embedding = self.mask_embedding(torch.zeros(1, device=x_nc.device).long())
+        value_ncd[masked_indices] = mask_embedding.squeeze()
+        # value_ncd = torch.where(masked_indices, mask_embedding, self.value_embedding(value_ids.unsqueeze(-1)))
+        hidden_ncd = gene_ncd + value_ncd
 
         # per cell
         # 1 1 1 0 0
@@ -390,34 +411,47 @@ class CellariumGPT(CellariumModel):
         self.attention_weights = [None] * len(self.blocks)
 
         for i, block in enumerate(self.blocks):
-            hidden_ngd = block(
-                hidden_ngd,
+            hidden_ncd = block(
+                hidden_ncd,
                 prefix_len_n=prefix_len_n,
             )
             # self.attention_weights[i] = block.attention.attention.attention_probs_nqs
 
-        logits = self.dense(hidden_ngd)
-
-        loss_logits = logits[masked_indices]
-        loss_logits = loss_logits - loss_logits.logsumexp(dim=-1, keepdim=True)
-        loss_labels = labels[masked_indices].unsqueeze(-1)
+        logits = self.dense(hidden_ncd)
+        mu_nc = logits[:, :, 0].exp()
+        theta_nc = logits[:, :, 1].exp()
+        mu = mu_nc[masked_indices]
+        theta = theta_nc[masked_indices]
+        dist = NegativeBinomial(mu=mu, theta=theta)
+        log_prob = dist.log_prob(labels[masked_indices])
         loss_weights = weights[masked_indices]
-        log_prob = loss_logits.gather(-1, loss_labels).squeeze(-1)
         loss = -(log_prob * loss_weights).sum() / loss_weights.sum()
+
+        # loss_logits = logits[masked_indices]
+        # loss_logits = loss_logits - loss_logits.logsumexp(dim=-1, keepdim=True)
+        # loss_labels = labels[masked_indices].unsqueeze(-1)
+        # log_prob = loss_logits.gather(-1, loss_labels).squeeze(-1)
         #  loss_fn = nn.CrossEntropyLoss(weight=weights.view(-1), ignore_index=-100, reduction="mean")
         #  loss = loss_fn(logits.view(-1, self.b_bins), labels.view(-1))
         with torch.no_grad():
-            loss_fn = nn.CrossEntropyLoss()
             nonzero_mask = labels > 0
-            nonzero_loss = loss_fn(logits[nonzero_mask], labels[nonzero_mask])
-            zero_mask = labels == 0
-            zero_loss = loss_fn(logits[zero_mask], labels[zero_mask])
-            prefix_len_nc = prefix_len_n[:, None].expand(-1, self.c_context)
-            nonzero_prefix_len = prefix_len_nc[nonzero_mask]
-            # split context size of 2048 into 8 parts
-            nonzero_prefix = torch.bucketize(
-                nonzero_prefix_len, torch.arange(0, self.c_context, self.c_context // 8, device=x_nc.device), right=True
+            nonzero_log_prob = NegativeBinomial(mu=mu_nc[nonzero_mask], theta=theta_nc[nonzero_mask]).log_prob(
+                labels[nonzero_mask]
             )
+            nonzero_weights = weights[nonzero_mask]
+            nonzero_loss = -(nonzero_log_prob * nonzero_weights).sum() / nonzero_weights.sum()
+
+            zero_mask = labels == 0
+            zero_log_prob = NegativeBinomial(mu=mu_nc[zero_mask], theta=theta_nc[zero_mask]).log_prob(labels[zero_mask])
+            zero_weights = weights[zero_mask]
+            zero_loss = -(zero_log_prob * zero_weights).sum() / zero_weights.sum()
+
+            prefix_len_nc = prefix_len_n[:, None].expand(-1, self.c_context)
+            # nonzero_prefix_len = prefix_len_nc[nonzero_mask]
+            # # split context size of 2048 into 8 parts
+            # nonzero_prefix = torch.bucketize(
+            #     nonzero_prefix_len, torch.arange(0, self.c_context, self.c_context // 8, device=x_nc.device), right=True
+            # )
         return {
             "loss": loss,
             "nonzero_loss": nonzero_loss,
@@ -427,9 +461,13 @@ class CellariumGPT(CellariumModel):
             "zero_mask": zero_mask,
             "labels": labels,
             "prefix_len_nc": prefix_len_nc,
-            "zero_preds": torch.argmax(logits[zero_mask], dim=-1),
-            "zero_labels": labels[zero_mask],
-            "nonzero_preds": torch.argmax(logits[nonzero_mask], dim=-1),
-            "nonzero_labels": labels[nonzero_mask],
-            "nonzero_prefix": nonzero_prefix,
+            # "zero_preds": torch.argmax(logits[zero_mask], dim=-1),
+            # "zero_labels": labels[zero_mask],
+            # "nonzero_preds": torch.argmax(logits[nonzero_mask], dim=-1),
+            # "nonzero_labels": labels[nonzero_mask],
+            # "nonzero_prefix": nonzero_prefix,
+            "mu_nc": mu_nc,
+            "theta_nc": theta_nc,
+            "nonzero_log_prob": nonzero_log_prob,
+            "zero_log_prob": zero_log_prob,
         }
