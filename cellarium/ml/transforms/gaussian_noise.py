@@ -10,7 +10,7 @@ from torch.distributions import Normal, Uniform
 class GaussianNoise(nn.Module):
     """
     Adds Gaussian noise to gene counts.
-    
+
     For each count, Gaussian sigma is independently
     and uniformly sampled according to the bounding parameters,
     yielding the sigma matrix sigma_ng.
@@ -18,7 +18,7 @@ class GaussianNoise(nn.Module):
     .. math::
 
         y_{ng} = x_{ng} + N(0, \\sigma_{ng})
-    
+
     Args:
         sigma_min:
             Lower bound on Gaussian sigma parameter.
@@ -28,10 +28,10 @@ class GaussianNoise(nn.Module):
 
     def __init__(self, sigma_min, sigma_max):
         super().__init__()
-        
+
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
-    
+
     def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -41,5 +41,5 @@ class GaussianNoise(nn.Module):
             Gene counts with added Gaussian noise.
         """
         sigma_ng = Uniform(self.sigma_min, self.sigma_max).sample(x_ng.shape).type_as(x_ng)
-        
+
         return x_ng + Normal(0, sigma_ng).sample()

@@ -10,7 +10,7 @@ from torch.distributions import Bernoulli, Uniform
 class Dropout(nn.Module):
     """
     Applies random dropout to gene counts.
-    
+
     For each count, the dropout parameter is independently
     and uniformly sampled according to the bounding parameters,
     yielding the parameter matrix p_ng.
@@ -18,7 +18,7 @@ class Dropout(nn.Module):
     .. math::
 
         y_{ng} = x_{ng} * (1 - Bernoulli(p_ng))
-    
+
     Args:
         p_dropout_min:
             Lower bound on dropout parameter.
@@ -28,7 +28,7 @@ class Dropout(nn.Module):
 
     def __init__(self, p_dropout_min, p_dropout_max):
         super().__init__()
-        
+
         self.p_dropout_min = p_dropout_min
         self.p_dropout_max = p_dropout_max
 
@@ -41,6 +41,6 @@ class Dropout(nn.Module):
             Gene counts with random dropout.
         """
         p_dropout_ng = Uniform(self.p_dropout_min, self.p_dropout_max).sample(x_ng.shape).type_as(x_ng)
-        
+
         x_ng[Bernoulli(probs=p_dropout_ng).sample().bool()] = 0
         return x_ng

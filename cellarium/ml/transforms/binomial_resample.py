@@ -10,7 +10,7 @@ from torch.distributions import Binomial, Uniform
 class BinomialResample(nn.Module):
     """
     Binomial resampling of gene counts.
-    
+
     For each count, the parameter to the binomial distribution
     is independently and uniformly sampled according to the
     bounding parameters, yielding the parameter matrix p_ng.
@@ -18,7 +18,7 @@ class BinomialResample(nn.Module):
     .. math::
 
         y_{ng} = Binomial(n=x_{ng}, p=p_{ng})
-    
+
     Args:
         p_binom_min:
             Lower bound on binomial distribution parameter.
@@ -28,7 +28,7 @@ class BinomialResample(nn.Module):
 
     def __init__(self, p_binom_min, p_binom_max):
         super().__init__()
-        
+
         self.p_binom_min = p_binom_min
         self.p_binom_max = p_binom_max
 
