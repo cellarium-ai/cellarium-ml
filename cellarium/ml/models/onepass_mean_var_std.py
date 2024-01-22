@@ -27,35 +27,35 @@ class OnePassMeanVarStd(CellariumModel):
        <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
 
     Args:
-        feature_schema: The variable names schema for the input data validation.
+        var_names_g: The variable names schema for the input data validation.
     """
 
-    def __init__(self, feature_schema: Sequence[str]) -> None:
+    def __init__(self, var_names_g: Sequence[str]) -> None:
         super().__init__()
-        self.feature_schema = np.array(feature_schema)
-        g_genes = len(self.feature_schema)
-        self.g_genes = g_genes
+        self.var_names_g = np.array(var_names_g)
+        n_vars = len(self.var_names_g)
+        self.n_vars = n_vars
         self.x_sums: torch.Tensor
         self.x_squared_sums: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("x_sums", torch.zeros(g_genes))
-        self.register_buffer("x_squared_sums", torch.zeros(g_genes))
+        self.register_buffer("x_sums", torch.zeros(n_vars))
+        self.register_buffer("x_squared_sums", torch.zeros(n_vars))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
                 Gene counts matrix.
-            feature_g:
+            var_names_g:
                 The list of the variable names in the input data.
 
         Returns:
             An empty dictionary.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         self.x_sums = self.x_sums + x_ng.sum(dim=0)
         self.x_squared_sums = self.x_squared_sums + (x_ng**2).sum(dim=0)

@@ -29,7 +29,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     )
     # model
     init_args = {
-        "feature_schema": var_names,
+        "var_names_g": var_names,
         "hidden_size": 2,
         "num_hidden_layers": 1,
         "num_attention_heads": 1,
@@ -65,5 +65,5 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     assert ckpt_path.is_file()
     loaded_model: Geneformer = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
-    assert np.array_equal(model.feature_schema, loaded_model.feature_schema)
+    assert np.array_equal(model.var_names_g, loaded_model.var_names_g)
     np.testing.assert_allclose(model.feature_ids, loaded_model.feature_ids)

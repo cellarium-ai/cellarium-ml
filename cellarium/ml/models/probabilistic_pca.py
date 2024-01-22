@@ -36,9 +36,9 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
     Args:
         n_obs:
             Number of cells.
-        feature_schema:
+        var_names_g:
             The variable names schema for the input data validation.
-        k_components:
+        n_components:
             Number of principal components.
         ppca_flavor:
             Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
@@ -59,8 +59,8 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
     def __init__(
         self,
         n_obs: int,
-        feature_schema: Sequence[str],
-        k_components: int,
+        var_names_g: Sequence[str],
+        n_components: int,
         ppca_flavor: Literal["marginalized", "linear_vae"],
         mean_g: float | torch.Tensor | None = None,
         W_init_scale: float = 1.0,
@@ -71,42 +71,40 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         super().__init__()
 
         self.n_obs = n_obs
-        self.feature_schema = np.array(feature_schema)
-        g_genes = len(self.feature_schema)
-        self.g_genes = g_genes
-        self.k_components = k_components
+        self.var_names_g = np.array(var_names_g)
+        n_vars = len(self.var_names_g)
+        self.n_vars = n_vars
+        self.n_components = n_components
         self.ppca_flavor = ppca_flavor
         self.elbo = elbo or pyro.infer.Trace_ELBO()
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
-            assert mean_g.shape == (
-                g_genes,
-            ), f"Expected meang_g to have a shape ({g_genes},) but found {mean_g.shape}."
+            assert mean_g.shape == (n_vars,), f"Expected meang_g to have a shape ({n_vars},) but found {mean_g.shape}."
         if mean_g is None:
             # make mean_g a learnable parameter
-            self.mean_g = PyroParam(lambda: torch.zeros(g_genes))
+            self.mean_g = PyroParam(lambda: torch.zeros(n_vars))
         else:
             self.register_buffer("mean_g", torch.as_tensor(mean_g))
 
         rng = torch.Generator()
         rng.manual_seed(seed)
         # model parameters
-        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((k_components, g_genes), generator=rng))
+        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((n_components, n_vars), generator=rng))
         self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
                 Gene counts matrix.
-            feature_g:
+            var_names_g:
                 The list of the variable names in the input data.
 
         Returns:
             A dictionary with the loss value.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng)
         return {"loss": loss}
@@ -119,14 +117,14 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
                     dist.LowRankMultivariateNormal(
                         loc=self.mean_g,
                         cov_factor=self.W_kg.T,
-                        cov_diag=self.sigma**2 * x_ng.new_ones(self.g_genes),
+                        cov_diag=self.sigma**2 * x_ng.new_ones(self.n_vars),
                     ),
                     obs=x_ng,
                 )
             else:
                 z_nk = pyro.sample(
                     "z",
-                    dist.Normal(x_ng.new_zeros(self.k_components), 1).to_event(1),
+                    dist.Normal(x_ng.new_zeros(self.n_components), 1).to_event(1),
                 )
                 pyro.sample(
                     "counts",
@@ -143,7 +141,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
-    def predict(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 
@@ -153,7 +151,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         Args:
             x_ng:
                 Gene counts matrix.
-            feature_g:
+            var_names_g:
                 The list of the variable names in the input data.
 
         Returns:
@@ -161,8 +159,8 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
 
             - ``z_nk``: Embedding of the input data into the principal component space.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
         z_nk = (x_ng - self.mean_g) @ V_gk
@@ -170,7 +168,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
 
     @property
     def M_kk(self) -> torch.Tensor:
-        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.k_components, device=self.sigma.device)
+        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.n_components, device=self.sigma.device)
 
     @property
     @torch.inference_mode()
@@ -211,4 +209,4 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return (self.g_genes * self.sigma**2).item()
+        return (self.n_vars * self.sigma**2).item()

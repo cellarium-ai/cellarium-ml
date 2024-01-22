@@ -45,6 +45,11 @@ class NormalizeTotal(nn.Module):
         total_mrna_umis_n: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
+        .. note::
+
+            When used with :class:`~cellarium.ml.core.CellariumModule` or :class:`~cellarium.ml.core.CellariumPipeline`,
+            ``x_ng`` key in the input dictionary will be overwritten with the normalized values.
+
         Args:
             x_ng:
                 Gene counts.

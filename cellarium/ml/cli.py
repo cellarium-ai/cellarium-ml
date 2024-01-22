@@ -35,7 +35,7 @@ def lightning_cli_factory(
 
         cli = lightning_cli_factory(
             "cellarium.ml.models.IncrementalPCA",
-            link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
+            link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
                 "strategy": {
@@ -82,7 +82,7 @@ def lightning_cli_factory(
                     if compute_fn is not None:
                         value = compute_fn(value)
 
-                    # e.g., target == "model.model.init_args.feature_schema"
+                    # e.g., target == "model.model.init_args.var_names_g"
                     target_keys = target.split(".")
                     # note that config is dict-like, so assign the value to the last key
                     config = self.config[self.subcommand]
@@ -132,7 +132,7 @@ def geneformer(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.Geneformer",
-        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
+        link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
     )
     cli(args=args)
 
@@ -148,7 +148,7 @@ def incremental_pca(args: ArgsType = None) -> None:
     Example run::
 
         cellarium-ml incremental_pca fit \
-            --model.model.init_args.k_components 50 \
+            --model.model.init_args.n_components 50 \
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
             --data.max_cache_size 2 \
@@ -170,7 +170,7 @@ def incremental_pca(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.IncrementalPCA",
-        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
+        link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -195,7 +195,7 @@ def logistic_regression(args: ArgsType = None) -> None:
             --data.max_cache_size 2 \
             --data.batch_keys.x_ng.attr X \
             --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
-            --data.batch_keys.feature_g.attr var_names \
+            --data.batch_keys.var_names_g.attr var_names \
             --data.batch_keys.y_n.attr obs \
             --data.batch_keys.y_n.key cell_type \
             --data.batch_keys.y_n.convert_fn cellarium.ml.utilities.data.categories_to_codes \
@@ -209,7 +209,7 @@ def logistic_regression(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
 
-    def get_c_categories(data: CellariumAnnDataDataModule) -> int:
+    def get_n_categories(data: CellariumAnnDataDataModule) -> int:
         """
         Get the number of categories in the target variable.
 
@@ -228,8 +228,8 @@ def logistic_regression(args: ArgsType = None) -> None:
         "cellarium.ml.models.LogisticRegression",
         link_arguments=[
             ("data.n_obs", "model.model.init_args.n_obs", None),
-            ("data.var_names", "model.model.init_args.feature_schema", None),
-            ("data", "model.model.init_args.c_categories", get_c_categories),
+            ("data.var_names", "model.model.init_args.var_names_g", None),
+            ("data", "model.model.init_args.n_categories", get_n_categories),
         ],
     )
     cli(args=args)
@@ -265,7 +265,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.OnePassMeanVarStd",
-        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
+        link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -300,7 +300,7 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     Example run::
 
         cellarium-ml probabilistic_pca fit \
-            --model.model.init_args.k_components 256 \
+            --model.model.init_args.n_components 256 \
             --model.model.init_args.ppca_flavor marginalized \
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
@@ -327,7 +327,7 @@ def probabilistic_pca(args: ArgsType = None) -> None:
         "cellarium.ml.models.ProbabilisticPCA",
         link_arguments=[
             ("data.n_obs", "model.model.init_args.n_obs", None),
-            ("data.var_names", "model.model.init_args.feature_schema", None),
+            ("data.var_names", "model.model.init_args.var_names_g", None),
         ],
     )
     cli(args=args)
@@ -363,7 +363,7 @@ def tdigest(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.TDigest",
-        link_arguments=[("data.var_names", "model.model.init_args.feature_schema", None)],
+        link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
         trainer_defaults={
             "max_epochs": 1,  # one pass
         },

@@ -21,7 +21,7 @@ class BoringDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
         data = {"x_ng": self.data[idx, None]}
         if self.var_names is not None:
-            data["feature_g"] = self.var_names
+            data["var_names_g"] = self.var_names
         return data
 
 

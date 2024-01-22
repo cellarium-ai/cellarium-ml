@@ -11,7 +11,6 @@ import torch
 from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
-from typing_extensions import override
 
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.core.saving import _load_state
@@ -126,9 +125,9 @@ class CellariumModule(pl.LightningModule):
 
                     model:
                       model:
-                        class_path: cellarium.ml.models.OnePassMeanVarStdFromCLI
+                        class_path: cellarium.ml.models.OnePassMeanVarStd
                         init_args:
-                          g_genes: 36350
+                          n_vars: 36350
                           target_count: 10000
                       optim_fn: null
                       optim_kwargs: null
@@ -185,8 +184,9 @@ class CellariumModule(pl.LightningModule):
             **kwargs,
         )
 
-    @override
-    def training_step(self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int) -> torch.Tensor | None:
+    def training_step(  # type: ignore[override]
+        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
+    ) -> torch.Tensor | None:
         """
         Forward pass for training step.
 

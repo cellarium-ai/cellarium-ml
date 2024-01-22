@@ -72,7 +72,7 @@ def test_tdigest_multi_device(
         dadc,
         batch_keys={
             "x_ng": AnnDataField("X"),
-            "feature_g": AnnDataField("var_names"),
+            "var_names_g": AnnDataField("var_names"),
         },
         batch_size=batch_size,
         shuffle=shuffle,
@@ -84,7 +84,7 @@ def test_tdigest_multi_device(
     )
 
     # fit
-    model = TDigest(feature_schema=dadc.var_names)
+    model = TDigest(var_names_g=dadc.var_names)
     module = CellariumModule(model, transforms=transforms)
     trainer = pl.Trainer(
         barebones=True,
@@ -129,7 +129,7 @@ def test_load_from_checkpoint_multi_device():
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"feature_schema": [f"gene_{i}" for i in range(g)]}
+    init_args = {"var_names_g": [f"gene_{i}" for i in range(g)]}
     model = TDigest(**init_args)  # type: ignore[arg-type]
     config = {
         "model": {

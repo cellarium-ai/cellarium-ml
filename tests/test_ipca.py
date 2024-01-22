@@ -48,8 +48,8 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
     )
     # model
     ipca = IncrementalPCA(
-        feature_schema=[f"gene_{i}" for i in range(g)],
-        k_components=k,
+        var_names_g=[f"gene_{i}" for i in range(g)],
+        n_components=k,
         perform_mean_correction=perform_mean_correction,
     )
     module = CellariumModule(ipca)
@@ -99,8 +99,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     )
     # model
     init_args = {
-        "feature_schema": [f"gene_{i}" for i in range(g)],
-        "k_components": 1,
+        "var_names_g": [f"gene_{i}" for i in range(g)],
+        "n_components": 1,
         "perform_mean_correction": True,
     }
     model = IncrementalPCA(**init_args)  # type: ignore[arg-type]

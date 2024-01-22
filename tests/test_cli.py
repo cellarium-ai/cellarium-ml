@@ -36,7 +36,7 @@ CONFIGS = [
                         "attr": "X",
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "feature_g": {"attr": "var_names"},
+                    "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "5",
                 "num_workers": "1",
@@ -73,7 +73,7 @@ CONFIGS = [
                         "attr": "X",
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "feature_g": {"attr": "var_names"},
+                    "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "5",
                 "num_workers": "1",
@@ -95,7 +95,7 @@ CONFIGS = [
                 "model": {
                     "class_path": "cellarium.ml.models.ProbabilisticPCA",
                     "init_args": {
-                        "k_components": "2",
+                        "n_components": "2",
                         "ppca_flavor": "marginalized",
                     },
                 },
@@ -109,7 +109,7 @@ CONFIGS = [
                         "attr": "X",
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "feature_g": {"attr": "var_names"},
+                    "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "50",
                 "shuffle": "true",
@@ -128,6 +128,13 @@ CONFIGS = [
         "fit": {
             "model": {
                 "model": "cellarium.ml.models.OnePassMeanVarStd",
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
@@ -138,7 +145,11 @@ CONFIGS = [
                         "attr": "X",
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "feature_g": {"attr": "var_names"},
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -156,8 +167,15 @@ CONFIGS = [
             "model": {
                 "model": {
                     "class_path": "cellarium.ml.models.IncrementalPCA",
-                    "init_args": {"k_components": "50"},
+                    "init_args": {"n_components": "50"},
                 },
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
@@ -168,7 +186,11 @@ CONFIGS = [
                         "attr": "X",
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "feature_g": {"attr": "var_names"},
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -186,8 +208,15 @@ CONFIGS = [
             "model": {
                 "model": {
                     "class_path": "cellarium.ml.models.IncrementalPCA",
-                    "init_args": {"k_components": "50"},
+                    "init_args": {"n_components": "50"},
                 },
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
             },
             "data": {
                 "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
@@ -198,8 +227,12 @@ CONFIGS = [
                         "attr": "X",
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "feature_g": {"attr": "var_names"},
+                    "var_names_g": {"attr": "var_names"},
                     "obs_names": {"attr": "obs_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
@@ -231,7 +264,7 @@ CONFIGS = [
                         "attr": "X",
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "feature_g": {
+                    "var_names_g": {
                         "attr": "var_names",
                     },
                     "y_n": {
@@ -265,7 +298,7 @@ CONFIGS = [
                         "attr": "X",
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
-                    "feature_g": {"attr": "var_names"},
+                    "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "50",
                 "num_workers": "2",

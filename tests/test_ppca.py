@@ -63,8 +63,8 @@ def test_probabilistic_pca_multi_device(
     s = np.sqrt(0.5 * total_var / g)
     ppca = ProbabilisticPCA(
         n_obs=n,
-        feature_schema=[f"gene_{i}" for i in range(g)],
-        k_components=k,
+        var_names_g=[f"gene_{i}" for i in range(g)],
+        n_components=k,
         ppca_flavor=ppca_flavor,
         mean_g=x_mean_g,
         W_init_scale=w,
@@ -155,8 +155,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # model
     init_args = {
         "n_obs": n,
-        "feature_schema": [f"gene_{i}" for i in range(g)],
-        "k_components": 1,
+        "var_names_g": [f"gene_{i}" for i in range(g)],
+        "n_components": 1,
         "ppca_flavor": "marginalized",
     }
     pyro.clear_param_store()

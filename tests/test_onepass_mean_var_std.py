@@ -62,7 +62,7 @@ def test_onepass_mean_var_std_multi_device(
         dadc,
         batch_keys={
             "x_ng": AnnDataField("X"),
-            "feature_g": AnnDataField("var_names"),
+            "var_names_g": AnnDataField("var_names"),
         },
         batch_size=batch_size,
         shuffle=shuffle,
@@ -75,7 +75,7 @@ def test_onepass_mean_var_std_multi_device(
     transforms = [NormalizeTotal(target_count=10_000), Log1p()]
 
     # fit
-    model = OnePassMeanVarStd(feature_schema=dadc.var_names)
+    model = OnePassMeanVarStd(var_names_g=dadc.var_names)
     module = CellariumModule(model, transforms=transforms)
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -122,7 +122,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"feature_schema": [f"gene_{i}" for i in range(g)]}
+    init_args = {"var_names_g": [f"gene_{i}" for i in range(g)]}
     model = OnePassMeanVarStd(**init_args)  # type: ignore[arg-type]
     config = {
         "model": {

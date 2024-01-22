@@ -24,7 +24,7 @@ class Geneformer(CellariumModel, PredictMixin):
        <https://www.nature.com/articles/s41586-023-06139-9>`_.
 
     Args:
-        feature_schema:
+        var_names_g:
             The variable names schema for the input data validation.
         hidden_size:
             Dimensionality of the encoder layers and the pooler layer.
@@ -62,7 +62,7 @@ class Geneformer(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        feature_schema: Sequence[str],
+        var_names_g: Sequence[str],
         hidden_size: int = 256,
         num_hidden_layers: int = 6,
         num_attention_heads: int = 4,
@@ -78,10 +78,10 @@ class Geneformer(CellariumModel, PredictMixin):
         mlm_probability: float = 0.15,
     ) -> None:
         super().__init__()
-        self.feature_schema = np.array(feature_schema)
+        self.var_names_g = np.array(var_names_g)
         # model configuration
         config = {
-            "vocab_size": len(self.feature_schema) + 2,  # number of genes + 2 for <mask> and <pad> tokens
+            "vocab_size": len(self.var_names_g) + 2,  # number of genes + 2 for <mask> and <pad> tokens
             "hidden_size": hidden_size,
             "num_hidden_layers": num_hidden_layers,
             "num_attention_heads": num_attention_heads,
@@ -101,7 +101,7 @@ class Geneformer(CellariumModel, PredictMixin):
         self.mlm_probability = mlm_probability
         self.feature_ids: torch.Tensor
         # ids for the features, 0 is for padding, 1 is for mask
-        self.register_buffer("feature_ids", torch.arange(2, len(self.feature_schema) + 2))
+        self.register_buffer("feature_ids", torch.arange(2, len(self.var_names_g) + 2))
 
     def tokenize(self, x_ng: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         tokens = self.feature_ids.expand(x_ng.shape)
@@ -117,18 +117,18 @@ class Geneformer(CellariumModel, PredictMixin):
         input_ids[~attention_mask] = 0
         return input_ids, attention_mask
 
-    def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor]:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
                 Gene counts matrix.
-            feature_g:
+            var_names_g:
                 The list of the variable names in the input data.
         Returns:
             A dictionary with the loss value.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         input_ids, attention_mask = self.tokenize(x_ng)
 
@@ -161,25 +161,31 @@ class Geneformer(CellariumModel, PredictMixin):
     def predict(
         self,
         x_ng: torch.Tensor,
-        feature_g: np.ndarray,
+        var_names_g: np.ndarray,
         output_hidden_states: bool = True,
         output_attentions: bool = True,
+        output_input_ids: bool = True,
+        output_attention_mask: bool = True,
     ) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Args:
             x_ng:
                 Gene counts matrix.
-            feature_g:
+            var_names_g:
                 The list of the variable names in the input data.
             output_hidden_states:
                 Whether to return all hidden-states.
             output_attentions:
                 Whether to return all attentions.
+            output_input_ids:
+                Whether to return input ids.
+            output_attention_mask:
+                Whether to return attention mask.
         Returns:
             A dictionary with the inference results.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         input_ids, attention_mask = self.tokenize(x_ng)
 
@@ -189,4 +195,8 @@ class Geneformer(CellariumModel, PredictMixin):
             output_hidden_states=output_hidden_states,
             output_attentions=output_attentions,
         )
+        if output_input_ids:
+            output["input_ids"] = input_ids
+        if output_attention_mask:
+            output["attention_mask"] = attention_mask
         return output
