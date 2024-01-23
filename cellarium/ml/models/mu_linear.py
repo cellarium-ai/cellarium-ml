@@ -270,6 +270,7 @@ class MuLinear(nn.Module):
 
     @bias.setter
     def bias(self, value: abcdParameter) -> None:
+        self.bias_unscaled: nn.Parameter | None
         if value.data is None:
             self.register_parameter("bias_unscaled", None)
             return
