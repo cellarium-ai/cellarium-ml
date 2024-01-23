@@ -10,6 +10,9 @@ lint: FORCE
 	ruff check .
 	black --check .
 
+docs: FORCE
+	cd docs && make html
+
 license: FORCE
 	python scripts/update_headers.py
 
