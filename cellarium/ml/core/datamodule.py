@@ -26,7 +26,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ...     max_cache_size=2,
         ...     batch_keys={
         ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
-        ...         "feature_g": AnnDataField(attr="var_names"),
+        ...         "var_names_g": AnnDataField(attr="var_names"),
         ...     },
         ...     batch_size=5000,
         ...     shuffle=True,
@@ -36,7 +36,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ... )
         >>> dm.setup()
         >>> for batch in dm.train_dataloader():
-        ...     print(batch.keys())  # x_ng, feature_g
+        ...     print(batch.keys())  # x_ng, var_names_g
 
     Example::
 
@@ -49,7 +49,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ...     max_cache_size=2,
         ...     batch_keys={
         ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
-        ...         "feature_g": AnnDataField(attr="var_names"),
+        ...         "var_names_g": AnnDataField(attr="var_names"),
         ...     },
         ...     batch_size=5000,
         ...     shuffle=True,
@@ -59,7 +59,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ... )
         >>> dm.setup()
         >>> for batch in dm.train_dataloader():
-        ...     print(batch.keys())  # x_ng, feature_g
+        ...     print(batch.keys())  # x_ng, var_names_g
 
     Args:
         filenames:

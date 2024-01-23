@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -13,8 +14,7 @@ import torch
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.callbacks import VarianceMonitor
-from cellarium.ml.models import ProbabilisticPCA, ProbabilisticPCAFromCLI
-from cellarium.ml.transforms import NormalizeTotal
+from cellarium.ml.models import ProbabilisticPCA
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDataset
 
@@ -34,7 +34,9 @@ def x_ng():
 @pytest.mark.parametrize("ppca_flavor", ["marginalized", "linear_vae"])
 @pytest.mark.parametrize("learn_mean", [False, True])
 @pytest.mark.parametrize("minibatch", [False, True], ids=["fullbatch", "minibatch"])
-def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_flavor: str, learn_mean: bool):
+def test_probabilistic_pca_multi_device(
+    x_ng: np.ndarray, minibatch: bool, ppca_flavor: Literal["marginalized", "linear_vae"], learn_mean: bool
+):
     n, g = x_ng.shape
     k = 3
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -46,7 +48,10 @@ def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_
     # dataloader
     batch_size = n // 2 if minibatch else n
     train_loader = torch.utils.data.DataLoader(
-        BoringDataset(x_ng),
+        BoringDataset(
+            x_ng,
+            np.array([f"gene_{i}" for i in range(g)]),
+        ),
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
@@ -57,9 +62,9 @@ def test_probabilistic_pca_multi_device(x_ng: np.ndarray, minibatch: bool, ppca_
     w = np.sqrt(0.5 * total_var / (g * k))
     s = np.sqrt(0.5 * total_var / g)
     ppca = ProbabilisticPCA(
-        n_cells=n,
-        g_genes=g,
-        k_components=k,
+        n_obs=n,
+        var_names_g=[f"gene_{i}" for i in range(g)],
+        n_components=k,
         ppca_flavor=ppca_flavor,
         mean_g=x_mean_g,
         W_init_scale=w,
@@ -113,12 +118,15 @@ def test_variance_monitor(x_ng: np.ndarray):
     k = 3
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        BoringDataset(x_ng),
+        BoringDataset(
+            x_ng,
+            np.array([f"gene_{i}" for i in range(g)]),
+        ),
         batch_size=n // 2,
         collate_fn=collate_fn,
     )
     # model
-    ppca = ProbabilisticPCA(n, g, k, "marginalized")
+    ppca = ProbabilisticPCA(n, [f"gene_{i}" for i in range(g)], k, "marginalized")
     module = CellariumModule(ppca)
     # trainer
     var_monitor = VarianceMonitor(total_variance=np.var(x_ng, axis=0).sum())
@@ -138,22 +146,25 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        BoringDataset(np.arange(n * g).reshape(n, g)),
+        BoringDataset(
+            np.random.randn(n, g).astype(np.float32),
+            np.array([f"gene_{i}" for i in range(g)]),
+        ),
         collate_fn=collate_fn,
     )
     # model
     init_args = {
-        "n_cells": n,
-        "g_genes": g,
-        "k_components": 1,
+        "n_obs": n,
+        "var_names_g": [f"gene_{i}" for i in range(g)],
+        "n_components": 1,
         "ppca_flavor": "marginalized",
-        "target_count": 10,
     }
-    model = ProbabilisticPCAFromCLI(**init_args)  # type: ignore[arg-type]
+    pyro.clear_param_store()
+    model = ProbabilisticPCA(**init_args)  # type: ignore[arg-type]
     config = {
         "model": {
             "model": {
-                "class_path": "cellarium.ml.models.ProbabilisticPCAFromCLI",
+                "class_path": "cellarium.ml.models.ProbabilisticPCA",
                 "init_args": init_args,
             }
         }
@@ -176,13 +187,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: ProbabilisticPCAFromCLI = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model: ProbabilisticPCA = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
-    assert isinstance(model.transform, torch.nn.Sequential) and len(model.transform) == 2
-    assert isinstance(loaded_model.transform, torch.nn.Sequential) and len(loaded_model.transform) == 2
-    assert isinstance(model.transform[0], NormalizeTotal)
-    assert isinstance(loaded_model.transform[0], NormalizeTotal)
-    assert model.transform[0].target_count == loaded_model.transform[0].target_count
     np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())
     np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())
     np.testing.assert_allclose(model.mean_g.detach(), loaded_model.mean_g.detach())

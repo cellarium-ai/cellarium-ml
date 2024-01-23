@@ -16,38 +16,13 @@ from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.models import CellariumModel, GatherLayer
-from cellarium.ml.utilities.data import AnnDataField, collate_fn, get_rank_and_num_replicas
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
+from tests.common import BoringModel
 
 # RuntimeError: Too many open files. Communication with the workers is no longer possible.
 # Please increase the limit using `ulimit -n` in the shell or change the sharing strategy
 # by calling `torch.multiprocessing.set_sharing_strategy('file_system')` at the beginning of your code
 torch.multiprocessing.set_sharing_strategy("file_system")
-
-
-class BoringModel(CellariumModel):
-    """
-    This model appends a batch input to an :attr:`iter_data` list at each iteration.
-    Its intended use is for testing purposes where batch inputs can be inspected after
-    iteration over the dataset with ``Trainer.fit()``. Batch input would typically contain
-    feature counts, worker info, torch.distributed info, cache info, etc.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.iter_data: list = []
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
-
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        return (), tensor_dict
-
-    def forward(self, **batch: torch.Tensor) -> None:
-        _, num_replicas = get_rank_and_num_replicas()
-        if num_replicas > 1:
-            for key, value in batch.items():
-                batch[key] = torch.cat(GatherLayer.apply(value), dim=0)
-        self.iter_data.append(batch)
 
 
 @pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])  # limits
@@ -80,7 +55,7 @@ def test_iterable_dataset(dadc: DistributedAnnDataCollection, shuffle: bool, num
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
-        batch_keys={"X": AnnDataField("X")},
+        batch_keys={"x_ng": AnnDataField("X")},
         batch_size=batch_size,
         shuffle=shuffle,
         test_mode=True,
@@ -102,7 +77,7 @@ def test_iterable_dataset(dadc: DistributedAnnDataCollection, shuffle: bool, num
         miss_count = max(miss_counts)
         assert miss_count == len(dadc.limits)
 
-    actual_idx = list(int(i) for batch in data_loader for i in batch["X"])
+    actual_idx = list(int(i) for batch in data_loader for i in batch["x_ng"])
     expected_idx = list(range(n_obs))
 
     # assert entire dataset is sampled
@@ -125,7 +100,7 @@ def test_iterable_dataset_multi_device(
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
-        batch_keys={"X": AnnDataField("X")},
+        batch_keys={"x_ng": AnnDataField("X")},
         batch_size=batch_size,
         shuffle=shuffle,
         drop_last=drop_last,
@@ -152,7 +127,7 @@ def test_iterable_dataset_multi_device(
     if trainer.global_rank != 0:
         return
 
-    actual_idx = list(int(i) for batch in model.iter_data for i in batch["X"])
+    actual_idx = list(int(i) for batch in model.iter_data for i in batch["x_ng"])
     expected_idx = list(range(n_obs))
 
     # assert entire dataset is sampled
@@ -187,7 +162,7 @@ def test_iterable_dataset_set_epoch_multi_device(
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
-        batch_keys={"X": AnnDataField("X")},
+        batch_keys={"x_ng": AnnDataField("X")},
         batch_size=1,
         shuffle=True,
         test_mode=True,

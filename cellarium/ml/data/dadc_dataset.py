@@ -43,7 +43,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         ...     dadc,
         ...     batch_keys={
         ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
-        ...         "feature_g": AnnDataField(attr="var_names"),
+        ...         "var_names_g": AnnDataField(attr="var_names"),
         ...     },
         ...     batch_size=5000,
         ...     shuffle=True,

@@ -43,8 +43,13 @@ class NormalizeTotal(nn.Module):
         self,
         x_ng: torch.Tensor,
         total_mrna_umis_n: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
         """
+        .. note::
+
+            When used with :class:`~cellarium.ml.core.CellariumModule` or :class:`~cellarium.ml.core.CellariumPipeline`,
+            ``x_ng`` key in the input dictionary will be overwritten with the normalized values.
+
         Args:
             x_ng:
                 Gene counts.
@@ -52,11 +57,14 @@ class NormalizeTotal(nn.Module):
                 Total mRNA UMI counts per cell. If ``None``, it is computed from ``x_ng``.
 
         Returns:
-            Gene counts normalized to target count.
+            A dictionary with the following keys:
+
+            - ``x_ng``: The gene counts normalized to target count.
         """
         if total_mrna_umis_n is None:
             total_mrna_umis_n = x_ng.sum(dim=-1)
-        return self.target_count * x_ng / (total_mrna_umis_n[:, None] + self.eps)
+        x_ng = self.target_count * x_ng / (total_mrna_umis_n[:, None] + self.eps)
+        return {"x_ng": x_ng}
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(target_count={self.target_count}, eps={self.eps})"
