@@ -30,6 +30,27 @@ jobs:
     - name: Lint check
       run: make lint
 
+  docs:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install -y pandoc
+        python -m pip install --upgrade pip
+        pip install .[docs]
+    - name: Build docs
+      run: make docs
+
   mypy:
 
     runs-on: ubuntu-latest
@@ -52,6 +73,7 @@ jobs:
 
   test:
 
+    needs: [lint, mypy, docs]
     runs-on: ubuntu-latest
     strategy:
       matrix:
