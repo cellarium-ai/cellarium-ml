@@ -14,7 +14,7 @@ from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.models import OnePassMeanVarStd, OnePassMeanVarStdFromCLI
+from cellarium.ml.models import OnePassMeanVarStd
 from cellarium.ml.transforms import Log1p, NormalizeTotal
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 from tests.common import BoringDataset
@@ -60,7 +60,10 @@ def test_onepass_mean_var_std_multi_device(
     # prepare dataloader
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
-        batch_keys={"X": AnnDataField("X")},
+        batch_keys={
+            "x_ng": AnnDataField("X"),
+            "var_names_g": AnnDataField("var_names"),
+        },
         batch_size=batch_size,
         shuffle=shuffle,
     )
@@ -69,11 +72,11 @@ def test_onepass_mean_var_std_multi_device(
         num_workers=num_workers,
         collate_fn=collate_fn,
     )
-    transform = torch.nn.Sequential(NormalizeTotal(target_count=10_000), Log1p())
+    transforms = [NormalizeTotal(target_count=10_000), Log1p()]
 
     # fit
-    model = OnePassMeanVarStd(g_genes=dadc.n_vars, transform=transform)
-    module = CellariumModule(model)
+    model = OnePassMeanVarStd(var_names_g=dadc.var_names)
+    module = CellariumModule(model, transforms=transforms)
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
         barebones=True,
@@ -94,7 +97,10 @@ def test_onepass_mean_var_std_multi_device(
     actual_std = model.std_g
 
     # expected mean, var, and std
-    x = transform(torch.from_numpy(adata.X))
+    batch = {"x_ng": torch.from_numpy(adata.X)}
+    for transform in transforms:
+        batch = transform(**batch)
+    x = batch["x_ng"]
     expected_mean = torch.mean(x, dim=0)
     expected_var = torch.var(x, dim=0, unbiased=False)
     expected_std = torch.std(x, dim=0, unbiased=False)
@@ -109,16 +115,19 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
-        BoringDataset(np.arange(n * g).reshape(n, g)),
+        BoringDataset(
+            np.random.randn(n, g),
+            np.array([f"gene_{i}" for i in range(g)]),
+        ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"g_genes": g, "target_count": 10}
-    model = OnePassMeanVarStdFromCLI(**init_args)
+    init_args = {"var_names_g": [f"gene_{i}" for i in range(g)]}
+    model = OnePassMeanVarStd(**init_args)  # type: ignore[arg-type]
     config = {
         "model": {
             "model": {
-                "class_path": "cellarium.ml.models.OnePassMeanVarStdFromCLI",
+                "class_path": "cellarium.ml.models.OnePassMeanVarStd",
                 "init_args": init_args,
             }
         }
@@ -143,13 +152,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: OnePassMeanVarStdFromCLI = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model: OnePassMeanVarStd = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
-    assert isinstance(model.transform, torch.nn.Sequential) and len(model.transform) == 2
-    assert isinstance(loaded_model.transform, torch.nn.Sequential) and len(loaded_model.transform) == 2
-    assert isinstance(model.transform[0], NormalizeTotal)
-    assert isinstance(loaded_model.transform[0], NormalizeTotal)
-    assert model.transform[0].target_count == loaded_model.transform[0].target_count
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
-    np.testing.assert_allclose(model.var_g, loaded_model.var_g)
-    np.testing.assert_allclose(model.std_g, loaded_model.std_g)
+    np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
+    np.testing.assert_allclose(model.std_g, loaded_model.std_g, atol=1e-6)

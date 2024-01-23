@@ -23,13 +23,6 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
 
     __call__: Callable[..., torch.Tensor | None]
 
-    @staticmethod
-    @abstractmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        """
-        Get forward method arguments from batch.
-        """
-
     def __getattr__(self, name: str) -> Any:
         if "_pyro_params" in self.__dict__:
             _pyro_params = self.__dict__["_pyro_params"]
@@ -70,16 +63,7 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor | dict[str, torch.Tensor | None]:
+    def predict(self, *args: Any, **kwargs: Any) -> dict[str, np.ndarray | torch.Tensor]:
         """
-        Perform prediction on data tensor.
-
-        Args:
-            x_ng:
-                Data tensor.
-            **kwargs:
-                Additional keyword arguments.
-
-        Returns:
-            Prediction tensor or dictionary of prediction tensors.
+        Perform prediction.
         """

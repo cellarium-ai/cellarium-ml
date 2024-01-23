@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-from typing import Any
+from collections.abc import Sequence
 
 import lightning.pytorch as pl
 import numpy as np
@@ -12,6 +12,10 @@ import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
 
 
 class IncrementalPCA(CellariumModel, PredictMixin):
@@ -26,9 +30,9 @@ class IncrementalPCA(CellariumModel, PredictMixin):
        <https://www.cs.toronto.edu/~dross/ivt/RossLimLinYang_ijcv.pdf>`_.
 
     Args:
-        g_genes:
-            Number of genes.
-        k_components:
+        var_names_g:
+            The variable names schema for the input data validation.
+        n_components:
             Number of principal components.
         svd_lowrank_niter:
             Number of iterations for the low-rank SVD algorithm.
@@ -36,55 +40,56 @@ class IncrementalPCA(CellariumModel, PredictMixin):
             If ``True`` then the mean correction is applied to the update step.
             If ``False`` then the data is assumed to be centered and the mean correction
             is not applied to the update step.
-        transform:
-            If not ``None`` is used to transform the input data.
     """
 
     def __init__(
         self,
-        g_genes: int,
-        k_components: int,
+        var_names_g: Sequence[str],
+        n_components: int,
         svd_lowrank_niter: int = 2,
         perform_mean_correction: bool = False,
-        transform: nn.Module | None = None,
     ) -> None:
         super().__init__()
-        self.g_genes = g_genes
-        self.k_components = k_components
+        self.var_names_g = np.array(var_names_g)
+        n_vars = len(self.var_names_g)
+        self.n_vars = n_vars
+        self.n_components = n_components
         self.svd_lowrank_niter = svd_lowrank_niter
         self.perform_mean_correction = perform_mean_correction
-        self.transform = transform
         self.V_kg: torch.Tensor
         self.S_k: torch.Tensor
         self.x_mean_g: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("V_kg", torch.zeros(k_components, g_genes))
-        self.register_buffer("S_k", torch.zeros(k_components))
-        self.register_buffer("x_mean_g", torch.zeros(g_genes))
+        self.register_buffer("V_kg", torch.zeros(n_components, n_vars))
+        self.register_buffer("S_k", torch.zeros(n_components))
+        self.register_buffer("x_mean_g", torch.zeros(n_vars))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = nn.Parameter(torch.tensor(0.0))
 
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        x = tensor_dict["X"]
-        return (x,), {}
-
-    def forward(self, x_ng: torch.Tensor) -> None:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Incrementally update partial SVD with new data.
-        """
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
 
-        g = self.g_genes
-        k = self.k_components
+        Args:
+            x_ng:
+                Gene counts matrix.
+            var_names_g:
+                The list of the variable names in the input data.
+
+        Returns:
+            An empty dictionary.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        g = self.n_vars
+        k = self.n_components
         niter = self.svd_lowrank_niter
         self_X_size = self.x_size
         other_X_size = x_ng.size(0)
         total_X_size = self_X_size + other_X_size
         assert k <= min(other_X_size, g), (
-            f"Rank of svd_lowrank (k_components): {k}"
-            f" must be less than min(n_cells, g_genes): {min(other_X_size, g)}"
+            f"Rank of svd_lowrank (n_components): {k}" f" must be less than min(n_obs, n_vars): {min(other_X_size, g)}"
         )
 
         # compute SVD of new data
@@ -115,6 +120,8 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         if self.perform_mean_correction:
             self.x_mean_g = self_X_mean * self_X_size / total_X_size + other_X_mean * other_X_size / total_X_size
 
+        return {}
+
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
             assert isinstance(trainer.strategy, DDPStrategy), (
@@ -144,7 +151,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         assert trainer.current_epoch == 0, "Only one pass through the data is required."
 
         # parameters
-        k = self.k_components
+        k = self.n_components
         niter = self.svd_lowrank_niter
         self_X_size = self.x_size
         self_X = torch.einsum("k,kg->kg", self.S_k, self.V_kg).contiguous()
@@ -216,7 +223,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         The amount of variance explained by each of the selected components. The variance
         estimation uses ``x_size`` degrees of freedom.
 
-        Equal to ``k_components`` largest eigenvalues of the covariance matrix of input data.
+        Equal to ``n_components`` largest eigenvalues of the covariance matrix of input data.
         """
         return self.S_k**2 / self.x_size
 
@@ -229,10 +236,23 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-        r"""
-        Centering and embedding of the input data ``x_ng`` into the principal component space.
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
-        return (x_ng - self.x_mean_g) @ self.V_kg.T
+        Centering and embedding of the input data ``x_ng`` into the principal component space.
+
+        Args:
+            x_ng:
+                Gene counts matrix.
+            var_names_g:
+                The list of the variable names in the input data.
+
+        Returns:
+            A dictionary with the following keys:
+
+            - ``z_nk``: Embedding of the input data into the principal component space.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        z_nk = (x_ng - self.x_mean_g) @ self.V_kg.T
+        return {"z_nk": z_nk}

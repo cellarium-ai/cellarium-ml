@@ -1,7 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any
+
+from collections.abc import Sequence
+from typing import Literal
 
 import numpy as np
 import pyro
@@ -10,10 +12,14 @@ import torch
 from pyro.nn import PyroParam
 from torch.distributions import constraints
 
-from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
 
 
-class ProbabilisticPCA(CellariumModel):
+class ProbabilisticPCA(CellariumModel, PredictMixin):
     """
     Probabilistic PCA implemented in Pyro.
 
@@ -28,11 +34,11 @@ class ProbabilisticPCA(CellariumModel):
        <https://openreview.net/pdf?id=r1xaVLUYuE>`_.
 
     Args:
-        n_cells:
+        n_obs:
             Number of cells.
-        g_genes:
-            Number of genes.
-        k_components:
+        var_names_g:
+            The variable names schema for the input data validation.
+        n_components:
             Number of principal components.
         ppca_flavor:
             Type of the PPCA model. Has to be one of `marginalized` or `linear_vae`.
@@ -45,8 +51,6 @@ class ProbabilisticPCA(CellariumModel):
             Initialization value of the `sigma` parameter.
         seed:
             Random seed used to initialize parameters.
-        transform:
-            If not ``None`` is used to transform the input data.
         elbo:
             ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
             If ``None``, defaults to :class:`~pyro.infer.Trace_ELBO`.
@@ -54,73 +58,73 @@ class ProbabilisticPCA(CellariumModel):
 
     def __init__(
         self,
-        n_cells: int,
-        g_genes: int,
-        k_components: int,
-        ppca_flavor: str,
+        n_obs: int,
+        var_names_g: Sequence[str],
+        n_components: int,
+        ppca_flavor: Literal["marginalized", "linear_vae"],
         mean_g: float | torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
         seed: int = 0,
-        transform: torch.nn.Module | None = None,
         elbo: pyro.infer.ELBO | None = None,
     ):
         super().__init__()
 
-        self.n_cells = n_cells
-        self.g_genes = g_genes
-        self.k_components = k_components
-        assert ppca_flavor in [
-            "marginalized",
-            "linear_vae",
-        ], "ppca_flavor must be one of 'marginalized' or 'linear_vae'"
+        self.n_obs = n_obs
+        self.var_names_g = np.array(var_names_g)
+        n_vars = len(self.var_names_g)
+        self.n_vars = n_vars
+        self.n_components = n_components
         self.ppca_flavor = ppca_flavor
-        self.transform = transform
         self.elbo = elbo or pyro.infer.Trace_ELBO()
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
-            assert mean_g.shape == (
-                g_genes,
-            ), f"Expected meang_g to have a shape ({g_genes},) but found {mean_g.shape}."
+            assert mean_g.shape == (n_vars,), f"Expected meang_g to have a shape ({n_vars},) but found {mean_g.shape}."
         if mean_g is None:
             # make mean_g a learnable parameter
-            self.mean_g = PyroParam(lambda: torch.zeros(g_genes))
+            self.mean_g = PyroParam(lambda: torch.zeros(n_vars))
         else:
             self.register_buffer("mean_g", torch.as_tensor(mean_g))
 
         rng = torch.Generator()
         rng.manual_seed(seed)
         # model parameters
-        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((k_components, g_genes), generator=rng))
+        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((n_components, n_vars), generator=rng))
         self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)
 
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict: dict[str, np.ndarray | torch.Tensor]) -> tuple[tuple, dict]:
-        x = tensor_dict["X"]
-        return (x,), {}
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+        """
+        Args:
+            x_ng:
+                Gene counts matrix.
+            var_names_g:
+                The list of the variable names in the input data.
 
-    def forward(self, *args: Any, **kwargs: Any) -> torch.Tensor:
-        return self.elbo.differentiable_loss(self.model, self.guide, *args, **kwargs)
+        Returns:
+            A dictionary with the loss value.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng)
+        return {"loss": loss}
 
     def model(self, x_ng: torch.Tensor) -> None:
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
-
-        with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
+        with pyro.plate("cells", size=self.n_obs, subsample_size=x_ng.shape[0]):
             if self.ppca_flavor == "marginalized":
                 pyro.sample(
                     "counts",
                     dist.LowRankMultivariateNormal(
                         loc=self.mean_g,
                         cov_factor=self.W_kg.T,
-                        cov_diag=self.sigma**2 * x_ng.new_ones(self.g_genes),
+                        cov_diag=self.sigma**2 * x_ng.new_ones(self.n_vars),
                     ),
                     obs=x_ng,
                 )
             else:
                 z_nk = pyro.sample(
                     "z",
-                    dist.Normal(x_ng.new_zeros(self.k_components), 1).to_event(1),
+                    dist.Normal(x_ng.new_zeros(self.n_components), 1).to_event(1),
                 )
                 pyro.sample(
                     "counts",
@@ -132,31 +136,39 @@ class ProbabilisticPCA(CellariumModel):
         if self.ppca_flavor == "marginalized":
             return
 
-        if self.transform is not None:
-            x_ng = self.transform(x_ng)
-
-        with pyro.plate("cells", size=self.n_cells, subsample_size=x_ng.shape[0]):
+        with pyro.plate("cells", size=self.n_obs, subsample_size=x_ng.shape[0]):
             V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
-    @torch.inference_mode()
-    def get_latent_representation(
-        self,
-        x_ng: torch.Tensor,
-    ) -> torch.Tensor:
-        r"""
-        Return the latent representation for each cell.
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+        """
+        Centering and embedding of the input data ``x_ng`` into the principal component space.
 
         .. note::
            Gradients are disabled, used for inference only.
+
+        Args:
+            x_ng:
+                Gene counts matrix.
+            var_names_g:
+                The list of the variable names in the input data.
+
+        Returns:
+            A dictionary with the following keys:
+
+            - ``z_nk``: Embedding of the input data into the principal component space.
         """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
         V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
-        return (x_ng - self.mean_g) @ V_gk
+        z_nk = (x_ng - self.mean_g) @ V_gk
+        return {"z_nk": z_nk}
 
     @property
     def M_kk(self) -> torch.Tensor:
-        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.k_components, device=self.sigma.device)
+        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.n_components, device=self.sigma.device)
 
     @property
     @torch.inference_mode()
@@ -197,4 +209,4 @@ class ProbabilisticPCA(CellariumModel):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return (self.g_genes * self.sigma**2).item()
+        return (self.n_vars * self.sigma**2).item()
