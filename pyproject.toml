@@ -49,7 +49,6 @@ test = [
 ]
 docs = [
   "nbsphinx",
-  "pandoc",
   "Pillow",
   "seaborn>=0.13.0",
   "sphinx",
