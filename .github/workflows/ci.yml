@@ -73,6 +73,7 @@ jobs:
 
   test:
 
+    needs: [lint, mypy, docs]
     runs-on: ubuntu-latest
     strategy:
       matrix:
