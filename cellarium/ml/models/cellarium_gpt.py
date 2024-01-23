@@ -373,17 +373,16 @@ class CellariumGPT(CellariumModel):
         return (x_ng, feature_g, total_mrna_umis_n), {}
 
     def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
-        # x_ng = self.normalize(x_ng, total_mrna_umis_n)
-        # x_ng = self.divide(x_ng, feature_g)
-        # x_ng, feature_g = self.filter(x_ng, feature_g)
-        random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.c_context - 1]
+        # random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.c_context - 1]
+        # ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
+        # x_nc = x_ng[ndx[:, None], random_indices]
+        # x_nc = torch.cat([total_mrna_umis_n[:, None], x_nc], dim=1)
+        # gene_ids = self.feature_ids[random_indices]
+        # gene_ids = torch.cat([torch.zeros((x_ng.shape[0], 1), dtype=torch.long, device=x_ng.device), gene_ids], dim=1)
+        random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.c_context]
         ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
         x_nc = x_ng[ndx[:, None], random_indices]
-        x_nc = torch.cat([total_mrna_umis_n[:, None], x_nc], dim=1)
         gene_ids = self.feature_ids[random_indices]
-        gene_ids = torch.cat([torch.zeros((x_ng.shape[0], 1), dtype=torch.long, device=x_ng.device), gene_ids], dim=1)
-        # right=False: boundaries[i-1] < input[m][n]...[l][x] <= boundaries[i]
-        # value_ids = torch.bucketize(x_nc, self.quantiles, right=False) - 1
         labels = x_nc.clone()
         prefix_len_n = torch.randint(1, self.c_context, (x_nc.shape[0],), device=x_nc.device)
         masked_indices = (
