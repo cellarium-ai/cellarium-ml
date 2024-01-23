@@ -20,6 +20,12 @@ Table of Contents
    preprocessing
    utilities
 
+.. toctree::
+   :maxdepth: 1
+   :caption: Tutorials
+
+   tutorials/mup_mlp
+
 Indices and tables
 ==================
 
