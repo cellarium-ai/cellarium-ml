@@ -379,25 +379,47 @@ class CellariumGPT(CellariumModel):
         # x_nc = torch.cat([total_mrna_umis_n[:, None], x_nc], dim=1)
         # gene_ids = self.feature_ids[random_indices]
         # gene_ids = torch.cat([torch.zeros((x_ng.shape[0], 1), dtype=torch.long, device=x_ng.device), gene_ids], dim=1)
-        random_indices = torch.argsort(torch.rand_like(x_ng))[:, : self.c_context]
-        ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
-        x_nc = x_ng[ndx[:, None], random_indices]
-        gene_ids = self.feature_ids[random_indices]
-        labels = x_nc.clone()
-        prefix_len_n = torch.randint(1, self.c_context, (x_nc.shape[0],), device=x_nc.device)
-        masked_indices = (
-            torch.arange((self.c_context), dtype=torch.float32, device=x_nc.device)[None, :] >= prefix_len_n[:, None]
+        random_indices_ng = torch.argsort(torch.rand_like(x_ng))
+        prefix_len_n = torch.randint(1, self.c_context, (x_ng.shape[0],), device=x_ng.device)
+        masked_indices_ng = (
+            torch.arange((self.g_genes), dtype=torch.float32, device=x_ng.device)[None, :] >= prefix_len_n[:, None]
         )
-        labels[~masked_indices] = -100
-        weights = 1 / masked_indices.sum(dim=1, keepdim=True).expand(-1, self.c_context)
+        masked_indices_nc = masked_indices_ng[:, : self.c_context]
+        random_indices_nc = random_indices_ng[:, : self.c_context]
+        ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
+        randomized_x_ng = x_ng[ndx[:, None], random_indices_ng]
+        randomized_x_nc = randomized_x_ng[:, : self.c_context]
+
+        # 1
+        zero_indices_ng = (randomized_x_ng == 0) & masked_indices_ng
+        nonzero_indices_ng = (randomized_x_ng > 0) & masked_indices_ng
+        zero_counts_n1 = zero_indices_ng.sum(dim=1, keepdim=True)
+        nonzero_counts_n1 = nonzero_indices_ng.sum(dim=1, keepdim=True)
+        total_counts_n1 = masked_indices_ng.sum(dim=1, keepdim=True)
+        zero_weights_ng = (0.5 / zero_counts_n1).expand(-1, self.g_genes)
+        nonzero_weights_ng = (0.5 / nonzero_counts_n1).expand(-1, self.g_genes)
+        weights_ng = torch.zeros_like(x_ng, dtype=torch.float32)
+        weights_ng[zero_indices_ng] = zero_weights_ng[zero_indices_ng]
+        weights_ng[nonzero_indices_ng] = nonzero_weights_ng[nonzero_indices_ng]
+        label_indices_nc = torch.multinomial(weights_ng, num_samples=self.c_context, replacement=True)
+        labels_nc = randomized_x_ng[ndx[:, None], label_indices_nc]
+        randomized_x_nc[masked_indices_nc] = labels_nc[masked_indices_nc]
+        importance_weights_ng = 1 / (weights_ng * total_counts_n1)
+        label_weights_nc = importance_weights_ng[ndx[:, None], label_indices_nc]
+        # 2
+        # labels = randomized_x_nc.clone()
+
+        sample_weights_nc = 1 / masked_indices_nc.sum(dim=1, keepdim=True).expand(-1, self.c_context)
+
+        gene_ids = self.feature_ids[random_indices_nc]
+        # labels_nc[~masked_indices_nc] = -100
         # value_ids[masked_indices] = self.b_bins
-        value_ids = torch.log1p(x_nc)
+        value_ids = torch.log1p(randomized_x_nc)
 
         gene_ncd = self.id_embedding(gene_ids)
         value_ncd = self.value_embedding(value_ids.unsqueeze(-1))
-        mask_embedding = self.mask_embedding(torch.zeros(1, device=x_nc.device).long())
-        value_ncd[masked_indices] = mask_embedding.squeeze()
-        # value_ncd = torch.where(masked_indices, mask_embedding, self.value_embedding(value_ids.unsqueeze(-1)))
+        mask_embedding = self.mask_embedding(torch.zeros(1, device=x_ng.device).long())
+        value_ncd[masked_indices_nc] = mask_embedding.squeeze()
         hidden_ncd = gene_ncd + value_ncd
 
         # per cell
@@ -419,12 +441,13 @@ class CellariumGPT(CellariumModel):
         logits = self.dense(hidden_ncd)
         mu_nc = logits[:, :, 0].exp()
         theta_nc = logits[:, :, 1].exp()
-        mu = mu_nc[masked_indices]
-        theta = theta_nc[masked_indices]
+        mu = mu_nc[masked_indices_nc]
+        theta = theta_nc[masked_indices_nc]
         dist = NegativeBinomial(mu=mu, theta=theta)
-        log_prob = dist.log_prob(labels[masked_indices])
-        loss_weights = weights[masked_indices]
-        loss = -(log_prob * loss_weights).sum() / loss_weights.sum()
+        log_prob = dist.log_prob(labels_nc[masked_indices_nc])
+        label_weights = label_weights_nc[masked_indices_nc]
+        sample_weights = sample_weights_nc[masked_indices_nc]
+        loss = -(log_prob * label_weights * sample_weights).sum() / sample_weights.sum()
 
         # loss_logits = logits[masked_indices]
         # loss_logits = loss_logits - loss_logits.logsumexp(dim=-1, keepdim=True)
@@ -433,17 +456,19 @@ class CellariumGPT(CellariumModel):
         #  loss_fn = nn.CrossEntropyLoss(weight=weights.view(-1), ignore_index=-100, reduction="mean")
         #  loss = loss_fn(logits.view(-1, self.b_bins), labels.view(-1))
         with torch.no_grad():
-            nonzero_mask = labels > 0
+            nonzero_mask = labels_nc > 0
             nonzero_log_prob = NegativeBinomial(mu=mu_nc[nonzero_mask], theta=theta_nc[nonzero_mask]).log_prob(
-                labels[nonzero_mask]
+                labels_nc[nonzero_mask]
             )
-            nonzero_weights = weights[nonzero_mask]
-            nonzero_loss = -(nonzero_log_prob * nonzero_weights).sum() / nonzero_weights.sum()
+            nonzero_sample_weights = sample_weights_nc[nonzero_mask]
+            nonzero_loss = -(nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
 
-            zero_mask = labels == 0
-            zero_log_prob = NegativeBinomial(mu=mu_nc[zero_mask], theta=theta_nc[zero_mask]).log_prob(labels[zero_mask])
-            zero_weights = weights[zero_mask]
-            zero_loss = -(zero_log_prob * zero_weights).sum() / zero_weights.sum()
+            zero_mask = labels_nc == 0
+            zero_log_prob = NegativeBinomial(mu=mu_nc[zero_mask], theta=theta_nc[zero_mask]).log_prob(
+                labels_nc[zero_mask]
+            )
+            zero_sample_weights = sample_weights_nc[zero_mask]
+            zero_loss = -(zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
 
             prefix_len_nc = prefix_len_n[:, None].expand(-1, self.c_context)
             # nonzero_prefix_len = prefix_len_nc[nonzero_mask]
@@ -458,7 +483,7 @@ class CellariumGPT(CellariumModel):
             "logits": logits,
             "nonzero_mask": nonzero_mask,
             "zero_mask": zero_mask,
-            "labels": labels,
+            "labels": labels_nc,
             "prefix_len_nc": prefix_len_nc,
             # "zero_preds": torch.argmax(logits[zero_mask], dim=-1),
             # "zero_labels": labels[zero_mask],
