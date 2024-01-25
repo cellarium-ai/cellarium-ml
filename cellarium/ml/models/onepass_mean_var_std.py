@@ -9,14 +9,14 @@ import torch
 import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
-from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.models.model import CellariumModel, CellariumPipelineUpdatable
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class OnePassMeanVarStd(CellariumModel):
+class OnePassMeanVarStd(CellariumPipelineUpdatable, CellariumModel):
     """
     Calculate the mean, variance, and standard deviation of the data in one pass (epoch)
     using running sums and running squared sums.
@@ -26,8 +26,6 @@ class OnePassMeanVarStd(CellariumModel):
     1. `Algorithms for calculating variance
        <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
 
-    Args:
-        feature_schema: The variable names schema for the input data validation.
     """
 
     def __init__(self, feature_schema: Sequence[str]) -> None:
@@ -42,6 +40,17 @@ class OnePassMeanVarStd(CellariumModel):
         self.register_buffer("x_squared_sums", torch.zeros(g_genes))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+
+    def update_input_tensors_from_previous_module(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        mask = np.isin(element=self.feature_schema, test_elements=batch["feature_g"])
+        mask_tensor = torch.Tensor(mask)
+        mask_tensor.to(self.x_sums.device)
+
+        self.feature_schema = self.feature_schema[mask]
+        self.g_genes = len(self.feature_schema)
+
+        self.x_sums = self.x_sums[mask_tensor]
+        self.x_squared_sums = self.x_squared_sums[mask_tensor]
 
     def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """

@@ -11,14 +11,14 @@ import torch.distributed as dist
 import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, CellariumPipelineUpdatable, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class IncrementalPCA(CellariumModel, PredictMixin):
+class IncrementalPCA(CellariumPipelineUpdatable, PredictMixin, CellariumModel):
     """
     Distributed and Incremental PCA.
 
@@ -65,6 +65,17 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.register_buffer("x_mean_g", torch.zeros(g_genes))
         self.register_buffer("x_size", torch.tensor(0))
         self._dummy_param = nn.Parameter(torch.tensor(0.0))
+
+    def update_input_tensors_from_previous_module(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        """
+        Update feature schema and g_genes according to a new batch dimension.
+
+        Args:
+             batch: The batch forwarded from the previous module.
+        """
+        mask = np.isin(element=self.feature_schema, test_elements=batch["feature_g"])
+        self.feature_schema = self.feature_schema[mask]
+        self.g_genes = len(self.feature_schema)
 
     def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """

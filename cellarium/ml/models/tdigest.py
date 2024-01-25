@@ -12,14 +12,14 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.models.model import CellariumModel, CellariumPipelineUpdatable
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class TDigest(CellariumModel):
+class TDigest(CellariumPipelineUpdatable, CellariumModel):
     """
     Compute an approximate non-zero histogram of the distribution of each gene in a batch of
     cells using t-digests.
@@ -29,8 +29,9 @@ class TDigest(CellariumModel):
     1. `Computing Extremely Accurate Quantiles Using T-Digests (Dunning et al.)
        <https://github.com/tdunning/t-digest/blob/master/docs/t-digest-paper/histo.pdf>`_.
 
+
     Args:
-        feature_schema: The variable names schema for the input data validation.
+    feature_schema: The variable names schema for the input data validation.
     """
 
     def __init__(self, feature_schema: Sequence[str]) -> None:
@@ -40,6 +41,18 @@ class TDigest(CellariumModel):
         self.g_genes = g_genes
         self.tdigests = [crick.tdigest.TDigest() for _ in range(self.g_genes)]
         self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+
+    def update_input_tensors_from_previous_module(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        """
+        Update the feature names and the dimensionality of t-digests based on the updated set of features.
+
+        Args:
+            batch: The batch forwarded from the previous module.
+        """
+        mask = np.isin(element=self.feature_schema, test_elements=batch["feature_g"])
+        self.feature_schema = self.feature_schema[mask]
+        self.g_genes = len(self.feature_schema)
+        self.tdigests = [tdigest for mask_flag, tdigest in zip(mask, self.tdigests) if mask_flag]
 
     def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -53,7 +66,7 @@ class TDigest(CellariumModel):
             An empty dictionary.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "feature_g", feature_g)
-        assert_arrays_equal("feature_g", feature_g, "feature_schema", self.feature_schema)
+        assert_arrays_equal("feature_g", feature_g, "feature_g", self.feature_g)
 
         for i, tdigest in enumerate(self.tdigests):
             x_n = x_ng[:, i]

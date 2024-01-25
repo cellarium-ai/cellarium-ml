@@ -10,22 +10,20 @@ import pyro
 import pyro.distributions as dist
 import torch
 
-from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.models.model import CellariumModel, CellariumPipelineUpdatable
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class LogisticRegression(CellariumModel):
+class LogisticRegression(CellariumModel, CellariumPipelineUpdatable):
     """
     Logistic regression model.
 
     Args:
         n_obs:
             Number of observations.
-        feature_schema:
-            The variable names schema for the input data validation.
         c_categories:
             Number of categories.
         W_prior_scale:
@@ -50,7 +48,6 @@ class LogisticRegression(CellariumModel):
     ) -> None:
         super().__init__()
 
-        # data
         self.n_obs = n_obs
         self.feature_schema = np.array(feature_schema)
         self.g_features = len(feature_schema)
@@ -68,6 +65,24 @@ class LogisticRegression(CellariumModel):
         self.elbo = pyro.infer.Trace_ELBO()
 
         self.log_metrics = log_metrics
+
+    def update_input_tensors_from_previous_module(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        """
+        Update `feature_schema`, and `W_gc`  according to a new batch dimension.
+
+        Args:
+             batch: The batch forwarded from the previous module.
+        """
+        mask = np.isin(element=self.feature_schema, test_elements=batch["feature_g"])
+        mask_tensor = torch.Tensor(mask)
+        mask_tensor.to(self.W_gc.device)
+        self.feature_schema = self.feature_schema[mask]
+        self.g_features = len(self.feature_schema)
+
+        self.W_gc = torch.nn.Parameter(
+            self.W_init_scale
+            * torch.randn((self.g_features, self.c_categories), generator=self.rng, device=self.W_gc.device)
+        )
 
     def forward(self, x_ng: torch.Tensor, feature_g: np.ndarray, y_n: torch.Tensor) -> dict[str, torch.Tensor | None]:
         """

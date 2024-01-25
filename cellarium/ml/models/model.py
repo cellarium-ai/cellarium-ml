@@ -67,3 +67,33 @@ class PredictMixin(metaclass=ABCMeta):
         """
         Perform prediction.
         """
+
+
+class CellariumPipelineUpdatable(metaclass=ABCMeta):
+    """
+    Designed to perform an update of parameters in pipeline during first forward method.
+
+    Example:
+
+        >>> from cellarium.ml.models import CellariumModel, CellariumPipelineUpdatable
+        >>>
+        >>> class ExampleModel(CellariumModel, CellariumPipelineUpdatable):
+        >>>     def update_input_tensors_from_previous_module(
+        >>>         self, batch: dict[str, np.ndarray | torch.Tensor]
+        >>>     ) -> None:
+        >>>         self.feature_g = batch["feature_g"]
+        >>>         self.mean_g = batch["mean_g"]
+        >>>         self.std_g = batch["std_g"]
+        >>>         self.g_genes = len(self.feature_g)
+    """
+
+    @abstractmethod
+    def update_input_tensors_from_previous_module(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        """
+        This function is called in the first
+        forward pass of the pipeline before the current module is called which allows the module to access the
+        forwarded from the previous modules batch and use it to initialize its state.
+
+        Args:
+            batch: The batch forwarded from the previous module.
+        """

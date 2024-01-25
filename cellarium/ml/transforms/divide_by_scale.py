@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from cellarium.ml.models import CellariumPipelineUpdatable
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -14,7 +15,7 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-class DivideByScale(nn.Module):
+class DivideByScale(nn.Module, CellariumPipelineUpdatable):
     """
     Divide gene counts by a scale.
 
@@ -38,6 +39,20 @@ class DivideByScale(nn.Module):
         self.feature_schema = np.array(feature_schema)
         assert_nonnegative("eps", eps)
         self.eps = eps
+
+    def update_input_tensors_from_previous_module(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        """
+        Update feature schema, and scale factor according to a new batch dimension.
+
+        Args:
+             batch: The batch forwarded from the previous module.
+        """
+        mask = np.isin(element=self.feature_schema, test_elements=batch["feature_g"])
+        mask_tensor = torch.Tensor(mask)
+        mask_tensor.to(self.scale_g.device)
+
+        self.feature_schema = self.feature_schema[mask]
+        self.scale_g = self.scale_g[mask_tensor]
 
     def forward(
         self,
