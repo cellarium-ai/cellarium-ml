@@ -390,7 +390,6 @@ class CellariumGPT(CellariumModel):
         randomized_x_ng = x_ng[ndx[:, None], random_indices_ng]
         randomized_x_nc = randomized_x_ng[:, : self.c_context]
 
-        # 1
         zero_indices_ng = (randomized_x_ng == 0) & masked_indices_ng
         nonzero_indices_ng = (randomized_x_ng > 0) & masked_indices_ng
         zero_counts_n1 = zero_indices_ng.sum(dim=1, keepdim=True)
@@ -398,21 +397,32 @@ class CellariumGPT(CellariumModel):
         total_counts_n1 = masked_indices_ng.sum(dim=1, keepdim=True)
         zero_weights_ng = (0.5 / zero_counts_n1).expand(-1, self.g_genes)
         nonzero_weights_ng = (0.5 / nonzero_counts_n1).expand(-1, self.g_genes)
+        # zero_weights_ng = (1 / total_counts_n1).expand(-1, self.g_genes)
+        # nonzero_weights_ng = (1 / total_counts_n1).expand(-1, self.g_genes)
         weights_ng = torch.zeros_like(x_ng, dtype=torch.float32)
         weights_ng[zero_indices_ng] = zero_weights_ng[zero_indices_ng]
         weights_ng[nonzero_indices_ng] = nonzero_weights_ng[nonzero_indices_ng]
         label_indices_nc = torch.multinomial(weights_ng, num_samples=self.c_context, replacement=True)
-        labels_nc = randomized_x_ng[ndx[:, None], label_indices_nc]
-        randomized_x_nc[masked_indices_nc] = labels_nc[masked_indices_nc]
+        # label_indices_nc = random_indices_nc.clone()
         importance_weights_ng = 1 / (weights_ng * total_counts_n1)
         label_weights_nc = importance_weights_ng[ndx[:, None], label_indices_nc]
-        # 2
-        # labels = randomized_x_nc.clone()
-
         sample_weights_nc = 1 / masked_indices_nc.sum(dim=1, keepdim=True).expand(-1, self.c_context)
+        # 1
+        labels_nc = x_ng[ndx[:, None], label_indices_nc]
+        labels_nc[~masked_indices_nc] = -100
+        randomized_x_nc[masked_indices_nc] = labels_nc[masked_indices_nc]
+        random_indices_nc[masked_indices_nc] = label_indices_nc[masked_indices_nc]
+        label_weights = label_weights_nc[masked_indices_nc]
+        # label_weights = 1
+        # 2
+        # import pdb
+
+        # pdb.set_trace()
+        # labels_nc = randomized_x_ng[:, : self.c_context].clone()
+        # labels_nc[~masked_indices_nc] = -100
+        # label_weights = 1
 
         gene_ids = self.feature_ids[random_indices_nc]
-        # labels_nc[~masked_indices_nc] = -100
         # value_ids[masked_indices] = self.b_bins
         value_ids = torch.log1p(randomized_x_nc)
 
@@ -445,7 +455,6 @@ class CellariumGPT(CellariumModel):
         theta = theta_nc[masked_indices_nc]
         dist = NegativeBinomial(mu=mu, theta=theta)
         log_prob = dist.log_prob(labels_nc[masked_indices_nc])
-        label_weights = label_weights_nc[masked_indices_nc]
         sample_weights = sample_weights_nc[masked_indices_nc]
         loss = -(log_prob * label_weights * sample_weights).sum() / sample_weights.sum()
 
