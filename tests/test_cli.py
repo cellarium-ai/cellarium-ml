@@ -317,3 +317,72 @@ def test_cpu_multi_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
     main(config)
+
+
+def test_compute_var_names_g(tmp_path):
+    ipca_config = f"""
+    model:
+      transforms:
+        - class_path: cellarium.ml.transforms.NormalizeTotal
+          init_args:
+            target_count: 10_000
+        - cellarium.ml.transforms.Log1p
+      model:
+        class_path: cellarium.ml.models.IncrementalPCA
+        init_args:
+            n_components: 50
+    data:
+      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+      shard_size: 100
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+        total_mrna_umis_n:
+          attr: obs
+          key: total_mrna_umis
+      batch_size: 100
+    trainer:
+      accelerator: cpu
+      devices: 1
+      default_root_dir: {tmp_path}
+    """
+    with open(ipca_config_path := str(tmp_path / "ipca_config.yaml"), "w") as f:
+        f.write(ipca_config)
+    main(["incremental_pca", "fit", "--config", ipca_config_path])
+    ckpt_path = tmp_path / "lightning_logs" / "version_0" / "checkpoints" / "epoch=0-step=2.ckpt"
+
+    lr_config = f"""
+    model:
+      transforms:
+        - class_path: cellarium.ml.cli.CellariumModuleLoadFromCheckpoint
+          init_args:
+            checkpoint_path: {ckpt_path}
+      model: cellarium.ml.models.LogisticRegression
+    data:
+      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+      shard_size: 100
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        y_n:
+          attr: obs
+          key: cell_type
+          convert_fn: cellarium.ml.utilities.data.categories_to_codes
+        var_names_g:
+          attr: var_names
+        total_mrna_umis_n:
+          attr: obs
+          key: total_mrna_umis
+      batch_size: 100
+    trainer:
+      accelerator: cpu
+      devices: 1
+      max_steps: 1
+    """
+    with open(lr_config_path := str(tmp_path / "lr_config.yaml"), "w") as f:
+        f.write(lr_config)
+    main(["logistic_regression", "fit", "--config", lr_config_path])

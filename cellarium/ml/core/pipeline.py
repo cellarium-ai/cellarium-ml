@@ -37,11 +37,15 @@ class CellariumPipeline(torch.nn.ModuleList):
         for module in self:
             # get the module input keys
             ann = module.forward.__annotations__
-            input_keys = {key for key in ann if key != "return" and key in batch}
-            # allow all keys to be passed to the module
-            if "kwargs" in ann:
-                input_keys |= batch.keys()
-            batch |= module(**{key: batch[key] for key in input_keys})
+            if "batch" in ann and len(ann) == 2:
+                # in case module is a CellariumModule, e.g. PCA checkpoint is used as a transform
+                batch |= module(batch)
+            else:
+                input_keys = {key for key in ann if key != "return" and key in batch}
+                # allow all keys to be passed to the module
+                if "kwargs" in ann:
+                    input_keys |= batch.keys()
+                batch |= module(**{key: batch[key] for key in input_keys})
 
         return batch
 

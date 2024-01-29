@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from collections.abc import Iterable
-from typing import IO, Any
+from typing import Any
 from unittest.mock import patch
 
 import lightning.pytorch as pl
@@ -30,11 +30,11 @@ class CellariumModule(pl.LightningModule):
           keyword arguments.
 
     Args:
-        model:
-            A :class:`cellarium.ml.models.CellariumModel` to train.
         transforms:
             A list of transforms to apply to the input data before passing it to the model.
             If ``None``, no transforms are applied.
+        model:
+            A :class:`cellarium.ml.models.CellariumModel` to train.
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             defaults to :class:`torch.optim.Adam`.
@@ -53,8 +53,8 @@ class CellariumModule(pl.LightningModule):
 
     def __init__(
         self,
-        model: CellariumModel,
         transforms: Iterable[torch.nn.Module] | None = None,
+        model: CellariumModel | None = None,
         optim_fn: type[torch.optim.Optimizer] | None = None,
         optim_kwargs: dict[str, Any] | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | None = None,
@@ -64,6 +64,8 @@ class CellariumModule(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.pipeline = CellariumPipeline(transforms)
+        if model is None:
+            raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
         self.pipeline.append(model)
 
         # set up optimizer and scheduler
@@ -99,7 +101,7 @@ class CellariumModule(pl.LightningModule):
     @patch("lightning.pytorch.core.saving._load_state", new=_load_state)
     def load_from_checkpoint(
         cls,
-        checkpoint_path: _PATH | IO,
+        checkpoint_path: _PATH,
         map_location: _MAP_LOCATION_TYPE = None,
         hparams_file: _PATH | None = None,
         strict: bool = True,
