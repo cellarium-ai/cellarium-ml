@@ -42,7 +42,7 @@ class FileLoader:
                   file_path: gs://dsp-cellarium-cas-public/test-data/filter_list.csv
                   loader_fn: pandas.read_csv
                   attr: index
-                  convert_fn: np.ndarray.tolist
+                  convert_fn: numpy.ndarray.tolist
 
     Args:
         file_path:
