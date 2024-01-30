@@ -35,18 +35,19 @@ class Filter(nn.Module):
             raise ValueError(f"`filter_list` must not be empty. Got {self.filter_list}")
 
     @cache
-    def filter(self, var_names_g: tuple) -> np.ndarray[Any, np.dtype[np.bool_]]:
+    def filter(self, var_names_g: tuple) -> np.ndarray[Any, np.dtype[np.int_]]:
         """
         Args:
             var_names_g: The list of the variable names in the input data.
 
         Returns:
-            A boolean mask of the features to filter by.
+            An array of indices of the features in ``var_names_g`` that are in :attr:`filter_list`.
         """
         mask = np.isin(var_names_g, self.filter_list)
         if not np.any(mask):
             raise AssertionError("No features in `var_names_g` matched the `filter_list`")
-        return mask
+        mask_indices = np.where(mask)[0]
+        return mask_indices
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | np.ndarray]:
         """
@@ -69,9 +70,10 @@ class Filter(nn.Module):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
 
-        filter_mask = self.filter(tuple(var_names_g.tolist()))
-        x_ng = x_ng[:, filter_mask]
-        var_names_g = var_names_g[filter_mask]
+        filter_indices = self.filter(tuple(var_names_g.tolist()))
+        ndx = torch.arange(x_ng.shape[0])
+        x_ng = x_ng[ndx[:, None], filter_indices]
+        var_names_g = var_names_g[filter_indices]
 
         return {"x_ng": x_ng, "var_names_g": var_names_g}
 

@@ -253,6 +253,24 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
                 "model": "cellarium.ml.models.LogisticRegression",
             },
             "data": {
