@@ -52,7 +52,7 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
         n_components=k,
         perform_mean_correction=perform_mean_correction,
     )
-    module = CellariumModule(ipca)
+    module = CellariumModule(model=ipca)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -112,7 +112,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
             }
         }
     }
-    module = CellariumModule(model, config=config)
+    module = CellariumModule(model=model, config=config)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(

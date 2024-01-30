@@ -114,7 +114,7 @@ def test_iterable_dataset_multi_device(
 
     # fit
     model = BoringModel()
-    module = CellariumModule(model)
+    module = CellariumModule(model=model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
@@ -176,7 +176,7 @@ def test_iterable_dataset_set_epoch_multi_device(
 
     # fit
     model = BoringModel()
-    module = CellariumModule(model)
+    module = CellariumModule(model=model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",

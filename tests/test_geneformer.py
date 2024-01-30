@@ -45,7 +45,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
             }
         }
     }
-    module = CellariumModule(model, config=config)
+    module = CellariumModule(model=model, config=config)
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",

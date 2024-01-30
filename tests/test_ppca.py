@@ -71,7 +71,7 @@ def test_probabilistic_pca_multi_device(
         sigma_init_scale=s,
     )
     module = CellariumModule(
-        ppca,
+        model=ppca,
         optim_fn=torch.optim.Adam,
         optim_kwargs={"lr": 3e-2},
         scheduler_fn=torch.optim.lr_scheduler.CosineAnnealingLR,
@@ -127,7 +127,7 @@ def test_variance_monitor(x_ng: np.ndarray):
     )
     # model
     ppca = ProbabilisticPCA(n, [f"gene_{i}" for i in range(g)], k, "marginalized")
-    module = CellariumModule(ppca)
+    module = CellariumModule(model=ppca)
     # trainer
     var_monitor = VarianceMonitor(total_variance=np.var(x_ng, axis=0).sum())
     trainer = pl.Trainer(
@@ -169,7 +169,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
             }
         }
     }
-    module = CellariumModule(model, config=config)
+    module = CellariumModule(model=model, config=config)
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",
