@@ -319,6 +319,94 @@ def test_cpu_multi_device(config: dict[str, Any]):
     main(config)
 
 
+def test_checkpoint_loader(tmp_path):
+    onepass_config = f"""
+    model:
+      model: cellarium.ml.models.OnePassMeanVarStd
+      transforms:
+        - class_path: cellarium.ml.transforms.NormalizeTotal
+          init_args:
+            target_count: 10_000
+        - cellarium.ml.transforms.Log1p
+    data:
+      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+      shard_size: 100
+      max_cache_size: 2
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+        total_mrna_umis_n:
+          attr: obs
+          key: total_mrna_umis
+      batch_size: 50
+      num_workers: 2
+    trainer:
+      accelerator: cpu
+      devices: 1
+      default_root_dir: {tmp_path}
+    """
+    with open(tmp_path / "onepass_config.yaml", "w") as f:
+        f.write(onepass_config)
+    main(["onepass_mean_var_std", "fit", "--config", str(tmp_path / "onepass_config.yaml")])
+    ckpt_path = tmp_path / "lightning_logs" / "version_0" / "checkpoints" / "epoch=0-step=4.ckpt"
+
+    lr_config = f"""
+    model:
+      model: cellarium.ml.models.LogisticRegression
+      transforms:
+        - class_path: cellarium.ml.transforms.NormalizeTotal
+          init_args:
+            target_count: 10_000
+        - cellarium.ml.transforms.Log1p
+        - class_path: cellarium.ml.transforms.ZScore
+          init_args:
+            mean_g:
+              !CheckpointLoader
+              file_path: {ckpt_path}
+              attr: model.mean_g
+              convert_fn: null
+            std_g:
+              !CheckpointLoader
+              file_path: {ckpt_path}
+              attr: model.std_g
+              convert_fn: null
+            var_names_g:
+              !CheckpointLoader
+              file_path: {ckpt_path}
+              attr: model.var_names_g
+              convert_fn: numpy.ndarray.tolist
+    data:
+      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+      shard_size: 100
+      max_cache_size: 2
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        y_n:
+          attr: obs
+          key: cell_type
+          convert_fn: cellarium.ml.utilities.data.categories_to_codes
+        var_names_g:
+          attr: var_names
+        total_mrna_umis_n:
+          attr: obs
+          key: total_mrna_umis
+      batch_size: 50
+      num_workers: 2
+    trainer:
+      accelerator: cpu
+      devices: 1
+      max_steps: 1
+    """
+    with open(tmp_path / "lr_config.yaml", "w") as f:
+        f.write(lr_config)
+    main(["logistic_regression", "fit", "--config", str(tmp_path / "lr_config.yaml")])
+
+
 def test_compute_var_names_g(tmp_path):
     ipca_config = f"""
     model:

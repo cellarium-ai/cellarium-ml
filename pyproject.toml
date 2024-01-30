@@ -41,7 +41,7 @@ lint = [
     "black[jupyter]",
     "ruff",
 ]
-mypy = ["mypy"]
+mypy = ["mypy", "types-PyYAML"]
 test = [
   "pytest-xdist",
   "tensorboard",

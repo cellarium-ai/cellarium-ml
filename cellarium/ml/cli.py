@@ -10,17 +10,131 @@ import sys
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
 from operator import attrgetter
 from typing import Any
 
 import numpy as np
 import torch
+import yaml
 from jsonargparse import Namespace, class_from_function
+from jsonargparse._loaders_dumpers import DefaultLoader
+from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.utilities.data import collate_fn
+
+cached_loaders = {}
+
+
+@dataclass
+class FileLoader:
+    """
+    A YAML constructor for loading a file and accessing its attributes.
+
+    Example:
+
+    .. code-block:: yaml
+
+        model:
+          transforms:
+            - class_path: cellarium.ml.transforms.Filter
+              init_args:
+                filter_list:
+                  !FileLoader
+                  file_path: gs://dsp-cellarium-cas-public/test-data/filter_list.csv
+                  loader_fn: pandas.read_csv
+                  attr: index
+                  convert_fn: numpy.ndarray.tolist
+
+    Args:
+        file_path:
+            The file path to load the object from.
+        loader_fn:
+            A function to load the object from the file path.
+        attr:
+            An attribute to get from the loaded object. If ``None`` the loaded object is returned.
+        convert_fn:
+            A function to convert the loaded object. If ``None`` the loaded object is returned.
+    """
+
+    file_path: str
+    loader_fn: Callable[[str], Any] | str
+    attr: str | None = None
+    convert_fn: Callable[[Any], Any] | str | None = None
+
+    def __new__(cls, file_path, loader_fn, attr, convert_fn):
+        if isinstance(loader_fn, str):
+            loader_fn = import_object(loader_fn)
+        if loader_fn not in cached_loaders:
+            cached_loaders[loader_fn] = cache(loader_fn)
+        loader_fn = cached_loaders[loader_fn]
+        obj = loader_fn(file_path)
+
+        if attr is not None:
+            obj = attrgetter(attr)(obj)
+
+        if isinstance(convert_fn, str):
+            convert_fn = import_object(convert_fn)
+        if convert_fn is not None:
+            obj = convert_fn(obj)
+
+        return obj
+
+
+@dataclass
+class CheckpointLoader(FileLoader):
+    """
+    A YAML constructor for loading a :class:`~cellarium.ml.core.CellariumModule` checkpoint and accessing its
+    attributes.
+
+    Example:
+
+    .. code-block:: yaml
+
+        model:
+          transorms:
+            - class_path: cellarium.ml.transforms.DivideByScale
+              init_args:
+                scale_g:
+                  !CheckpointLoader
+                  file_path: gs://dsp-cellarium-cas-public/test-data/tdigest.ckpt
+                  attr: model.median_g
+                  convert_fn: null
+
+    Args:
+        file_path:
+            The file path to load the object from.
+        attr:
+            An attribute to get from the loaded object. If ``None`` the loaded object is returned.
+        convert_fn:
+            A function to convert the loaded object. If ``None`` the loaded object is returned.
+    """
+
+    file_path: str
+    attr: str | None = None
+    convert_fn: Callable[[Any], Any] | str | None = None
+
+    def __new__(cls, file_path, attr, convert_fn):
+        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, convert_fn)
+
+
+def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> FileLoader:
+    """Construct an object from a file."""
+    return FileLoader(**loader.construct_mapping(node))  # type: ignore[misc]
+
+
+def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
+    """Construct an object from a checkpoint."""
+    return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[misc]
+
+
+loader = DefaultLoader
+loader.add_constructor("!FileLoader", file_loader_constructor)
+loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
+
 
 REGISTERED_MODELS = {}
 
