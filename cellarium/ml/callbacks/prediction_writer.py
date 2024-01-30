@@ -71,13 +71,13 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        z_nk = prediction["z_nk"]
+        x_ng = prediction["x_ng"]
         if self.prediction_size is not None:
-            z_nk = z_nk[:, : self.prediction_size]
+            x_ng = x_ng[:, : self.prediction_size]
 
         assert isinstance(batch["obs_names"], np.ndarray)
         write_prediction(
-            prediction=z_nk,
+            prediction=x_ng,
             ids=batch["obs_names"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,

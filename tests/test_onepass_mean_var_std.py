@@ -76,7 +76,7 @@ def test_onepass_mean_var_std_multi_device(
 
     # fit
     model = OnePassMeanVarStd(var_names_g=dadc.var_names)
-    module = CellariumModule(model, transforms=transforms)
+    module = CellariumModule(transforms=transforms, model=model)
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
         barebones=True,
@@ -132,7 +132,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
             }
         }
     }
-    module = CellariumModule(model, config=config)
+    module = CellariumModule(model=model, config=config)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(

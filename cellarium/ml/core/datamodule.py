@@ -4,7 +4,6 @@
 from collections.abc import Iterable, Sequence
 
 import lightning.pytorch as pl
-import numpy as np
 import torch
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
@@ -174,18 +173,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             indices_strict=self.indices_strict,
             obs_columns=obs_columns,
         )
-
-    @property
-    def n_obs(self) -> int:
-        return self.dadc.n_obs
-
-    @property
-    def n_vars(self) -> int:
-        return self.dadc.n_vars
-
-    @property
-    def var_names(self) -> np.ndarray:
-        return self.dadc.var_names.values
 
     def setup(self, stage: str | None = None) -> None:
         """

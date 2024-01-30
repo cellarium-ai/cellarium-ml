@@ -116,7 +116,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
         r"""
-        Returns a dictionary containing the data from the :attr:`dadc` with keys specified by its :attr:`dadc.convert`
+        Returns a dictionary containing the data from the :attr:`dadc` with keys specified by the :attr:`batch_keys`
         at the given index ``idx``.
         """
 

@@ -249,10 +249,12 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the following keys:
 
-            - ``z_nk``: Embedding of the input data into the principal component space.
+            - ``x_ng``: Embedding of the input data into the principal component space.
+            - ``var_names_g``: The list of variable names for the output data.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         z_nk = (x_ng - self.x_mean_g) @ self.V_kg.T
-        return {"z_nk": z_nk}
+        var_names_k = np.array([f"PC{i + 1}" for i in range(self.n_components)])
+        return {"x_ng": z_nk, "var_names_g": var_names_k}
