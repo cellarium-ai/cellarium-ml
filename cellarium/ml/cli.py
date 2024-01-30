@@ -38,7 +38,7 @@ class FileLoader:
             - class_path: cellarium.ml.transforms.Filter
               init_args:
                 filter_list:
-                  !ObjectLoader
+                  !FileLoader
                   file_path: gs://dsp-cellarium-cas-public/test-data/filter_list.csv
                   loader_fn: pandas.read_csv
                   attr: index
