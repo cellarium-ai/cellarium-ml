@@ -1,10 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from __future__ import annotations
-
 import gc
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 
 import pandas as pd
@@ -13,12 +11,13 @@ from anndata._core.index import Index, _normalize_indices
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
     AnnCollectionView,
+    ConvertType,
 )
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
-from .read import read_h5ad_file
-from .schema import AnnDataSchema
+from cellarium.ml.data.fileio import read_h5ad_file
+from cellarium.ml.data.schema import AnnDataSchema
 
 
 class getattr_mode:
@@ -26,8 +25,6 @@ class getattr_mode:
 
 
 _GETATTR_MODE = getattr_mode()
-
-ConvertType = dict[str, Callable | dict[str, Callable]]
 
 
 @contextmanager
@@ -51,7 +48,7 @@ class DistributedAnnDataCollectionView(AnnCollectionView):
     of :class:`LazyAnnData` objects.
     """
 
-    def __getitem__(self, index: Index) -> DistributedAnnDataCollectionView:
+    def __getitem__(self, index: Index) -> "DistributedAnnDataCollectionView":
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
 
@@ -289,7 +286,7 @@ class DistributedAnnDataCollection(AnnCollection):
 
 class LazyAnnData:
     """
-    Lazy AnnData backed by a file.
+    Lazy :class:`~anndata.AnnData` backed by a file.
 
     Accessing attributes under :func:`lazy_getattr` context returns schema attributes.
 

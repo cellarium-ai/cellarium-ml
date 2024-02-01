@@ -12,12 +12,19 @@ Table of Contents
 
    callbacks
    cli
+   core
    data
-   module
-   optim
-   trainer
+   lr_schedulers
+   models
    transforms
-   utils
+   preprocessing
+   utilities
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Tutorials
+
+   tutorials/mup_mlp
 
 Indices and tables
 ==================

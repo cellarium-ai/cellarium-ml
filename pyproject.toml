@@ -24,10 +24,12 @@ dependencies = [
   "anndata",
   "boltons",
   "braceexpand",
+  "crick>=0.0.4",
   "google-cloud-storage",
   "jsonargparse[signatures]",
   "lightning>=2.0.9",
   "pyro-ppl",
+  "pytest",
   "torch>=2.0.0",
   "transformers",
 ]
@@ -39,17 +41,18 @@ lint = [
     "black[jupyter]",
     "ruff",
 ]
-mypy = ["mypy"]
+mypy = ["mypy", "types-PyYAML"]
 test = [
-  "pytest",
   "pytest-xdist",
   "tensorboard",
+  "torchvision",
 ]
 docs = [
+  "nbsphinx",
   "Pillow",
+  "seaborn>=0.13.0",
   "sphinx",
   "sphinx_rtd_theme",
-  "sphinx-autodoc-typehints",
   "sphinx-copybutton",
 ]
 dev = ["cellarium-ml[docs,lint,mypy,test]"]
@@ -83,3 +86,5 @@ line-length = 120
 [tool.mypy]
 ignore_missing_imports = true
 explicit_package_bases = true
+check_untyped_defs = true
+warn_unreachable = true

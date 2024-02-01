@@ -10,6 +10,9 @@ lint: FORCE
 	ruff check .
 	black --check .
 
+docs: FORCE
+	cd docs && make html
+
 license: FORCE
 	python scripts/update_headers.py
 
@@ -18,7 +21,7 @@ format: license FORCE
 	black .
 
 typecheck: FORCE
-	mypy cellarium test
+	mypy cellarium tests
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)

@@ -65,18 +65,19 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        prediction: torch.Tensor,
+        prediction: dict[str, torch.Tensor],
         batch_indices: Sequence[int] | None,
         batch: dict[str, np.ndarray | torch.Tensor],
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
+        x_ng = prediction["x_ng"]
         if self.prediction_size is not None:
-            prediction = prediction[:, : self.prediction_size]
+            x_ng = x_ng[:, : self.prediction_size]
 
         assert isinstance(batch["obs_names"], np.ndarray)
         write_prediction(
-            prediction=prediction,
+            prediction=x_ng,
             ids=batch["obs_names"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,

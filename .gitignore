@@ -1,5 +1,6 @@
 __pycache__/
 runs/
+.ipynb_checkpoints
 .mypy_cache/
 docs/build/
 docs/source/examples/
@@ -9,3 +10,5 @@ lightning_logs/
 output/
 .idea/
 build/
+notebooks/.ipynb_checkpoints/
+output/
