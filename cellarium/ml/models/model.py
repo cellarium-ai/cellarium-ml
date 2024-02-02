@@ -8,11 +8,12 @@ from typing import Any
 
 import numpy as np
 import torch
+from lightning.pytorch.core.mixins import HyperparametersMixin
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
 
 
-class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
+class CellariumModel(torch.nn.Module, HyperparametersMixin, metaclass=ABCMeta):
     """
     Base class for Cellarium ML compatible models.
     """

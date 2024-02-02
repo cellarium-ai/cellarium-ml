@@ -17,35 +17,26 @@ from tests.common import BoringDataset
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 4, 3
-    var_names = np.array([f"gene_{i}" for i in range(g)])
+    var_names_g = [f"gene_{i}" for i in range(g)]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.arange(n * g).reshape(n, g),
-            var_names=var_names,
+            var_names=np.array(var_names_g),
         ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {
-        "var_names_g": var_names,
-        "hidden_size": 2,
-        "num_hidden_layers": 1,
-        "num_attention_heads": 1,
-        "intermediate_size": 4,
-        "max_position_embeddings": 2,
-    }
-    model = Geneformer(**init_args)  # type: ignore[arg-type]
-    config = {
-        "model": {
-            "model": {
-                "class_path": "cellarium.ml.models.Geneformer",
-                "init_args": init_args,
-            }
-        }
-    }
-    module = CellariumModule(model=model, config=config)
+    model = Geneformer(
+        var_names_g=var_names_g,
+        hidden_size=2,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        intermediate_size=4,
+        max_position_embeddings=2,
+    )
+    module = CellariumModule(model=model, optim_fn=torch.optim.Adam, optim_kwargs={"lr": 1e-3})
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",

@@ -32,6 +32,8 @@ class OnePassMeanVarStd(CellariumModel):
 
     def __init__(self, var_names_g: Sequence[str]) -> None:
         super().__init__()
+        self.save_hyperparameters(logger=False)
+
         self.var_names_g = np.array(var_names_g)
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars

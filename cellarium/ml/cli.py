@@ -275,45 +275,17 @@ def lightning_cli_factory(
                 args=args,
             )
 
-        def instantiate_classes(self) -> None:
-            super().instantiate_classes()
-
-            # impute linked arguments after instantiation
-            if link_arguments is not None:
-                for link in link_arguments:
-                    source = link.source
-                    target = link.target
-                    compute_fn = link.compute_fn
-                    if isinstance(source, str):
-                        source = (source,)
-                    source_objects = []
-                    for attr in source:
-                        # note that config_init is initialized, so source_object is an instantiated object
-                        config_init = self.config_init[self.subcommand]
-                        # e.g., attr == "model.transforms"
-                        source_object = attrgetter(attr)(config_init)
-                        source_objects.append(source_object)
-                    if compute_fn is not None:
-                        value = compute_fn(*source_objects)
-                    else:
-                        value = source_objects[0]
-
-                    # e.g., target == "model.model.init_args.var_names_g"
-                    target_keys = target.split(".")
-                    # note that config is dict-like, so assign the value to the last key
-                    config = self.config[self.subcommand]
-                    for key in target_keys[:-1]:
-                        config = config[key]
-                    config[target_keys[-1]] = value
-
-            # save the config to the :attr:`model.hparams` to be able to load the model checkpoint
-            self.model._set_hparams(self.config[self.subcommand])
-
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
             if link_arguments is not None:
                 for link in link_arguments:
                     parser.link_arguments(link.source, link.target, link.compute_fn, link.apply_on)
-            parser.set_defaults({"model.model": model_class_path})
+            # this is helpful for generating a default config file with --print_config
+            parser.set_defaults(
+                {
+                    "model.model": model_class_path,
+                    "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
+                }
+            )
 
     return NewLightningCLI
 
@@ -605,6 +577,7 @@ def main(args: ArgsType = None) -> None:
     ), f"'model_name' must be one of {list(REGISTERED_MODELS.keys())}. Got '{model_name}'"
     model_cli = REGISTERED_MODELS[model_name]
     with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Transforming to str index.")
         warnings.filterwarnings("ignore", message="LightningCLI's args parameter is intended to run from within Python")
         warnings.filterwarnings("ignore", message="Your `IterableDataset` has `__len__` defined.")
         model_cli(args)  # run the model
