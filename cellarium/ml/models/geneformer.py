@@ -193,7 +193,7 @@ class Geneformer(CellariumModel, PredictMixin):
                 Specify features whose expression should be set to zero before tokenization (remove from inputs).
             feature_activation:
                 Specify features whose expression should be set to > max(x_ng) before tokenization (top rank).
-        
+
         Returns:
             A dictionary with the inference results.
 
@@ -202,12 +202,12 @@ class Geneformer(CellariumModel, PredictMixin):
             1. Use feature_map to replace a feature token with MASK (1) or PAD (0)
                 e.g. feature_map={"ENSG0001": 0} will replace var_names_g feature
                 ENSG0001 with a PAD token.
-            2. Use feature_deletion to remove a feature from the cell's inputs, which instead of adding a 
+            2. Use feature_deletion to remove a feature from the cell's inputs, which instead of adding a
                 PAD or MASK token, will allow another feature to take its place.
-                e.g. feature_deletion=["ENSG0001"] will remove var_names_g feature ENSG0001 from the input, 
+                e.g. feature_deletion=["ENSG0001"] will remove var_names_g feature ENSG0001 from the input,
                 and allow a new feature token to take its place.
             3. Use feature_activation to move a feature all the way to the top rank position in the input.
-                e.g. feature_activation=["ENSG0001"] will make var_names_g feature ENSG0001 the first in 
+                e.g. feature_activation=["ENSG0001"] will make var_names_g feature ENSG0001 the first in
                 rank order. Multiple input features will be ranked according to their order in the input list.
             Number (2) and (3) are described in the Geneformer paper under
             "In silico perturbation" in the Methods section.
@@ -217,27 +217,26 @@ class Geneformer(CellariumModel, PredictMixin):
 
         # activation and deletion happen before sorting
         if feature_deletion:
-            assert all([g in self.var_names_g for g in feature_deletion]), \
-                "Some feature_deletion elements are not in self.var_names_g"
-            deletion_logic_g = np.logical_or.reduce(
-                [(self.var_names_g == g) for g in feature_deletion]
-            )
+            assert all(
+                [g in self.var_names_g for g in feature_deletion]
+            ), "Some feature_deletion elements are not in self.var_names_g"
+            deletion_logic_g = np.logical_or.reduce([(self.var_names_g == g) for g in feature_deletion])
             x_ng[:, deletion_logic_g] = 0
         if feature_activation:
             max_val = x_ng.max()
             for i, g in enumerate(feature_activation[::-1]):
-                feature_logic_g = (self.var_names_g == g)
+                feature_logic_g = self.var_names_g == g
                 assert feature_logic_g.sum() == 1, f"feature_activation element {g} is not in self.var_names_g"
                 top_rank_value = max_val + i + 1
                 x_ng[:, feature_logic_g] = top_rank_value
-        
+
         # tokenize and sort to give rank-ordered inputs
         input_ids, attention_mask = self.tokenize(x_ng)
 
         # feature map is applied after tokenization and sorting
         if feature_map:
             for g, target_token in feature_map.items():
-                feature_logic_g = (self.var_names_g == g)
+                feature_logic_g = self.var_names_g == g
                 assert feature_logic_g.sum() == 1, f"feature_map key {g} not in self.var_names_g"
                 initial_token = self.feature_ids[feature_logic_g]
                 input_ids[input_ids == initial_token] = target_token
