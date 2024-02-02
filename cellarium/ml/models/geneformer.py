@@ -117,6 +117,42 @@ class Geneformer(CellariumModel, PredictMixin):
         input_ids[~attention_mask] = 0
         return input_ids, attention_mask
 
+    def tokenize_with_perturbations(
+        self,
+        x_ng: torch.Tensor,
+        feature_deletion: list[str] | None = None,
+        feature_activation: list[str] | None = None,
+        feature_map: dict[str, int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+        # activation and deletion happen before sorting
+        if feature_deletion:
+            assert all(
+                [g in self.var_names_g for g in feature_deletion]
+            ), "Some feature_deletion elements are not in self.var_names_g"
+            deletion_logic_g = np.logical_or.reduce([(self.var_names_g == g) for g in feature_deletion])
+            x_ng[:, deletion_logic_g] = 0
+        if feature_activation:
+            max_val = x_ng.max()
+            for i, g in enumerate(feature_activation[::-1]):
+                feature_logic_g = self.var_names_g == g
+                assert feature_logic_g.sum() == 1, f"feature_activation element {g} is not in self.var_names_g"
+                top_rank_value = max_val + i + 1
+                x_ng[:, feature_logic_g] = top_rank_value
+
+        # tokenize and sort to give rank-ordered inputs
+        input_ids, attention_mask = self.tokenize(x_ng)
+
+        # feature map is applied after tokenization and sorting
+        if feature_map:
+            for g, target_token in feature_map.items():
+                feature_logic_g = self.var_names_g == g
+                assert feature_logic_g.sum() == 1, f"feature_map key {g} not in self.var_names_g"
+                initial_token = self.feature_ids[feature_logic_g]
+                input_ids[input_ids == initial_token] = target_token
+
+        return input_ids, attention_mask
+
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -200,8 +236,8 @@ class Geneformer(CellariumModel, PredictMixin):
         NOTE:
             In silico perturbations can be achieved in one of three ways:
             1. Use feature_map to replace a feature token with MASK (1) or PAD (0)
-                e.g. feature_map={"ENSG0001": 0} will replace var_names_g feature
-                ENSG0001 with a PAD token.
+                e.g. feature_map={"ENSG0001": 1} will replace var_names_g feature
+                ENSG0001 with a MASK token.
             2. Use feature_deletion to remove a feature from the cell's inputs, which instead of adding a
                 PAD or MASK token, will allow another feature to take its place.
                 e.g. feature_deletion=["ENSG0001"] will remove var_names_g feature ENSG0001 from the input,
@@ -215,31 +251,9 @@ class Geneformer(CellariumModel, PredictMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        # activation and deletion happen before sorting
-        if feature_deletion:
-            assert all(
-                [g in self.var_names_g for g in feature_deletion]
-            ), "Some feature_deletion elements are not in self.var_names_g"
-            deletion_logic_g = np.logical_or.reduce([(self.var_names_g == g) for g in feature_deletion])
-            x_ng[:, deletion_logic_g] = 0
-        if feature_activation:
-            max_val = x_ng.max()
-            for i, g in enumerate(feature_activation[::-1]):
-                feature_logic_g = self.var_names_g == g
-                assert feature_logic_g.sum() == 1, f"feature_activation element {g} is not in self.var_names_g"
-                top_rank_value = max_val + i + 1
-                x_ng[:, feature_logic_g] = top_rank_value
-
-        # tokenize and sort to give rank-ordered inputs
-        input_ids, attention_mask = self.tokenize(x_ng)
-
-        # feature map is applied after tokenization and sorting
-        if feature_map:
-            for g, target_token in feature_map.items():
-                feature_logic_g = self.var_names_g == g
-                assert feature_logic_g.sum() == 1, f"feature_map key {g} not in self.var_names_g"
-                initial_token = self.feature_ids[feature_logic_g]
-                input_ids[input_ids == initial_token] = target_token
+        input_ids, attention_mask = self.tokenize_with_perturbations(
+            x_ng, feature_activation=feature_activation, feature_deletion=feature_deletion, feature_map=feature_map
+        )
 
         output = self.bert(
             input_ids=input_ids,
