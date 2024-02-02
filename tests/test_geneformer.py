@@ -89,7 +89,7 @@ def test_tokenize_with_perturbations(perturb: str):
         case "map":
             kwargs = {"feature_map": {"a": 1, "b": 1}}
             expected_input_ids = torch.tensor([[1, 1, 4, 5]])
-        
+
     input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, **kwargs)
 
     print(f"Expected input_ids:\n{expected_input_ids}")

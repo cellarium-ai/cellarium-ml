@@ -8,7 +8,7 @@ docs/source/examples/
 eggs/
 *.egg*
 lightning_logs/
-output/
 .idea/
 build/
 notebooks/.ipynb_checkpoints/
+output/
