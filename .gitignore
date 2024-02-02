@@ -2,6 +2,7 @@ __pycache__/
 runs/
 .ipynb_checkpoints
 .mypy_cache/
+.ruff_cache/
 docs/build/
 docs/source/examples/
 eggs/
