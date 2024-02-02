@@ -78,6 +78,8 @@ class Geneformer(CellariumModel, PredictMixin):
         mlm_probability: float = 0.15,
     ) -> None:
         super().__init__()
+        self.save_hyperparameters(logger=False)
+
         self.var_names_g = np.array(var_names_g)
         # model configuration
         config = {

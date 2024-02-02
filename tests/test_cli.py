@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -26,11 +27,18 @@ CONFIGS = [
                         "max_position_embeddings": "2",
                     },
                 },
+                "optim_fn": "torch.optim.Adam",
             },
             "data": {
-                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
-                "shard_size": "100",
-                "max_cache_size": "2",
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
@@ -65,9 +73,15 @@ CONFIGS = [
                 },
             },
             "data": {
-                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
-                "shard_size": "100",
-                "max_cache_size": "2",
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
@@ -99,11 +113,18 @@ CONFIGS = [
                         "ppca_flavor": "marginalized",
                     },
                 },
+                "optim_fn": "torch.optim.Adam",
             },
             "data": {
-                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                "shard_size": "100",
-                "max_cache_size": "2",
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
@@ -127,7 +148,6 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "model": "cellarium.ml.models.OnePassMeanVarStd",
                 "transforms": [
                     {
                         "class_path": "cellarium.ml.transforms.NormalizeTotal",
@@ -135,11 +155,18 @@ CONFIGS = [
                     },
                     "cellarium.ml.transforms.Log1p",
                 ],
+                "model": "cellarium.ml.models.OnePassMeanVarStd",
             },
             "data": {
-                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                "shard_size": "100",
-                "max_cache_size": "2",
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
@@ -165,10 +192,6 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "model": {
-                    "class_path": "cellarium.ml.models.IncrementalPCA",
-                    "init_args": {"n_components": "50"},
-                },
                 "transforms": [
                     {
                         "class_path": "cellarium.ml.transforms.NormalizeTotal",
@@ -176,11 +199,21 @@ CONFIGS = [
                     },
                     "cellarium.ml.transforms.Log1p",
                 ],
+                "model": {
+                    "class_path": "cellarium.ml.models.IncrementalPCA",
+                    "init_args": {"n_components": "50"},
+                },
             },
             "data": {
-                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                "shard_size": "100",
-                "max_cache_size": "2",
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
@@ -206,10 +239,6 @@ CONFIGS = [
         "subcommand": "predict",
         "predict": {
             "model": {
-                "model": {
-                    "class_path": "cellarium.ml.models.IncrementalPCA",
-                    "init_args": {"n_components": "50"},
-                },
                 "transforms": [
                     {
                         "class_path": "cellarium.ml.transforms.NormalizeTotal",
@@ -217,11 +246,21 @@ CONFIGS = [
                     },
                     "cellarium.ml.transforms.Log1p",
                 ],
+                "model": {
+                    "class_path": "cellarium.ml.models.IncrementalPCA",
+                    "init_args": {"n_components": "50"},
+                },
             },
             "data": {
-                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                "shard_size": "100",
-                "max_cache_size": "2",
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
@@ -272,11 +311,18 @@ CONFIGS = [
                     }
                 ],
                 "model": "cellarium.ml.models.LogisticRegression",
+                "optim_fn": "torch.optim.Adam",
             },
             "data": {
-                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                "shard_size": "100",
-                "max_cache_size": "2",
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["cell_type"],
+                    },
+                },
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
@@ -308,9 +354,15 @@ CONFIGS = [
         "fit": {
             "model": {"model": "cellarium.ml.models.TDigest"},
             "data": {
-                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                "shard_size": "100",
-                "max_cache_size": "2",
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
@@ -337,19 +389,23 @@ def test_cpu_multi_device(config: dict[str, Any]):
     main(config)
 
 
-def test_checkpoint_loader(tmp_path):
+def test_checkpoint_loader(tmp_path: Path) -> None:
     onepass_config = f"""
     model:
-      model: cellarium.ml.models.OnePassMeanVarStd
       transforms:
         - class_path: cellarium.ml.transforms.NormalizeTotal
           init_args:
             target_count: 10_000
         - cellarium.ml.transforms.Log1p
+      model: cellarium.ml.models.OnePassMeanVarStd
     data:
-      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
-      shard_size: 100
-      max_cache_size: 2
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+          shard_size: 100
+          obs_columns_to_validate: [total_mrna_umis]
+          max_cache_size: 2
       batch_keys:
         x_ng:
           attr: X
@@ -373,7 +429,6 @@ def test_checkpoint_loader(tmp_path):
 
     lr_config = f"""
     model:
-      model: cellarium.ml.models.LogisticRegression
       transforms:
         - class_path: cellarium.ml.transforms.NormalizeTotal
           init_args:
@@ -396,10 +451,16 @@ def test_checkpoint_loader(tmp_path):
               file_path: {ckpt_path}
               attr: model.var_names_g
               convert_fn: numpy.ndarray.tolist
+      model: cellarium.ml.models.LogisticRegression
+      optim_fn: torch.optim.Adam
     data:
-      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
-      shard_size: 100
-      max_cache_size: 2
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+          shard_size: 100
+          obs_columns_to_validate: [cell_type, total_mrna_umis]
+          max_cache_size: 2
       batch_keys:
         x_ng:
           attr: X
@@ -425,7 +486,7 @@ def test_checkpoint_loader(tmp_path):
     main(["logistic_regression", "fit", "--config", str(tmp_path / "lr_config.yaml")])
 
 
-def test_compute_var_names_g(tmp_path):
+def test_compute_var_names_g(tmp_path: Path) -> None:
     ipca_config = f"""
     model:
       transforms:
@@ -438,8 +499,12 @@ def test_compute_var_names_g(tmp_path):
         init_args:
             n_components: 50
     data:
-      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
-      shard_size: 100
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+          shard_size: 100
+          obs_columns_to_validate: [total_mrna_umis]
       batch_keys:
         x_ng:
           attr: X
@@ -463,13 +528,19 @@ def test_compute_var_names_g(tmp_path):
     lr_config = f"""
     model:
       transforms:
-        - class_path: cellarium.ml.cli.CellariumModuleLoadFromCheckpoint
-          init_args:
-            checkpoint_path: {ckpt_path}
+        - !CheckpointLoader
+          file_path: {ckpt_path}
+          attr: null
+          convert_fn: null
       model: cellarium.ml.models.LogisticRegression
+      optim_fn: torch.optim.Adam
     data:
-      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
-      shard_size: 100
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+          shard_size: 100
+          obs_columns_to_validate: [cell_type, total_mrna_umis]
       batch_keys:
         x_ng:
           attr: X

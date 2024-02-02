@@ -69,6 +69,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         elbo: pyro.infer.ELBO | None = None,
     ):
         super().__init__()
+        self.save_hyperparameters(logger=False)
 
         self.n_obs = n_obs
         self.var_names_g = np.array(var_names_g)

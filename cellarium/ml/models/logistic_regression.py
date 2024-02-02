@@ -49,6 +49,7 @@ class LogisticRegression(CellariumModel):
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
+        self.save_hyperparameters(logger=False)
 
         # data
         self.n_obs = n_obs

@@ -1,12 +1,13 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Iterable, Sequence
 
 import lightning.pytorch as pl
 import torch
+from anndata import AnnData
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.utilities.core import initialize_object, uninitialize_object
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 
@@ -17,34 +18,14 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
     Example::
 
         >>> from cellarium.ml import CellariumAnnDataDataModule
+        >>> from cellarium.ml.data import DistributedAnnDataCollection
         >>> from cellarium.ml.utilities.data import AnnDataField, densify
 
         >>> dm = CellariumAnnDataDataModule(
-        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
-        ...     shard_size=10_000,
-        ...     max_cache_size=2,
-        ...     batch_keys={
-        ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
-        ...         "var_names_g": AnnDataField(attr="var_names"),
-        ...     },
-        ...     batch_size=5000,
-        ...     shuffle=True,
-        ...     seed=0,
-        ...     drop_last=True,
-        ...     num_workers=4,
-        ... )
-        >>> dm.setup()
-        >>> for batch in dm.train_dataloader():
-        ...     print(batch.keys())  # x_ng, var_names_g
-
-    Example::
-
-        >>> from cellarium.ml import CellariumAnnDataDataModule
-        >>> from cellarium.ml.utilities.data import AnnDataField, densify
-
-        >>> dm = CellariumAnnDataDataModule(
-        ...     "gs://bucket-name/folder/adata{000..005}.h5ad",
-        ...     shard_size=10_000,
+        ...     DistributedAnnDataCollection(
+        ...         "gs://bucket-name/folder/adata{000..005}.h5ad",
+        ...         shard_size=10_000,
+        ...     ),
         ...     max_cache_size=2,
         ...     batch_keys={
         ...         "x_ng": AnnDataField(attr="X", convert_fn=densify),
@@ -61,37 +42,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ...     print(batch.keys())  # x_ng, var_names_g
 
     Args:
-        filenames:
-            Names of anndata files.
-        limits:
-            List of global cell indices (limits) for the last cells in each shard.
-            If ``None``, the limits are inferred from ``shard_size`` and ``last_shard_size``.
-        shard_size:
-            The number of cells in each anndata file (shard).
-            Must be specified if the ``limits`` is not provided.
-        last_shard_size:
-            Last shard size. If not ``None``, the last shard will have this size possibly
-            different from ``shard_size``.
-        max_cache_size:
-            Max size of the cache.
-        cache_size_strictly_enforced:
-            Assert that the number of retrieved anndatas is not more than maxsize.
-        label:
-            Column in :attr:`obs` to place batch information in. If it's ``None``, no column is added.
-        keys:
-            Names for each object being added. These values are used for column values for
-            ``label`` or appended to the index if ``index_unique`` is not ``None``.
-            If ``None``, ``keys`` are set to ``filenames``.
-        index_unique:
-            Whether to make the index unique by using the keys. If provided, this
-            is the delimeter between ``{orig_idx}{index_unique}{key}``. When ``None``,
-            the original indices are kept.
-        indices_strict:
-            If  ``True``, arrays from the subset objects will always have the same order
-            of indices as in selection used to subset.
-            This parameter can be set to ``False`` if the order in the returned arrays
-            is not important, for example, when using them for stochastic gradient descent.
-            In this case the performance of subsetting can be a bit better.
+        dadc:
+            An instance of :class:`~cellarium.ml.data.DistributedAnnDataCollection` or :class:`AnnData`.
         batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
             in the batch data and how to convert them. Keys must correspond to
@@ -116,17 +68,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        # DistributedAnnDataCollection args
-        filenames: Sequence[str] | str,
-        limits: Iterable[int] | None = None,
-        shard_size: int | None = None,
-        last_shard_size: int | None = None,
-        max_cache_size: int = 1,
-        cache_size_strictly_enforced: bool = True,
-        label: str | None = None,
-        keys: Sequence[str] | None = None,
-        index_unique: str | None = None,
-        indices_strict: bool = True,
+        dadc: DistributedAnnDataCollection | AnnData,
         # IterableDistributedAnnDataCollectionDataset args
         batch_keys: dict[str, AnnDataField] | None = None,
         batch_size: int = 1,
@@ -138,17 +80,12 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         num_workers: int = 0,
     ) -> None:
         super().__init__()
-        # DistributedAnnDataCollection args
-        self.filenames = filenames
-        self.limits = limits
-        self.shard_size = shard_size
-        self.last_shard_size = last_shard_size
-        self.max_cache_size = max_cache_size
-        self.cache_size_strictly_enforced = cache_size_strictly_enforced
-        self.label = label
-        self.keys = keys
-        self.index_unique = index_unique
-        self.indices_strict = indices_strict
+        _dadc = dadc
+        dadc = uninitialize_object(_dadc)
+        self.save_hyperparameters(logger=False)
+        dadc = initialize_object(_dadc)
+
+        self.dadc = dadc
         # IterableDistributedAnnDataCollectionDataset args
         self.batch_keys = batch_keys or {}
         self.batch_size = batch_size
@@ -158,21 +95,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
-        # DistributedAnnDataCollection
-        obs_columns = [field.obs_column for field in self.batch_keys.values() if field.obs_column is not None]
-        self.dadc = DistributedAnnDataCollection(
-            filenames=self.filenames,
-            limits=self.limits,
-            shard_size=self.shard_size,
-            last_shard_size=self.last_shard_size,
-            max_cache_size=self.max_cache_size,
-            cache_size_strictly_enforced=self.cache_size_strictly_enforced,
-            label=self.label,
-            keys=self.keys,
-            index_unique=self.index_unique,
-            indices_strict=self.indices_strict,
-            obs_columns=obs_columns,
-        )
 
     def setup(self, stage: str | None = None) -> None:
         """
