@@ -76,6 +76,7 @@ def test_tokenize_with_perturbations(perturb: str):
     geneformer = Geneformer(var_names_g=var_names_g)
     x_ng = torch.tensor([[4, 3, 2, 1]])  # sort order will be [a,b,c,d] and tokens will be [2,3,4,5]
 
+    # test that we get the expected output for a well-formed set of input args
     match perturb:
         case "none":
             kwargs = {}
@@ -95,3 +96,20 @@ def test_tokenize_with_perturbations(perturb: str):
     print(f"Expected input_ids:\n{expected_input_ids}")
     print(f"Actual input_ids:\n{input_ids}")
     torch.testing.assert_close(input_ids, expected_input_ids)
+
+    # test that we raise an AssertionError if we try to perturb something outside schema
+    if perturb == "none":
+        return
+    match perturb:
+        case "activation":
+            kwargs = {"feature_activation": ["e"]}
+            expected_input_ids = torch.tensor([[5, 2, 3, 4]])
+        case "deletion":
+            kwargs = {"feature_deletion": ["e"]}
+            expected_input_ids = torch.tensor([[2, 3, 5, 0]])
+        case "map":
+            kwargs = {"feature_map": {"a": 1, "e": 1}}
+            expected_input_ids = torch.tensor([[1, 1, 4, 5]])
+
+    with pytest.raises(AssertionError):
+        geneformer.tokenize_with_perturbations(x_ng, **kwargs)

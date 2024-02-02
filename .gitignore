@@ -3,6 +3,7 @@ runs/
 .ipynb_checkpoints
 .mypy_cache/
 .ruff_cache/
+.pytest_cache/
 docs/build/
 docs/source/examples/
 eggs/
