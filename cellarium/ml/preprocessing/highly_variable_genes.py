@@ -55,7 +55,9 @@ def get_highly_variable_genes(
             informed about this
     """
     # compute the dispersion
-    assert len(gene_names) == len(mean) == len(var), "Sizes of `gene_names`, `mean`, and `var` should be the same"
+    if not (len(gene_names) == len(mean) == len(var)):
+        raise ValueError("Sizes of `gene_names`, `mean`, and `var` should be the same")
+
     mean[mean == 0] = 1e-12  # set entries equal to zero to small value
     dispersion = var / mean
     # logarithmized mean as in Seurat
@@ -112,8 +114,8 @@ def get_highly_variable_genes(
         dispersion_norm[np.isnan(dispersion_norm)] = 0  # similar to Seurat
         gene_subset = np.logical_and.reduce(
             (
-                mean > min_mean,
-                mean < max_mean,
+                mean.numpy() > min_mean,
+                mean.numpy() < max_mean,
                 dispersion_norm > min_disp,
                 dispersion_norm < max_disp,
             )
