@@ -7,7 +7,8 @@ import torch
 from cellarium.ml.preprocessing.highly_variable_genes import get_highly_variable_genes
 
 
-def test_highly_variable_genes_top_n():
+@pytest.mark.parametrize("num_genes_to_check", [2, 3, 4])
+def test_highly_variable_genes_top_n(num_genes_to_check: int):
     """
     Test if :func:`get_highly_variable_genes` returns the top n genes.
     """
@@ -25,7 +26,6 @@ def test_highly_variable_genes_top_n():
         ]
     )
     # compute
-    num_genes_to_check = 2
     result = get_highly_variable_genes(
         gene_names=gene_names, mean=mean, var=var, n_top_genes=num_genes_to_check, n_bins=1
     )
