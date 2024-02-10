@@ -11,9 +11,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torchvision import datasets, transforms
 
 from cellarium.ml.models import MuLinear
+from cellarium.ml.models.mup import apply_mup
 from cellarium.ml.utilities.testing import assert_slope_equals, get_coord_data
 
 optim_dict = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
@@ -66,18 +68,13 @@ def coord_check_MLP(
 
     def gen(w: int) -> Callable[[], nn.Module]:
         def f() -> nn.Module:
-            model: nn.Module
+            model = MLP(width=w, bias=bias, nonlin=nonlin, input_mult=input_mult, output_mult=output_mult)
             if mup:
-                model = MuMLP(
-                    width=w,
-                    bias=bias,
-                    nonlin=nonlin,
-                    optimizer=optim_name,
-                    input_mult=input_mult,
-                    output_mult=output_mult,
-                )
-            else:
-                model = MLP(width=w, bias=bias, nonlin=nonlin, input_mult=input_mult, output_mult=output_mult)
+                with FakeTensorMode(allow_non_fake_inputs=True):
+                    base_model = MLP(
+                        width=128, bias=bias, nonlin=nonlin, input_mult=input_mult, output_mult=output_mult
+                    )
+                apply_mup(model, base_model, optim_name)
             return model
 
         return f

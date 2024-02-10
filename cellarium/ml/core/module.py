@@ -11,10 +11,12 @@ import torch
 from jsonargparse import Namespace
 from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.core.saving import _load_state
 from cellarium.ml.models import CellariumModel
+from cellarium.ml.models.mup import apply_mup
 
 
 class CellariumModule(pl.LightningModule):
@@ -61,6 +63,7 @@ class CellariumModule(pl.LightningModule):
         scheduler_kwargs: dict[str, Any] | None = None,
         default_lr: float = 1e-3,
         config: dict[str, Any] | Namespace | None = None,
+        mup: bool = False,
     ) -> None:
         super().__init__()
         self.pipeline = CellariumPipeline(transforms)
@@ -86,6 +89,9 @@ class CellariumModule(pl.LightningModule):
 
         if config is not None:
             self._set_hparams(config)
+
+        if mup:
+            self._configure_model()
 
     @property
     def model(self) -> CellariumModel:
@@ -205,7 +211,10 @@ class CellariumModule(pl.LightningModule):
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
-            self.log("train_loss", loss)
+            self.log("train_loss", loss, sync_dist=True)
+        if "zero_loss" in output and "nonzero_loss" in output:
+            self.log("zero_loss", output["zero_loss"], sync_dist=True)
+            self.log("nonzero_loss", output["nonzero_loss"], sync_dist=True)
         return loss
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
@@ -219,6 +228,19 @@ class CellariumModule(pl.LightningModule):
             A dictionary containing the batch data and inference outputs.
         """
         return self.pipeline.predict(batch)
+
+    def _configure_model(self) -> None:
+        import copy
+
+        from cellarium.ml.models import CellariumGPT
+
+        with FakeTensorMode(allow_non_fake_inputs=True):
+            base_hparams = copy.deepcopy(self.model.hparams)
+            base_hparams["n_hiddens"] = 128
+            base_hparams["n_intermediates"] = 256
+            base_hparams["n_heads"] = 4
+            base_model = CellariumGPT(**base_hparams)
+        apply_mup(self.model, base_model, "adamw", scale=True)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         """Configure optimizers for the model."""

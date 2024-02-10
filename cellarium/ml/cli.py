@@ -319,6 +319,34 @@ def lightning_cli_factory(
 
 
 @register_model
+def cellarium_gpt(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.CellariumGPT` model.
+    This example shows how to fit feature count data to the Geneformer model [1].
+    Example run::
+        cellarium-ml geneformer fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 5 \
+            --data.num_workers 1 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/geneformer \
+            --trainer.max_steps 10
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.CellariumGPT",
+        link_arguments=[
+            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
 def geneformer(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.Geneformer` model.

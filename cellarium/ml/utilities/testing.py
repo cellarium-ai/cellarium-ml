@@ -17,6 +17,8 @@ import torch
 from pytest import approx
 from scipy.stats import linregress
 
+from cellarium.ml.models.mup import abcdParameter
+
 
 def assert_positive(name: str, number: float):
     """
@@ -205,10 +207,12 @@ def get_coord_data(
                     )
                     # record parameter values
                     for param_name, param in module.named_parameters():
-                        if param_name.endswith("_unscaled"):
+                        # if param_name.endswith("_unscaled"):
+                        if isinstance(param, abcdParameter):
                             # muP
-                            param_name = param_name.removesuffix("_unscaled")
-                            multiplier = getattr(module, f"{param_name}_multiplier")
+                            # param_name = param_name.removesuffix("_unscaled")
+                            # multiplier = getattr(module, f"{param_name}_multiplier")
+                            multiplier = param._multiplier
                         else:
                             # SP
                             multiplier = 1.0
@@ -232,10 +236,12 @@ def get_coord_data(
                 # record parameter deltas
                 for module_name, module in model.named_children():
                     for param_name, param in module.named_parameters():
-                        if param_name.endswith("_unscaled"):
+                        # if param_name.endswith("_unscaled"):
+                        if isinstance(param, abcdParameter):
                             # muP
-                            param_name = param_name.removesuffix("_unscaled")
-                            multiplier = getattr(module, f"{param_name}_multiplier")
+                            # param_name = param_name.removesuffix("_unscaled")
+                            # multiplier = getattr(module, f"{param_name}_multiplier")
+                            multiplier = param._multiplier
                         else:
                             # SP
                             multiplier = 1.0
