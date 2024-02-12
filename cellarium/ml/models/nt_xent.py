@@ -46,13 +46,8 @@ class NT_Xent(nn.Module):
                 The value of n.
         """
 
-        ones = torch.ones(n_batch, dtype=bool)
-
-        mask = torch.eye(2 * n_batch, dtype=bool)
-        mask |= torch.diag(ones, n_batch)
-        mask |= torch.diag(ones, -n_batch)
-
-        return ~mask
+        mask = ~torch.eye(n_batch, dtype=bool).repeat((2, 2))
+        return mask
 
     def forward(self, z_i: torch.Tensor, z_j: torch.Tensor) -> torch.Tensor:
         """

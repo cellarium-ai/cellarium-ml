@@ -15,6 +15,10 @@ from cellarium.ml.models.probabilistic_pca import ProbabilisticPCA
 from cellarium.ml.models.tdigest import TDigest
 from cellarium.ml.transforms import DivideByScale, Log1p, NormalizeTotal
 
+from anndata import ImplicitModificationWarning
+import warnings
+warnings.simplefilter(action='ignore', category=ImplicitModificationWarning)
+
 
 class OnePassMeanVarStdFromCLI(OnePassMeanVarStd):
     """
@@ -296,9 +300,10 @@ class ContrastiveMLPFromCLI(ContrastiveMLP):
         g_genes: int,
         hidden_size: Sequence[int],
         embed_dim: int,
-        stats_path: str,
         batch_size: int,
         world_size: int,
+        augment: torch.nn.Module | Sequence[torch.nn.Module | str],
+        stats_path: str | None = None,
         temperature: float = 1.0,
         target_count: int = 10_000,
     ) -> None:
@@ -306,9 +311,10 @@ class ContrastiveMLPFromCLI(ContrastiveMLP):
             g_genes=g_genes,
             hidden_size=hidden_size,
             embed_dim=embed_dim,
-            stats_path=stats_path,
             batch_size=batch_size,
             world_size=world_size,
-            temperature=1.0,
+            augment=augment,
+            stats_path=stats_path,
+            temperature=temperature,
             target_count=target_count,
         )
