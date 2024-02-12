@@ -98,7 +98,7 @@ def test_tokenize_with_perturbations(perturb: str):
     # test that we raise an AssertionError if we try to perturb something outside schema
     if perturb == "none":
         return
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         match perturb:
             case "activation":
                 geneformer.tokenize_with_perturbations(x_ng, feature_activation=["e"])
