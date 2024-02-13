@@ -7,6 +7,7 @@ from pathlib import Path
 
 import lightning.pytorch as pl
 import numpy as np
+import pytest
 import torch
 
 from cellarium.ml import CellariumModule
@@ -67,3 +68,41 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # assert
     assert np.array_equal(model.var_names_g, loaded_model.var_names_g)
     np.testing.assert_allclose(model.feature_ids, loaded_model.feature_ids)
+
+
+@pytest.mark.parametrize("perturb", ["activation", "deletion", "map", "none"])
+def test_tokenize_with_perturbations(perturb: str):
+    var_names_g = ["a", "b", "c", "d"]
+    geneformer = Geneformer(var_names_g=var_names_g)
+    x_ng = torch.tensor([[4, 3, 2, 1]])  # sort order will be [a,b,c,d] and tokens will be [2,3,4,5]
+
+    # test that we get the expected output for a well-formed set of input args
+    match perturb:
+        case "none":
+            input_ids, _ = geneformer.tokenize_with_perturbations(x_ng)
+            expected_input_ids = torch.tensor([[2, 3, 4, 5]])
+        case "activation":
+            input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_activation=["d"])
+            expected_input_ids = torch.tensor([[5, 2, 3, 4]])
+        case "deletion":
+            input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_deletion=["c"])
+            expected_input_ids = torch.tensor([[2, 3, 5, 0]])
+        case "map":
+            input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_map={"a": 1, "b": 1})
+            expected_input_ids = torch.tensor([[1, 1, 4, 5]])
+
+    print(f"Expected input_ids:\n{expected_input_ids}")
+    print(f"Actual input_ids:\n{input_ids}")
+    torch.testing.assert_close(input_ids, expected_input_ids)
+
+    # test that we raise an AssertionError if we try to perturb something outside schema
+    if perturb == "none":
+        return
+    with pytest.raises(ValueError):
+        match perturb:
+            case "activation":
+                geneformer.tokenize_with_perturbations(x_ng, feature_activation=["e"])
+            case "deletion":
+                geneformer.tokenize_with_perturbations(x_ng, feature_deletion=["e"])
+            case "map":
+                geneformer.tokenize_with_perturbations(x_ng, feature_map={"a": 1, "e": 1})
