@@ -59,7 +59,7 @@ def scale_grad(base_width: int, width: int, d: float) -> Callable[[torch.Tensor]
     return hook
 
 
-def apply_mup(module, base_module, optimizer, scale=False):
+def apply_mup(module, base_module, optimizer, scale="init"):
     for (name, param), (base_name, base_param) in zip(module.named_parameters(), base_module.named_parameters()):
         assert name == base_name
         if param.shape != base_param.shape:
@@ -100,10 +100,12 @@ def apply_mup(module, base_module, optimizer, scale=False):
                 raise ValueError(f"Optimizer must be either 'sgd', 'adam', or 'adamw'. Got {optimizer!r}")
 
             multiplier = (base_width / width) ** a
-            if scale:
+            if scale == "scale_init":
                 data = param.data * (base_width / width) ** b
-            else:
+            elif scale == "init":
                 data = param.data / multiplier
+            elif scale == "load":
+                data = param.data
             attr = ".".join(name.split(".")[:-1])
             _name = name.split(".")[-1]
             if attr:

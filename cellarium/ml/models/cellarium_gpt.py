@@ -160,7 +160,7 @@ class NegativeBinomial(dist.Distribution):
 class DotProductAttention(nn.Module):
     """Scaled dot product attention."""
 
-    def __init__(self, dropout, attn_mult, use_keops=False):
+    def __init__(self, dropout, attn_mult, use_keops=True):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.attn_mult = attn_mult
@@ -291,11 +291,11 @@ class MultiHeadAttention(nn.Module):
 class PositionWiseFFN(nn.Module):
     """The positionwise feed-forward network."""
 
-    def __init__(self, mlp_hiddens, d_hiddens):
+    def __init__(self, mlp_hiddens, d_hiddens, use_bias):
         super().__init__()
-        self.dense1 = nn.Linear(d_hiddens, mlp_hiddens, bias=True)
+        self.dense1 = nn.Linear(d_hiddens, mlp_hiddens, bias=use_bias)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(mlp_hiddens, d_hiddens, bias=True)
+        self.dense2 = nn.Linear(mlp_hiddens, d_hiddens, bias=use_bias)
 
     def forward(self, X_nd):
         return self.dense2(self.relu(self.dense1(X_nd)))
@@ -304,11 +304,11 @@ class PositionWiseFFN(nn.Module):
 class ValueEmbedding(nn.Module):
     """The positionwise feed-forward network."""
 
-    def __init__(self, d_hiddens):
+    def __init__(self, d_hiddens, use_bias):
         super().__init__()
-        self.dense1 = nn.Linear(1, d_hiddens, bias=True)
+        self.dense1 = nn.Linear(1, d_hiddens, bias=use_bias)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(d_hiddens, d_hiddens, bias=True)
+        self.dense2 = nn.Linear(d_hiddens, d_hiddens, bias=use_bias)
 
     def forward(self, X_nd):
         return self.dense2(self.relu(self.dense1(X_nd)))
@@ -317,10 +317,10 @@ class ValueEmbedding(nn.Module):
 class NormAdd(nn.Module):
     """The residual connection followed by layer normalization."""
 
-    def __init__(self, norm_shape, dropout):
+    def __init__(self, norm_shape, dropout, use_bias=True):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-        self.ln = nn.LayerNorm(norm_shape)
+        self.ln = nn.LayerNorm(norm_shape, bias=use_bias)
 
     def forward(self, X, Y):
         return X + self.ln(self.dropout(Y))
@@ -338,9 +338,9 @@ class TransformerBlock(nn.Module):
     ):
         super().__init__()
         self.attention = MultiHeadAttention(d_hiddens, h_heads, dropout, attn_mult, use_bias)
-        self.normadd1 = NormAdd(d_hiddens, dropout)
-        self.ffn = PositionWiseFFN(f_hiddens, d_hiddens)
-        self.normadd2 = NormAdd(d_hiddens, dropout)
+        self.normadd1 = NormAdd(d_hiddens, dropout, use_bias)
+        self.ffn = PositionWiseFFN(f_hiddens, d_hiddens, use_bias)
+        self.normadd2 = NormAdd(d_hiddens, dropout, use_bias)
 
     def forward(self, X, prefix_len_n, attention_type="block"):
         Y = self.normadd1(X, self.attention(X, X, X, prefix_len_n, attention_type))
@@ -418,36 +418,39 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
 
     def __init__(
         self,
-        var_names_g: Sequence[str],
+        n_vars: int,
         n_hiddens: int = 128,
         n_intermediates: int = 256,
         n_heads: int = 4,
         n_blocks: int = 6,
         dropout: float = 0.02,
+        use_bias: bool = False,
+        n_context: int | None = None,
         attn_mult: float = 1.0,
         input_mult: float = 1.0,
         output_mult: float = 1.0,
-        use_bias: bool = False,
-        n_context: int | None = None,
         initializer_range: float = 0.02,
-        optimizer: str = "adam",
+        importance_sampling: bool = False,
     ):
         super().__init__()
-        self.save_hyperparameters(logger=False)
-        self.var_names_g = np.array(var_names_g)
-        self.n_vars = len(var_names_g)
+        self.save_hyperparameters(logger=True)
+        # self.var_names_g = np.array(var_names_g)
+        # self.n_vars = len(var_names_g)
+        self.n_vars = n_vars
         self.attn_mult = attn_mult
         self.input_mult = input_mult
         self.output_mult = output_mult
+        self.importance_sampling = importance_sampling
 
-        self.var_ids_g: torch.Tensor
+        # self.var_ids_g: torch.Tensor
         # ids for the features, 0 is for cls
-        self.register_buffer("var_ids_g", torch.arange(1, self.n_vars + 1))
+        # self.register_buffer("var_ids_g", torch.arange(self.n_vars + 1))
 
-        # +1 for masking
+        # +1 for cls
         self.id_embedding = nn.Embedding(self.n_vars + 1, n_hiddens)
+        # +1 for masking
         self.mask_embedding = nn.Embedding(1, n_hiddens)
-        self.value_embedding = ValueEmbedding(n_hiddens)
+        self.value_embedding = ValueEmbedding(n_hiddens, use_bias=use_bias)
 
         self.n_blocks = n_blocks
         self.blocks = nn.ModuleList(
@@ -464,10 +467,9 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             ]
         )
         # no mask token in predictions
-        self.dense = nn.Linear(n_hiddens, 2, bias=False)
+        self.dense = nn.Linear(n_hiddens, 2, bias=use_bias)
 
         self.n_context = n_context  # or len(self.filter.filter_list)
-        self.optimizer = optimizer
         self.initializer_range = initializer_range
         self.apply(self._init_weights)
 
@@ -485,7 +487,8 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
         elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
+            if module.bias is not None:
+                module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
         # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
@@ -500,64 +503,78 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                 p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.n_blocks)))
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+        # assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        # assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
+        ### masking
+        # n_context = 5
+        # choices = [1, 2, 3, 4]
+        # prefix = 3
+        # indices = [0, 1, 2, 3, 4]
+        # labels mask = [False, False, False, True, True]
         prefix_len_n = torch.randint(1, self.n_context, (x_ng.shape[0],), device=x_ng.device)
-        random_indices_ng = torch.argsort(torch.rand_like(x_ng))
-        random_indices_nc = random_indices_ng[:, : self.n_context - 1]
-        masked_indices_ng = (
-            torch.arange((self.n_vars), dtype=torch.float32, device=x_ng.device)[None, :] >= prefix_len_n[:, None]
+        labels_mask_ng = (
+            torch.arange((self.n_vars + 1), dtype=torch.float32, device=x_ng.device)[None, :] >= prefix_len_n[:, None]
         )
-        masked_indices_nc = masked_indices_ng[:, : self.n_context]
+        labels_mask_nc = labels_mask_ng[:, : self.n_context]
+        ### prefix
+        random_indices_ng = torch.argsort(torch.rand_like(x_ng))
+        random_indices_ng = torch.cat(
+            [torch.zeros((x_ng.shape[0], 1), dtype=torch.long, device=x_ng.device), random_indices_ng + 1], dim=1
+        )
+        x_ng = torch.cat([total_mrna_umis_n[:, None], x_ng], dim=1)
+        random_indices_nc = random_indices_ng[:, : self.n_context]
         ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
-        # randomized_x_ng = x_ng[ndx[:, None], random_indices_ng]
-        # randomized_x_nc = randomized_x_ng[:, : self.n_context - 1]
-        randomized_x_nc = x_ng[ndx[:, None], random_indices_nc]
-        randomized_x_nc = torch.cat([total_mrna_umis_n[:, None], randomized_x_nc], dim=1)
+        random_x_ng = x_ng[ndx[:, None], random_indices_ng]
+        random_x_nc = random_x_ng[:, : self.n_context]
 
         # importance sampling
-        # zero_indices_ng = (randomized_x_ng == 0) & masked_indices_ng
-        # nonzero_indices_ng = (randomized_x_ng > 0) & masked_indices_ng
-        # zero_counts_n1 = zero_indices_ng.sum(dim=1, keepdim=True)
-        # nonzero_counts_n1 = nonzero_indices_ng.sum(dim=1, keepdim=True)
-        # total_counts_n1 = masked_indices_ng.sum(dim=1, keepdim=True)
-        # zero_weights_ng = (0.5 / zero_counts_n1).expand(-1, self.n_vars)
-        # nonzero_weights_ng = (0.5 / nonzero_counts_n1).expand(-1, self.n_vars)
-        # weights_ng = torch.zeros_like(x_ng, dtype=torch.float32)
-        # weights_ng[zero_indices_ng] = zero_weights_ng[zero_indices_ng]
-        # weights_ng[nonzero_indices_ng] = nonzero_weights_ng[nonzero_indices_ng]
-        # label_indices_nc = torch.multinomial(weights_ng, num_samples=self.n_context, replacement=True)
-        # importance_weights_ng = 1 / (weights_ng * total_counts_n1)
-        # label_weights_nc = importance_weights_ng[ndx[:, None], label_indices_nc]
-        # # 1
-        # labels_nc = x_ng[ndx[:, None], label_indices_nc]
-        # labels_nc[~masked_indices_nc] = -100
-        # randomized_x_nc[masked_indices_nc] = labels_nc[masked_indices_nc]
-        # random_indices_nc[masked_indices_nc] = label_indices_nc[masked_indices_nc]
-        # label_weights = label_weights_nc[masked_indices_nc]
-        # 2
-        labels_nc = randomized_x_nc.clone()
-        labels_nc[~masked_indices_nc] = -100
-        label_weights = 1
+        if self.importance_sampling:
+            zero_mask_ng = (random_x_ng == 0) & labels_mask_ng
+            nonzero_mask_ng = (random_x_ng > 0) & labels_mask_ng
+            zero_counts_n1 = zero_mask_ng.sum(dim=1, keepdim=True)
+            nonzero_counts_n1 = nonzero_mask_ng.sum(dim=1, keepdim=True)
+            total_counts_n1 = labels_mask_ng.sum(dim=1, keepdim=True)
+            zero_weights_ng = (0.5 / zero_counts_n1).expand(-1, self.n_vars + 1)
+            nonzero_weights_ng = (0.5 / nonzero_counts_n1).expand(-1, self.n_vars + 1)
+            weights_ng = torch.zeros_like(x_ng, dtype=torch.float32)
+            weights_ng[zero_mask_ng] = zero_weights_ng[zero_mask_ng]
+            weights_ng[nonzero_mask_ng] = nonzero_weights_ng[nonzero_mask_ng]
+            label_indices_nc = torch.multinomial(weights_ng, num_samples=self.n_context, replacement=True)
+            importance_weights_ng = 1 / (weights_ng * total_counts_n1)
+            label_weights_nc = importance_weights_ng[ndx[:, None], label_indices_nc]
+            # 1
+            labels_nc = x_ng[ndx[:, None], label_indices_nc]
+            labels_nc[~labels_mask_nc] = -100
+            random_x_nc[labels_mask_nc] = labels_nc[labels_mask_nc]
+            random_indices_nc[labels_mask_nc] = label_indices_nc[labels_mask_nc]
+            label_weights = label_weights_nc[labels_mask_nc]
+        else:
+            # 2
+            # labels_mask_nc = (
+            #     torch.arange((self.n_context), dtype=torch.float32, device=x_ng.device)[None, :]
+            #     >= prefix_len_n[:, None]
+            # )
+            # random_indices_nc = random_indices_ng[:, : self.n_context - 1]
+            # random_indices_nc = torch.cat(
+            #     [torch.zeros((x_ng.shape[0], 1), dtype=torch.long, device=x_ng.device), random_indices_nc + 1], dim=1
+            # )
+            # random_x_nc = x_ng[ndx[:, None], random_indices_nc]
+            labels_nc = random_x_nc.clone()
+            labels_nc[~labels_mask_nc] = -100
+            label_weights = 1
 
-        sample_weights_nc = 1 / masked_indices_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
-        gene_ids = self.var_ids_g[random_indices_nc]
-        gene_ids = torch.cat([torch.zeros((x_ng.shape[0], 1), dtype=torch.long, device=x_ng.device), gene_ids], dim=1)
-        value_ids = torch.log1p(randomized_x_nc)
+        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+        # gene_ids = self.var_ids_g[random_indices_nc]
+        # gene_ids = torch.cat([torch.zeros((x_ng.shape[0], 1), dtype=torch.long, device=x_ng.device), gene_ids], dim=1)
+        gene_ids = random_indices_nc
+        value_ids = torch.log1p(random_x_nc)
 
         gene_ncd = self.id_embedding(gene_ids)
         value_ncd = self.value_embedding(value_ids.unsqueeze(-1))
         mask_embedding = self.mask_embedding(torch.zeros(1, device=x_ng.device).long())
-        value_ncd[masked_indices_nc] = mask_embedding.squeeze()
+        value_ncd[labels_mask_nc] = mask_embedding.squeeze()
         hidden_ncd = gene_ncd + value_ncd
-
-        # per cell
-        # 1 1 1 0 0
-        # 1 1 1 0 0
-        # 1 1 1 0 0
-        # 1 1 1 1 0
-        # 1 1 1 0 1
 
         self.attention_weights = [None] * len(self.blocks)
 
@@ -577,13 +594,13 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         logits = self.dense(hidden_ncd) * self.output_mult
         mu_nc = logits[:, :, 0].sigmoid()
         theta_nc = logits[:, :, 1].exp()
-        mu = mu_nc[masked_indices_nc]
-        theta = theta_nc[masked_indices_nc]
+        mu = mu_nc[labels_mask_nc]
+        theta = theta_nc[labels_mask_nc]
         total_mrna_umis_nc = total_mrna_umis_n.unsqueeze(1).expand(-1, self.n_context)
-        total_mrna_umis = total_mrna_umis_nc[masked_indices_nc]
+        total_mrna_umis = total_mrna_umis_nc[labels_mask_nc]
         model_dist = NegativeBinomial(mu=mu * total_mrna_umis, theta=theta)
-        log_prob = model_dist.log_prob(labels_nc[masked_indices_nc])
-        sample_weights = sample_weights_nc[masked_indices_nc]
+        log_prob = model_dist.log_prob(labels_nc[labels_mask_nc])
+        sample_weights = sample_weights_nc[labels_mask_nc]
         loss = -(log_prob * label_weights * sample_weights).sum() / sample_weights.sum()
 
         with torch.no_grad():

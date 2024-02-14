@@ -182,6 +182,19 @@ def compute_n_obs(data: CellariumAnnDataDataModule) -> int:
     return data.dadc.n_obs
 
 
+def compute_n_vars(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of observations in the data.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of observations in the data.
+    """
+    return data.dadc.n_vars
+
+
 def compute_n_categories(data: CellariumAnnDataDataModule) -> int:
     """
     Compute the number of categories in the target variable.
@@ -339,9 +352,7 @@ def cellarium_gpt(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.CellariumGPT",
-        link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
-        ],
+        link_arguments=[LinkArguments("data", "model.model.init_args.n_vars", compute_n_vars)],
     )
     cli(args=args)
 
