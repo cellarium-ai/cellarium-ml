@@ -317,10 +317,10 @@ class ValueEmbedding(nn.Module):
 class NormAdd(nn.Module):
     """The residual connection followed by layer normalization."""
 
-    def __init__(self, norm_shape, dropout, use_bias=True):
+    def __init__(self, norm_shape, dropout):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-        self.ln = nn.LayerNorm(norm_shape, bias=use_bias)
+        self.ln = nn.LayerNorm(norm_shape)
 
     def forward(self, X, Y):
         return X + self.ln(self.dropout(Y))
@@ -338,9 +338,9 @@ class TransformerBlock(nn.Module):
     ):
         super().__init__()
         self.attention = MultiHeadAttention(d_hiddens, h_heads, dropout, attn_mult, use_bias)
-        self.normadd1 = NormAdd(d_hiddens, dropout, use_bias)
+        self.normadd1 = NormAdd(d_hiddens, dropout)
         self.ffn = PositionWiseFFN(f_hiddens, d_hiddens, use_bias)
-        self.normadd2 = NormAdd(d_hiddens, dropout, use_bias)
+        self.normadd2 = NormAdd(d_hiddens, dropout)
 
     def forward(self, X, prefix_len_n, attention_type="block"):
         Y = self.normadd1(X, self.attention(X, X, X, prefix_len_n, attention_type))

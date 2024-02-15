@@ -30,7 +30,7 @@ dependencies = [
   "lightning>=2.0.9",
   "pyro-ppl",
   "pytest",
-  "torch>=2.1.0",
+  "torch>=2.0.0",
   "transformers",
 ]
 
