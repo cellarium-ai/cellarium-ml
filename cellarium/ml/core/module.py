@@ -236,11 +236,11 @@ class CellariumModule(pl.LightningModule):
 
         with FakeTensorMode(allow_non_fake_inputs=True):
             base_hparams = copy.deepcopy(self.model.hparams)
-            base_hparams["n_hiddens"] = 128
-            base_hparams["n_intermediates"] = 256
-            base_hparams["n_heads"] = 4
+            base_hparams["n_hiddens"] = 256
+            base_hparams["n_intermediates"] = 512
+            base_hparams["n_heads"] = 8
             base_model = CellariumGPT(**base_hparams)
-        apply_mup(self.model, base_model, "adamw", scale=True)
+        apply_mup(self.model, base_model, "adamw", scale="scale_init")
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         """Configure optimizers for the model."""
