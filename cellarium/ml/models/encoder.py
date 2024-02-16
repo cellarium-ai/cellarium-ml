@@ -5,9 +5,13 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
-from cellarium.ml.FCLayer import FCLayers
+from cellarium.ml.models.FCLayer import FCLayers
+
+def _identity(x):
+    return x
 
 class Encoder(nn.Module):
+
     """Encode data of ``n_input`` dimensions into a latent space of ``n_output`` dimensions.
 
     Uses a fully-connected neural network of ``n_hidden`` layers.
@@ -43,18 +47,17 @@ class Encoder(nn.Module):
     """
 
     def __init__(
-        self,
-        n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        dropout_rate: float = 0.1,
-        distribution: str = "normal",
-        var_eps: float = 1e-4,
-        var_activation: Optional[Callable] = None,
-        return_dist: bool = False,
-        **kwargs,
+            self,
+            n_input: int,
+            n_output: int,
+            n_cat_list: Iterable[int] = None,
+            n_layers: int = 1,
+            n_hidden: int = 128,
+            dropout_rate: float = 0.1,
+            distribution: str = "normal",
+            var_eps: float = 1e-4,
+            var_activation: Optional[Callable] = None,
+            **kwargs,
     ):
         super().__init__()
 
@@ -71,7 +74,6 @@ class Encoder(nn.Module):
         )
         self.mean_encoder = nn.Linear(n_hidden, n_output)
         self.var_encoder = nn.Linear(n_hidden, n_output)
-        self.return_dist = return_dist
 
         if distribution == "ln":
             self.z_transformation = nn.Softmax(dim=-1)
@@ -97,7 +99,6 @@ class Encoder(nn.Module):
         -------
         3-tuple of :py:class:`torch.Tensor`
             tensors of shape ``(n_latent,)`` for mean and var, and sample
-
         """
         # Parameters for latent distribution
         q = self.encoder(x, *cat_list)
@@ -105,6 +106,5 @@ class Encoder(nn.Module):
         q_v = self.var_activation(self.var_encoder(q)) + self.var_eps
         dist = Normal(q_m, q_v.sqrt())
         latent = self.z_transformation(dist.rsample())
-        if self.return_dist:
-            return dist, latent
+
         return q_m, q_v, latent

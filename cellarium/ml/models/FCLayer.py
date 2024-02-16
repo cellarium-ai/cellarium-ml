@@ -4,7 +4,16 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
+def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
+
+    """One hot a tensor of categories."""
+
+    onehot = torch.zeros(index.size(0), n_cat, device=index.device)
+    onehot.scatter_(1, index.type(torch.long), 1)
+    return onehot.type(torch.float32)
+
 class FCLayers(nn.Module):
+
     """A helper class to build fully-connected layers for a neural network.
 
     Parameters
@@ -38,19 +47,19 @@ class FCLayers(nn.Module):
     """
 
     def __init__(
-        self,
-        n_in: int,
-        n_out: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        dropout_rate: float = 0.1,
-        use_batch_norm: bool = True,
-        use_layer_norm: bool = False,
-        use_activation: bool = True,
-        bias: bool = True,
-        inject_covariates: bool = True,
-        activation_fn: nn.Module = nn.ReLU,
+            self,
+            n_in: int,
+            n_out: int,
+            n_cat_list: Iterable[int] = None,
+            n_layers: int = 1,
+            n_hidden: int = 128,
+            dropout_rate: float = 0.1,
+            use_batch_norm: bool = True,
+            use_layer_norm: bool = False,
+            use_activation: bool = True,
+            bias: bool = True,
+            inject_covariates: bool = True,
+            activation_fn: nn.Module = nn.ReLU,
     ):
         super().__init__()
         self.inject_covariates = inject_covariates

@@ -11,7 +11,9 @@ from cellarium.ml.models.model import CellariumModel
 from typing import Literal
 
 def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
+
     """One hot a tensor of categories."""
+
     onehot = torch.zeros(index.size(0), n_cat, device=index.device)
     onehot.scatter_(1, index.type(torch.long), 1)
     return onehot.type(torch.float32)
@@ -83,7 +85,6 @@ class scVI(CellariumModel):
     def inference(self, x, n_samples=1):
         """
         High level inference method.
-
         Runs the inference (encoder) model.
         """
         x_ = x
@@ -112,7 +113,7 @@ class scVI(CellariumModel):
 
         return outputs
 
-    def generative(self, z, library, y=None, transform_batch=None):
+    def generative(self, z, library, y=None):
         """Runs the generative model."""
         # Likelihood distribution
 
@@ -147,10 +148,7 @@ class scVI(CellariumModel):
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
         return dict(px=px, pl=pl, pz=pz)
 
-    def forward(
-            self,
-            x,
-    ):
+    def forward(self, x: torch.Tensor):
 
         inference_outputs = self.inference(x)
         qz_m = inference_outputs["qz_m"]
@@ -166,8 +164,7 @@ class scVI(CellariumModel):
             dim=1
         )
 
-        generative_outputs = self.generative(inference_outputs["z"], inference_outputs["library"],
-                                             y=None, transform_batch=None)
+        generative_outputs = self.generative(inference_outputs["z"], inference_outputs["library"])
         # reconstruction loss
         rec_loss = -generative_outputs["px"].log_prob(x).sum(-1)
 
@@ -175,4 +172,4 @@ class scVI(CellariumModel):
             rec_loss * kl_divergence_z
         )
 
-        return {'loss': loss}
+        return {"loss": loss}
