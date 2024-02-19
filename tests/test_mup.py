@@ -11,9 +11,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torchvision import datasets, transforms
 
 from cellarium.ml.models import MuLinear
+from cellarium.ml.mup import apply_mup
 from cellarium.ml.utilities.testing import assert_slope_equals, get_coord_data
 
 optim_dict = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
@@ -68,16 +70,33 @@ def coord_check_MLP(
         def f() -> nn.Module:
             model: nn.Module
             if mup:
-                model = MuMLP(
+                model = MLP(
                     width=w,
                     bias=bias,
                     nonlin=nonlin,
-                    optimizer=optim_name,
                     input_mult=input_mult,
                     output_mult=output_mult,
+                    fc_2_weight_init_std=1 / math.sqrt(128),
                 )
+                with FakeTensorMode(allow_non_fake_inputs=True):
+                    base_model = MLP(
+                        width=128,
+                        bias=bias,
+                        nonlin=nonlin,
+                        input_mult=input_mult,
+                        output_mult=output_mult,
+                        fc_2_weight_init_std=1 / math.sqrt(128),
+                    )
+                apply_mup(base_model, model, optim_name)
             else:
-                model = MLP(width=w, bias=bias, nonlin=nonlin, input_mult=input_mult, output_mult=output_mult)
+                model = MLP(
+                    width=w,
+                    bias=bias,
+                    nonlin=nonlin,
+                    input_mult=input_mult,
+                    output_mult=output_mult,
+                    fc_2_weight_init_std=1 / math.sqrt(w),
+                )
             return model
 
         return f
@@ -132,12 +151,14 @@ class MLP(nn.Module):
         nonlin: Callable[[torch.Tensor], torch.Tensor] = F.relu,
         input_mult: float = 1.0,
         output_mult: float = 1.0,
+        fc_2_weight_init_std: float = 1 / math.sqrt(128),
     ) -> None:
         super().__init__()
         self.nonlin = nonlin
         self.bias = bias
         self.input_mult = input_mult
         self.output_mult = output_mult
+        self.fc_2_weight_init_std = fc_2_weight_init_std
         self.fc_1 = nn.Linear(3072, width, bias=bias)
         self.fc_2 = nn.Linear(width, width, bias=bias)
         self.fc_3 = nn.Linear(width, num_classes, bias=bias)
@@ -147,8 +168,7 @@ class MLP(nn.Module):
         fan_in_1 = self.fc_1.weight.shape[1]
         nn.init.normal_(self.fc_1.weight, std=1 / math.sqrt(fan_in_1))  # 1 / sqrt(d)
         self.fc_1.weight.data /= self.input_mult**0.5
-        fan_in_2 = self.fc_2.weight.shape[1]
-        nn.init.normal_(self.fc_2.weight, std=1 / math.sqrt(fan_in_2))  # 1 / sqrt(n)
+        nn.init.normal_(self.fc_2.weight, std=self.fc_2_weight_init_std)  # 1 / sqrt(n)
         nn.init.zeros_(self.fc_3.weight)  # zero readout
         if self.bias:
             # zero biases

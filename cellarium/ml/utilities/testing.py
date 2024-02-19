@@ -17,6 +17,8 @@ import torch
 from pytest import approx
 from scipy.stats import linregress
 
+from cellarium.ml.mup import abcdParameter
+
 
 def assert_positive(name: str, number: float):
     """
@@ -209,6 +211,8 @@ def get_coord_data(
                             # muP
                             param_name = param_name.removesuffix("_unscaled")
                             multiplier = getattr(module, f"{param_name}_multiplier")
+                        elif isinstance(param, abcdParameter):
+                            multiplier = param.multiplier
                         else:
                             # SP
                             multiplier = 1.0
@@ -236,6 +240,8 @@ def get_coord_data(
                             # muP
                             param_name = param_name.removesuffix("_unscaled")
                             multiplier = getattr(module, f"{param_name}_multiplier")
+                        elif isinstance(param, abcdParameter):
+                            multiplier = param.multiplier
                         else:
                             # SP
                             multiplier = 1.0
