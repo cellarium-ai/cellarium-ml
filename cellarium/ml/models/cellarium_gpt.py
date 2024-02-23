@@ -2,22 +2,20 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable
+from typing import Literal
 
 import numpy as np
 import torch
 import torch.distributions as dist
 from lightning.pytorch.core.mixins import HyperparametersMixin
+from pykeops.torch import LazyTensor
 from torch import nn
 from torch.backends.cuda import sdp_kernel
 from torch.distributions import constraints
 from torch.distributions.utils import broadcast_all
 
 from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.utilities.testing import (
-    assert_arrays_equal,
-    assert_columns_and_array_lengths_equal,
-)
 
 backend_map = {
     "math": {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
@@ -167,7 +165,12 @@ class NegativeBinomial(dist.Distribution):
 class DotProductAttention(nn.Module):
     """Scaled dot product attention."""
 
-    def __init__(self, dropout, attn_mult, backend="pykeops"):
+    def __init__(
+        self,
+        dropout: float,
+        attn_mult: float,
+        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
+    ) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.attn_mult = attn_mult
@@ -182,13 +185,13 @@ class DotProductAttention(nn.Module):
         queries_nqd: torch.Tensor,
         keys_nsd: torch.Tensor,
         values_nsv: torch.Tensor,
-        prefix_len_n=None,
-    ):
+        prefix_len_n: torch.Tensor,
+    ) -> torch.Tensor:
         n, q, d = queries_nqd.shape
         s = keys_nsd.shape[1]
-        if self.backend == "pykeops":
-            from pykeops.torch import LazyTensor
-
+        if self.backend == "keops":
+            if self.dropout.p > 0:
+                raise NotImplementedError("Dropout is not supported with PyKeOps.")
             prefix_len_n = LazyTensor(prefix_len_n[:, None, None, None].expand([n, q, 1, 1]).float())
             q_range = LazyTensor(torch.arange(q, device=keys_nsd.device)[:, None].float(), axis=0)
             s_range = LazyTensor(torch.arange(s, device=keys_nsd.device)[:, None].float(), axis=1)
@@ -222,7 +225,7 @@ class DotProductAttention(nn.Module):
                     attention_mask_nqs,
                     scale=self.attn_mult / d,
                 ).squeeze(0)
-        else:
+        elif self.backend == "torch":
             block_mask = (
                 torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
                 < prefix_len_n[:, None, None]
@@ -235,34 +238,48 @@ class DotProductAttention(nn.Module):
             scores_nqs = queries_nqd @ keys_nsd.transpose(1, 2) * self.attn_mult / d
             scores_nqs[~attention_mask_nqs] = -1e9
             self.attention_probs_nqs = scores_nqs.softmax(dim=-1)
+            self.scores_nqs = scores_nqs
+            self.attention_mask_nqs = attention_mask_nqs
             return self.dropout(self.attention_probs_nqs) @ values_nsv  # _nqv
+        else:
+            raise ValueError(f"Unknown backend: {self.backend}")
 
 
 class MultiHeadAttention(nn.Module):
     """Multi-head attention."""
 
-    def __init__(self, d_hiddens, h_heads, dropout, attn_mult, bias=True):
+    def __init__(
+        self,
+        n_hiddens: int,
+        n_heads: int,
+        dropout: float,
+        attn_mult: float,
+        use_bias: bool,
+        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
+    ) -> None:
         super().__init__()
-        self.h_heads = h_heads
-        self.attention = DotProductAttention(dropout, attn_mult)
-        self.Wq = nn.Linear(d_hiddens, d_hiddens, bias=bias)
-        self.Wk = nn.Linear(d_hiddens, d_hiddens, bias=bias)
-        self.Wv = nn.Linear(d_hiddens, d_hiddens, bias=bias)
-        self.Wo = nn.Linear(d_hiddens, d_hiddens, bias=bias)
+        self.n_heads = n_heads
+        self.attention = DotProductAttention(dropout, attn_mult, backend=backend)
+        self.Wq = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+        self.Wk = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+        self.Wv = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+        self.Wo = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
 
     @staticmethod
-    def split_heads(X, h_heads):
+    def split_heads(X_nqd: torch.Tensor, n_heads: int) -> torch.Tensor:
         """Transposition for parallel computation of multiple attention heads."""
         # Shape of input X: (batch_size, no. of queries or key-value pairs,
         # num_hiddens). Shape of output X: (batch_size, no. of queries or
         # key-value pairs, num_heads, num_hiddens / num_heads)
-        X = X.reshape(X.shape[0], X.shape[1], h_heads, -1)
+        # m = n * h
+        # k = d / h
+        X_nqhk = X_nqd.reshape(X_nqd.shape[0], X_nqd.shape[1], n_heads, -1)
         # Shape of output X: (batch_size, num_heads, no. of queries or key-value
         # pairs, num_hiddens / num_heads)
-        X = X.permute(0, 2, 1, 3)
+        X_nhqk = X_nqhk.permute(0, 2, 1, 3)
         # Shape of output: (batch_size * num_heads, no. of queries or key-value
         # pairs, num_hiddens / num_heads)
-        return X.reshape(-1, X.shape[2], X.shape[3])
+        return X_nhqk.reshape(-1, X_nhqk.shape[2], X_nhqk.shape[3])  # _mqk
 
     @staticmethod
     def split_attention_mask(attention_mask, h_heads):
@@ -272,100 +289,102 @@ class MultiHeadAttention(nn.Module):
         return attention_mask
 
     @staticmethod
-    def merge_heads(X, h_heads):
+    def merge_heads(X_mqk: torch.Tensor, n_heads: int) -> torch.Tensor:
         # reverse of split_heads
-        X = X.reshape(-1, h_heads, X.shape[1], X.shape[2])
-        X = X.permute(0, 2, 1, 3)
-        return X.reshape(X.shape[0], X.shape[1], -1)
+        X_nhqk = X_mqk.reshape(-1, n_heads, X_mqk.shape[1], X_mqk.shape[2])
+        X_nqhk = X_nhqk.permute(0, 2, 1, 3)
+        return X_nqhk.reshape(X_nqhk.shape[0], X_nqhk.shape[1], -1)  # _nqd
 
     def forward(
         self,
-        queries_nqd,
-        keys_nsd,
-        values_nsd,
-        prefix_len_n,
-    ):
+        queries_nqd: torch.Tensor,
+        keys_nsd: torch.Tensor,
+        values_nsd: torch.Tensor,
+        prefix_len_n: torch.Tensor,
+    ) -> torch.Tensor:
         # Shape of queries, keys, or values:
         # (batch_size, no. of queries or key-value pairs, num_hiddens)
         # Shape of valid_lens: (batch_size,) or (batch_size, no. of queries)
         # After transposing, shape of output queries, keys, or values:
         # (batch_size * num_heads, no. of queries or key-value pairs,
         # num_hiddens / num_heads)
-        h_heads = self.h_heads
+        n_heads = self.n_heads
         queries_nqd = self.Wq(queries_nqd)
         keys_nsd = self.Wk(keys_nsd)
         values_nsd = self.Wv(values_nsd)
         # m = n * h
         # k = d / h
-        queries_mqk = self.split_heads(queries_nqd, h_heads)
-        keys_msk = self.split_heads(keys_nsd, h_heads)
-        values_msk = self.split_heads(values_nsd, h_heads)
+        queries_mqk = self.split_heads(queries_nqd, n_heads)
+        keys_msk = self.split_heads(keys_nsd, n_heads)
+        values_msk = self.split_heads(values_nsd, n_heads)
         # attention_mask_mqs = self.split_attention_mask(attention_mask_nqs, h_heads)
-        prefix_len_m = prefix_len_n.repeat(1, h_heads).reshape(-1)
+        # prefix_len_m = prefix_len_n.repeat(1, n_heads).reshape(-1)  WRONG!
+        prefix_len_m = prefix_len_n.repeat_interleave(n_heads)
 
         # Shape of output: (batch_size * num_heads, no. of queries,
         # num_hiddens / num_heads)
-        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, prefix_len_n=prefix_len_m)
+        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, prefix_len_m)
         # Shape of output_concat: (batch_size, no. of queries, num_hiddens)
-        output_nqd = self.merge_heads(output_mqk, h_heads)
+        output_nqd = self.merge_heads(output_mqk, n_heads)
         return self.Wo(output_nqd)  # _nqd
 
 
 class PositionWiseFFN(nn.Module):
     """The positionwise feed-forward network."""
 
-    def __init__(self, mlp_hiddens, d_hiddens, use_bias):
+    def __init__(self, n_intermediates: int, n_hiddens: int, use_bias: bool) -> None:
         super().__init__()
-        self.dense1 = nn.Linear(d_hiddens, mlp_hiddens, bias=use_bias)
+        self.dense1 = nn.Linear(n_hiddens, n_intermediates, bias=use_bias)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(mlp_hiddens, d_hiddens, bias=use_bias)
+        self.dense2 = nn.Linear(n_intermediates, n_hiddens, bias=use_bias)
 
-    def forward(self, X_nd):
+    def forward(self, X_nd: torch.Tensor) -> torch.Tensor:
         return self.dense2(self.relu(self.dense1(X_nd)))
 
 
 class ValueEmbedding(nn.Module):
     """The positionwise feed-forward network."""
 
-    def __init__(self, d_hiddens, use_bias):
+    def __init__(self, n_hiddens: int, use_bias: bool) -> None:
         super().__init__()
-        self.dense1 = nn.Linear(1, d_hiddens, bias=use_bias)
+        self.dense1 = nn.Linear(1, n_hiddens, bias=use_bias)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(d_hiddens, d_hiddens, bias=use_bias)
+        self.dense2 = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
 
-    def forward(self, X_nd):
+    def forward(self, X_nd: torch.Tensor) -> torch.Tensor:
         return self.dense2(self.relu(self.dense1(X_nd)))
 
 
 class NormAdd(nn.Module):
     """Pre-norm layer where the layer normalization is applied before the sublayer."""
 
-    def __init__(self, norm_shape, dropout):
+    def __init__(self, norm_shape: int, dropout: float) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.ln = nn.LayerNorm(norm_shape)
 
-    def forward(self, X, sublayer):
+    def forward(self, X: torch.Tensor, sublayer: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
         return X + self.dropout(sublayer(self.ln(X)))
 
 
 class TransformerBlock(nn.Module):
     def __init__(
         self,
-        d_hiddens: int,
-        f_hiddens: int,
-        h_heads: int,
+        n_hiddens: int,
+        n_intermediates: int,
+        n_heads: int,
         dropout: float,
         attn_mult: float,
-        use_bias: bool = False,
-    ):
+        use_bias: bool,
+        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
+    ) -> None:
         super().__init__()
-        self.attention = MultiHeadAttention(d_hiddens, h_heads, dropout, attn_mult, use_bias)
-        self.normadd1 = NormAdd(d_hiddens, dropout)
-        self.ffn = PositionWiseFFN(f_hiddens, d_hiddens, use_bias)
-        self.normadd2 = NormAdd(d_hiddens, dropout)
+        self.attention = MultiHeadAttention(n_hiddens, n_heads, dropout, attn_mult, use_bias, backend)
+        self.normadd1 = NormAdd(n_hiddens, dropout)
+        self.ffn = PositionWiseFFN(n_intermediates, n_hiddens, use_bias)
+        self.normadd2 = NormAdd(n_hiddens, dropout)
 
-    def forward(self, X, prefix_len_n):
+    def forward(self, X: torch.Tensor, prefix_len_n: torch.Tensor) -> torch.Tensor:
         Y = self.normadd1(X, lambda X: self.attention(X, X, X, prefix_len_n))
         return self.normadd2(Y, lambda Y: self.ffn(Y))
 
@@ -455,6 +474,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         initializer_range: float = 0.02,
         importance_sampling: bool = False,
         skip: bool = False,
+        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
     ):
         super().__init__()
         self.save_hyperparameters(logger=True)
@@ -494,6 +514,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                     dropout,
                     attn_mult,
                     use_bias,
+                    backend,
                 )
                 for i in range(n_blocks)
             ]
@@ -612,7 +633,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         value_ncd[labels_mask_nc] = mask_embedding.squeeze()
         hidden_ncd = gene_ncd + value_ncd
 
-        self.attention_weights = [None] * len(self.blocks)
+        # attention_weights = [None] * len(self.blocks)
 
         hidden_ncd = hidden_ncd * self.input_mult
         for i, block in enumerate(self.blocks):
@@ -620,13 +641,15 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                 hidden_ncd,
                 prefix_len_n=prefix_len_n,
             )
-            # self.attention_weights[i] = block.attention.attention.attention_probs_nqs
+            # attention_weights[i] = block.attention.attention.attention_probs_nqs
 
+        # attention_weights = None
         if self.skip:
             queries = self.query_embedding(gene_ids)
             hidden_ncd[labels_mask_nc] = queries[labels_mask_nc]
             Y = self.skip_normadd1(0, self.skip_attention(queries, hidden_ncd, hidden_ncd, prefix_len_n))
             hidden_ncd = self.skip_normadd2(0, self.skip_ffn(Y))
+            # attention_weights = self.skip_attention.attention.attention_probs_nqs
 
         logits = self.dense(hidden_ncd) * self.output_mult
         mu_nc = logits[:, :, 0].sigmoid()
@@ -669,4 +692,5 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             "theta_nc": theta_nc,
             "nonzero_log_prob": nonzero_log_prob,
             "zero_log_prob": zero_log_prob,
+            # "attention_weights": attention_weights,
         }
