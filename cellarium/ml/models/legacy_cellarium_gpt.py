@@ -2,17 +2,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-import random
-from collections.abc import Callable
-from typing import Any, Literal
+from collections.abc import Sequence
+from typing import Literal
 
-import lightning.pytorch as pl
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.distributions as dist
 from lightning.pytorch.core.mixins import HyperparametersMixin
-from lightning.pytorch.utilities.types import STEP_OUTPUT
 from pykeops.torch import LazyTensor
 from torch import nn
 from torch.backends.cuda import sdp_kernel
@@ -20,6 +16,10 @@ from torch.distributions import constraints
 from torch.distributions.utils import broadcast_all
 
 from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
 
 backend_map = {
     "math": {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
@@ -126,9 +126,6 @@ class NegativeBinomial(dist.Distribution):
 
     @property
     def variance(self) -> torch.Tensor:
-        # var(aX) = a^2 var(X)
-        # N * rho + (N * rho)^2 / theta = N^2 * (rho + rho^2 / theta')
-        # where theta' = theta / N
         return self.mean + (self.mean**2) / self.theta
 
     @torch.inference_mode()
@@ -176,8 +173,8 @@ class DotProductAttention(nn.Module):
         self,
         dropout: float,
         attn_mult: float,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
-    ) -> None:
+        backend: Literal["pykeops", "pytorch", "math", "flash", "mem_efficient"],
+    ):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.attn_mult = attn_mult
@@ -192,26 +189,19 @@ class DotProductAttention(nn.Module):
         queries_nqd: torch.Tensor,
         keys_nsd: torch.Tensor,
         values_nsv: torch.Tensor,
-        prefix_len_n: torch.Tensor,
-        mask_type: str = "block",
-    ) -> torch.Tensor:
+        prefix_len_n=None,
+        use_softmax: bool = True,
+    ):
         n, q, d = queries_nqd.shape
         s = keys_nsd.shape[1]
-        if self.backend == "keops":
-            if self.dropout.p > 0:
-                raise NotImplementedError("Dropout is not supported with PyKeOps.")
-            if mask_type == "block":
-                prefix_len_n = LazyTensor(prefix_len_n[:, None, None, None].expand([n, q, 1, 1]).float())
-                s_range = LazyTensor(torch.arange(s, device=keys_nsd.device)[:, None].float(), axis=1)
-                block_mask = 1 - (prefix_len_n - s_range - 1).step()
-                attention_mask_nqs = block_mask
-            elif mask_type == "block_diag":
-                prefix_len_n = LazyTensor(prefix_len_n[:, None, None, None].expand([n, q, 1, 1]).float())
-                q_range = LazyTensor(torch.arange(q, device=keys_nsd.device)[:, None].float(), axis=0)
-                s_range = LazyTensor(torch.arange(s, device=keys_nsd.device)[:, None].float(), axis=1)
-                block_mask = 1 - (prefix_len_n - s_range - 1).step()
-                diag_mask = 1 - (-(q_range - s_range).abs()).step()
-                attention_mask_nqs = block_mask * diag_mask
+        if self.backend == "pykeops":
+
+            prefix_len_n = LazyTensor(prefix_len_n[:, None, None, None].expand([n, q, 1, 1]).float())
+            q_range = LazyTensor(torch.arange(q, device=keys_nsd.device)[:, None].float(), axis=0)
+            s_range = LazyTensor(torch.arange(s, device=keys_nsd.device)[:, None].float(), axis=1)
+            block_mask = 1 - (prefix_len_n - s_range - 1).step()
+            diag_mask = 1 - (-(q_range - s_range).abs()).step()
+            attention_mask_nqs = block_mask * diag_mask
             scores_nqs = (
                 (
                     LazyTensor(queries_nqd[:, :, None, :].contiguous())
@@ -239,7 +229,7 @@ class DotProductAttention(nn.Module):
                     attention_mask_nqs,
                     scale=self.attn_mult / d,
                 ).squeeze(0)
-        elif self.backend == "torch":
+        else:
             block_mask = (
                 torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
                 < prefix_len_n[:, None, None]
@@ -255,45 +245,33 @@ class DotProductAttention(nn.Module):
             self.scores_nqs = scores_nqs
             self.attention_mask_nqs = attention_mask_nqs
             return self.dropout(self.attention_probs_nqs) @ values_nsv  # _nqv
-        else:
-            raise ValueError(f"Unknown backend: {self.backend}")
 
 
 class MultiHeadAttention(nn.Module):
     """Multi-head attention."""
 
-    def __init__(
-        self,
-        n_hiddens: int,
-        n_heads: int,
-        dropout: float,
-        attn_mult: float,
-        use_bias: bool,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
-    ) -> None:
+    def __init__(self, d_hiddens, h_heads, dropout, attn_mult, bias=True):
         super().__init__()
-        self.n_heads = n_heads
-        self.attention = DotProductAttention(dropout, attn_mult, backend=backend)
-        self.Wq = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
-        self.Wk = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
-        self.Wv = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
-        self.Wo = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+        self.h_heads = h_heads
+        self.attention = DotProductAttention(dropout, attn_mult)
+        self.Wq = nn.Linear(d_hiddens, d_hiddens, bias=bias)
+        self.Wk = nn.Linear(d_hiddens, d_hiddens, bias=bias)
+        self.Wv = nn.Linear(d_hiddens, d_hiddens, bias=bias)
+        self.Wo = nn.Linear(d_hiddens, d_hiddens, bias=bias)
 
     @staticmethod
-    def split_heads(X_nqd: torch.Tensor, n_heads: int) -> torch.Tensor:
+    def split_heads(X, h_heads):
         """Transposition for parallel computation of multiple attention heads."""
         # Shape of input X: (batch_size, no. of queries or key-value pairs,
         # num_hiddens). Shape of output X: (batch_size, no. of queries or
         # key-value pairs, num_heads, num_hiddens / num_heads)
-        # m = n * h
-        # k = d / h
-        X_nqhk = X_nqd.reshape(X_nqd.shape[0], X_nqd.shape[1], n_heads, -1)
+        X = X.reshape(X.shape[0], X.shape[1], h_heads, -1)
         # Shape of output X: (batch_size, num_heads, no. of queries or key-value
         # pairs, num_hiddens / num_heads)
-        X_nhqk = X_nqhk.permute(0, 2, 1, 3)
+        X = X.permute(0, 2, 1, 3)
         # Shape of output: (batch_size * num_heads, no. of queries or key-value
         # pairs, num_hiddens / num_heads)
-        return X_nhqk.reshape(-1, X_nhqk.shape[2], X_nhqk.shape[3])  # _mqk
+        return X.reshape(-1, X.shape[2], X.shape[3])
 
     @staticmethod
     def split_attention_mask(attention_mask, h_heads):
@@ -303,104 +281,107 @@ class MultiHeadAttention(nn.Module):
         return attention_mask
 
     @staticmethod
-    def merge_heads(X_mqk: torch.Tensor, n_heads: int) -> torch.Tensor:
+    def merge_heads(X, h_heads):
         # reverse of split_heads
-        X_nhqk = X_mqk.reshape(-1, n_heads, X_mqk.shape[1], X_mqk.shape[2])
-        X_nqhk = X_nhqk.permute(0, 2, 1, 3)
-        return X_nqhk.reshape(X_nqhk.shape[0], X_nqhk.shape[1], -1)  # _nqd
+        X = X.reshape(-1, h_heads, X.shape[1], X.shape[2])
+        X = X.permute(0, 2, 1, 3)
+        return X.reshape(X.shape[0], X.shape[1], -1)
 
     def forward(
         self,
-        queries_nqd: torch.Tensor,
-        keys_nsd: torch.Tensor,
-        values_nsd: torch.Tensor,
-        prefix_len_n: torch.Tensor,
-    ) -> torch.Tensor:
+        queries_nqd,
+        keys_nsd,
+        values_nsd,
+        prefix_len_n,
+    ):
         # Shape of queries, keys, or values:
         # (batch_size, no. of queries or key-value pairs, num_hiddens)
         # Shape of valid_lens: (batch_size,) or (batch_size, no. of queries)
         # After transposing, shape of output queries, keys, or values:
         # (batch_size * num_heads, no. of queries or key-value pairs,
         # num_hiddens / num_heads)
-        n_heads = self.n_heads
+        h_heads = self.h_heads
         queries_nqd = self.Wq(queries_nqd)
         keys_nsd = self.Wk(keys_nsd)
         values_nsd = self.Wv(values_nsd)
         # m = n * h
         # k = d / h
-        queries_mqk = self.split_heads(queries_nqd, n_heads)
-        keys_msk = self.split_heads(keys_nsd, n_heads)
-        values_msk = self.split_heads(values_nsd, n_heads)
+        queries_mqk = self.split_heads(queries_nqd, h_heads)
+        keys_msk = self.split_heads(keys_nsd, h_heads)
+        values_msk = self.split_heads(values_nsd, h_heads)
         # attention_mask_mqs = self.split_attention_mask(attention_mask_nqs, h_heads)
-        # prefix_len_m = prefix_len_n.repeat(1, n_heads).reshape(-1)  WRONG!
-        prefix_len_m = prefix_len_n.repeat_interleave(n_heads)
+        prefix_len_m = prefix_len_n.repeat(1, h_heads).reshape(-1)
 
         # Shape of output: (batch_size * num_heads, no. of queries,
         # num_hiddens / num_heads)
-        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, prefix_len_m)
+        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, prefix_len_n=prefix_len_m)
         # Shape of output_concat: (batch_size, no. of queries, num_hiddens)
-        output_nqd = self.merge_heads(output_mqk, n_heads)
+        output_nqd = self.merge_heads(output_mqk, h_heads)
         return self.Wo(output_nqd)  # _nqd
 
 
 class PositionWiseFFN(nn.Module):
     """The positionwise feed-forward network."""
 
-    def __init__(self, n_intermediates: int, n_hiddens: int, use_bias: bool) -> None:
+    def __init__(self, mlp_hiddens, d_hiddens, use_bias):
         super().__init__()
-        self.dense1 = nn.Linear(n_hiddens, n_intermediates, bias=use_bias)
+        self.dense1 = nn.Linear(d_hiddens, mlp_hiddens, bias=use_bias)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(n_intermediates, n_hiddens, bias=use_bias)
+        self.dense2 = nn.Linear(mlp_hiddens, d_hiddens, bias=use_bias)
 
-    def forward(self, X_nd: torch.Tensor) -> torch.Tensor:
+    def forward(self, X_nd):
         return self.dense2(self.relu(self.dense1(X_nd)))
 
 
 class ValueEmbedding(nn.Module):
     """The positionwise feed-forward network."""
 
-    def __init__(self, n_hiddens: int, use_bias: bool) -> None:
+    def __init__(self, d_hiddens, use_bias):
         super().__init__()
-        self.dense1 = nn.Linear(1, n_hiddens, bias=use_bias)
+        self.dense1 = nn.Linear(1, d_hiddens, bias=use_bias)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+        self.dense2 = nn.Linear(d_hiddens, d_hiddens, bias=use_bias)
 
-    def forward(self, X_nd: torch.Tensor) -> torch.Tensor:
+    def forward(self, X_nd):
         return self.dense2(self.relu(self.dense1(X_nd)))
 
 
 class NormAdd(nn.Module):
     """Pre-norm layer where the layer normalization is applied before the sublayer."""
 
-    def __init__(self, norm_shape: int, dropout: float) -> None:
+    def __init__(self, norm_shape, dropout):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.ln = nn.LayerNorm(norm_shape)
 
-    def forward(self, X: torch.Tensor, sublayer: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
-        return X + self.dropout(sublayer(self.ln(X)))
+    # def forward(self, X, sublayer):
+    #     return X + self.dropout(sublayer(self.ln(X)))
+    def forward(self, X, Y):
+        return X + self.ln(self.dropout(Y))
 
 
 class TransformerBlock(nn.Module):
     def __init__(
         self,
-        n_hiddens: int,
-        n_intermediates: int,
-        n_heads: int,
+        d_hiddens: int,
+        f_hiddens: int,
+        h_heads: int,
         dropout: float,
         attn_mult: float,
-        use_bias: bool,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
-    ) -> None:
+        use_bias: bool = False,
+    ):
         super().__init__()
-        self.attention = MultiHeadAttention(n_hiddens, n_heads, dropout, attn_mult, use_bias, backend)
-        self.normadd1 = NormAdd(n_hiddens, dropout)
-        self.ffn = PositionWiseFFN(n_intermediates, n_hiddens, use_bias)
-        self.normadd2 = NormAdd(n_hiddens, dropout)
+        self.attention = MultiHeadAttention(d_hiddens, h_heads, dropout, attn_mult, use_bias)
+        self.normadd1 = NormAdd(d_hiddens, dropout)
+        self.ffn = PositionWiseFFN(f_hiddens, d_hiddens, use_bias)
+        self.normadd2 = NormAdd(d_hiddens, dropout)
 
-    def forward(self, X: torch.Tensor, prefix_len_n: torch.Tensor) -> torch.Tensor:
-        Y = self.normadd1(X, lambda X: self.attention(X, X, X, prefix_len_n))
-        return self.normadd2(Y, lambda Y: self.ffn(Y))
+    # def forward(self, X, prefix_len_n):
+    #     Y = self.normadd1(X, lambda X: self.attention(X, X, X, prefix_len_n))
+    #     return self.normadd2(Y, lambda Y: self.ffn(Y))
+    def forward(self, X, prefix_len_n, attention_type="block"):
+        Y = self.normadd1(X, self.attention(X, X, X, prefix_len_n))
+        return self.normadd2(Y, self.ffn(Y))
 
 
 class CellariumGPT(CellariumModel, HyperparametersMixin):
@@ -488,7 +469,6 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         initializer_range: float = 0.02,
         importance_sampling: bool = False,
         skip: bool = False,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
     ):
         super().__init__()
         self.save_hyperparameters(logger=True)
@@ -502,13 +482,15 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         self.skip = skip
         # skip
         if self.skip:
-            self.query_embedding = nn.Embedding(self.n_vars + 1, n_hiddens // 2)
-            self.skip_attention = DotProductAttention(dropout, math.sqrt(n_hiddens), backend=backend)
-            self.Wk = nn.Linear(n_hiddens, n_hiddens // 2, bias=use_bias)
-            self.W = torch.nn.Parameter(torch.randn(n_vars + 1, n_hiddens, 2) * 0.02)
-        else:
-            # no mask token in predictions
-            self.dense = nn.Linear(n_hiddens, 2, bias=use_bias)
+            self.query_embedding = nn.Embedding(self.n_vars + 1, n_hiddens)
+            self.skip_attention = MultiHeadAttention(n_hiddens, n_heads, dropout, attn_mult, use_bias)
+            self.skip_normadd1 = NormAdd(n_hiddens, dropout)
+            self.skip_ffn = PositionWiseFFN(n_intermediates, n_hiddens, use_bias)
+            self.skip_normadd2 = NormAdd(n_hiddens, dropout)
+
+        # self.var_ids_g: torch.Tensor
+        # ids for the features, 0 is for cls
+        # self.register_buffer("var_ids_g", torch.arange(self.n_vars + 1))
 
         # +1 for cls
         self.id_embedding = nn.Embedding(self.n_vars + 1, n_hiddens)
@@ -526,11 +508,12 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                     dropout,
                     attn_mult,
                     use_bias,
-                    backend,
                 )
                 for i in range(n_blocks)
             ]
         )
+        # no mask token in predictions
+        self.dense = nn.Linear(n_hiddens, 2, bias=use_bias)
 
         self.n_context = n_context  # or len(self.filter.filter_list)
         self.initializer_range = initializer_range
@@ -653,109 +636,54 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             )
             # attention_weights[i] = block.attention.attention.attention_probs_nqs
 
-        # attention_weights = None
+        attention_weights = None
         if self.skip:
-            queries_ncd = self.query_embedding(gene_ids)
-            keys_ncd = self.Wk(hidden_ncd)
-            hidden_ncd = self.skip_attention(queries_ncd, keys_ncd, hidden_ncd, prefix_len_n)
-            logits = (hidden_ncd.unsqueeze(-2) @ self.W[gene_ids]).squeeze(-2) * self.output_mult
-            # attention_weights = self.skip_attention.attention.attention_probs_nqs
-        else:
-            logits = self.dense(hidden_ncd) * self.output_mult
+            queries = self.query_embedding(gene_ids)
+            hidden_ncd[labels_mask_nc] = queries[labels_mask_nc]
+            Y = self.skip_normadd1(0, self.skip_attention(queries, hidden_ncd, hidden_ncd, prefix_len_n))
+            hidden_ncd = self.skip_normadd2(0, self.skip_ffn(Y))
+            attention_weights = self.skip_attention.attention.attention_probs_nqs
 
-        total_mrna_umis_nc = total_mrna_umis_n.unsqueeze(1).expand(-1, self.n_context)
+        logits = self.dense(hidden_ncd) * self.output_mult
         mu_nc = logits[:, :, 0].sigmoid()
         theta_nc = logits[:, :, 1].exp()
         mu = mu_nc[labels_mask_nc]
         theta = theta_nc[labels_mask_nc]
+        total_mrna_umis_nc = total_mrna_umis_n.unsqueeze(1).expand(-1, self.n_context)
         total_mrna_umis = total_mrna_umis_nc[labels_mask_nc]
         model_dist = NegativeBinomial(mu=mu * total_mrna_umis, theta=theta)
         log_prob = model_dist.log_prob(labels_nc[labels_mask_nc])
         sample_weights = sample_weights_nc[labels_mask_nc]
         loss = -(log_prob * label_weights * sample_weights).sum() / sample_weights.sum()
 
+        with torch.no_grad():
+            nonzero_mask = labels_nc > 0
+            nonzero_log_prob = NegativeBinomial(
+                mu=mu_nc[nonzero_mask] * total_mrna_umis_nc[nonzero_mask], theta=theta_nc[nonzero_mask]
+            ).log_prob(labels_nc[nonzero_mask])
+            nonzero_sample_weights = sample_weights_nc[nonzero_mask]
+            nonzero_loss = -(nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
+
+            zero_mask = labels_nc == 0
+            zero_log_prob = NegativeBinomial(
+                mu=mu_nc[zero_mask] * total_mrna_umis_nc[zero_mask], theta=theta_nc[zero_mask]
+            ).log_prob(labels_nc[zero_mask])
+            zero_sample_weights = sample_weights_nc[zero_mask]
+            zero_loss = -(zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
+
+            prefix_len_nc = prefix_len_n[:, None].expand(-1, self.n_context)
         return {
             "loss": loss,
-            "labels_nc": labels_nc,
+            "nonzero_loss": nonzero_loss,
+            "zero_loss": zero_loss,
+            "logits": logits,
+            "nonzero_mask": nonzero_mask,
+            "zero_mask": zero_mask,
+            "labels": labels_nc,
+            "prefix_len_nc": prefix_len_nc,
             "mu_nc": mu_nc,
             "theta_nc": theta_nc,
-            "total_mrna_umis_nc": total_mrna_umis_nc,
-            "sample_weights_nc": sample_weights_nc,
-            "prefix_len_n": prefix_len_n,
-            # "attention_weights": attention_weights,
+            "nonzero_log_prob": nonzero_log_prob,
+            "zero_log_prob": zero_log_prob,
+            "attention_weights": attention_weights,
         }
-
-    @torch.no_grad()
-    def on_batch_end(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule, outputs: STEP_OUTPUT, batch: Any, batch_idx: int
-    ) -> None:
-
-        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
-            return
-
-        labels_nc = outputs["labels_nc"]
-        mu_nc = outputs["mu_nc"]
-        theta_nc = outputs["theta_nc"]
-        total_mrna_umis_nc = outputs["total_mrna_umis_nc"]
-        sample_weights_nc = outputs["sample_weights_nc"]
-        prefix_len_n = outputs["prefix_len_n"]
-
-        nonzero_mask = labels_nc > 0
-        nonzero_log_prob = NegativeBinomial(
-            mu=mu_nc[nonzero_mask] * total_mrna_umis_nc[nonzero_mask], theta=theta_nc[nonzero_mask]
-        ).log_prob(labels_nc[nonzero_mask])
-        nonzero_sample_weights = sample_weights_nc[nonzero_mask]
-        nonzero_loss = -(nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
-
-        zero_mask = labels_nc == 0
-        zero_log_prob = NegativeBinomial(
-            mu=mu_nc[zero_mask] * total_mrna_umis_nc[zero_mask], theta=theta_nc[zero_mask]
-        ).log_prob(labels_nc[zero_mask])
-        zero_sample_weights = sample_weights_nc[zero_mask]
-        zero_loss = -(zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
-
-        pl_module.log("zero_loss", zero_loss, sync_dist=True)
-        pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
-
-        if trainer.global_rank != 0:
-            return
-
-        if (trainer.global_step + 1) % (trainer.log_every_n_steps * 10) != 0:  # type: ignore[attr-defined]
-            return
-
-        fig = plt.figure(figsize=(12, 15))
-
-        nonzero_indices = random.sample(range(nonzero_mask.sum().item()), 24)
-        prefix_len_nc = prefix_len_n[:, None].expand(-1, self.n_context)
-
-        for idx, i in enumerate(nonzero_indices):
-            plt.subplot(8, 4, idx + 1)
-            prefix = prefix_len_nc[nonzero_mask][i].item()
-            label = labels_nc[nonzero_mask][i].item()
-            mu = mu_nc[nonzero_mask][i].cpu()
-            theta = theta_nc[nonzero_mask][i].cpu()
-            n_umis = total_mrna_umis_nc[nonzero_mask][i].item()
-
-            dist = NegativeBinomial(mu=mu * n_umis, theta=theta)
-            x = torch.arange(0, label * 3 + 5)
-            y = dist.log_prob(x).exp()
-            plt.plot(x, y, "o")
-            plt.vlines(label, 0, dist.log_prob(torch.tensor(label)).exp(), color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
-
-        plt.tight_layout()
-        # fig.canvas.draw()
-        # img = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
-        # img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-
-        # # Normalize into 0-1 range for TensorBoard(X). Swap axes for newer versions where API expects colors in first dim
-        # img = img / 255.0
-        # img = np.swapaxes(img, 0, 2)  # if your TensorFlow + TensorBoard version are >= 1.8
-
-        for logger in trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                logger.experiment.add_figure(
-                    "predictions",
-                    fig,
-                    global_step=trainer.global_step,
-                )

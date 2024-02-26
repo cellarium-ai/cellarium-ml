@@ -212,10 +212,7 @@ class CellariumModule(pl.LightningModule):
         if loss is not None:
             # Logging to TensorBoard by default
             self.log("train_loss", loss, sync_dist=True)
-        if "zero_loss" in output and "nonzero_loss" in output:
-            self.log("zero_loss", output["zero_loss"], sync_dist=True)
-            self.log("nonzero_loss", output["nonzero_loss"], sync_dist=True)
-        return loss
+        return output
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         """
@@ -299,4 +296,4 @@ class CellariumModule(pl.LightningModule):
         """
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
-            on_batch_end(self.trainer)
+            on_batch_end(self.trainer, self, outputs, batch, batch_idx)
