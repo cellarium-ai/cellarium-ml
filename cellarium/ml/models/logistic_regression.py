@@ -90,11 +90,11 @@ class LogisticRegression(CellariumModel):
     def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
-            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
+            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),  # type: ignore[attr-defined]
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
+            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)  # type: ignore[attr-defined]
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))

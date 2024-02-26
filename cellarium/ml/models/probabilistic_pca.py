@@ -82,15 +82,15 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             assert mean_g.shape == (n_vars,), f"Expected meang_g to have a shape ({n_vars},) but found {mean_g.shape}."
         if mean_g is None:
             # make mean_g a learnable parameter
-            self.mean_g = PyroParam(lambda: torch.zeros(n_vars))
+            self.mean_g = PyroParam(lambda: torch.zeros(n_vars))  # type: ignore[call-arg]
         else:
             self.register_buffer("mean_g", torch.as_tensor(mean_g))
 
         rng = torch.Generator()
         rng.manual_seed(seed)
         # model parameters
-        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((n_components, n_vars), generator=rng))
-        self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)
+        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((n_components, n_vars), generator=rng))  # type: ignore[call-arg]
+        self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)  # type: ignore[call-arg]
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -106,7 +106,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng)  # type: ignore[attr-defined]
         return {"loss": loss}
 
     def model(self, x_ng: torch.Tensor) -> None:
@@ -114,21 +114,21 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             if self.ppca_flavor == "marginalized":
                 pyro.sample(
                     "counts",
-                    dist.LowRankMultivariateNormal(
+                    dist.LowRankMultivariateNormal(  # type: ignore[attr-defined]
                         loc=self.mean_g,
-                        cov_factor=self.W_kg.T,
-                        cov_diag=self.sigma**2 * x_ng.new_ones(self.n_vars),
+                        cov_factor=self.W_kg.T,  # type: ignore[attr-defined]
+                        cov_diag=self.sigma**2 * x_ng.new_ones(self.n_vars),  # type: ignore[operator]
                     ),
                     obs=x_ng,
                 )
             else:
                 z_nk = pyro.sample(
                     "z",
-                    dist.Normal(x_ng.new_zeros(self.n_components), 1).to_event(1),
+                    dist.Normal(x_ng.new_zeros(self.n_components), 1).to_event(1),  # type: ignore[attr-defined]
                 )
                 pyro.sample(
                     "counts",
-                    dist.Normal(self.mean_g + z_nk @ self.W_kg, self.sigma).to_event(1),
+                    dist.Normal(self.mean_g + z_nk @ self.W_kg, self.sigma).to_event(1),  # type: ignore[attr-defined]
                     obs=x_ng,
                 )
 
@@ -139,7 +139,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         with pyro.plate("cells", size=self.n_obs, subsample_size=x_ng.shape[0]):
             V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
-            pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
+            pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))  # type: ignore[attr-defined]
 
     def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
@@ -168,7 +168,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
 
     @property
     def M_kk(self) -> torch.Tensor:
-        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.n_components, device=self.sigma.device)
+        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.n_components, device=self.sigma.device)  # type: ignore[attr-defined, operator]
 
     @property
     @torch.inference_mode()
@@ -179,8 +179,8 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        S_k = torch.linalg.svdvals(self.W_kg.T)
-        return S_k**2 + self.sigma**2
+        S_k = torch.linalg.svdvals(self.W_kg.T)  # type: ignore[attr-defined]
+        return S_k**2 + self.sigma**2  # type: ignore[operator]
 
     @property
     @torch.inference_mode()
@@ -191,7 +191,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return torch.linalg.svd(self.W_kg.T, full_matrices=False).U
+        return torch.linalg.svd(self.W_kg.T, full_matrices=False).U  # type: ignore[attr-defined]
 
     @property
     @torch.inference_mode()
@@ -200,7 +200,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return torch.trace(self.W_kg.T @ self.W_kg).item()
+        return torch.trace(self.W_kg.T @ self.W_kg).item()  # type: ignore[attr-defined]
 
     @property
     @torch.inference_mode()
@@ -209,4 +209,4 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return (self.n_vars * self.sigma**2).item()
+        return (self.n_vars * self.sigma**2).item()  # type: ignore[attr-defined, operator]
