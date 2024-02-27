@@ -189,6 +189,6 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     assert ckpt_path.is_file()
     loaded_model: ProbabilisticPCA = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
-    np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())
-    np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())
-    np.testing.assert_allclose(model.mean_g.detach(), loaded_model.mean_g.detach())
+    np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())  # type: ignore[attr-defined]
+    np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())  # type: ignore[attr-defined]
+    np.testing.assert_allclose(model.mean_g.detach(), loaded_model.mean_g.detach())  # type: ignore[attr-defined]
