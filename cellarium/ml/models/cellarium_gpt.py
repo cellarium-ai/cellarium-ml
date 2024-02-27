@@ -193,7 +193,7 @@ class DotProductAttention(nn.Module):
         keys_nsd: torch.Tensor,
         values_nsv: torch.Tensor,
         prefix_len_n: torch.Tensor,
-        mask_type: str = "block",
+        mask_type: str = "block_diag",
     ) -> torch.Tensor:
         n, q, d = queries_nqd.shape
         s = keys_nsd.shape[1]
@@ -506,9 +506,6 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             self.skip_attention = DotProductAttention(dropout, math.sqrt(n_hiddens), backend=backend)
             self.Wk = nn.Linear(n_hiddens, n_hiddens // 2, bias=use_bias)
             self.W = torch.nn.Parameter(torch.randn(n_vars + 1, n_hiddens, 2) * 0.02)
-        else:
-            # no mask token in predictions
-            self.dense = nn.Linear(n_hiddens, 2, bias=use_bias)
 
         # +1 for cls
         self.id_embedding = nn.Embedding(self.n_vars + 1, n_hiddens)
@@ -531,6 +528,9 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                 for i in range(n_blocks)
             ]
         )
+        if not self.skip:
+            # no mask token in predictions
+            self.dense = nn.Linear(n_hiddens, 2, bias=use_bias)
 
         self.n_context = n_context  # or len(self.filter.filter_list)
         self.initializer_range = initializer_range
