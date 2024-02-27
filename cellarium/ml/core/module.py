@@ -55,14 +55,21 @@ class CellariumModule(pl.LightningModule):
     ) -> None:
         super().__init__()
 
+        # We avoid saving the `nn.Module` objects to the hparams because that will save a copy
+        # of model weights which already are being saved in the model checkpoint's `state_dict`.
+        # Instead, we save the class name and the init args which then can be used to
+        # re-initialize the model and transforms.
+        # In order to achieve this, we temporarily re-assign `model` and `transforms` to their un-initialized states
+        # and then call `save_hyperparameters` which will save these values as hparams.
+        # Then, we re-assign `model` and `transforms` back to their initialized states.
+        # `initialize_object` handles the case when the object was passed as a dictionary of class path and init args.
         _transforms, _model = transforms, model
-
         transforms = [uninitialize_object(transform) for transform in _transforms] if _transforms is not None else None
         model = uninitialize_object(_model)
         self.save_hyperparameters(logger=False)
-
         transforms = [initialize_object(transform) for transform in _transforms] if _transforms is not None else None
         model = initialize_object(_model)
+
         self.pipeline = CellariumPipeline(transforms)
         if model is None:
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")

@@ -80,6 +80,15 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         num_workers: int = 0,
     ) -> None:
         super().__init__()
+
+        # We avoid saving the `DistributedAnnDataCollection` object to the hparams because that will save
+        # anndata objects in the model checkpoint.
+        # Instead, we save the class name and the init args which then can be used to
+        # re-initialize the distributed anndata.
+        # In order to achieve this, we temporarily re-assign `dadc` to its un-initialized state
+        # and then call `save_hyperparameters` which will save these values as hparams.
+        # Then, we re-assign `dadc` back to its initialized state.
+        # `initialize_object` handles the case when the object was passed as a dictionary of class path and init args.
         _dadc = dadc
         dadc = uninitialize_object(_dadc)
         self.save_hyperparameters(logger=False)
