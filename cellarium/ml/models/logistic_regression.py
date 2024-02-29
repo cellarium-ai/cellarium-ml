@@ -49,7 +49,6 @@ class LogisticRegression(CellariumModel):
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(logger=False)
 
         # data
         self.n_obs = n_obs
@@ -57,18 +56,27 @@ class LogisticRegression(CellariumModel):
         self.n_vars = len(var_names_g)
         self.n_categories = n_categories
 
-        rng = torch.Generator()
-        rng.manual_seed(seed)
+        self.seed = seed
         # parameters
+        self._W_prior_scale = W_prior_scale
+        self.W_init_scale = W_init_scale
         self.W_prior_scale: torch.Tensor
-        self.register_buffer("W_prior_scale", torch.tensor(W_prior_scale))
-        self.W_gc = torch.nn.Parameter(W_init_scale * torch.randn((self.n_vars, n_categories), generator=rng))
-        self.b_c = torch.nn.Parameter(torch.zeros(n_categories))
+        self.register_buffer("W_prior_scale", torch.empty(()))
+        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, n_categories))
+        self.b_c = torch.nn.Parameter(torch.empty(n_categories))
+        self.reset_parameters()
 
         # loss
         self.elbo = pyro.infer.Trace_ELBO()
 
         self.log_metrics = log_metrics
+
+    def reset_parameters(self) -> None:
+        rng = torch.Generator()
+        rng.manual_seed(self.seed)
+        self.W_prior_scale.fill_(self._W_prior_scale)
+        self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
+        self.b_c.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor) -> dict[str, torch.Tensor | None]:
         """
@@ -91,11 +99,11 @@ class LogisticRegression(CellariumModel):
     def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
-            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
+            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),  # type: ignore[attr-defined]
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
+            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)  # type: ignore[attr-defined]
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))

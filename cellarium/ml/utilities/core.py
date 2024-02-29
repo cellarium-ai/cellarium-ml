@@ -1,46 +1,34 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import warnings
-from functools import singledispatch
-from typing import Any
+import copy
 
-from jsonargparse._util import import_object
-from lightning.pytorch.core.mixins import HyperparametersMixin
+import torch
 
 
-@singledispatch
-def uninitialize_object(value):
+def copy_module(
+    module: torch.nn.Module, self_device: torch.device, copy_device: torch.device
+) -> tuple[torch.nn.Module, torch.nn.Module]:
     """
-    Given an object, return a dictionary containing the class path and the init args.
+    Return an original module on ``self_device`` and its copy on ``copy_device``.
+    If the module is on meta device then it is moved to ``self_device`` efficiently using ``to_empty`` method.
+
+    Args:
+        module:
+            The module to copy.
+        self_device:
+            The device to send the original module to.
+        copy_device:
+            The device to copy the module to.
+
+    Returns:
+        A tuple of the original module and its copy.
     """
-    return value
-
-
-@uninitialize_object.register
-def _(value: HyperparametersMixin) -> dict[str, Any]:
-    if not value.hparams:
-        warnings.warn(
-            f"Module {value.__class__.__name__} has no hyperparameters. "
-            "Consider using `save_hyperparameters` to save the module's hyperparameters.",
-            UserWarning,
-        )
-    return {"class_path": f"{value.__module__}.{value.__class__.__name__}", "init_args": value.hparams}
-
-
-@singledispatch
-def initialize_object(value):
-    """
-    Given a class path and init args, return an object.
-    """
-    return value
-
-
-@initialize_object.register
-def _(value: str) -> HyperparametersMixin:
-    return initialize_object({"class_path": value, "init_args": {}})
-
-
-@initialize_object.register
-def _(value: dict) -> HyperparametersMixin:
-    return import_object(value["class_path"])(**value["init_args"])
+    module_copy = copy.deepcopy(module).to(copy_device)
+    if any(param.device.type == "meta" for param in module.parameters()) or any(
+        buffer.device.type == "meta" for buffer in module.buffers()
+    ):
+        module.to_empty(device=self_device)
+    else:
+        module.to(device=self_device)
+    return module, module_copy

@@ -12,7 +12,7 @@ from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerC
 
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.models import CellariumModel
-from cellarium.ml.utilities.core import initialize_object, uninitialize_object
+from cellarium.ml.utilities.core import copy_module
 
 
 class CellariumModule(pl.LightningModule):
@@ -42,6 +42,10 @@ class CellariumModule(pl.LightningModule):
             A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
         scheduler_kwargs:
             Keyword arguments for lr scheduler.
+        is_initialized:
+            Whether the model has been initialized. This is set to ``False`` by default under the assumption that
+            ``torch.device("meta")`` context was used and is set to ``True`` after
+            the first call to :meth:`configure_model`.
     """
 
     def __init__(
@@ -52,43 +56,67 @@ class CellariumModule(pl.LightningModule):
         optim_kwargs: dict[str, Any] | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | None = None,
         scheduler_kwargs: dict[str, Any] | None = None,
+        is_initialized: bool = False,
     ) -> None:
         super().__init__()
-
-        # We avoid saving the `nn.Module` objects to the hparams because that will save a copy
-        # of model weights which already are being saved in the model checkpoint's `state_dict`.
-        # Instead, we save the class name and the init args which then can be used to
-        # re-initialize the model and transforms.
-        # In order to achieve this, we temporarily re-assign `model` and `transforms` to their un-initialized states
-        # and then call `save_hyperparameters` which will save these values as hparams.
-        # Then, we re-assign `model` and `transforms` back to their initialized states.
-        # `initialize_object` handles the case when the object was passed as a dictionary of class path and init args.
-        _transforms, _model = transforms, model
-        transforms = [uninitialize_object(transform) for transform in _transforms] if _transforms is not None else None
-        model = uninitialize_object(_model)
         self.save_hyperparameters(logger=False)
-        transforms = [initialize_object(transform) for transform in _transforms] if _transforms is not None else None
-        model = initialize_object(_model)
+        self.pipeline: CellariumPipeline | None = None
+
+    def configure_model(self) -> None:
+        # This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
+        # implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
+        # calls to it should be a no-op.
+        if self.pipeline is not None:
+            return
+
+        # Steps involved in configuring the model:
+        # 1. Make a copy of modules on the meta device and assign to hparams.
+        # 2. Send the original modules to the host device and assign to self.
+        # 3. Reset the model parameters if it has not been initialized before.
+        #
+        # Benefits of this approach:
+        # 1. Modules stored in the checkpoint are on the meta device.
+        # 2. Loading from a checkpoint skips a wasteful step of initialization of module parameters
+        #    before loading the state_dict.
+        # 3. The modules are directly initialized on the host gpu device instead of being initialized on the cpu
+        #    and then moved to the gpu device (given that ``CellariumModule`` was initialized under
+        #    the ``torch.device("meta")`` contex).
+        model, self.hparams["model"] = copy_module(
+            self.hparams["model"], self_device=self.device, copy_device=torch.device("meta")
+        )
+        if self.hparams["transforms"]:
+            transforms, self.hparams["transforms"] = zip(
+                *(
+                    copy_module(transform, self_device=self.device, copy_device=torch.device("meta"))
+                    for transform in self.hparams["transforms"]
+                )
+            )
+        else:
+            transforms = None
 
         self.pipeline = CellariumPipeline(transforms)
         if model is None:
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
         self.pipeline.append(model)
 
-        # set up optimizer and scheduler
-        self.optim_fn = optim_fn
-        self.optim_kwargs = optim_kwargs or {}
-        self.scheduler_fn = scheduler_fn
-        self.scheduler_kwargs = scheduler_kwargs or {}
+        if not self.hparams["is_initialized"]:
+            model.reset_parameters()
+            self.hparams["is_initialized"] = True
 
     @property
     def model(self) -> CellariumModel:
         """The model"""
+        if self.pipeline is None:
+            raise ValueError("The model is not configured. Call `configure_model` before accessing the model.")
+
         return self.pipeline[-1]
 
     @property
     def transforms(self) -> CellariumPipeline:
         """The transforms pipeline"""
+        if self.pipeline is None:
+            raise ValueError("The model is not configured. Call `configure_model` before accessing the model.")
+
         return self.pipeline[:-1]
 
     def training_step(  # type: ignore[override]
@@ -106,6 +134,9 @@ class CellariumModule(pl.LightningModule):
         Returns:
             Loss tensor or ``None`` if no loss.
         """
+        if self.pipeline is None:
+            raise ValueError("The model is not configured. Call `configure_model` before accessing the model.")
+
         output = self.pipeline(batch)
         loss = output.get("loss")
         if loss is not None:
@@ -123,22 +154,28 @@ class CellariumModule(pl.LightningModule):
         Returns:
             A dictionary containing the batch data and inference outputs.
         """
+        if self.pipeline is None:
+            raise ValueError("The model is not initialized. Call `configure_model` before accessing the model.")
+
         return self.pipeline.predict(batch)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
         """Configure optimizers for the model."""
-        if self.optim_fn is None:
-            if self.optim_kwargs:
+        optim_fn = self.hparams["optim_fn"]
+        optim_kwargs = self.hparams["optim_kwargs"] or {}
+        scheduler_fn = self.hparams["scheduler_fn"]
+        scheduler_kwargs = self.hparams["scheduler_kwargs"] or {}
+
+        if optim_fn is None:
+            if optim_kwargs:
                 warnings.warn("Optimizer kwargs are provided but no optimizer is defined.", UserWarning)
-            if self.scheduler_fn is not None:
+            if scheduler_fn is not None:
                 warnings.warn("Scheduler is defined but no optimizer is defined.", UserWarning)
             return None
 
-        optim_config: OptimizerLRSchedulerConfig = {
-            "optimizer": self.optim_fn(self.model.parameters(), **self.optim_kwargs)
-        }
-        if self.scheduler_fn is not None:
-            scheduler = self.scheduler_fn(optim_config["optimizer"], **self.scheduler_kwargs)
+        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
+        if scheduler_fn is not None:
+            scheduler = scheduler_fn(optim_config["optimizer"], **scheduler_kwargs)
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
         return optim_config
 

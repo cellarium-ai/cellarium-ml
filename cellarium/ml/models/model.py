@@ -8,12 +8,11 @@ from typing import Any
 
 import numpy as np
 import torch
-from lightning.pytorch.core.mixins import HyperparametersMixin
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
 
 
-class CellariumModel(torch.nn.Module, HyperparametersMixin, metaclass=ABCMeta):
+class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
     """
     Base class for Cellarium ML compatible models.
     """
@@ -23,6 +22,12 @@ class CellariumModel(torch.nn.Module, HyperparametersMixin, metaclass=ABCMeta):
         super().__init__()
 
     __call__: Callable[..., torch.Tensor | None]
+
+    @abstractmethod
+    def reset_parameters(self) -> None:
+        """
+        Reset the model parameters that were constructed in the __init__ method.
+        """
 
     def __getattr__(self, name: str) -> Any:
         if "_pyro_params" in self.__dict__:

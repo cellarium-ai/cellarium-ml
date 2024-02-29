@@ -275,6 +275,12 @@ def lightning_cli_factory(
                 args=args,
             )
 
+        def instantiate_classes(self) -> None:
+            with torch.device("meta"):
+                # skip the initialization of model parameters
+                # parameters are later initialized by the  `CellariumModule.configure_model` method
+                return super().instantiate_classes()
+
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
             if link_arguments is not None:
                 for link in link_arguments:

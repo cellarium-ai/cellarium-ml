@@ -15,7 +15,6 @@ from anndata.experimental.multi_files._anncollection import (
 )
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
-from lightning.pytorch.core.mixins import HyperparametersMixin
 
 from cellarium.ml.data.fileio import read_h5ad_file
 from cellarium.ml.data.schema import AnnDataSchema
@@ -78,7 +77,7 @@ class DistributedAnnDataCollectionView(AnnCollectionView):
         return obs_names
 
 
-class DistributedAnnDataCollection(AnnCollection, HyperparametersMixin):
+class DistributedAnnDataCollection(AnnCollection):
     r"""
     Distributed AnnData Collection.
 
@@ -171,10 +170,6 @@ class DistributedAnnDataCollection(AnnCollection, HyperparametersMixin):
         indices_strict: bool = True,
         obs_columns_to_validate: Sequence[str] | None = None,
     ):
-        super(HyperparametersMixin, self).__init__()
-        HyperparametersMixin.__init__(self)
-        self.save_hyperparameters(logger=False)
-
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
             raise ValueError("If `last_shard_size` is specified then `shard_size` must also be specified.")
@@ -205,8 +200,7 @@ class DistributedAnnDataCollection(AnnCollection, HyperparametersMixin):
             keys = self.filenames
         assert len(keys) == len(self.filenames)
         with lazy_getattr():
-            AnnCollection.__init__(
-                self,
+            super().__init__(
                 adatas=lazy_adatas,
                 join_obs=None,
                 join_obsm=None,

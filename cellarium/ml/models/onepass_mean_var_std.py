@@ -32,18 +32,23 @@ class OnePassMeanVarStd(CellariumModel):
 
     def __init__(self, var_names_g: Sequence[str]) -> None:
         super().__init__()
-        self.save_hyperparameters(logger=False)
-
         self.var_names_g = np.array(var_names_g)
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.x_sums: torch.Tensor
         self.x_squared_sums: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("x_sums", torch.zeros(n_vars))
-        self.register_buffer("x_squared_sums", torch.zeros(n_vars))
-        self.register_buffer("x_size", torch.tensor(0))
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+        self.register_buffer("x_sums", torch.empty(n_vars))
+        self.register_buffer("x_squared_sums", torch.empty(n_vars))
+        self.register_buffer("x_size", torch.empty(()))
+        self._dummy_param = torch.nn.Parameter(torch.empty(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.x_sums.zero_()
+        self.x_squared_sums.zero_()
+        self.x_size.zero_()
+        self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
