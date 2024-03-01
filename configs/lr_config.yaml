@@ -7,9 +7,13 @@ trainer:
   num_nodes: 1
   precision: null
   logger: null
-  callbacks: null
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
+      log_momentum: false
   fast_dev_run: false
-  max_epochs: 1
+  max_epochs: 10
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -22,7 +26,7 @@ trainer:
   val_check_interval: null
   check_val_every_n_epoch: 1
   num_sanity_val_steps: null
-  log_every_n_steps: null
+  log_every_n_steps: 1
   enable_checkpointing: null
   enable_progress_bar: null
   enable_model_summary: null
@@ -53,8 +57,9 @@ model:
       W_init_scale: 1.0
       seed: 0
       log_metrics: true
-  optim_fn: null
-  optim_kwargs: null
+  optim_fn: torch.optim.Adam
+  optim_kwargs:
+    lr: 0.1
   scheduler_fn: null
   scheduler_kwargs: null
 data:
@@ -88,7 +93,7 @@ data:
       key: assay
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 10_000  # Set to desired
-  shuffle: false
+  shuffle: true
   seed: 0
   drop_last: false
   test_mode: false
