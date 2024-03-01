@@ -212,6 +212,8 @@ class DotProductAttention(nn.Module):
                 block_mask = 1 - (prefix_len_n - s_range - 1).step()
                 diag_mask = 1 - (-(q_range - s_range).abs()).step()
                 attention_mask_nqs = block_mask * diag_mask
+            elif mask_type == "none":
+                attention_mask_nqs = 0
             scores_nqs = (
                 (
                     LazyTensor(queries_nqd[:, :, None, :].contiguous())
@@ -240,14 +242,21 @@ class DotProductAttention(nn.Module):
                     scale=self.attn_mult / d,
                 ).squeeze(0)
         elif self.backend == "torch":
-            block_mask = (
-                torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
-                < prefix_len_n[:, None, None]
-            )
-            diag_mask = (
-                torch.diag(torch.ones((s,), dtype=torch.bool, device=queries_nqd.device)).bool().expand([n, s, s])
-            )
-            attention_mask_nqs = block_mask | diag_mask
+            if mask_type == "block":
+                block_mask = (
+                    torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
+                    < prefix_len_n[:, None, None]
+                )
+                attention_mask_nqs = block_mask
+            elif mask_type == "block_diag":
+                block_mask = (
+                    torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
+                    < prefix_len_n[:, None, None]
+                )
+                diag_mask = (
+                    torch.diag(torch.ones((s,), dtype=torch.bool, device=queries_nqd.device)).bool().expand([n, s, s])
+                )
+                attention_mask_nqs = block_mask | diag_mask
             # Swap the last two dimensions of keys with keys.transpose(1, 2)
             scores_nqs = queries_nqd @ keys_nsd.transpose(1, 2) * self.attn_mult / d
             scores_nqs[~attention_mask_nqs] = -1e9
@@ -315,6 +324,7 @@ class MultiHeadAttention(nn.Module):
         keys_nsd: torch.Tensor,
         values_nsd: torch.Tensor,
         prefix_len_n: torch.Tensor,
+        mask_type: str = "block_diag",
     ) -> torch.Tensor:
         # Shape of queries, keys, or values:
         # (batch_size, no. of queries or key-value pairs, num_hiddens)
@@ -337,7 +347,7 @@ class MultiHeadAttention(nn.Module):
 
         # Shape of output: (batch_size * num_heads, no. of queries,
         # num_hiddens / num_heads)
-        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, prefix_len_m)
+        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, prefix_len_m, mask_type)
         # Shape of output_concat: (batch_size, no. of queries, num_hiddens)
         output_nqd = self.merge_heads(output_mqk, n_heads)
         return self.Wo(output_nqd)  # _nqd
@@ -398,8 +408,8 @@ class TransformerBlock(nn.Module):
         self.ffn = PositionWiseFFN(n_intermediates, n_hiddens, use_bias)
         self.normadd2 = NormAdd(n_hiddens, dropout)
 
-    def forward(self, X: torch.Tensor, prefix_len_n: torch.Tensor) -> torch.Tensor:
-        Y = self.normadd1(X, lambda X: self.attention(X, X, X, prefix_len_n))
+    def forward(self, X: torch.Tensor, prefix_len_n: torch.Tensor, mask_type="blog_diag") -> torch.Tensor:
+        Y = self.normadd1(X, lambda X: self.attention(X, X, X, prefix_len_n, mask_type))
         return self.normadd2(Y, lambda Y: self.ffn(Y))
 
 
@@ -503,7 +513,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         # skip
         if self.skip:
             self.query_embedding = nn.Embedding(self.n_vars + 1, n_hiddens // 2)
-            self.skip_attention = DotProductAttention(dropout, math.sqrt(n_hiddens), backend=backend)
+            self.skip_attention = DotProductAttention(dropout, math.sqrt(n_hiddens), backend="torch")
             self.Wk = nn.Linear(n_hiddens, n_hiddens // 2, bias=use_bias)
             self.W = torch.nn.Parameter(torch.randn(n_vars + 1, n_hiddens, 2) * 0.02)
 
@@ -653,13 +663,13 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             )
             # attention_weights[i] = block.attention.attention.attention_probs_nqs
 
-        # attention_weights = None
+        attention_weights = None
         if self.skip:
             queries_ncd = self.query_embedding(gene_ids)
             keys_ncd = self.Wk(hidden_ncd)
-            hidden_ncd = self.skip_attention(queries_ncd, keys_ncd, hidden_ncd, prefix_len_n)
+            hidden_ncd = self.skip_attention(queries_ncd, keys_ncd, hidden_ncd, prefix_len_n, mask_type="block")
             logits = (hidden_ncd.unsqueeze(-2) @ self.W[gene_ids]).squeeze(-2) * self.output_mult
-            # attention_weights = self.skip_attention.attention.attention_probs_nqs
+            attention_weights = self.skip_attention.attention_probs_nqs
         else:
             logits = self.dense(hidden_ncd) * self.output_mult
 
@@ -682,7 +692,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             "total_mrna_umis_nc": total_mrna_umis_nc,
             "sample_weights_nc": sample_weights_nc,
             "prefix_len_n": prefix_len_n,
-            # "attention_weights": attention_weights,
+            "attention_weights": attention_weights,
         }
 
     @torch.no_grad()
@@ -759,3 +769,30 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                     fig,
                     global_step=trainer.global_step,
                 )
+
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
+        # assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        # assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        ### prefix
+        prefix_len_n = torch.randint(1, self.n_context, (x_ng.shape[0],), device=x_ng.device)
+        x_nc = x_ng[:, : self.n_context - 1]
+        x_nc = torch.cat([total_mrna_umis_n[:, None], x_nc], dim=1)
+        indices_nc = torch.arange(self.n_context, device=x_ng.device).expand(x_nc.shape)
+        gene_ids = indices_nc
+        value_ids = torch.log1p(x_nc)
+
+        gene_ncd = self.id_embedding(gene_ids)
+        value_ncd = self.value_embedding(value_ids.unsqueeze(-1))
+        hidden_ncd = gene_ncd + value_ncd
+
+        hidden_ncd = hidden_ncd * self.input_mult
+        for i, block in enumerate(self.blocks):
+            hidden_ncd = block(
+                hidden_ncd,
+                prefix_len_n=prefix_len_n,
+                mask_type="none",
+            )
+        hiddens = hidden_ncd[:, 1:]
+        var_names = var_names_g[: self.n_context - 1]
+        return {"hiddens_ncd": hiddens, "var_names_c": var_names}
