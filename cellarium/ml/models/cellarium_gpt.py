@@ -192,8 +192,8 @@ class DotProductAttention(nn.Module):
         queries_nqd: torch.Tensor,
         keys_nsd: torch.Tensor,
         values_nsv: torch.Tensor,
-        prefix_len_n: torch.Tensor,
-        mask_type: str = "block_diag",
+        prefix_len_n: torch.Tensor | None,
+        mask_type: str,
     ) -> torch.Tensor:
         n, q, d = queries_nqd.shape
         s = keys_nsd.shape[1]
@@ -225,14 +225,21 @@ class DotProductAttention(nn.Module):
             scores_nqs = scores_nqs - 1e9 * attention_mask_nqs
             return scores_nqs.sumsoftmaxweight(LazyTensor(values_nsv.unsqueeze(1).contiguous()), dim=2)
         elif self.backend in ["math", "flash", "mem_efficient"]:
-            block_mask = (
-                torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
-                < prefix_len_n[:, None, None]
-            )
-            diag_mask = (
-                torch.diag(torch.ones((s,), dtype=torch.bool, device=queries_nqd.device)).bool().expand([n, s, s])
-            )
-            attention_mask_nqs = block_mask | diag_mask
+            if mask_type == "block":
+                block_mask = (
+                    torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
+                    < prefix_len_n[:, None, None]
+                )
+                attention_mask_nqs = block_mask
+            elif mask_type == "block_diag":
+                block_mask = (
+                    torch.arange((s), dtype=torch.short, device=queries_nqd.device).expand([s, s])
+                    < prefix_len_n[:, None, None]
+                )
+                diag_mask = (
+                    torch.diag(torch.ones((s,), dtype=torch.bool, device=queries_nqd.device)).bool().expand([n, s, s])
+                )
+                attention_mask_nqs = block_mask | diag_mask
             with sdp_kernel(**backend_map[self.backend]):
                 return nn.functional.scaled_dot_product_attention(
                     queries_nqd.unsqueeze(0),
@@ -323,8 +330,8 @@ class MultiHeadAttention(nn.Module):
         queries_nqd: torch.Tensor,
         keys_nsd: torch.Tensor,
         values_nsd: torch.Tensor,
-        prefix_len_n: torch.Tensor,
-        mask_type: str = "block_diag",
+        prefix_len_n: torch.Tensor | None,
+        mask_type: str,
     ) -> torch.Tensor:
         # Shape of queries, keys, or values:
         # (batch_size, no. of queries or key-value pairs, num_hiddens)
@@ -343,7 +350,10 @@ class MultiHeadAttention(nn.Module):
         values_msk = self.split_heads(values_nsd, n_heads)
         # attention_mask_mqs = self.split_attention_mask(attention_mask_nqs, h_heads)
         # prefix_len_m = prefix_len_n.repeat(1, n_heads).reshape(-1)  WRONG!
-        prefix_len_m = prefix_len_n.repeat_interleave(n_heads)
+        if prefix_len_n is not None:
+            prefix_len_m = prefix_len_n.repeat_interleave(n_heads)
+        else:
+            prefix_len_m = None
 
         # Shape of output: (batch_size * num_heads, no. of queries,
         # num_hiddens / num_heads)
@@ -408,7 +418,7 @@ class TransformerBlock(nn.Module):
         self.ffn = PositionWiseFFN(n_intermediates, n_hiddens, use_bias)
         self.normadd2 = NormAdd(n_hiddens, dropout)
 
-    def forward(self, X: torch.Tensor, prefix_len_n: torch.Tensor, mask_type="blog_diag") -> torch.Tensor:
+    def forward(self, X: torch.Tensor, prefix_len_n: torch.Tensor | None, mask_type) -> torch.Tensor:
         Y = self.normadd1(X, lambda X: self.attention(X, X, X, prefix_len_n, mask_type))
         return self.normadd2(Y, lambda Y: self.ffn(Y))
 
@@ -497,7 +507,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         output_mult: float = 1.0,
         initializer_range: float = 0.02,
         importance_sampling: bool = False,
-        skip: bool = False,
+        interpretable: bool = False,
         backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
     ):
         super().__init__()
@@ -509,13 +519,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         self.input_mult = input_mult
         self.output_mult = output_mult
         self.importance_sampling = importance_sampling
-        self.skip = skip
-        # skip
-        if self.skip:
-            self.query_embedding = nn.Embedding(self.n_vars + 1, n_hiddens // 2)
-            self.skip_attention = DotProductAttention(dropout, math.sqrt(n_hiddens), backend="torch")
-            self.Wk = nn.Linear(n_hiddens, n_hiddens // 2, bias=use_bias)
-            self.W = torch.nn.Parameter(torch.randn(n_vars + 1, n_hiddens, 2) * 0.02)
+        self.interpretable = interpretable
 
         # +1 for cls
         self.id_embedding = nn.Embedding(self.n_vars + 1, n_hiddens)
@@ -538,9 +542,15 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                 for i in range(n_blocks)
             ]
         )
-        if not self.skip:
-            # no mask token in predictions
-            self.dense = nn.Linear(n_hiddens, 2, bias=use_bias)
+        # skip
+        if self.interpretable:
+            self.skip_attention = DotProductAttention(dropout, math.sqrt(n_hiddens), backend="mem_efficient")
+            self.Wk = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+            self.Wq = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+            self.Wv = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+            self.ffn = PositionWiseFFN(n_intermediates, n_hiddens, use_bias)
+        # no mask token in predictions
+        self.dense = nn.Linear(n_hiddens, 2, bias=use_bias)
 
         self.n_context = n_context  # or len(self.filter.filter_list)
         self.initializer_range = initializer_range
@@ -580,13 +590,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         # assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         ### masking
-        # n_context = 5
-        # choices = [1, 2, 3, 4]
-        # prefix = 3
-        # indices = [0, 1, 2, 3, 4]
-        # labels mask = [False, False, False, True, True]
-        prefix_len_n = torch.randint(1, self.n_context, (x_ng.shape[0],), device=x_ng.device)
-        # prefix_len = torch.randint(1, self.n_context, (1,), device=x_ng.device)
+        prefix_len_n = torch.randint(2, self.n_context, (x_ng.shape[0],), device=x_ng.device)
 
         # importance sampling
         if self.importance_sampling:
@@ -660,18 +664,27 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             hidden_ncd = block(
                 hidden_ncd,
                 prefix_len_n=prefix_len_n,
+                mask_type="block" if self.interpretable else "block_diag",
             )
             # attention_weights[i] = block.attention.attention.attention_probs_nqs
 
-        attention_weights = None
-        if self.skip:
-            queries_ncd = self.query_embedding(gene_ids)
+        # attention_weights = None
+        if self.interpretable:
+            queries_ncd = self.Wq(gene_ncd)
+            values_ncd = self.Wv(gene_ncd)
             keys_ncd = self.Wk(hidden_ncd)
-            hidden_ncd = self.skip_attention(queries_ncd, keys_ncd, hidden_ncd, prefix_len_n, mask_type="block")
-            logits = (hidden_ncd.unsqueeze(-2) @ self.W[gene_ids]).squeeze(-2) * self.output_mult
-            attention_weights = self.skip_attention.attention_probs_nqs
-        else:
-            logits = self.dense(hidden_ncd) * self.output_mult
+            hidden_ncd = self.skip_attention(
+                queries_ncd[:, 1:], keys_ncd[:, 1:], hidden_ncd[:, 1:], prefix_len_n - 1, mask_type="block"
+            )
+            hidden_ncd = torch.cat(
+                [torch.zeros(hidden_ncd.shape[0], 1, hidden_ncd.shape[2], device=x_ng.device), hidden_ncd], dim=1
+            )
+            hidden_ncd = hidden_ncd + values_ncd
+            hidden_ncd = torch.relu(self.ffn(hidden_ncd))
+            # logits = (hidden_ncd.unsqueeze(-2) @ self.W[gene_ids]).squeeze(-2) * self.output_mult
+            # attention_weights = self.skip_attention.attention_probs_nqs
+
+        logits = self.dense(hidden_ncd) * self.output_mult
 
         total_mrna_umis_nc = total_mrna_umis_n.unsqueeze(1).expand(-1, self.n_context)
         mu_nc = logits[:, :, 0].sigmoid()
@@ -692,7 +705,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             "total_mrna_umis_nc": total_mrna_umis_nc,
             "sample_weights_nc": sample_weights_nc,
             "prefix_len_n": prefix_len_n,
-            "attention_weights": attention_weights,
+            # "attention_weights": attention_weights,
         }
 
     @torch.no_grad()
