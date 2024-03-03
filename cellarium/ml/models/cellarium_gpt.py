@@ -546,7 +546,9 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         if self.interpretable:
             self.skip_attention = DotProductAttention(dropout, math.sqrt(n_hiddens), backend="mem_efficient")
             self.Wk = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
-            self.Wq = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
+            self.query_embedding = nn.Embedding(self.n_vars + 1, n_hiddens)
+            # self.W = torch.nn.Parameter(torch.randn(n_vars + 1, n_hiddens, 2) * 0.02)
+            # self.Wq = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
             self.Wv = nn.Linear(n_hiddens, n_hiddens, bias=use_bias)
             self.ffn = PositionWiseFFN(n_intermediates, n_hiddens, use_bias)
         # no mask token in predictions
@@ -670,15 +672,17 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
 
         # attention_weights = None
         if self.interpretable:
-            queries_ncd = self.Wq(gene_ncd)
-            values_ncd = self.Wv(gene_ncd)
+            queries_ncd = self.query_embedding(gene_ids)
+            values_ncd = self.Wv(queries_ncd)
             keys_ncd = self.Wk(hidden_ncd)
+            # values_ncd[~labels_mask_nc] = hidden_ncd[~labels_mask_nc]
             hidden_ncd = self.skip_attention(
                 queries_ncd[:, 1:], keys_ncd[:, 1:], hidden_ncd[:, 1:], prefix_len_n - 1, mask_type="block"
             )
             hidden_ncd = torch.cat(
                 [torch.zeros(hidden_ncd.shape[0], 1, hidden_ncd.shape[2], device=x_ng.device), hidden_ncd], dim=1
             )
+            # hidden_ncd = self.skip_attention(queries_ncd, keys_ncd, hidden_ncd, prefix_len_n, mask_type="block")
             hidden_ncd = hidden_ncd + values_ncd
             hidden_ncd = torch.relu(self.ffn(hidden_ncd))
             # logits = (hidden_ncd.unsqueeze(-2) @ self.W[gene_ids]).squeeze(-2) * self.output_mult
@@ -687,12 +691,12 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         logits = self.dense(hidden_ncd) * self.output_mult
 
         total_mrna_umis_nc = total_mrna_umis_n.unsqueeze(1).expand(-1, self.n_context)
-        mu_nc = logits[:, :, 0].sigmoid()
-        theta_nc = logits[:, :, 1].exp()
+        # total_mrna_umis = total_mrna_umis_nc[labels_mask_nc]
+        mu_nc = logits[:, :, 0].sigmoid() * total_mrna_umis_nc
+        theta_nc = logits[:, :, 1].exp()  # * mu_nc**2
         mu = mu_nc[labels_mask_nc]
         theta = theta_nc[labels_mask_nc]
-        total_mrna_umis = total_mrna_umis_nc[labels_mask_nc]
-        model_dist = NegativeBinomial(mu=mu * total_mrna_umis, theta=theta)
+        model_dist = NegativeBinomial(mu=mu, theta=theta)
         log_prob = model_dist.log_prob(labels_nc[labels_mask_nc])
         sample_weights = sample_weights_nc[labels_mask_nc]
         loss = -(log_prob * label_weights * sample_weights).sum() / sample_weights.sum()
@@ -724,16 +728,14 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         prefix_len_n = outputs["prefix_len_n"]
 
         nonzero_mask = labels_nc > 0
-        nonzero_log_prob = NegativeBinomial(
-            mu=mu_nc[nonzero_mask] * total_mrna_umis_nc[nonzero_mask], theta=theta_nc[nonzero_mask]
-        ).log_prob(labels_nc[nonzero_mask])
+        nonzero_log_prob = NegativeBinomial(mu=mu_nc[nonzero_mask], theta=theta_nc[nonzero_mask]).log_prob(
+            labels_nc[nonzero_mask]
+        )
         nonzero_sample_weights = sample_weights_nc[nonzero_mask]
         nonzero_loss = -(nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
 
         zero_mask = labels_nc == 0
-        zero_log_prob = NegativeBinomial(
-            mu=mu_nc[zero_mask] * total_mrna_umis_nc[zero_mask], theta=theta_nc[zero_mask]
-        ).log_prob(labels_nc[zero_mask])
+        zero_log_prob = NegativeBinomial(mu=mu_nc[zero_mask], theta=theta_nc[zero_mask]).log_prob(labels_nc[zero_mask])
         zero_sample_weights = sample_weights_nc[zero_mask]
         zero_loss = -(zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
 
@@ -746,10 +748,10 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         if (trainer.global_step + 1) % (trainer.log_every_n_steps * 10) != 0:  # type: ignore[attr-defined]
             return
 
-        fig = plt.figure(figsize=(12, 15))
-
-        nonzero_indices = random.sample(range(nonzero_mask.sum().item()), 24)
         prefix_len_nc = prefix_len_n[:, None].expand(-1, self.n_context)
+
+        fig = plt.figure(figsize=(12, 15))
+        nonzero_indices = random.sample(range(nonzero_mask.sum().item()), 24)
 
         for idx, i in enumerate(nonzero_indices):
             plt.subplot(8, 4, idx + 1)
@@ -759,27 +761,48 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             theta = theta_nc[nonzero_mask][i].cpu()
             n_umis = total_mrna_umis_nc[nonzero_mask][i].item()
 
-            dist = NegativeBinomial(mu=mu * n_umis, theta=theta)
+            dist = NegativeBinomial(mu=mu, theta=theta)
             x = torch.arange(0, label * 3 + 5)
             y = dist.log_prob(x).exp()
             plt.plot(x, y, "o")
             plt.vlines(label, 0, dist.log_prob(torch.tensor(label)).exp(), color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
+            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}, mu={mu:.2f}, theta={theta:.2f}")
 
         plt.tight_layout()
-        # fig.canvas.draw()
-        # img = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
-        # img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-
-        # # Normalize into 0-1 range for TensorBoard(X). Swap axes for newer versions where API expects colors in first dim
-        # img = img / 255.0
-        # img = np.swapaxes(img, 0, 2)  # if your TensorFlow + TensorBoard version are >= 1.8
 
         for logger in trainer.loggers:
             if isinstance(logger, pl.loggers.TensorBoardLogger):
                 logger.experiment.add_figure(
-                    "predictions",
+                    "nonzero predictions",
                     fig,
+                    global_step=trainer.global_step,
+                )
+
+        zero_fig = plt.figure(figsize=(12, 15))
+        zero_indices = random.sample(range(zero_mask.sum().item()), 24)
+
+        for idx, i in enumerate(zero_indices):
+            plt.subplot(8, 4, idx + 1)
+            prefix = prefix_len_nc[zero_mask][i].item()
+            label = labels_nc[zero_mask][i].item()
+            mu = mu_nc[zero_mask][i].cpu()
+            theta = theta_nc[zero_mask][i].cpu()
+            n_umis = total_mrna_umis_nc[zero_mask][i].item()
+
+            dist = NegativeBinomial(mu=mu, theta=theta)
+            x = torch.arange(0, label * 3 + 5)
+            y = dist.log_prob(x).exp()
+            plt.plot(x, y, "o")
+            plt.vlines(label, 0, dist.log_prob(torch.tensor(label)).exp(), color="r")
+            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}, mu={mu:.2f}, theta={theta:.2f}")
+
+        plt.tight_layout()
+
+        for logger in trainer.loggers:
+            if isinstance(logger, pl.loggers.TensorBoardLogger):
+                logger.experiment.add_figure(
+                    "zero predictions",
+                    zero_fig,
                     global_step=trainer.global_step,
                 )
 
