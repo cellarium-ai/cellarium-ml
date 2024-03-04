@@ -201,7 +201,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return torch.linalg.svd(self.W_kg.T, full_matrices=False).U
+        return torch.linalg.svd(self.W_kg.T, full_matrices=False).U  # type: ignore[attr-defined]
 
     @property
     @torch.inference_mode()
@@ -210,7 +210,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return torch.trace(self.W_kg.T @ self.W_kg).item()
+        return torch.trace(self.W_kg.T @ self.W_kg).item()  # type: ignore[attr-defined]
 
     @property
     @torch.inference_mode()

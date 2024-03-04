@@ -17,7 +17,7 @@ from cellarium.ml.data import (
     IterableDistributedAnnDataCollectionDataset,
     read_h5ad_file,
 )
-from cellarium.ml.utilities.data import AnnDataField
+from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
 
 
 @pytest.fixture
@@ -36,6 +36,10 @@ def adatas_path(tmp_path: Path):
         {
             "A": rng.integers(0, 2, n_cell),
             "B": rng.integers(0, 2, n_cell),
+            "C": pd.Categorical(
+                np.array(["e", "f"])[np.random.randint(0, 2, n_cell)],
+                categories=["e", "f"],
+            ),
         },
         index=[f"ref_cell{i:03d}" for i in range(n_cell)],
     )
@@ -60,6 +64,7 @@ def adatas_path(tmp_path: Path):
     adata.write(os.path.join(tmp_path, "adata.h5ad"))
     for i, limit in enumerate(zip([0] + limits, limits)):
         sliced_adata = adata[slice(*limit)]
+        sliced_adata.obs["C"] = sliced_adata.obs["C"].cat.set_categories(adata.obs["C"].cat.categories)
         sliced_adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))
     return tmp_path
 
@@ -146,16 +151,18 @@ def test_indexing(
     else:
         adt_view = adt[oidx, vidx]
         dat_view = dat[oidx, vidx]
+        adt_view.obs["C"] = adt_view.obs["C"].cat.set_categories(adt.obs["C"].cat.categories)
         np.testing.assert_array_equal(adt_view.X, dat_view.X)
         np.testing.assert_array_equal(adt_view.var_names, dat_view.var_names)
         np.testing.assert_array_equal(adt_view.obs_names, dat_view.obs_names)
         np.testing.assert_array_equal(adt_view.layers["L"], dat_view.layers["L"])
         np.testing.assert_array_equal(adt_view.obsm["M"], dat_view.obsm["M"])
-        np.testing.assert_array_equal(adt_view.obs["A"], dat_view.obs["A"])
+        assert adt_view.obs["A"].equals(dat_view.obs["A"])
+        assert adt_view.obs["C"].equals(dat_view.obs["C"])
 
 
 def test_pickle(dat: DistributedAnnDataCollection):
-    new_dat = pickle.loads(pickle.dumps(dat))
+    new_dat: DistributedAnnDataCollection = pickle.loads(pickle.dumps(dat))
 
     assert len(new_dat.cache) == 1
 
@@ -166,7 +173,8 @@ def test_pickle(dat: DistributedAnnDataCollection):
     np.testing.assert_array_equal(new_dat_view.obs_names, dat_view.obs_names)
     np.testing.assert_array_equal(new_dat_view.layers["L"], dat_view.layers["L"])
     np.testing.assert_array_equal(new_dat_view.obsm["M"], dat_view.obsm["M"])
-    np.testing.assert_array_equal(new_dat_view.obs["A"], dat_view.obs["A"])
+    assert new_dat_view.obs["A"].equals(dat_view.obs["A"])
+    assert new_dat_view.obs["C"].equals(dat_view.obs["C"])
 
 
 @pytest.mark.parametrize(
@@ -239,6 +247,7 @@ def dadc(adatas_path: Path):
     [
         ("X", None, None),
         ("obs", "A", None),
+        ("obs", "C", categories_to_codes),
         ("obs_names", None, None),
         ("var_names", None, None),
         ("layers", "L", None),

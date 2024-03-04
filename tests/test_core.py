@@ -5,7 +5,6 @@ from pathlib import Path
 
 import lightning.pytorch as pl
 import pytest
-from anndata import AnnData
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection
