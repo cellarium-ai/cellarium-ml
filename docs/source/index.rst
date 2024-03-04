@@ -25,6 +25,7 @@ Table of Contents
    :caption: Tutorials
 
    tutorials/mup_mlp
+   tutorials/mehrtash_test
 
 Indices and tables
 ==================
