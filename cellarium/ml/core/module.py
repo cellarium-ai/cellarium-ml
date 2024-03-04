@@ -19,10 +19,9 @@ class CellariumModule(pl.LightningModule):
     """
     ``CellariumModule`` organizes code into following sections:
 
+        * :attr:`transforms`: A list of transforms to apply to the input data before passing it to the model.
         * :attr:`model`: A :class:`cellarium.ml.models.CellariumModel` to train with
           :meth:`training_step` method and epoch end hooks.
-        * :attr:`transforms`: A :class:`cellarium.ml.core.pipeline.CellariumPipeline` of transforms to apply to the
-          input data before passing it to the model.
         * :attr:`optim_fn` and :attr:`optim_kwargs`: A Pytorch optimizer class and its keyword arguments.
         * :attr:`scheduler_fn` and :attr:`scheduler_kwargs`: A Pytorch lr scheduler class and its
           keyword arguments.
@@ -71,16 +70,18 @@ class CellariumModule(pl.LightningModule):
 
         # Steps involved in configuring the model:
         # 1. Make a copy of modules on the meta device and assign to hparams.
-        # 2. Send the original modules to the host device and assign to self.
+        # 2. Send the original modules to the host device and add to self.pipeline.
         # 3. Reset the model parameters if it has not been initialized before.
+        # For more context, see discussions in
+        # https://dev-discuss.pytorch.org/t/state-of-model-creation-initialization-seralization-in-pytorch-core/1240
         #
         # Benefits of this approach:
-        # 1. Modules stored in the checkpoint are on the meta device.
-        # 2. Loading from a checkpoint skips a wasteful step of initialization of module parameters
+        # 1. The checkpoint stores modules on the meta device.
+        # 2. Loading from a checkpoint skips a wasteful step of initializing module parameters
         #    before loading the state_dict.
-        # 3. The modules are directly initialized on the host gpu device instead of being initialized on the cpu
-        #    and then moved to the gpu device (given that ``CellariumModule`` was initialized under
-        #    the ``torch.device("meta")`` contex).
+        # 3. The module parameters are directly initialized on the host gpu device instead of being initialized
+        #    on the cpu and then moved to the gpu device (given that modules were instantiated under
+        #    the ``torch.device("meta")`` context).
         model, self.hparams["model"] = copy_module(
             self.hparams["model"], self_device=self.device, copy_device=torch.device("meta")
         )
@@ -107,7 +108,7 @@ class CellariumModule(pl.LightningModule):
     def model(self) -> CellariumModel:
         """The model"""
         if self.pipeline is None:
-            raise ValueError("The model is not configured. Call `configure_model` before accessing the model.")
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
         return self.pipeline[-1]
 
@@ -115,7 +116,7 @@ class CellariumModule(pl.LightningModule):
     def transforms(self) -> CellariumPipeline:
         """The transforms pipeline"""
         if self.pipeline is None:
-            raise ValueError("The model is not configured. Call `configure_model` before accessing the model.")
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
         return self.pipeline[:-1]
 
@@ -135,7 +136,7 @@ class CellariumModule(pl.LightningModule):
             Loss tensor or ``None`` if no loss.
         """
         if self.pipeline is None:
-            raise ValueError("The model is not configured. Call `configure_model` before accessing the model.")
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
         output = self.pipeline(batch)
         loss = output.get("loss")
@@ -155,7 +156,7 @@ class CellariumModule(pl.LightningModule):
             A dictionary containing the batch data and inference outputs.
         """
         if self.pipeline is None:
-            raise ValueError("The model is not initialized. Call `configure_model` before accessing the model.")
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
         return self.pipeline.predict(batch)
 

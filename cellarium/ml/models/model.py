@@ -26,7 +26,11 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
     @abstractmethod
     def reset_parameters(self) -> None:
         """
-        Reset the model parameters that were constructed in the __init__ method.
+        Reset the model parameters and buffers that were constructed in the __init__ method.
+        Constructed means methods like ``torch.tensor``, ``torch.empty``, ``torch.zeros``,
+        ``torch.randn``, ``torch.as_tensor``, etc.
+        If the parameter or buffer was assigned (e.g. from a torch.Tensor passed to the __init__)
+        then there is no need to reset it.
         """
 
     def __getattr__(self, name: str) -> Any:

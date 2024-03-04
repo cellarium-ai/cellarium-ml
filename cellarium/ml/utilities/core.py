@@ -24,11 +24,13 @@ def copy_module(
     Returns:
         A tuple of the original module and its copy.
     """
-    module_copy = copy.deepcopy(module).to(copy_device)
+    module_copy = copy.deepcopy(module)
     if any(param.device.type == "meta" for param in module.parameters()) or any(
         buffer.device.type == "meta" for buffer in module.buffers()
     ):
         module.to_empty(device=self_device)
+        module_copy.to_empty(device=copy_device)
     else:
         module.to(device=self_device)
+        module_copy.to(device=copy_device)
     return module, module_copy
