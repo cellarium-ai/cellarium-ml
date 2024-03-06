@@ -28,6 +28,7 @@ dependencies = [
   "google-cloud-storage",
   "jsonargparse[signatures]",
   "lightning>=2.0.9",
+  "pykeops>=2.1.0",
   "pyro-ppl",
   "pytest",
   "torch>=2.0.0",
