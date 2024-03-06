@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.distributions as dist
-from lightning.pytorch.core.mixins import HyperparametersMixin
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from pykeops.torch import LazyTensor
 from torch import nn
@@ -126,9 +125,6 @@ class NegativeBinomial(dist.Distribution):
 
     @property
     def variance(self) -> torch.Tensor:
-        # var(aX) = a^2 var(X)
-        # N * rho + (N * rho)^2 / theta = N^2 * (rho + rho^2 / theta')
-        # where theta' = theta / N
         return self.mean + (self.mean**2) / self.theta
 
     @torch.inference_mode()
@@ -423,7 +419,7 @@ class TransformerBlock(nn.Module):
         return self.normadd2(Y, lambda Y: self.ffn(Y))
 
 
-class CellariumGPT(CellariumModel, HyperparametersMixin):
+class CellariumGPT(CellariumModel):
     """
     Cellarium GPT model.
     Args:
@@ -511,7 +507,6 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
     ):
         super().__init__()
-        self.save_hyperparameters(logger=True)
         # self.var_names_g = np.array(var_names_g)
         # self.n_vars = len(var_names_g)
         self.n_vars = n_vars
@@ -673,17 +668,20 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
         # attention_weights = None
         if self.interpretable:
             queries_ncd = self.query_embedding(gene_ids)
-            values_ncd = self.Wv(queries_ncd)
+            zq_ncd = self.Wv(queries_ncd)
             keys_ncd = self.Wk(hidden_ncd)
-            # values_ncd[~labels_mask_nc] = hidden_ncd[~labels_mask_nc]
-            hidden_ncd = self.skip_attention(
+            zi_ncd = self.skip_attention(
                 queries_ncd[:, 1:], keys_ncd[:, 1:], hidden_ncd[:, 1:], prefix_len_n - 1, mask_type="block"
             )
-            hidden_ncd = torch.cat(
-                [torch.zeros(hidden_ncd.shape[0], 1, hidden_ncd.shape[2], device=x_ng.device), hidden_ncd], dim=1
-            )
+            zi_ncd = torch.cat([torch.zeros(zi_ncd.shape[0], 1, zi_ncd.shape[2], device=x_ng.device), zi_ncd], dim=1)
+            zc_n1d = hidden_ncd[:, 0, None, :]
             # hidden_ncd = self.skip_attention(queries_ncd, keys_ncd, hidden_ncd, prefix_len_n, mask_type="block")
-            hidden_ncd = hidden_ncd + values_ncd
+            probs_nc = torch.full((hidden_ncd.shape[0], self.n_context), 0.8, device=x_ng.device)
+            c_mask_nc = torch.bernoulli(probs_nc)
+            probs_nc = torch.full((hidden_ncd.shape[0], self.n_context), 0.5, device=x_ng.device)
+            i_mask_nc = torch.bernoulli(probs_nc * c_mask_nc)
+            hidden_ncd = zq_ncd + c_mask_nc.unsqueeze(-1) * zc_n1d + i_mask_nc.unsqueeze(-1) * zi_ncd
+            # hidden_ncd = hidden_ncd + values_ncd
             hidden_ncd = torch.relu(self.ffn(hidden_ncd))
             # logits = (hidden_ncd.unsqueeze(-2) @ self.W[gene_ids]).squeeze(-2) * self.output_mult
             # attention_weights = self.skip_attention.attention_probs_nqs
@@ -766,7 +764,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             y = dist.log_prob(x).exp()
             plt.plot(x, y, "o")
             plt.vlines(label, 0, dist.log_prob(torch.tensor(label)).exp(), color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}, mu={mu:.2f}, theta={theta:.2f}")
+            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
 
         plt.tight_layout()
 
@@ -794,7 +792,7 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
             y = dist.log_prob(x).exp()
             plt.plot(x, y, "o")
             plt.vlines(label, 0, dist.log_prob(torch.tensor(label)).exp(), color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}, mu={mu:.2f}, theta={theta:.2f}")
+            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
 
         plt.tight_layout()
 
@@ -806,15 +804,17 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                     global_step=trainer.global_step,
                 )
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
+    def predict(
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor, n_context: int
+    ) -> torch.Tensor:
         # assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         # assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         ### prefix
-        prefix_len_n = torch.randint(1, self.n_context, (x_ng.shape[0],), device=x_ng.device)
-        x_nc = x_ng[:, : self.n_context - 1]
+        prefix_len_n = torch.randint(1, n_context, (x_ng.shape[0],), device=x_ng.device)
+        x_nc = x_ng[:, : n_context - 1]
         x_nc = torch.cat([total_mrna_umis_n[:, None], x_nc], dim=1)
-        indices_nc = torch.arange(self.n_context, device=x_ng.device).expand(x_nc.shape)
+        indices_nc = torch.arange(n_context, device=x_ng.device).expand(x_nc.shape)
         gene_ids = indices_nc
         value_ids = torch.log1p(x_nc)
 
@@ -830,5 +830,5 @@ class CellariumGPT(CellariumModel, HyperparametersMixin):
                 mask_type="none",
             )
         hiddens = hidden_ncd[:, 1:]
-        var_names = var_names_g[: self.n_context - 1]
+        var_names = var_names_g[: n_context - 1]
         return {"hiddens_ncd": hiddens, "var_names_c": var_names}
