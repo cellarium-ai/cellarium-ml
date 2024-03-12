@@ -3,12 +3,14 @@
 
 
 from collections.abc import Sequence
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
+from lightning.pytorch.utilities.types import STEP_OUTPUT
 
 from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.utilities.testing import (
@@ -99,7 +101,15 @@ class LogisticRegression(CellariumModel):
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
-    def on_batch_end(self, trainer: pl.Trainer) -> None:
+    def on_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+
         if trainer.global_rank != 0:
             return
 

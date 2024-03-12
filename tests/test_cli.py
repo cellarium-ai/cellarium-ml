@@ -12,6 +12,56 @@ devices = os.environ.get("TEST_DEVICES", "1")
 
 CONFIGS = [
     {
+        "model_name": "cellarium_gpt",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.CellariumGPT",
+                    "init_args": {
+                        "d_model": 2,
+                        "d_ffn": 4,
+                        "n_heads": 1,
+                        "n_blocks": 1,
+                        "dropout": 0.0,
+                        "use_bias": False,
+                        "n_context": 5,
+                        "attn_mult": 1,
+                        "input_mult": 1.0,
+                        "output_mult": 1.0,
+                        "initializer_range": 0.02,
+                        "backend": "torch",
+                        "log_metrics": True,
+                    },
+                },
+            },
+            "data": {
+                "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                "shard_size": "100",
+                "max_cache_size": "2",
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
+                },
+                "batch_size": "5",
+                "num_workers": "1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": 1,
+                "log_every_n_steps": 1,
+            },
+        },
+    },
+    {
         "model_name": "geneformer",
         "subcommand": "fit",
         "fit": {
