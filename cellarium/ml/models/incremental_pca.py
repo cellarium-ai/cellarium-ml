@@ -60,11 +60,19 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.S_k: torch.Tensor
         self.x_mean_g: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("V_kg", torch.zeros(n_components, n_vars))
-        self.register_buffer("S_k", torch.zeros(n_components))
-        self.register_buffer("x_mean_g", torch.zeros(n_vars))
-        self.register_buffer("x_size", torch.tensor(0))
-        self._dummy_param = nn.Parameter(torch.tensor(0.0))
+        self.register_buffer("V_kg", torch.empty(n_components, n_vars))
+        self.register_buffer("S_k", torch.empty(n_components))
+        self.register_buffer("x_mean_g", torch.empty(n_vars))
+        self.register_buffer("x_size", torch.empty(()))
+        self._dummy_param = nn.Parameter(torch.empty(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.V_kg.zero_()
+        self.S_k.zero_()
+        self.x_mean_g.zero_()
+        self.x_size.zero_()
+        self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -249,10 +257,12 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the following keys:
 
-            - ``z_nk``: Embedding of the input data into the principal component space.
+            - ``x_ng``: Embedding of the input data into the principal component space.
+            - ``var_names_g``: The list of variable names for the output data.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         z_nk = (x_ng - self.x_mean_g) @ self.V_kg.T
-        return {"z_nk": z_nk}
+        var_names_k = np.array([f"PC{i + 1}" for i in range(self.n_components)])
+        return {"x_ng": z_nk, "var_names_g": var_names_k}

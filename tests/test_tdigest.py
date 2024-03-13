@@ -85,7 +85,7 @@ def test_tdigest_multi_device(
 
     # fit
     model = TDigest(var_names_g=dadc.var_names)
-    module = CellariumModule(model, transforms=transforms)
+    module = CellariumModule(transforms=transforms, model=model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
@@ -119,27 +119,19 @@ def test_load_from_checkpoint_multi_device():
     # so we need to use a fixed shared directory
     tmp_path = Path("/tmp/test_load_from_checkpoint_multi_device")
     n, g = 4, 3
+    var_names_g = [f"gene_{i}" for i in range(g)]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array([f"gene_{i}" for i in range(g)]),
+            np.array(var_names_g),
         ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"var_names_g": [f"gene_{i}" for i in range(g)]}
-    model = TDigest(**init_args)  # type: ignore[arg-type]
-    config = {
-        "model": {
-            "model": {
-                "class_path": "cellarium.ml.models.TDigest",
-                "init_args": init_args,
-            },
-        }
-    }
-    module = CellariumModule(model, config=config)
+    model = TDigest(var_names_g=var_names_g)
+    module = CellariumModule(model=model)
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",

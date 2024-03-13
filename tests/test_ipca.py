@@ -52,7 +52,7 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
         n_components=k,
         perform_mean_correction=perform_mean_correction,
     )
-    module = CellariumModule(ipca)
+    module = CellariumModule(model=ipca)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -88,31 +88,23 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 3, 2
+    var_names_g = [f"gene_{i}" for i in range(g)]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array([f"gene_{i}" for i in range(g)]),
+            np.array(var_names_g),
         ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {
-        "var_names_g": [f"gene_{i}" for i in range(g)],
-        "n_components": 1,
-        "perform_mean_correction": True,
-    }
-    model = IncrementalPCA(**init_args)  # type: ignore[arg-type]
-    config = {
-        "model": {
-            "model": {
-                "class_path": "cellarium.ml.models.IncrementalPCA",
-                "init_args": init_args,
-            }
-        }
-    }
-    module = CellariumModule(model, config=config)
+    model = IncrementalPCA(
+        var_names_g=var_names_g,
+        n_components=1,
+        perform_mean_correction=True,
+    )
+    module = CellariumModule(model=model)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(

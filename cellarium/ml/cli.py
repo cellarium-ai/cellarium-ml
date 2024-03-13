@@ -5,15 +5,136 @@
 Command line interface for Cellarium ML.
 """
 
+import copy
 import sys
 import warnings
 from collections.abc import Callable
+from dataclasses import dataclass
+from functools import cache
+from operator import attrgetter
 from typing import Any
 
-from jsonargparse import Namespace
+import numpy as np
+import torch
+import yaml
+from jsonargparse import Namespace, class_from_function
+from jsonargparse._loaders_dumpers import DefaultLoader
+from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
+from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 
-from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
+from cellarium.ml.utilities.data import collate_fn
+
+cached_loaders = {}
+
+
+@dataclass
+class FileLoader:
+    """
+    A YAML constructor for loading a file and accessing its attributes.
+
+    Example:
+
+    .. code-block:: yaml
+
+        model:
+          transforms:
+            - class_path: cellarium.ml.transforms.Filter
+              init_args:
+                filter_list:
+                  !FileLoader
+                  file_path: gs://dsp-cellarium-cas-public/test-data/filter_list.csv
+                  loader_fn: pandas.read_csv
+                  attr: index
+                  convert_fn: numpy.ndarray.tolist
+
+    Args:
+        file_path:
+            The file path to load the object from.
+        loader_fn:
+            A function to load the object from the file path.
+        attr:
+            An attribute to get from the loaded object. If ``None`` the loaded object is returned.
+        convert_fn:
+            A function to convert the loaded object. If ``None`` the loaded object is returned.
+    """
+
+    file_path: str
+    loader_fn: Callable[[str], Any] | str
+    attr: str | None = None
+    convert_fn: Callable[[Any], Any] | str | None = None
+
+    def __new__(cls, file_path, loader_fn, attr, convert_fn):
+        if isinstance(loader_fn, str):
+            loader_fn = import_object(loader_fn)
+        if loader_fn not in cached_loaders:
+            cached_loaders[loader_fn] = cache(loader_fn)
+        loader_fn = cached_loaders[loader_fn]
+        obj = loader_fn(file_path)
+
+        if attr is not None:
+            obj = attrgetter(attr)(obj)
+
+        if isinstance(convert_fn, str):
+            convert_fn = import_object(convert_fn)
+        if convert_fn is not None:
+            obj = convert_fn(obj)
+
+        return obj
+
+
+@dataclass
+class CheckpointLoader(FileLoader):
+    """
+    A YAML constructor for loading a :class:`~cellarium.ml.core.CellariumModule` checkpoint and accessing its
+    attributes.
+
+    Example:
+
+    .. code-block:: yaml
+
+        model:
+          transorms:
+            - class_path: cellarium.ml.transforms.DivideByScale
+              init_args:
+                scale_g:
+                  !CheckpointLoader
+                  file_path: gs://dsp-cellarium-cas-public/test-data/tdigest.ckpt
+                  attr: model.median_g
+                  convert_fn: null
+
+    Args:
+        file_path:
+            The file path to load the object from.
+        attr:
+            An attribute to get from the loaded object. If ``None`` the loaded object is returned.
+        convert_fn:
+            A function to convert the loaded object. If ``None`` the loaded object is returned.
+    """
+
+    file_path: str
+    attr: str | None = None
+    convert_fn: Callable[[Any], Any] | str | None = None
+
+    def __new__(cls, file_path, attr, convert_fn):
+        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, convert_fn)
+
+
+def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> FileLoader:
+    """Construct an object from a file."""
+    return FileLoader(**loader.construct_mapping(node))  # type: ignore[misc]
+
+
+def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
+    """Construct an object from a checkpoint."""
+    return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[misc]
+
+
+loader = DefaultLoader
+loader.add_constructor("!FileLoader", file_loader_constructor)
+loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
+
 
 REGISTERED_MODELS = {}
 
@@ -23,9 +144,93 @@ def register_model(model: Callable[[ArgsType], None]):
     return model
 
 
+CellariumModuleLoadFromCheckpoint = class_from_function(CellariumModule.load_from_checkpoint, CellariumModule)
+
+
+@dataclass
+class LinkArguments:
+    """
+    Arguments for linking the value of a target argument to the values of one or more source arguments.
+
+    Args:
+        source:
+            Key(s) from which the target value is derived.
+        target:
+            Key to where the value is set.
+        compute_fn:
+            Function to compute target value from source.
+        apply_on:
+            At what point to set target value, ``"parse"`` or ``"instantiate"``.
+    """
+
+    source: str | tuple[str, ...]
+    target: str
+    compute_fn: Callable | None = None
+    apply_on: str = "instantiate"
+
+
+def compute_n_obs(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of observations in the data.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of observations in the data.
+    """
+    return data.dadc.n_obs
+
+
+def compute_n_categories(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of categories in the target variable.
+
+    E.g. if the target variable is ``obs["cell_type"]`` then this function
+    returns the number of categories in ``obs["cell_type"]``::
+
+        >>> len(data.dadc[0].obs["cell_type"].cat.categories)
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of categories in the target variable.
+    """
+    field = data.batch_keys["y_n"]
+    value = getattr(data.dadc[0], field.attr)
+    if field.key is not None:
+        value = value[field.key]
+    return len(value.cat.categories)
+
+
+def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDataDataModule) -> np.ndarray:
+    """
+    Compute variable names from the data by applying the transforms.
+
+    Args:
+        transforms:
+            A list of transforms.
+        data:
+            A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The variable names.
+    """
+    batch = {key: field(data.dadc, 0) for key, field in data.batch_keys.items()}
+    pipeline = CellariumPipeline(transforms)
+    with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
+        fake_batch = collate_fn([batch])
+        with FakeCopyMode(fake_mode):
+            fake_pipeline = copy.deepcopy(pipeline)
+        fake_pipeline.to("cpu")
+        output = fake_pipeline(fake_batch)
+    return output["var_names_g"]
+
+
 def lightning_cli_factory(
     model_class_path: str,
-    link_arguments: list[tuple[str, str, Callable[[Any], object] | None]] | None = None,
+    link_arguments: list[LinkArguments] | None = None,
     trainer_defaults: dict[str, Any] | None = None,
 ) -> type[LightningCLI]:
     """
@@ -35,7 +240,9 @@ def lightning_cli_factory(
 
         cli = lightning_cli_factory(
             "cellarium.ml.models.IncrementalPCA",
-            link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
+            link_arguments=[
+                LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+            ],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
                 "strategy": {
@@ -49,7 +256,9 @@ def lightning_cli_factory(
         model_class_path:
             A string representation of the model class path (e.g., ``"cellarium.ml.models.IncrementalPCA"``).
         link_arguments:
-            A list of tuples of the form ``(source, target)`` where ``source`` is linked to ``target``.
+            A list of :class:`LinkArguments` that specify how to derive the value of a target
+            argument from the values of one or more source arguments. If ``None`` then no
+            arguments are linked.
         trainer_defaults:
             Default values for the trainer.
 
@@ -67,37 +276,22 @@ def lightning_cli_factory(
             )
 
         def instantiate_classes(self) -> None:
-            super().instantiate_classes()
-
-            # impute linked arguments after instantiation
-            if link_arguments is not None:
-                for source, target, compute_fn in link_arguments:
-                    # e.g., source == "data.var_names"
-                    source_key, *source_attrs = source.split(".")
-                    # note that config_init is initialized, so value is an instance
-                    config_init = self.config_init[self.subcommand]
-                    value = config_init[source_key]
-                    for attr in source_attrs:
-                        value = getattr(value, attr)
-                    if compute_fn is not None:
-                        value = compute_fn(value)
-
-                    # e.g., target == "model.model.init_args.var_names_g"
-                    target_keys = target.split(".")
-                    # note that config is dict-like, so assign the value to the last key
-                    config = self.config[self.subcommand]
-                    for key in target_keys[:-1]:
-                        config = config[key]
-                    config[target_keys[-1]] = value
-
-            # save the config to the :attr:`model.hparams` to be able to load the model checkpoint
-            self.model._set_hparams(self.config[self.subcommand])
+            with torch.device("meta"):
+                # skip the initialization of model parameters
+                # parameters are later initialized by the  `CellariumModule.configure_model` method
+                return super().instantiate_classes()
 
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
             if link_arguments is not None:
-                for arg1, arg2, compute_fn in link_arguments:
-                    parser.link_arguments(arg1, arg2, compute_fn=compute_fn, apply_on="instantiate")
-            parser.set_defaults({"model.model": model_class_path})
+                for link in link_arguments:
+                    parser.link_arguments(link.source, link.target, link.compute_fn, link.apply_on)
+            # this is helpful for generating a default config file with --print_config
+            parser.set_defaults(
+                {
+                    "model.model": model_class_path,
+                    "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
+                }
+            )
 
     return NewLightningCLI
 
@@ -132,7 +326,9 @@ def geneformer(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.Geneformer",
-        link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
+        link_arguments=[
+            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+        ],
     )
     cli(args=args)
 
@@ -170,7 +366,9 @@ def incremental_pca(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.IncrementalPCA",
-        link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
+        link_arguments=[
+            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+        ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -209,27 +407,12 @@ def logistic_regression(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
 
-    def get_n_categories(data: CellariumAnnDataDataModule) -> int:
-        """
-        Get the number of categories in the target variable.
-
-        E.g. if the target variable is ``obs["cell_type"]`` then this function
-        returns the number of categories in ``obs["cell_type"]``::
-
-            >>> len(data.dadc[0].obs["cell_type"].cat.categories)
-        """
-        field = data.batch_keys["y_n"]
-        value = getattr(data.dadc[0], field.attr)
-        if field.key is not None:
-            value = value[field.key]
-        return len(value.cat.categories)
-
     cli = lightning_cli_factory(
         "cellarium.ml.models.LogisticRegression",
         link_arguments=[
-            ("data.n_obs", "model.model.init_args.n_obs", None),
-            ("data.var_names", "model.model.init_args.var_names_g", None),
-            ("data", "model.model.init_args.n_categories", get_n_categories),
+            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
+            LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.n_categories", compute_n_categories),
         ],
     )
     cli(args=args)
@@ -265,7 +448,9 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.OnePassMeanVarStd",
-        link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
+        link_arguments=[
+            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+        ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
             "strategy": {
@@ -326,8 +511,8 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.ProbabilisticPCA",
         link_arguments=[
-            ("data.n_obs", "model.model.init_args.n_obs", None),
-            ("data.var_names", "model.model.init_args.var_names_g", None),
+            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
+            LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
         ],
     )
     cli(args=args)
@@ -431,7 +616,9 @@ def tdigest(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.TDigest",
-        link_arguments=[("data.var_names", "model.model.init_args.var_names_g", None)],
+        link_arguments=[
+            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+        ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
         },
@@ -464,6 +651,7 @@ def main(args: ArgsType = None) -> None:
     ), f"'model_name' must be one of {list(REGISTERED_MODELS.keys())}. Got '{model_name}'"
     model_cli = REGISTERED_MODELS[model_name]
     with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Transforming to str index.")
         warnings.filterwarnings("ignore", message="LightningCLI's args parameter is intended to run from within Python")
         warnings.filterwarnings("ignore", message="Your `IterableDataset` has `__len__` defined.")
         model_cli(args)  # run the model

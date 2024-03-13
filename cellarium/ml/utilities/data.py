@@ -58,15 +58,8 @@ class AnnDataField:
     key: str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
-    def __call__(self, adata: AnnData | AnnCollection) -> "AnnDataField":
-        self.adata = adata
-        return self
-
-    def __getitem__(self, idx: int | list[int] | slice) -> np.ndarray:
-        if self.adata is None:
-            raise ValueError("Must call AnnDataField with an AnnData-like object first")
-
-        value = getattr(self.adata[idx], self.attr)
+    def __call__(self, adata: AnnData | AnnCollection, idx: int | list[int] | slice) -> np.ndarray:
+        value = getattr(adata[idx], self.attr)
         if self.key is not None:
             value = value[self.key]
 
@@ -102,7 +95,7 @@ def get_rank_and_num_replicas() -> tuple[int, int]:
         try:
             num_replicas = dist.get_world_size()
             rank = dist.get_rank()
-        except RuntimeError:
+        except (ValueError, RuntimeError):  # RuntimeError was changed to ValueError in PyTorch 2.2
             warnings.warn(
                 "Distributed package is available but the default process group has not been initialized. "
                 "Falling back to ``rank=0`` and ``num_replicas=1``.",

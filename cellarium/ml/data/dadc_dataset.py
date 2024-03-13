@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 import torch
+from anndata import AnnData
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
@@ -53,7 +54,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     Args:
         dadc:
-            DistributedAnnDataCollection from which to load the data.
+            DistributedAnnDataCollection or AnnData from which to load the data.
         batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
             in the batch data and how to convert them. Keys must correspond to
@@ -76,7 +77,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __init__(
         self,
-        dadc: DistributedAnnDataCollection,
+        dadc: DistributedAnnDataCollection | AnnData,
         batch_keys: dict[str, AnnDataField],
         batch_size: int = 1,
         shuffle: bool = False,
@@ -85,6 +86,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
+        if isinstance(dadc, AnnData):
+            # mimic a DistributedAnnDataCollection
+            self.dadc.limits = [dadc.n_obs]
         self.batch_keys = batch_keys
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -116,13 +120,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
         r"""
-        Returns a dictionary containing the data from the :attr:`dadc` with keys specified by its :attr:`dadc.convert`
+        Returns a dictionary containing the data from the :attr:`dadc` with keys specified by the :attr:`batch_keys`
         at the given index ``idx``.
         """
 
         data = {}
         for key, field in self.batch_keys.items():
-            data[key] = field(self.dadc)[idx]
+            data[key] = field(self.dadc, idx)
 
         # for testing purposes
         if self.test_mode:
@@ -293,7 +297,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         | worker 0 | (6,7) | (8,9) | (10,0) |
         +----------+-------+-------+--------+
         """
-        if self.test_mode:
+        if self.test_mode and isinstance(self.dadc, DistributedAnnDataCollection):
             # clear lru cache
             self.dadc.cache.clear()
 
