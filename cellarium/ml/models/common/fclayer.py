@@ -4,13 +4,16 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
 
+def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
     """One hot a tensor of categories."""
+
+    # TODO: use pytorch one-hot instead
 
     onehot = torch.zeros(index.size(0), n_cat, device=index.device)
     onehot.scatter_(1, index.type(torch.long), 1)
     return onehot.type(torch.float32)
+
 
 class FCLayers(nn.Module):
 
@@ -154,6 +157,9 @@ class FCLayers(nn.Module):
             if n_cat and cat is None:
                 raise ValueError("cat not provided while n_cat != 0 in init. params.")
             if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
+                # TODO: why do I need to do the following two lines???
+                if cat.ndim == 1:
+                    cat = cat.unsqueeze(1)
                 if cat.size(1) != n_cat:
                     one_hot_cat = one_hot(cat, n_cat)
                 else:

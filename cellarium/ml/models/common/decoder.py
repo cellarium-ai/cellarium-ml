@@ -4,7 +4,8 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from cellarium.ml.models.FCLayer import FCLayers
+from cellarium.ml.models.common.fclayer import FCLayers
+
 
 class DecoderSCVI(nn.Module):
 
