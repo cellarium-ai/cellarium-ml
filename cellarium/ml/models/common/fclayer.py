@@ -4,13 +4,16 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
 
+def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
     """One hot a tensor of categories."""
+
+    # TODO: use pytorch one-hot instead
 
     onehot = torch.zeros(index.size(0), n_cat, device=index.device)
     onehot.scatter_(1, index.type(torch.long), 1)
     return onehot.type(torch.float32)
+
 
 class FCLayers(nn.Module):
 

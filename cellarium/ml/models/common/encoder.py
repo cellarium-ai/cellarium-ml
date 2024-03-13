@@ -5,10 +5,12 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
-from cellarium.ml.models.FCLayer import FCLayers
+from cellarium.ml.models.common.fclayer import FCLayers
+
 
 def _identity(x):
     return x
+
 
 class Encoder(nn.Module):
 
@@ -54,7 +56,7 @@ class Encoder(nn.Module):
             n_layers: int = 1,
             n_hidden: int = 128,
             dropout_rate: float = 0.1,
-            distribution: str = "normal",
+            distribution: str = "normal",  # TODO: fix ambiguity here
             var_eps: float = 1e-4,
             var_activation: Optional[Callable] = None,
             **kwargs,
@@ -63,6 +65,7 @@ class Encoder(nn.Module):
 
         self.distribution = distribution
         self.var_eps = var_eps
+        # TODO: make this more flexible so all hidden layers need not have same number of neurons
         self.encoder = FCLayers(
             n_in=n_input,
             n_out=n_hidden,
@@ -107,4 +110,4 @@ class Encoder(nn.Module):
         dist = Normal(q_m, q_v.sqrt())
         latent = self.z_transformation(dist.rsample())
 
-        return q_m, q_v, latent
+        return dist, latent

@@ -14,3 +14,4 @@ lightning_logs/
 build/
 notebooks/.ipynb_checkpoints/
 output/
+cellarium/ml/configs/
