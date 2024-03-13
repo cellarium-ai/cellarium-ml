@@ -151,7 +151,7 @@ class DistributedAnnDataCollection(AnnCollection):
             This parameter can be set to ``False`` if the order in the returned arrays
             is not important, for example, when using them for stochastic gradient descent.
             In this case the performance of subsetting can be a bit better.
-        obs_columns:
+        obs_columns_to_validate:
             Subset of columns to validate in the :attr:`obs` attribute.
             If ``None``, all columns are validated.
     """
@@ -169,7 +169,7 @@ class DistributedAnnDataCollection(AnnCollection):
         index_unique: str | None = None,
         convert: ConvertType | None = None,
         indices_strict: bool = True,
-        obs_columns: Sequence | None = None,
+        obs_columns_to_validate: Sequence[str] | None = None,
     ):
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
@@ -189,7 +189,8 @@ class DistributedAnnDataCollection(AnnCollection):
         # schema
         adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
         assert len(adata0) == limits[0]
-        self.schema = AnnDataSchema(adata0, obs_columns)
+        self.obs_columns_to_validate = obs_columns_to_validate
+        self.schema = AnnDataSchema(adata0, obs_columns_to_validate)
         # lazy anndatas
         lazy_adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
@@ -275,15 +276,22 @@ class DistributedAnnDataCollection(AnnCollection):
         state = self.__dict__.copy()
         del state["cache"]
         del state["adatas"]
+        del state["obs_names"]
+        del state["schema"]
+        del state["_obs"]
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.cache = LRU(self.max_cache_size)
+        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
+        self.schema = AnnDataSchema(adata0, self.obs_columns_to_validate)
         self.adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
             for start, end, filename in zip([0] + self.limits, self.limits, self.filenames)
         ]
+        self.obs_names = pd.Index([f"cell_{i}" for i in range(self.limits[-1])])
+        self._obs = pd.DataFrame(index=self.obs_names)
 
 
 class LazyAnnData:

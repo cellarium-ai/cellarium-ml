@@ -9,7 +9,7 @@ import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro.nn import PyroParam
+from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import constraints
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
@@ -62,7 +62,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         var_names_g: Sequence[str],
         n_components: int,
         ppca_flavor: Literal["marginalized", "linear_vae"],
-        mean_g: float | torch.Tensor | None = None,
+        mean_g: torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
         seed: int = 0,
@@ -82,15 +82,25 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             assert mean_g.shape == (n_vars,), f"Expected meang_g to have a shape ({n_vars},) but found {mean_g.shape}."
         if mean_g is None:
             # make mean_g a learnable parameter
-            self.mean_g = PyroParam(lambda: torch.zeros(n_vars))  # type: ignore[call-arg]
+            self.mean_g = torch.nn.Parameter(torch.empty(n_vars))
         else:
-            self.register_buffer("mean_g", torch.as_tensor(mean_g))
+            self.register_buffer("mean_g", mean_g)
 
-        rng = torch.Generator()
-        rng.manual_seed(seed)
+        self.seed = seed
         # model parameters
-        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((n_components, n_vars), generator=rng))  # type: ignore[call-arg]
-        self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)  # type: ignore[call-arg]
+        self.W_init_scale = W_init_scale
+        self.sigma_init_scale = sigma_init_scale
+        self.W_kg = torch.nn.Parameter(torch.empty(n_components, n_vars))
+        self.sigma = PyroParam(torch.empty(()), constraint=constraints.positive)  # type: ignore[call-arg]
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        rng = torch.Generator()
+        rng.manual_seed(self.seed)
+        if isinstance(self.mean_g, torch.nn.Parameter):
+            self.mean_g.data.zero_()
+        self.W_kg.data.normal_(0, self.W_init_scale, generator=rng)
+        self.sigma_unconstrained.data.fill_(_unconstrain(torch.as_tensor(self.sigma_init_scale), constraints.positive))
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -209,4 +219,4 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return (self.n_vars * self.sigma**2).item()  # type: ignore[attr-defined, operator]
+        return (self.n_vars * self.sigma**2).item()  # type: ignore[operator]
