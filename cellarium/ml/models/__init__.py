@@ -22,5 +22,5 @@ __all__ = [
     "OnePassMeanVarStd",
     "PredictMixin",
     "ProbabilisticPCA",
-    # "TDigest",
+    "TDigest",
 ]
