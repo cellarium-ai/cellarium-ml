@@ -157,6 +157,9 @@ class FCLayers(nn.Module):
             if n_cat and cat is None:
                 raise ValueError("cat not provided while n_cat != 0 in init. params.")
             if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
+                # TODO: why do I need to do the following two lines???
+                if cat.ndim == 1:
+                    cat = cat.unsqueeze(1)
                 if cat.size(1) != n_cat:
                     one_hot_cat = one_hot(cat, n_cat)
                 else:

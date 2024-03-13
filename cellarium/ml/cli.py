@@ -204,6 +204,30 @@ def compute_n_categories(data: CellariumAnnDataDataModule) -> int:
     return len(value.cat.categories)
 
 
+def nunique_scvi(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of categories in the target variable.
+
+    E.g. if the target variable is ``obs["cell_type"]`` then this function
+    returns the number of categories in ``obs["cell_type"]``::
+
+        >>> len(data.dadc[0].obs["cell_type"].cat.categories)
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+        key: Data is pulled from adata.obs[key]
+
+    Returns:
+        The number of categories in the target variable.
+    """
+    # return data.batch_keys["batch_index_n"].nunique()
+    field = data.batch_keys["batch_index_n"]
+    value = getattr(data.dadc[0], field.attr)
+    if field.key is not None:
+        value = value[field.key]
+    return len(value.cat.categories)
+
+
 def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDataDataModule) -> np.ndarray:
     """
     Compute variable names from the data by applying the transforms.
@@ -550,8 +574,8 @@ def scvi(args: ArgsType = None) -> None:
         "cellarium.ml.models.SingleCellVariationalInference",
         link_arguments=[
             LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
-            LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
-            LinkArguments("data", "model.model.init_args.n_categories", compute_n_categories),
+            # LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.n_batch", nunique_scvi),
         ],
     )
     cli(args=args)

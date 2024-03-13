@@ -2,10 +2,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions import kl_divergence as kl
-from torch.distributions import Normal, Poisson, NegativeBinomial, Distribution
+from torch.distributions import Normal, Poisson, Distribution
 
 from cellarium.ml.models.common.encoder import Encoder
 from cellarium.ml.models.common.decoder import DecoderSCVI
+from cellarium.ml.models.common.distributions import NegativeBinomial
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -231,7 +232,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             use_batch_norm=use_batch_norm_encoder,
             use_layer_norm=use_layer_norm_encoder,
             var_activation=var_activation,
-            return_dist=True,
+            # return_dist=True,
             **_extra_encoder_kwargs,
         )
 
@@ -255,8 +256,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
 
     def reset_parameters(self) -> None:
+        pass
         # TODO
-        raise NotImplementedError
+        # raise NotImplementedError
         # rng = torch.Generator()
         # rng.manual_seed(self.seed)
         # if isinstance(self.mean_g, torch.nn.Parameter):
@@ -276,6 +278,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         High level inference method.
         Runs the inference (encoder) model.
         """
+
         x_ = x
         if self.use_observed_lib_size:
             library = torch.log(x.sum(1)).unsqueeze(1)
