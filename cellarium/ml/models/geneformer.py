@@ -96,12 +96,22 @@ class Geneformer(CellariumModel, PredictMixin):
             "layer_norm_eps": layer_norm_eps,
             "pad_token_id": 0,
         }
-        config = BertConfig(**config)
-        self.bert = BertForMaskedLM(config)
+        self.config = BertConfig(**config)
+        self.bert = BertForMaskedLM(self.config)
         self.mlm_probability = mlm_probability
         self.feature_ids: torch.Tensor
         # ids for the features, 0 is for padding, 1 is for mask
         self.register_buffer("feature_ids", torch.arange(2, len(self.var_names_g) + 2))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.feature_ids = torch.arange(2, len(self.var_names_g) + 2)
+        self.bert.bert.embeddings.position_ids = torch.arange(self.config.max_position_embeddings).expand((1, -1))
+        self.bert.bert.embeddings.token_type_ids = torch.zeros(
+            self.bert.bert.embeddings.position_ids.size(), dtype=torch.long
+        )
+        self.bert.apply(lambda module: setattr(module, "_is_hf_initialized", False))
+        self.bert.init_weights()
 
     def tokenize(self, x_ng: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         tokens = self.feature_ids.expand(x_ng.shape)

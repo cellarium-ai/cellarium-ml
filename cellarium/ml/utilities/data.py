@@ -58,15 +58,8 @@ class AnnDataField:
     key: str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
-    def __call__(self, adata: AnnData | AnnCollection) -> "AnnDataField":
-        self.adata = adata
-        return self
-
-    def __getitem__(self, idx: int | list[int] | slice) -> np.ndarray:
-        if self.adata is None:
-            raise ValueError("Must call AnnDataField with an AnnData-like object first")
-
-        value = getattr(self.adata[idx], self.attr)
+    def __call__(self, adata: AnnData | AnnCollection, idx: int | list[int] | slice) -> np.ndarray:
+        value = getattr(adata[idx], self.attr)
         if self.key is not None:
             value = value[self.key]
 
