@@ -13,21 +13,21 @@ model:
     init_args:
       attn_mult: 1
       backend: torch
-      d_ffn: 4
-      d_model: 2
+      d_ffn: 512
+      d_model: 256
       dropout: 0.0
       initializer_range: 0.02
       input_mult: 1.0
       log_metrics: true
-      n_blocks: 1
-      n_context: 5
-      n_heads: 1
+      n_blocks: 4
+      n_context: 2048
+      n_heads: 8
       output_mult: 1.0
       use_bias: false
       log_metrics: true
       log_plots: false
 data:
-  filenames: gs://cellarium-file-system/curriculum/homo_sap_no_cancer/extract_files/extract_{0..9}.h5ad
+  filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/curriculum/extract_files/extract_{0..9}.h5ad
   batch_size: 5
   max_cache_size: 2
   num_workers: 1
