@@ -58,14 +58,16 @@ class NegativeBinomial(dist.Distribution):
         if self._validate_args:
             self._validate_sample(value)
 
-        # log_theta_mu_eps = torch.log(self.theta + self.mu + self.eps)
-        # return (
-        #     self.theta * (torch.log(self.theta + self.eps) - log_theta_mu_eps)
-        #     + value * (torch.log(self.mu + self.eps) - log_theta_mu_eps)
-        #     + torch.lgamma(value + self.theta)
-        #     - torch.lgamma(self.theta)
-        #     - torch.lgamma(value + 1)
-        # )
+        # Original implementation from scVI:
+        #
+        #   log_theta_mu_eps = torch.log(self.theta + self.mu + self.eps)
+        #   return (
+        #       self.theta * (torch.log(self.theta + self.eps) - log_theta_mu_eps)
+        #       + value * (torch.log(self.mu + self.eps) - log_theta_mu_eps)
+        #       + torch.lgamma(value + self.theta)
+        #       - torch.lgamma(self.theta)
+        #       - torch.lgamma(value + 1)
+        #   )
         delta = torch.where(
             (value / self.theta < 1e-2) & (self.theta > 1e2),
             (value + self.theta - 0.5) * torch.log1p(value / self.theta) - value,
@@ -525,7 +527,8 @@ class CellariumGPT(CellariumModel):
         initializer_range: float = 0.02,
         backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
         log_metrics: bool = True,
-    ) -> None:
+        log_plots: bool = False,
+        log_plots_every_n_steps_multiplier: int = 10) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.n_vars = len(var_names_g)
@@ -548,6 +551,8 @@ class CellariumGPT(CellariumModel):
         self.reset_parameters()
 
         self.log_metrics = log_metrics
+        self.log_plots = log_plots
+        self.log_plots_every_n_steps_multiplier = log_plots_every_n_steps_multiplier
 
     def reset_parameters(self) -> None:
         self.apply(self._init_weights)
@@ -654,22 +659,37 @@ class CellariumGPT(CellariumModel):
         if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
             return
 
+        self._log_metrics(pl_module, outputs)
+
+        if not self.log_plots:
+            return
+
+        if trainer.global_rank != 0:
+            return
+
+        if (trainer.global_step + 1) % (trainer.log_every_n_steps * self.log_plots_every_n_steps_multiplier) != 0:  # type: ignore[attr-defined]
+            return
+
+        self._log_plots(trainer, outputs)
+
+    def _log_metrics(
+            self,
+            pl_module: pl.LightningModule,
+            outputs: dict[str, torch.Tensor]) -> None:
         values_nc = outputs["values_nc"]
-        total_mrna_umis_n = outputs["total_mrna_umis_n"]
-        prefix_len_n = outputs["prefix_len_n"]
         labels_mask_nc = outputs["labels_mask_nc"]
         sample_weights_nc = outputs["sample_weights_nc"]
         mu_nc = outputs["mu_nc"]
         theta_nc = outputs["theta_nc"]
-
         nonzero_mask = (values_nc > 0) & labels_mask_nc
+        zero_mask = (values_nc == 0) & labels_mask_nc
+
         nonzero_log_prob = NegativeBinomial(mu=mu_nc[nonzero_mask], theta=theta_nc[nonzero_mask]).log_prob(
             values_nc[nonzero_mask]
         )
         nonzero_sample_weights = sample_weights_nc[nonzero_mask]
         nonzero_loss = -(nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
 
-        zero_mask = (values_nc == 0) & labels_mask_nc
         zero_log_prob = NegativeBinomial(mu=mu_nc[zero_mask], theta=theta_nc[zero_mask]).log_prob(values_nc[zero_mask])
         zero_sample_weights = sample_weights_nc[zero_mask]
         zero_loss = -(zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
@@ -677,13 +697,21 @@ class CellariumGPT(CellariumModel):
         pl_module.log("zero_loss", zero_loss, sync_dist=True)
         pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
 
-        if trainer.global_rank != 0:
-            return
-
-        if (trainer.global_step + 1) % (trainer.log_every_n_steps * 10) != 0:  # type: ignore[attr-defined]
-            return
+    def _log_plots(
+            self,
+            trainer: pl.Trainer,
+            outputs: dict[str, torch.Tensor]):
 
         import matplotlib.pyplot as plt
+
+        values_nc = outputs["values_nc"]
+        total_mrna_umis_n = outputs["total_mrna_umis_n"]
+        prefix_len_n = outputs["prefix_len_n"]
+        labels_mask_nc = outputs["labels_mask_nc"]
+        mu_nc = outputs["mu_nc"]
+        theta_nc = outputs["theta_nc"]
+        nonzero_mask = (values_nc > 0) & labels_mask_nc
+        zero_mask = (values_nc == 0) & labels_mask_nc
 
         prefix_len_nc = prefix_len_n[:, None].expand(-1, self.n_context)
         total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, self.n_context)
@@ -743,3 +771,4 @@ class CellariumGPT(CellariumModel):
                     zero_fig,
                     global_step=trainer.global_step,
                 )
+

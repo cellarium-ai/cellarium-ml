@@ -1,0 +1,54 @@
+# lightning.pytorch==2.1.3
+seed_everything: true
+trainer:
+  accelerator: gpu
+  devices: 1
+  log_every_n_steps: 1
+  strategy: auto
+  max_epochs: 5
+  default_root_dir: smoke_test/cellarium_gpt
+model:
+  model:
+    class_path: cellarium.ml.models.CellariumGPT
+    init_args:
+      attn_mult: 1
+      backend: torch
+      d_ffn: 4
+      d_model: 2
+      dropout: 0.0
+      initializer_range: 0.02
+      input_mult: 1.0
+      log_metrics: true
+      n_blocks: 1
+      n_context: 5
+      n_heads: 1
+      output_mult: 1.0
+      use_bias: false
+      log_metrics: true
+      log_plots: false
+data:
+  filenames: gs://cellarium-file-system/curriculum/homo_sap_no_cancer/extract_files/extract_{0..9}.h5ad
+  batch_size: 5
+  max_cache_size: 2
+  num_workers: 1
+  shard_size: 100
+  limits: null
+  shard_size: 10_000
+  last_shard_size: null
+  max_cache_size: 2
+  cache_size_strictly_enforced: true
+  label: null
+  keys: null
+  index_unique: null
+  indices_strict: true
+  batch_keys: null
+  shuffle: false
+  batch_keys:
+    total_mrna_umis_n:
+      attr: obs
+      key: total_mrna_umis
+    var_names_g:
+      attr: var_names
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
