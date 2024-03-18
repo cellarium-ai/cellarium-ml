@@ -25,11 +25,11 @@ To run the tests::
 
 To automatically format the code::
 
-   $ make format               # runs ruff and black formatters
+   $ make format               # runs ruff formatter and fixes linter errors
 
 To run the linters::
 
-   $ make lint                  # runs ruff and black checks
+   $ make lint                  # runs ruff linter and checks for formatter errors
 
 To build the documentation::
 
