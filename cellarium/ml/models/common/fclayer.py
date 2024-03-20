@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import collections
 from collections.abc import Iterable
 
@@ -16,7 +19,6 @@ def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
 
 
 class FCLayers(nn.Module):
-
     """A helper class to build fully-connected layers for a neural network.
 
     Parameters
@@ -50,19 +52,19 @@ class FCLayers(nn.Module):
     """
 
     def __init__(
-            self,
-            n_in: int,
-            n_out: int,
-            n_cat_list: Iterable[int] = None,
-            n_layers: int = 1,
-            n_hidden: int = 128,
-            dropout_rate: float = 0.1,
-            use_batch_norm: bool = True,
-            use_layer_norm: bool = False,
-            use_activation: bool = True,
-            bias: bool = True,
-            inject_covariates: bool = True,
-            activation_fn: nn.Module = nn.ReLU,
+        self,
+        n_in: int,
+        n_out: int,
+        n_cat_list: Iterable[int] = None,
+        n_layers: int = 1,
+        n_hidden: int = 128,
+        dropout_rate: float = 0.1,
+        use_batch_norm: bool = True,
+        use_layer_norm: bool = False,
+        use_activation: bool = True,
+        bias: bool = True,
+        inject_covariates: bool = True,
+        activation_fn: nn.Module = nn.ReLU,
     ):
         super().__init__()
         self.inject_covariates = inject_covariates
@@ -87,12 +89,8 @@ class FCLayers(nn.Module):
                                 bias=bias,
                             ),
                             # non-default params come from defaults in original Tensorflow implementation
-                            nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001)
-                            if use_batch_norm
-                            else None,
-                            nn.LayerNorm(n_out, elementwise_affine=False)
-                            if use_layer_norm
-                            else None,
+                            nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001) if use_batch_norm else None,
+                            nn.LayerNorm(n_out, elementwise_affine=False) if use_layer_norm else None,
                             activation_fn() if use_activation else None,
                             nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None,
                         ),
@@ -177,8 +175,7 @@ class FCLayers(nn.Module):
                         if isinstance(layer, nn.Linear) and self.inject_into_layer(i):
                             if x.dim() == 3:
                                 one_hot_cat_list_layer = [
-                                    o.unsqueeze(0).expand((x.size(0), o.size(0), o.size(1)))
-                                    for o in one_hot_cat_list
+                                    o.unsqueeze(0).expand((x.size(0), o.size(0), o.size(1))) for o in one_hot_cat_list
                                 ]
                             else:
                                 one_hot_cat_list_layer = one_hot_cat_list

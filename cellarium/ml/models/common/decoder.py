@@ -1,5 +1,8 @@
-from typing import Literal
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 from collections.abc import Iterable
+from typing import Literal
 
 import torch
 from torch import nn
@@ -8,7 +11,6 @@ from cellarium.ml.models.common.fclayer import FCLayers
 
 
 class DecoderSCVI(nn.Module):
-
     """Decodes data from latent space of ``n_input`` dimensions into ``n_output`` dimensions.
 
     Uses a fully-connected neural network of ``n_hidden`` layers.
@@ -42,17 +44,17 @@ class DecoderSCVI(nn.Module):
     """
 
     def __init__(
-            self,
-            n_input: int,
-            n_output: int,
-            n_cat_list: Iterable[int] = None,
-            n_layers: int = 1,
-            n_hidden: int = 128,
-            inject_covariates: bool = True,
-            use_batch_norm: bool = False,
-            use_layer_norm: bool = False,
-            scale_activation: Literal["softmax", "softplus"] = "softmax",
-            **kwargs,
+        self,
+        n_input: int,
+        n_output: int,
+        n_cat_list: Iterable[int] = None,
+        n_layers: int = 1,
+        n_hidden: int = 128,
+        inject_covariates: bool = True,
+        use_batch_norm: bool = False,
+        use_layer_norm: bool = False,
+        scale_activation: Literal["softmax", "softplus"] = "softmax",
+        **kwargs,
     ):
         super().__init__()
         self.px_decoder = FCLayers(
@@ -124,18 +126,17 @@ class DecoderSCVI(nn.Module):
 
 
 class LinearDecoderSCVI(nn.Module):
-
     """Linear decoder for scVI."""
 
     def __init__(
-            self,
-            n_input: int,
-            n_output: int,
-            n_cat_list: Iterable[int] = None,
-            use_batch_norm: bool = False,
-            use_layer_norm: bool = False,
-            bias: bool = False,
-            **kwargs,
+        self,
+        n_input: int,
+        n_output: int,
+        n_cat_list: Iterable[int] = None,
+        use_batch_norm: bool = False,
+        use_layer_norm: bool = False,
+        bias: bool = False,
+        **kwargs,
     ):
         super().__init__()
 

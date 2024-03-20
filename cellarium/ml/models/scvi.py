@@ -1,19 +1,21 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
+from typing import Callable, Literal, Sequence
+
 import numpy as np
 import torch
-import torch.nn.functional as F
+from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
-from torch.distributions import Normal, Poisson, Distribution
 
-from cellarium.ml.models.common.encoder import Encoder
 from cellarium.ml.models.common.decoder import DecoderSCVI
 from cellarium.ml.models.common.distributions import NegativeBinomial
+from cellarium.ml.models.common.encoder import Encoder
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
-
-from typing import Literal, Sequence, Callable
 
 
 def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
@@ -173,8 +175,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
                 raise ValueError(
-                    "If not using observed_lib_size, "
-                    "must provide library_log_means and library_log_vars."
+                    "If not using observed_lib_size, " "must provide library_log_means and library_log_vars."
                 )
 
             self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
@@ -193,7 +194,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 " 'gene-label', 'gene-cell'], but input was "
                 "{}".format(self.dispersion)
             )
-        
+
         self.batch_representation = batch_representation
         if self.batch_representation == "embedding":
             raise NotImplementedError
@@ -203,7 +204,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             raise ValueError("`batch_representation` must be one of 'one-hot', 'embedding'.")
         if batch_embedding_kwargs is not None:
             raise NotImplementedError
-        
+
         use_batch_norm_encoder = use_batch_norm == "encoder" or use_batch_norm == "both"
         use_batch_norm_decoder = use_batch_norm == "decoder" or use_batch_norm == "both"
         use_layer_norm_encoder = use_layer_norm == "encoder" or use_layer_norm == "both"
@@ -264,16 +265,18 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # if isinstance(self.mean_g, torch.nn.Parameter):
         #     self.mean_g.data.zero_()
         # self.W_kg.data.normal_(0, self.W_init_scale, generator=rng)
-        # self.sigma_unconstrained.data.fill_(_unconstrain(torch.as_tensor(self.sigma_init_scale), constraints.positive))
+        # self.sigma_unconstrained.data.fill_(
+        #     _unconstrain(
+        #       torch.as_tensor(self.sigma_init_scale), constraints.positive))
 
     def inference(
-            self, 
-            x, 
-            batch_index,
-            cont_covs=None,
-            cat_covs=None,
-            n_samples=1,
-        ):
+        self,
+        x,
+        batch_index,
+        cont_covs=None,
+        cat_covs=None,
+        n_samples=1,
+    ):
         """
         High level inference method.
         Runs the inference (encoder) model.
@@ -307,18 +310,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             if self.batch_representation == "embedding":
                 ql, library_encoded = self.l_encoder(encoder_input, *categorical_input)
             else:
-                ql, library_encoded = self.l_encoder(
-                    encoder_input, batch_index, *categorical_input
-                )
+                ql, library_encoded = self.l_encoder(encoder_input, batch_index, *categorical_input)
             library = library_encoded
 
         if n_samples > 1:
             untran_z = qz.sample((n_samples,))
             z = self.z_encoder.z_transformation(untran_z)
             if self.use_observed_lib_size:
-                library = library.unsqueeze(0).expand(
-                    (n_samples, library.size(0), library.size(1))
-                )
+                library = library.unsqueeze(0).expand((n_samples, library.size(0), library.size(1)))
             else:
                 library = ql.sample((n_samples,))
 
@@ -331,7 +330,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         return outputs
 
     def generative(
-        self, 
+        self,
         z: torch.Tensor,
         library: torch.Tensor,
         batch_index: torch.Tensor,
@@ -348,9 +347,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         if cont_covs is None:
             decoder_input = z
         elif z.dim() != cont_covs.dim():
-            decoder_input = torch.cat(
-                [z, cont_covs.unsqueeze(0).expand(z.size(0), -1, -1)], dim=-1
-            )
+            decoder_input = torch.cat([z, cont_covs.unsqueeze(0).expand(z.size(0), -1, -1)], dim=-1)
         else:
             decoder_input = torch.cat([z, cont_covs], dim=-1)
 
@@ -425,7 +422,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         return dict(px=px, pl=pl, pz=pz)
 
     def forward(
-        self, 
+        self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         batch_index_n: torch.Tensor,
@@ -447,7 +444,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 Categorical covariates for each cell (d-dimensional).
             size_factor_n:
                 Library size factor for each cell.
-            
+
         Returns:
             A dictionary with the loss value.
         """
@@ -474,25 +471,19 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
 
         # KL divergence
-        kl_divergence_z = kl(
-            inference_outputs["qz"],
-            generative_outputs["pz"]).sum(
-            dim=1
-        )
+        kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
         # reconstruction loss
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
-        loss = torch.mean(
-            rec_loss + kl_divergence_z
-        )
+        loss = torch.mean(rec_loss + kl_divergence_z)
 
         return {"loss": loss}
-    
+
     def predict(
-        self, 
-        x_ng: torch.Tensor, 
-        var_names_g: np.ndarray, 
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
         transform_batch_n: torch.Tensor,
     ) -> dict[str, np.ndarray | torch.Tensor]:
         """
@@ -507,7 +498,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             var_names_g:
                 The list of the variable names in the input data.
             transform_batch_n:
-                Batch labels to use in decoder (if you for example want to project 
+                Batch labels to use in decoder (if you for example want to project
                 all the data as if it came from a single batch).
 
         Returns:

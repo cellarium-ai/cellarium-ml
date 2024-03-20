@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 from collections.abc import Iterable
 from typing import Callable, Optional
 
@@ -13,7 +16,6 @@ def _identity(x):
 
 
 class Encoder(nn.Module):
-
     """Encode data of ``n_input`` dimensions into a latent space of ``n_output`` dimensions.
 
     Uses a fully-connected neural network of ``n_hidden`` layers.
@@ -49,17 +51,17 @@ class Encoder(nn.Module):
     """
 
     def __init__(
-            self,
-            n_input: int,
-            n_output: int,
-            n_cat_list: Iterable[int] = None,
-            n_layers: int = 1,
-            n_hidden: int = 128,
-            dropout_rate: float = 0.1,
-            distribution: str = "normal",  # TODO: fix ambiguity here
-            var_eps: float = 1e-4,
-            var_activation: Optional[Callable] = None,
-            **kwargs,
+        self,
+        n_input: int,
+        n_output: int,
+        n_cat_list: Iterable[int] = None,
+        n_layers: int = 1,
+        n_hidden: int = 128,
+        dropout_rate: float = 0.1,
+        distribution: str = "normal",  # TODO: fix ambiguity here
+        var_eps: float = 1e-4,
+        var_activation: Optional[Callable] = None,
+        **kwargs,
     ):
         super().__init__()
 

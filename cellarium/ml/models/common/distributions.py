@@ -1,14 +1,15 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Probability distributions"""
 
 from typing import Optional, Tuple, Union
 
 import torch
-import torch.nn.functional as F
 from torch.distributions import Distribution, Gamma, constraints
 from torch.distributions import Poisson as PoissonTorch
 from torch.distributions.utils import (
     broadcast_all,
-    lazy_property,
     probs_to_logits,
 )
 
@@ -67,9 +68,7 @@ class NegativeBinomial(Distribution):
                 "Please use one of the two possible parameterizations. Refer to the documentation for more information."
             )
 
-        using_param_1 = total_count is not None and (
-            logits is not None or probs is not None
-        )
+        using_param_1 = total_count is not None and (logits is not None or probs is not None)
         if using_param_1:
             logits = logits if logits is not None else probs_to_logits(probs)
             total_count = total_count.type_as(logits)
@@ -103,9 +102,7 @@ class NegativeBinomial(Distribution):
         # Clamping as distributions objects can have buggy behaviors when
         # their parameters are too high
         l_train = torch.clamp(p_means, max=1e8)
-        counts = PoissonTorch(
-            l_train
-        ).sample()  # Shape : (n_samples, n_cells_batch, n_vars)
+        counts = PoissonTorch(l_train).sample()  # Shape : (n_samples, n_cells_batch, n_vars)
         return counts
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
@@ -119,7 +116,7 @@ class NegativeBinomial(Distribution):
 
     def _gamma(self):
         return _gamma(self.theta, self.mu)
-    
+
 
 def log_nb_positive(
     x: Union[torch.Tensor],
