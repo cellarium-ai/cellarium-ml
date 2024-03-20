@@ -484,7 +484,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         loss = torch.mean(
-            rec_loss * kl_divergence_z
+            rec_loss + kl_divergence_z
         )
 
         return {"loss": loss}
