@@ -404,9 +404,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             #     scale=px_scale,
             # )
         elif self.gene_likelihood == "nb":
-            px = NegativeBinomial(mu=px_rate, theta=px_r, scale=px_scale)
+            px = NegativeBinomial(mu=px_rate, theta=px_r)
         elif self.gene_likelihood == "poisson":
-            px = Poisson(px_rate, scale=px_scale)
+            px = Poisson(rate=px_rate)
 
         # Priors
         if self.use_observed_lib_size:
@@ -477,6 +477,17 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         loss = torch.mean(rec_loss + kl_divergence_z)
+
+        print('generative_outputs_px')
+        print(generative_outputs["px"].mu)
+        print(generative_outputs["px"].theta)
+
+        print('rec_loss')
+        print(torch.mean(rec_loss))
+        print('kl_divergence_z')
+        print(torch.mean(kl_divergence_z))
+        print('total_loss')
+        print(loss.item())
 
         return {"loss": loss}
 

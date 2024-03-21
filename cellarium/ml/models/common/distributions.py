@@ -22,13 +22,12 @@ class NegativeBinomial(Distribution):
     arg_constraints = {"mu": constraints.greater_than_eq(0), "theta": constraints.greater_than_eq(0)}
     support = constraints.nonnegative_integer
 
-    def __init__(self, mu: torch.Tensor, theta: torch.Tensor, eps: float = 1e-8, validate_args: bool = False) -> None:
+    def __init__(self, mu: torch.Tensor, theta: torch.Tensor, validate_args: bool = False) -> None:
         self.mu, self.theta = broadcast_all(mu, theta)
         if isinstance(mu, Number) and isinstance(theta, Number):
             batch_shape = torch.Size()
         else:
             batch_shape = self.mu.size()
-        self.eps = eps
         super().__init__(batch_shape, validate_args=validate_args)
 
     @property
