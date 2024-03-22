@@ -9,8 +9,9 @@ from typing import Any, Literal
 
 import lightning.pytorch as pl
 import numpy as np
+import pyro.distributions as dist
 import torch
-import torch.distributions as dist
+import torch.distributions as torch_dist
 from pykeops.torch import LazyTensor
 from torch import nn
 from torch.backends.cuda import sdp_kernel
@@ -24,7 +25,7 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-class NegativeBinomial(dist.Distribution):
+class NegativeBinomial(torch_dist.Distribution):
     """Negative binomial distribution.
 
     Args:
@@ -474,7 +475,66 @@ class NegativeBinomialHead(nn.Module):
         return mu_nc, theta_nc
 
 
-class CellariumGPT(CellariumModel):
+class BaseCellariumGPT(CellariumModel):
+    def reset_parameters(self) -> None:
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module) -> None:
+        """Initialize the weights."""
+        if isinstance(module, nn.Linear):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            # assert self.optimizer == "adam", "Only Adam(W) optimizer is supported for now."
+            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            if module.bias is not None:
+                module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+        # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
+        #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
+        #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
+        #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
+        #
+        # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+        for name, p in module.named_parameters():
+            if name == "dense2.weight" or name == "Wo.weight":
+                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
+                p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.gpt_model.n_blocks)))
+
+    @torch.no_grad()
+    def on_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: dict[str, torch.Tensor],
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        if not self.log_metrics:
+            return
+
+        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
+            return
+
+        log_metrics(pl_module, outputs)
+
+        if trainer.global_rank != 0:
+            return
+
+        if (trainer.global_step + 1) % (trainer.log_every_n_steps * 10) != 0:  # type: ignore[attr-defined]
+            return
+
+        log_plots(self, trainer, outputs)
+
+
+class CellariumGPT(BaseCellariumGPT):
     """
     Cellarium GPT model.
 
@@ -549,38 +609,6 @@ class CellariumGPT(CellariumModel):
 
         self.log_metrics = log_metrics
 
-    def reset_parameters(self) -> None:
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module) -> None:
-        """Initialize the weights."""
-        if isinstance(module, nn.Linear):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            # assert self.optimizer == "adam", "Only Adam(W) optimizer is supported for now."
-            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.LayerNorm):
-            if module.bias is not None:
-                module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-
-        # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
-        #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
-        #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
-        #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
-        #
-        # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
-        for name, p in module.named_parameters():
-            if name == "dense2.weight" or name == "Wo.weight":
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.gpt_model.n_blocks)))
-
     def tokenize(
         self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int, shuffle: bool
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -638,108 +666,318 @@ class CellariumGPT(CellariumModel):
             "theta_nc": theta_nc,
         }
 
-    @torch.no_grad()
-    def on_batch_end(
+
+class InterpretableNegativeBinomialHead(nn.Module):
+    """
+    Negative binomial head.
+
+    Args:
+        d_model:
+            Dimensionality of the embeddings and hidden states.
+        use_bias:
+            Whether to use bias in the linear transformations.
+        output_mult:
+            Multiplier for the output embeddings.
+    """
+
+    def __init__(self, n_vars: int, d_model: int, use_bias: bool, output_mult: float) -> None:
+        super().__init__()
+        # self.dense = nn.Linear(d_model, 2, bias=use_bias)
+        self.output_mult = output_mult
+        d_ffn = d_model * 2
+
+        # self.attention = ScaledDotProductAttention(0.0, math.sqrt(d_model), backend="mem_efficient")
+        # self.Wk = nn.Linear(d_model, d_model, bias=use_bias)
+        self.query_embedding = nn.Embedding(n_vars + 1, d_model)
+        # self.Wv = nn.Linear(d_model, d_model, bias=use_bias)
+        self.dense1 = nn.Linear(d_model, d_ffn, bias=use_bias)
+        self.dense2 = nn.Linear(d_ffn, d_ffn, bias=use_bias)
+        self.dense3 = nn.Linear(d_ffn, 2, bias=use_bias)
+        self.relu = nn.ReLU()
+
+    def forward(self, hidden_state_ncd, ids_nc, prefix_len_n, total_mrna_umis_n) -> tuple[torch.Tensor, torch.Tensor]:
+        # device = hidden_state_ncd.device
+
+        queries_ncd = self.query_embedding(ids_nc)
+        # zq_ncd = self.Wv(queries_ncd)
+        # keys_ncd = self.Wk(hidden_state_ncd)
+        # zi_ncd = self.attention(
+        #     queries_ncd[:, 1:], keys_ncd[:, 1:], hidden_state_ncd[:, 1:], prefix_len_n - 1, attention_type="block"
+        # )
+        # zi_ncd = torch.cat([torch.zeros(zi_ncd.shape[0], 1, zi_ncd.shape[2], device=device), zi_ncd], dim=1)
+        # hidden_state_ncd = zq_ncd + zi_ncd
+        hidden_state_ncd = queries_ncd + hidden_state_ncd[:, 0, None]
+
+        output = self.dense3(self.relu(self.dense2(self.relu(self.dense1(hidden_state_ncd))))) * self.output_mult
+        mu_nc = output[..., 0].sigmoid() * total_mrna_umis_n[:, None]
+        theta_nc = output[..., 1].exp()
+        return mu_nc, theta_nc
+
+
+class BioGPT(BaseCellariumGPT):
+    """
+    Cellarium GPT model.
+
+    Args:
+        var_names_g:
+            The variable names schema for the input data validation.
+        d_model:
+            Dimensionality of the embeddings and hidden states.
+        d_ffn:
+            Dimensionality of the inner feed-forward layers.
+        n_heads:
+            Number of attention heads.
+        n_blocks:
+            Number of transformer blocks.
+        dropout:
+            Dropout probability.
+        use_bias:
+            Whether to use bias in the linear transformations.
+        n_context:
+            Number of context variables.
+        attn_mult:
+            Multiplier for the attention scores.
+        input_mult:
+            Multiplier for the input embeddings.
+        output_mult:
+            Multiplier for the output embeddings.
+        initializer_range:
+            The standard deviation of the truncated normal initializer.
+        backend:
+            Backend for the attention computation.
+        log_metrics:
+            Whether to log the zero and nonzero losses and predictions.
+    """
+
+    def __init__(
         self,
-        trainer: pl.Trainer,
-        pl_module: pl.LightningModule,
-        outputs: dict[str, torch.Tensor],
-        batch: Any,
-        batch_idx: int,
+        var_names_g: Sequence[str],
+        d_model: int = 128,
+        d_ffn: int = 256,
+        n_heads: int = 4,
+        n_blocks: int = 6,
+        dropout: float = 0.0,
+        use_bias: bool = False,
+        n_context: int = 2048,
+        attn_mult: float = 1.0,
+        input_mult: float = 1.0,
+        output_mult: float = 1.0,
+        initializer_range: float = 0.02,
+        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
+        log_metrics: bool = True,
     ) -> None:
-
-        if not self.log_metrics:
-            return
-
-        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
-            return
-
-        values_nc = outputs["values_nc"]
-        total_mrna_umis_n = outputs["total_mrna_umis_n"]
-        prefix_len_n = outputs["prefix_len_n"]
-        labels_mask_nc = outputs["labels_mask_nc"]
-        sample_weights_nc = outputs["sample_weights_nc"]
-        mu_nc = outputs["mu_nc"]
-        theta_nc = outputs["theta_nc"]
-
-        nonzero_mask = (values_nc > 0) & labels_mask_nc
-        nonzero_log_prob = NegativeBinomial(mu=mu_nc[nonzero_mask], theta=theta_nc[nonzero_mask]).log_prob(
-            values_nc[nonzero_mask]
+        super().__init__()
+        self.var_names_g = np.array(var_names_g)
+        self.n_vars = len(var_names_g)
+        self.gpt_model = GPTModel(
+            self.n_vars,
+            d_model,
+            d_ffn,
+            n_heads,
+            n_blocks,
+            dropout,
+            use_bias,
+            attn_mult,
+            input_mult,
+            backend,
         )
-        nonzero_sample_weights = sample_weights_nc[nonzero_mask]
-        nonzero_loss = -(nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
 
-        zero_mask = (values_nc == 0) & labels_mask_nc
-        zero_log_prob = NegativeBinomial(mu=mu_nc[zero_mask], theta=theta_nc[zero_mask]).log_prob(values_nc[zero_mask])
-        zero_sample_weights = sample_weights_nc[zero_mask]
-        zero_loss = -(zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
+        self.nb_head = InterpretableNegativeBinomialHead(self.n_vars, d_model, use_bias, output_mult)
+        # self.loc_embedding = nn.Parameter(torch.empty(self.n_vars + 1, d_model))
+        # self.log_scale_embedding = nn.Parameter(torch.empty(self.n_vars + 1, d_model))
+        assert n_context <= self.n_vars + 1, "n_context must be less than or equal to the number of genes + 1"
+        self.n_context = n_context
+        self.initializer_range = initializer_range
+        self.reset_parameters()
 
-        pl_module.log("zero_loss", zero_loss, sync_dist=True)
-        pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
+        self.log_metrics = log_metrics
 
-        if trainer.global_rank != 0:
-            return
+    # def reset_parameters(self) -> None:
+    #     self.loc_embedding.data.zero_()
+    #     self.log_scale_embedding.data.fill_(-1)
+    #     return super().reset_parameters()
 
-        if (trainer.global_step + 1) % (trainer.log_every_n_steps * 10) != 0:  # type: ignore[attr-defined]
-            return
+    def tokenize(
+        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int, shuffle: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n = x_ng.shape[0]
+        device = x_ng.device
+        ndx = torch.arange(n, device=device)
 
-        import matplotlib.pyplot as plt
+        genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
+        if shuffle:
+            indices_ng = torch.argsort(torch.rand_like(x_ng))
+            indices_nc = indices_ng[:, :genes_context_size]
+        else:
+            indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
+        values_nc = x_ng[ndx[:, None], indices_nc]
+        if total_mrna_umis_n is not None:
+            # concatenate total_mrna_umis to the random subset of genes
+            values_nc = torch.cat([total_mrna_umis_n[:, None], values_nc], dim=1)
+            ids_nc = torch.cat([torch.zeros((n, 1), dtype=torch.long, device=device), indices_nc + 1], dim=1)
+        else:
+            ids_nc = indices_nc + 1
+        return ids_nc, values_nc
 
-        prefix_len_nc = prefix_len_n[:, None].expand(-1, self.n_context)
-        total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, self.n_context)
+    def forward(
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        fig = plt.figure(figsize=(12, 15))
-        nonzero_indices = random.sample(range(int(nonzero_mask.sum().item())), 24)
+        n = x_ng.shape[0]
+        device = x_ng.device
 
-        for idx, i in enumerate(nonzero_indices):
-            plt.subplot(8, 4, idx + 1)
-            prefix = prefix_len_nc[nonzero_mask][i].item()
-            label = values_nc[nonzero_mask][i].item()
-            mu = mu_nc[nonzero_mask][i].cpu()
-            theta = theta_nc[nonzero_mask][i].cpu()
-            n_umis = total_mrna_umis_nc[nonzero_mask][i].item()
+        # prefix includes the total_mrna_umis and a random subset of genes
+        # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
+        prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
+        labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
 
-            nb_dist = NegativeBinomial(mu=mu, theta=theta)
-            x = torch.arange(0, label * 3 + 5)
-            y = nb_dist.log_prob(x).exp()
-            plt.plot(x, y, "o")
-            plt.vlines(label, 0, nb_dist.log_prob(torch.tensor(label)).exp(), color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block")
 
-        plt.tight_layout()
+        mu_nc, theta_nc = self.nb_head(hidden_state_ncd, ids_nc, prefix_len_n, total_mrna_umis_n)
 
-        for logger in trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                logger.experiment.add_figure(
-                    "nonzero predictions",
-                    fig,
-                    global_step=trainer.global_step,
-                )
+        # qz_dist = dist.Delta(hidden_state_ncd[:, 1:][~labels_mask_nc[:, 1:]])
+        # zi_loc_ncd = self.loc_embedding[ids_nc]
+        # zi_scale_ncd = self.log_scale_embedding[ids_nc].exp()
+        # pz_dist = dist.Normal(zi_loc_ncd[:, 1:][~labels_mask_nc[:, 1:]], zi_scale_ncd[:, 1:][~labels_mask_nc[:, 1:]])
+        # log_pz = pz_dist.log_prob(hidden_state_ncd[:, 1:][~labels_mask_nc[:, 1:]]).sum() / n
+        # log_qz = qz_dist.log_prob(hidden_state_ncd[:, 1:][~labels_mask_nc[:, 1:]]).sum() / n
 
-        zero_fig = plt.figure(figsize=(12, 15))
-        zero_indices = random.sample(range(int(zero_mask.sum().item())), 24)
+        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+        nb_dist = NegativeBinomial(mu=mu_nc[labels_mask_nc], theta=theta_nc[labels_mask_nc])
+        log_px = nb_dist.log_prob(values_nc[labels_mask_nc])
+        sample_weights = sample_weights_nc[labels_mask_nc]
+        loss = -(log_px * sample_weights).sum() / sample_weights.sum()
 
-        for idx, i in enumerate(zero_indices):
-            plt.subplot(8, 4, idx + 1)
-            prefix = prefix_len_nc[zero_mask][i].item()
-            label = values_nc[zero_mask][i].item()
-            mu = mu_nc[zero_mask][i].cpu()
-            theta = theta_nc[zero_mask][i].cpu()
-            n_umis = total_mrna_umis_nc[zero_mask][i].item()
+        return {
+            "loss": loss,
+            "values_nc": values_nc,
+            "total_mrna_umis_n": total_mrna_umis_n,
+            "prefix_len_n": prefix_len_n,
+            "labels_mask_nc": labels_mask_nc,
+            "sample_weights_nc": sample_weights_nc,
+            "mu_nc": mu_nc,
+            "theta_nc": theta_nc,
+        }
 
-            nb_dist = NegativeBinomial(mu=mu, theta=theta)
-            x = torch.arange(0, label * 3 + 5)
-            y = nb_dist.log_prob(x).exp()
-            plt.plot(x, y, "o")
-            plt.vlines(label, 0, nb_dist.log_prob(torch.tensor(label)).exp(), color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
+    def predict(
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        plt.tight_layout()
+        n = x_ng.shape[0]
+        device = x_ng.device
 
-        for logger in trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                logger.experiment.add_figure(
-                    "zero predictions",
-                    zero_fig,
-                    global_step=trainer.global_step,
-                )
+        # prefix includes the total_mrna_umis and a random subset of genes
+        # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
+        prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
+        labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
+
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block")
+        return hidden_state_ncd[:, 0]  # _nd
+
+
+def log_metrics(
+    pl_module: pl.LightningModule,
+    outputs: dict[str, torch.Tensor],
+) -> None:
+    values_nc = outputs["values_nc"]
+    labels_mask_nc = outputs["labels_mask_nc"]
+    sample_weights_nc = outputs["sample_weights_nc"]
+    mu_nc = outputs["mu_nc"]
+    theta_nc = outputs["theta_nc"]
+
+    nonzero_mask = (values_nc > 0) & labels_mask_nc
+    nonzero_log_prob = NegativeBinomial(mu=mu_nc[nonzero_mask], theta=theta_nc[nonzero_mask]).log_prob(
+        values_nc[nonzero_mask]
+    )
+    nonzero_sample_weights = sample_weights_nc[nonzero_mask]
+    nonzero_loss = -(nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
+
+    zero_mask = (values_nc == 0) & labels_mask_nc
+    zero_log_prob = NegativeBinomial(mu=mu_nc[zero_mask], theta=theta_nc[zero_mask]).log_prob(values_nc[zero_mask])
+    zero_sample_weights = sample_weights_nc[zero_mask]
+    zero_loss = -(zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
+
+    pl_module.log("zero_loss", zero_loss, sync_dist=True)
+    pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
+
+
+def log_plots(
+    model: CellariumGPT,
+    trainer: pl.Trainer,
+    outputs: dict[str, torch.Tensor],
+) -> None:
+    import matplotlib.pyplot as plt
+
+    values_nc = outputs["values_nc"]
+    total_mrna_umis_n = outputs["total_mrna_umis_n"]
+    prefix_len_n = outputs["prefix_len_n"]
+    labels_mask_nc = outputs["labels_mask_nc"]
+    mu_nc = outputs["mu_nc"]
+    theta_nc = outputs["theta_nc"]
+
+    prefix_len_nc = prefix_len_n[:, None].expand(-1, model.n_context)
+    total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, model.n_context)
+    nonzero_mask = (values_nc > 0) & labels_mask_nc
+    zero_mask = (values_nc == 0) & labels_mask_nc
+
+    fig = plt.figure(figsize=(12, 15))
+    nonzero_indices = random.sample(range(int(nonzero_mask.sum().item())), 24)
+
+    for idx, i in enumerate(nonzero_indices):
+        plt.subplot(8, 4, idx + 1)
+        prefix = prefix_len_nc[nonzero_mask][i].item()
+        label = values_nc[nonzero_mask][i].item()
+        mu = mu_nc[nonzero_mask][i].cpu()
+        theta = theta_nc[nonzero_mask][i].cpu()
+        n_umis = total_mrna_umis_nc[nonzero_mask][i].item()
+
+        nb_dist = NegativeBinomial(mu=mu, theta=theta)
+        x = torch.arange(0, label * 3 + 5)
+        y = nb_dist.log_prob(x).exp()
+        plt.plot(x, y, "o")
+        plt.vlines(label, 0, nb_dist.log_prob(torch.tensor(label)).exp(), color="r")
+        plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
+
+    plt.tight_layout()
+
+    for logger in trainer.loggers:
+        if isinstance(logger, pl.loggers.TensorBoardLogger):
+            logger.experiment.add_figure(
+                "nonzero predictions",
+                fig,
+                global_step=trainer.global_step,
+            )
+
+    zero_fig = plt.figure(figsize=(12, 15))
+    zero_indices = random.sample(range(int(zero_mask.sum().item())), 24)
+
+    for idx, i in enumerate(zero_indices):
+        plt.subplot(8, 4, idx + 1)
+        prefix = prefix_len_nc[zero_mask][i].item()
+        label = values_nc[zero_mask][i].item()
+        mu = mu_nc[zero_mask][i].cpu()
+        theta = theta_nc[zero_mask][i].cpu()
+        n_umis = total_mrna_umis_nc[zero_mask][i].item()
+
+        nb_dist = NegativeBinomial(mu=mu, theta=theta)
+        x = torch.arange(0, label * 3 + 5)
+        y = nb_dist.log_prob(x).exp()
+        plt.plot(x, y, "o")
+        plt.vlines(label, 0, nb_dist.log_prob(torch.tensor(label)).exp(), color="r")
+        plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
+
+    plt.tight_layout()
+
+    for logger in trainer.loggers:
+        if isinstance(logger, pl.loggers.TensorBoardLogger):
+            logger.experiment.add_figure(
+                "zero predictions",
+                zero_fig,
+                global_step=trainer.global_step,
+            )
