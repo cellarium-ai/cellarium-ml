@@ -487,7 +487,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
     def predict(
         self,
         x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
+        # var_names_g: np.ndarray,
         batch_index_n: torch.Tensor,
         cont_covs_nc: torch.Tensor | None = None,
         cat_covs_nd: torch.Tensor | None = None,
