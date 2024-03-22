@@ -17,6 +17,14 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
+def weights_init(m):
+    classname = m.__class__.__name__
+    if classname.find('BatchNorm') != -1:
+        torch.nn.init.normal_(m.weight, 1.0, 0.02)
+        torch.nn.init.zeros_(m.bias)
+    elif classname.find('Linear') != -1:
+        torch.nn.init.xavier_normal_(m.weight)
+        torch.nn.init.zeros_(m.bias)
 
 def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
     """One hot a tensor of categories."""
@@ -256,18 +264,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             **_extra_decoder_kwargs,
         )
 
-    def reset_parameters(self) -> None:
-        pass
-        # TODO
-        # raise NotImplementedError
-        # rng = torch.Generator()
-        # rng.manual_seed(self.seed)
-        # if isinstance(self.mean_g, torch.nn.Parameter):
-        #     self.mean_g.data.zero_()
-        # self.W_kg.data.normal_(0, self.W_init_scale, generator=rng)
-        # self.sigma_unconstrained.data.fill_(
-        #     _unconstrain(
-        #       torch.as_tensor(self.sigma_init_scale), constraints.positive))
+        self.reset_parameters()
+
+        def reset_parameters(self) -> None:
+            # pass
+            self.z_encoder.encoder.fc_layers.apply(weights_init)
+            self.z_encoder.mean_encoder.apply(weights_init)
+            self.z_encoder.var_encoder.apply(weights_init)
+            self.decoder.px_decoder.fc_layers.apply(weights_init)
 
     def inference(
         self,
@@ -484,29 +488,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
-        transform_batch_n: torch.Tensor,
-    ) -> dict[str, np.ndarray | torch.Tensor]:
-        """
-        Embed the input data ``x_ng`` into the scVI latent space.
+        batch_index_n: torch.Tensor,
+        cont_covs_nc: torch.Tensor | None = None,
+        cat_covs_nd: torch.Tensor | None = None,
+        size_factor_n: torch.Tensor | None = None,
+    ):
+        return self.inference(
+            x=x_ng,
+            batch_index=batch_index_n,
+            cont_covs=cont_covs_nc,
+            cat_covs=cat_covs_nd,
+            n_samples=1,
+        )
 
-        .. note::
-           Gradients are disabled, used for inference only.
-
-        Args:
-            x_ng:
-                Gene counts matrix.
-            var_names_g:
-                The list of the variable names in the input data.
-            transform_batch_n:
-                Batch labels to use in decoder (if you for example want to project
-                all the data as if it came from a single batch).
-
-        Returns:
-            A dictionary with the following keys:
-
-            - ``z_nk``: Embedding of the input data into the principal component space.
-        """
-
-        # TODO: use transform_batch_n here
-
-        raise NotImplementedError
