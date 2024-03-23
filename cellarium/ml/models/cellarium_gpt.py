@@ -399,6 +399,7 @@ class GPTModel(nn.Module):
     def __init__(
         self,
         n_vars: int,
+        n_registers: int,
         d_model: int = 128,
         d_ffn: int = 256,
         n_heads: int = 4,
@@ -410,12 +411,16 @@ class GPTModel(nn.Module):
         backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
     ) -> None:
         super().__init__()
+        self.n_vars = n_vars
+        self.n_registers = n_registers
+        self.d_model = d_model
+        self.d_ffn = d_ffn
         # +1 token for total_mrna_umis
-        self.id_embedding = nn.Embedding(n_vars + 1, d_model)
+        self.id_embedding = nn.Embedding(n_vars + n_registers + 2, d_model)
         # continuous value embedding
         self.value_embedding = ValueEmbedding(d_model, use_bias=use_bias)
         # mask token for target values
-        self.mask_embedding = nn.Embedding(1, d_model)
+        # self.mask_embedding = nn.Embedding(1, d_model)
 
         self.n_blocks = n_blocks
         self.blocks = nn.ModuleList(
@@ -433,14 +438,24 @@ class GPTModel(nn.Module):
         attention_type: Literal["block", "block_diagonal", "full"],
     ) -> torch.Tensor:
         device = ids_nc.device
+        n = ids_nc.shape[0]
 
         id_tokens_ncd = self.id_embedding(ids_nc)
         value_tokens_ncd = self.value_embedding(torch.log1p(values_nc.float()).unsqueeze(-1))
-        mask_token = self.mask_embedding(torch.tensor(0, device=device))
-        value_tokens_ncd[labels_mask_nc] = mask_token
+        # mask_token = self.mask_embedding(torch.tensor(0, device=device))
+        # value_tokens_ncd[labels_mask_nc] = mask_token
 
-        hidden_state_ncd = (id_tokens_ncd + value_tokens_ncd) * self.input_mult
-        for block in self.blocks:
+        gene_tokens_ncd = id_tokens_ncd + value_tokens_ncd
+        cls_register_tokens_rd = self.id_embedding(
+            torch.arange(self.n_vars, self.n_vars + self.n_registers + 1, device=device)
+        )
+        hidden_state_ncd = torch.cat(
+            [cls_register_tokens_rd.expand(n, self.n_registers + 1, self.d_model), gene_tokens_ncd], dim=1
+        )
+        # * self.input_mult
+        for i, block in enumerate(self.blocks):
+            if i == self.n_blocks - 1:
+                self.embeddings_ncd = hidden_state_ncd
             hidden_state_ncd = block(
                 hidden_state_ncd,
                 prefix_len_n=prefix_len_n,
@@ -680,17 +695,16 @@ class InterpretableNegativeBinomialHead(nn.Module):
             Multiplier for the output embeddings.
     """
 
-    def __init__(self, n_vars: int, d_model: int, use_bias: bool, output_mult: float) -> None:
+    def __init__(self, n_vars: int, n_registers: int, d_model: int, use_bias: bool, output_mult: float) -> None:
         super().__init__()
-        # self.dense = nn.Linear(d_model, 2, bias=use_bias)
         self.output_mult = output_mult
         d_ffn = d_model * 2
 
         # self.attention = ScaledDotProductAttention(0.0, math.sqrt(d_model), backend="mem_efficient")
         # self.Wk = nn.Linear(d_model, d_model, bias=use_bias)
-        self.query_embedding = nn.Embedding(n_vars + 1, d_model)
+        self.query_embedding = nn.Embedding(n_vars + n_registers + 2, d_model)
         # self.Wv = nn.Linear(d_model, d_model, bias=use_bias)
-        self.dense1 = nn.Linear(d_model, d_ffn, bias=use_bias)
+        self.dense1 = nn.Linear(d_ffn, d_ffn, bias=use_bias)
         self.dense2 = nn.Linear(d_ffn, d_ffn, bias=use_bias)
         self.dense3 = nn.Linear(d_ffn, 2, bias=use_bias)
         self.relu = nn.ReLU()
@@ -706,9 +720,10 @@ class InterpretableNegativeBinomialHead(nn.Module):
         # )
         # zi_ncd = torch.cat([torch.zeros(zi_ncd.shape[0], 1, zi_ncd.shape[2], device=device), zi_ncd], dim=1)
         # hidden_state_ncd = zq_ncd + zi_ncd
-        hidden_state_ncd = queries_ncd + hidden_state_ncd[:, 0, None]
+        # hidden_state_ncd = queries_ncd + hidden_state_ncd[:, 0, None]
+        hidden_state_ncf = torch.cat([queries_ncd, hidden_state_ncd[:, 0, None].expand(queries_ncd.shape)], dim=2)
 
-        output = self.dense3(self.relu(self.dense2(self.relu(self.dense1(hidden_state_ncd))))) * self.output_mult
+        output = self.dense3(self.relu(self.dense2(self.relu(self.dense1(hidden_state_ncf))))) * self.output_mult
         mu_nc = output[..., 0].sigmoid() * total_mrna_umis_n[:, None]
         theta_nc = output[..., 1].exp()
         return mu_nc, theta_nc
@@ -752,6 +767,7 @@ class BioGPT(BaseCellariumGPT):
     def __init__(
         self,
         var_names_g: Sequence[str],
+        n_registers: int = 0,
         d_model: int = 128,
         d_ffn: int = 256,
         n_heads: int = 4,
@@ -769,8 +785,10 @@ class BioGPT(BaseCellariumGPT):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.n_vars = len(var_names_g)
+        self.n_registers = n_registers
         self.gpt_model = GPTModel(
             self.n_vars,
+            self.n_registers,
             d_model,
             d_ffn,
             n_heads,
@@ -782,9 +800,7 @@ class BioGPT(BaseCellariumGPT):
             backend,
         )
 
-        self.nb_head = InterpretableNegativeBinomialHead(self.n_vars, d_model, use_bias, output_mult)
-        # self.loc_embedding = nn.Parameter(torch.empty(self.n_vars + 1, d_model))
-        # self.log_scale_embedding = nn.Parameter(torch.empty(self.n_vars + 1, d_model))
+        self.nb_head = InterpretableNegativeBinomialHead(self.n_vars, self.n_registers, d_model, use_bias, output_mult)
         assert n_context <= self.n_vars + 1, "n_context must be less than or equal to the number of genes + 1"
         self.n_context = n_context
         self.initializer_range = initializer_range
@@ -798,13 +814,20 @@ class BioGPT(BaseCellariumGPT):
     #     return super().reset_parameters()
 
     def tokenize(
-        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int, shuffle: bool
+        self,
+        x_ng: torch.Tensor,
+        total_mrna_umis_n: torch.Tensor | None,
+        context_size: int,
+        shuffle: bool,
+        n_registers: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         n = x_ng.shape[0]
         device = x_ng.device
         ndx = torch.arange(n, device=device)
 
-        genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
+        genes_context_size = (
+            context_size - n_registers - 1 if total_mrna_umis_n is None else context_size - n_registers - 2
+        )
         if shuffle:
             indices_ng = torch.argsort(torch.rand_like(x_ng))
             indices_nc = indices_ng[:, :genes_context_size]
@@ -814,9 +837,11 @@ class BioGPT(BaseCellariumGPT):
         if total_mrna_umis_n is not None:
             # concatenate total_mrna_umis to the random subset of genes
             values_nc = torch.cat([total_mrna_umis_n[:, None], values_nc], dim=1)
-            ids_nc = torch.cat([torch.zeros((n, 1), dtype=torch.long, device=device), indices_nc + 1], dim=1)
+            ids_nc = torch.cat(
+                [torch.full((n, 1), fill_value=self.n_vars, dtype=torch.long, device=device), indices_nc], dim=1
+            )
         else:
-            ids_nc = indices_nc + 1
+            ids_nc = indices_nc
         return ids_nc, values_nc
 
     def forward(
@@ -830,10 +855,14 @@ class BioGPT(BaseCellariumGPT):
 
         # prefix includes the total_mrna_umis and a random subset of genes
         # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
-        prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
-        labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
+        prefix_len_n = torch.randint(2 + self.n_registers, self.n_context, (n,), device=device)
+        labels_mask_nc = (
+            torch.arange(self.n_registers + 1, self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
+        )
 
-        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
+        ids_nc, values_nc = self.tokenize(
+            x_ng, total_mrna_umis_n, self.n_context, shuffle=True, n_registers=self.n_registers
+        )
         hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block")
 
         mu_nc, theta_nc = self.nb_head(hidden_state_ncd, ids_nc, prefix_len_n, total_mrna_umis_n)
@@ -845,7 +874,9 @@ class BioGPT(BaseCellariumGPT):
         # log_pz = pz_dist.log_prob(hidden_state_ncd[:, 1:][~labels_mask_nc[:, 1:]]).sum() / n
         # log_qz = qz_dist.log_prob(hidden_state_ncd[:, 1:][~labels_mask_nc[:, 1:]]).sum() / n
 
-        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(
+            -1, self.n_context - self.n_registers - 1
+        )
         nb_dist = NegativeBinomial(mu=mu_nc[labels_mask_nc], theta=theta_nc[labels_mask_nc])
         log_px = nb_dist.log_prob(values_nc[labels_mask_nc])
         sample_weights = sample_weights_nc[labels_mask_nc]
@@ -873,12 +904,18 @@ class BioGPT(BaseCellariumGPT):
 
         # prefix includes the total_mrna_umis and a random subset of genes
         # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
-        prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
+        # prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
+        prefix_len_n = torch.full((n,), self.n_context - 1, device=device)
         labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
 
-        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=False)
+        # self.gpt_model.blocks[-1].attention.attention.backend = "torch"
         hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block")
-        return hidden_state_ncd[:, 0]  # _nd
+        return {
+            "cell_state_nd": hidden_state_ncd[:, 0],
+            "embeddings_ncd": self.gpt_model.embeddings_ncd,
+            # "attention_probs_nqs": self.gpt_model.blocks[-1].attention.attention.attention_probs_nqs,
+        }
 
 
 def log_metrics(
@@ -921,8 +958,8 @@ def log_plots(
     mu_nc = outputs["mu_nc"]
     theta_nc = outputs["theta_nc"]
 
-    prefix_len_nc = prefix_len_n[:, None].expand(-1, model.n_context)
-    total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, model.n_context)
+    prefix_len_nc = prefix_len_n[:, None].expand(-1, model.n_context - model.n_registers - 1)
+    total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, model.n_context - model.n_registers - 1)
     nonzero_mask = (values_nc > 0) & labels_mask_nc
     zero_mask = (values_nc == 0) & labels_mask_nc
 
