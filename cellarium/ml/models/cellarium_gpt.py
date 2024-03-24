@@ -642,6 +642,70 @@ class CellariumGPT(CellariumModel):
             "mu_nc": mu_nc,
             "theta_nc": theta_nc,
         }
+    
+    def predict(
+        self, 
+        x_ng: torch.Tensor, 
+        var_names_g: np.ndarray, 
+        total_mrna_umis_n: torch.Tensor, 
+        context_size: int = 2048, 
+        shuffle: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Predict gene embeddings and negative binomial parameters.
+
+        Args:
+            x_ng:
+                The input gene expression data.
+            var_names_g:
+                The variable names schema for the input data validation.
+            total_mrna_umis_n:
+                The total mRNA UMIs.
+            context_size:
+                The number of genes to include in the computation.
+            shuffle:
+                True to choose genes at random, False to choose the first context_size genes.
+
+        Returns:
+            A dictionary with the following keys and values:
+                - hidden_state_ncd: The final hidden state of the GPT model, i.e. the embeddings. 
+                    First is the total mRNA UMIs.
+                - values_nc: The input gene expression data with the total mRNA UMIs and all input genes. 
+                    First is the total mRNA UMIs.
+                - total_mrna_umis_n: The total mRNA UMIs.
+                - prefix_len_n: The length of the prefix.
+                - labels_mask_nc: The mask for the labels.
+                - sample_weights_nc: The sample weights.
+                - mu_nc: The mean of the negative binomial distribution.
+                - theta_nc: The inverse dispersion of the negative binomial distribution.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        n = x_ng.shape[0]
+        device = x_ng.device
+
+        # prefix includes the total_mrna_umis and a subset of genes
+        # the length of the prefix is given by context_size
+        prefix_len_n = torch.ones(n, device=device) * context_size
+        labels_mask_nc = torch.arange(context_size, device=device)[None, :] >= prefix_len_n[:, None]
+
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, context_size=context_size, shuffle=shuffle)
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
+        mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
+
+        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+
+        return {
+            "hidden_state_ncd": hidden_state_ncd,
+            "values_nc": values_nc,
+            "total_mrna_umis_n": total_mrna_umis_n,
+            "prefix_len_n": prefix_len_n,
+            "labels_mask_nc": labels_mask_nc,
+            "sample_weights_nc": sample_weights_nc,
+            "mu_nc": mu_nc,
+            "theta_nc": theta_nc,
+        }
 
     @torch.no_grad()
     def on_batch_end(
