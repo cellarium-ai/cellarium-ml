@@ -17,7 +17,7 @@ from torch.backends.cuda import sdp_kernel
 from torch.distributions import constraints
 from torch.distributions.utils import broadcast_all
 
-from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -476,7 +476,7 @@ class NegativeBinomialHead(nn.Module):
         return mu_nc, theta_nc
 
 
-class CellariumGPT(CellariumModel):
+class CellariumGPT(CellariumModel, PredictMixin):
     """
     Cellarium GPT model.
 
