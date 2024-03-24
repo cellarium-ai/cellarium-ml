@@ -124,6 +124,7 @@ class Geneformer(CellariumModel, PredictMixin):
         feature_deletion: list[str] | None = None,
         feature_map: dict[str, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+
         # activation and deletion happen before sorting
         if feature_deletion:
             if not all([g in self.var_names_g for g in feature_deletion]):

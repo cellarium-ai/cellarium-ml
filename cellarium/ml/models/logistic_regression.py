@@ -109,6 +109,7 @@ class LogisticRegression(CellariumModel):
         batch: Any,
         batch_idx: int,
     ) -> None:
+
         if trainer.global_rank != 0:
             return
 
