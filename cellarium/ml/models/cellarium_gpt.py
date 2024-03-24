@@ -17,7 +17,7 @@ from torch.backends.cuda import sdp_kernel
 from torch.distributions import constraints
 from torch.distributions.utils import broadcast_all
 
-from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -476,7 +476,7 @@ class NegativeBinomialHead(nn.Module):
         return mu_nc, theta_nc
 
 
-class CellariumGPT(CellariumModel):
+class CellariumGPT(CellariumModel, PredictMixin):
     """
     Cellarium GPT model.
 
@@ -528,7 +528,8 @@ class CellariumGPT(CellariumModel):
         backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
         log_metrics: bool = True,
         log_plots: bool = False,
-        log_plots_every_n_steps_multiplier: int = 10) -> None:
+        log_plots_every_n_steps_multiplier: int = 10,
+    ) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.n_vars = len(var_names_g)
@@ -587,18 +588,31 @@ class CellariumGPT(CellariumModel):
                 p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.gpt_model.n_blocks)))
 
     def tokenize(
-        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int, shuffle: bool
+        self,
+        x_ng: torch.Tensor,
+        total_mrna_umis_n: torch.Tensor | None,
+        context_size: int | None = None,
+        shuffle: bool = False,
+        context_inds_c: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert (
+            sum([(context_size is not None), (context_inds_c is not None)]) == 1
+        ), "Exactly one of [context_size, context_inds_c] must be provided."
         n = x_ng.shape[0]
         device = x_ng.device
         ndx = torch.arange(n, device=device)
 
-        genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
-        if shuffle:
-            indices_ng = torch.argsort(torch.rand_like(x_ng))
-            indices_nc = indices_ng[:, :genes_context_size]
+        if context_inds_c is not None:
+            indices_nc = context_inds_c.expand(n, -1)
         else:
-            indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
+            if context_size is None:
+                context_size = self.n_context  # for mypy, but should never be reached
+            genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
+            if shuffle:
+                indices_ng = torch.argsort(torch.rand_like(x_ng))
+                indices_nc = indices_ng[:, :genes_context_size]
+            else:
+                indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
         values_nc = x_ng[ndx[:, None], indices_nc]
         if total_mrna_umis_n is not None:
             # concatenate total_mrna_umis to the random subset of genes
@@ -643,6 +657,68 @@ class CellariumGPT(CellariumModel):
             "theta_nc": theta_nc,
         }
 
+    def predict(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        total_mrna_umis_n: torch.Tensor,
+        context_inds_c: torch.Tensor,
+    ) -> dict[str, torch.Tensor | np.ndarray]:
+        """
+        Predict gene embeddings and negative binomial parameters.
+
+        Args:
+            x_ng:
+                The input gene expression data.
+            var_names_g:
+                The variable names schema for the input data validation.
+            total_mrna_umis_n:
+                The total mRNA UMIs.
+            context_inds_c:
+                The indices of genes (total of c context size) to include in the computation.
+
+        Returns:
+            A dictionary with the following keys and values:
+                - hidden_state_ncd: The final hidden state of the GPT model, i.e. the embeddings.
+                    First is the total mRNA UMIs.
+                - values_nc: The input gene expression data with the total mRNA UMIs and all input genes.
+                    First is the total mRNA UMIs.
+                - total_mrna_umis_n: The total mRNA UMIs.
+                - prefix_len_n: The length of the prefix.
+                - labels_mask_nc: The mask for the labels.
+                - sample_weights_nc: The sample weights.
+                - mu_nc: The mean of the negative binomial distribution.
+                - theta_nc: The inverse dispersion of the negative binomial distribution.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        n = x_ng.shape[0]
+        device = x_ng.device
+
+        # prefix includes the total_mrna_umis and a subset of genes
+        # the length of the prefix is given by context_size
+        context_length = len(context_inds_c) + 1
+        prefix_len_n = torch.ones(n, device=device) * context_length
+        labels_mask_nc = torch.arange(context_length, device=device)[None, :] >= prefix_len_n[:, None]
+
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, context_inds_c=context_inds_c, shuffle=False)
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
+        mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
+
+        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, context_length)
+
+        return {
+            "hidden_state_ncd": hidden_state_ncd,
+            "values_nc": values_nc,
+            "total_mrna_umis_n": total_mrna_umis_n,
+            "prefix_len_n": prefix_len_n,
+            "labels_mask_nc": labels_mask_nc,
+            "sample_weights_nc": sample_weights_nc,
+            "mu_nc": mu_nc,
+            "theta_nc": theta_nc,
+        }
+
     @torch.no_grad()
     def on_batch_end(
         self,
@@ -652,7 +728,6 @@ class CellariumGPT(CellariumModel):
         batch: Any,
         batch_idx: int,
     ) -> None:
-
         if not self.log_metrics:
             return
 
@@ -672,10 +747,7 @@ class CellariumGPT(CellariumModel):
 
         self._log_plots(trainer, outputs)
 
-    def _log_metrics(
-            self,
-            pl_module: pl.LightningModule,
-            outputs: dict[str, torch.Tensor]) -> None:
+    def _log_metrics(self, pl_module: pl.LightningModule, outputs: dict[str, torch.Tensor]) -> None:
         values_nc = outputs["values_nc"]
         labels_mask_nc = outputs["labels_mask_nc"]
         sample_weights_nc = outputs["sample_weights_nc"]
@@ -697,11 +769,7 @@ class CellariumGPT(CellariumModel):
         pl_module.log("zero_loss", zero_loss, sync_dist=True)
         pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
 
-    def _log_plots(
-            self,
-            trainer: pl.Trainer,
-            outputs: dict[str, torch.Tensor]):
-
+    def _log_plots(self, trainer: pl.Trainer, outputs: dict[str, torch.Tensor]):
         import matplotlib.pyplot as plt
 
         values_nc = outputs["values_nc"]
@@ -771,4 +839,3 @@ class CellariumGPT(CellariumModel):
                     zero_fig,
                     global_step=trainer.global_step,
                 )
-
