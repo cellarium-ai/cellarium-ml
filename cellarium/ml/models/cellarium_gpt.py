@@ -587,18 +587,23 @@ class CellariumGPT(CellariumModel, PredictMixin):
                 p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.gpt_model.n_blocks)))
 
     def tokenize(
-        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int, shuffle: bool
+        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int | None = None, shuffle: bool = False, context_inds_c: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert sum([(context_size is not None), (context_inds_c is not None)]) == 1, \
+            "Exactly one of [context_size, context_inds_c] must be provided."
         n = x_ng.shape[0]
         device = x_ng.device
         ndx = torch.arange(n, device=device)
 
-        genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
-        if shuffle:
-            indices_ng = torch.argsort(torch.rand_like(x_ng))
-            indices_nc = indices_ng[:, :genes_context_size]
+        if context_inds_c is not None:
+            indices_nc = context_inds_c.expand(n, -1)
         else:
-            indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
+            genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
+            if shuffle:
+                indices_ng = torch.argsort(torch.rand_like(x_ng))
+                indices_nc = indices_ng[:, :genes_context_size]
+            else:
+                indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
         values_nc = x_ng[ndx[:, None], indices_nc]
         if total_mrna_umis_n is not None:
             # concatenate total_mrna_umis to the random subset of genes
@@ -648,8 +653,7 @@ class CellariumGPT(CellariumModel, PredictMixin):
         x_ng: torch.Tensor, 
         var_names_g: np.ndarray, 
         total_mrna_umis_n: torch.Tensor, 
-        context_size: int = 2048, 
-        shuffle: bool = False,
+        context_inds_c: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """
         Predict gene embeddings and negative binomial parameters.
@@ -661,10 +665,8 @@ class CellariumGPT(CellariumModel, PredictMixin):
                 The variable names schema for the input data validation.
             total_mrna_umis_n:
                 The total mRNA UMIs.
-            context_size:
-                The number of genes to include in the computation.
-            shuffle:
-                True to choose genes at random, False to choose the first context_size genes.
+            context_inds_c:
+                The indices of genes (total of c context size) to include in the computation.
 
         Returns:
             A dictionary with the following keys and values:
@@ -687,14 +689,15 @@ class CellariumGPT(CellariumModel, PredictMixin):
 
         # prefix includes the total_mrna_umis and a subset of genes
         # the length of the prefix is given by context_size
-        prefix_len_n = torch.ones(n, device=device) * context_size
-        labels_mask_nc = torch.arange(context_size, device=device)[None, :] >= prefix_len_n[:, None]
+        context_length = len(context_inds_c) + 1
+        prefix_len_n = torch.ones(n, device=device) * context_length
+        labels_mask_nc = torch.arange(context_length, device=device)[None, :] >= prefix_len_n[:, None]
 
-        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, context_size=context_size, shuffle=shuffle)
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, context_inds_c=context_inds_c, shuffle=False)
         hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
         mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
 
-        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, context_length)
 
         return {
             "hidden_state_ncd": hidden_state_ncd,
