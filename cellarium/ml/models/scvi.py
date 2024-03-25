@@ -266,12 +266,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         self.reset_parameters()
 
-        def reset_parameters(self) -> None:
-            # pass
-            self.z_encoder.encoder.fc_layers.apply(weights_init)
-            self.z_encoder.mean_encoder.apply(weights_init)
-            self.z_encoder.var_encoder.apply(weights_init)
-            self.decoder.px_decoder.fc_layers.apply(weights_init)
+    def reset_parameters(self) -> None:
+        self.z_encoder.encoder.fc_layers.apply(weights_init)
+        self.z_encoder.mean_encoder.apply(weights_init)
+        self.z_encoder.var_encoder.apply(weights_init)
+        self.decoder.px_decoder.fc_layers.apply(weights_init)
 
     def inference(
         self,
