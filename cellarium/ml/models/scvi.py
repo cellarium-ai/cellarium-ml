@@ -492,6 +492,24 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         cat_covs_nd: torch.Tensor | None = None,
         size_factor_n: torch.Tensor | None = None,
     ):
+        """
+        Args:
+            x_ng:
+                Gene counts matrix.
+            var_names_g:
+                The list of the variable names in the input data.
+            batch_index_n:
+                Batch indices of input cells as integers.
+            cont_covs_nc:
+                Continuous covariates for each cell (c-dimensional).
+            cat_covs_nd:
+                Categorical covariates for each cell (d-dimensional).
+            size_factor_n:
+                Library size factor for each cell.
+
+        Returns:
+            A dictionary with the loss value.
+        """
         return self.inference(
             x=x_ng,
             batch_index=batch_index_n,
