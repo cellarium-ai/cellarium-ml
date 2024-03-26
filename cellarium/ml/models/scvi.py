@@ -11,7 +11,7 @@ from torch.distributions import kl_divergence as kl
 from cellarium.ml.models.common.decoder import DecoderSCVI
 from cellarium.ml.models.common.distributions import NegativeBinomial
 from cellarium.ml.models.common.encoder import Encoder
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, LogLearningRateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -36,7 +36,7 @@ def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
     return onehot.type(torch.float32)
 
 
-class SingleCellVariationalInference(CellariumModel, PredictMixin):
+class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRateMixin):
     """
     Flexible version of single-cell variational inference (scVI) [1] re-implemented in Cellarium ML.
 
@@ -481,16 +481,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         loss = torch.mean(rec_loss + kl_divergence_z)
 
-        print('generative_outputs_px')
-        print(generative_outputs["px"].mu)
-        print(generative_outputs["px"].theta)
+        # print('generative_outputs_px')
+        # print(generative_outputs["px"].mu)
+        # print(generative_outputs["px"].theta)
 
-        print('rec_loss')
-        print(torch.mean(rec_loss))
-        print('kl_divergence_z')
-        print(torch.mean(kl_divergence_z))
-        print('total_loss')
-        print(loss.item())
+        # print('rec_loss')
+        # print(torch.mean(rec_loss))
+        # print('kl_divergence_z')
+        # print(torch.mean(kl_divergence_z))
+        # print('total_loss')
+        # print(loss.item())
 
         return {"loss": loss}
 
