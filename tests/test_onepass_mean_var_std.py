@@ -115,27 +115,19 @@ def test_onepass_mean_var_std_multi_device(
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
 def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: str):
     n, g = 3, 2
+    var_names_g = [f"gene_{i}" for i in range(g)]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array([f"gene_{i}" for i in range(g)]),
+            np.array(var_names_g),
         ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"var_names_g": [f"gene_{i}" for i in range(g)], "algorithm": algorithm}
-    model = OnePassMeanVarStd(**init_args)  # type: ignore[arg-type]
-    config = {
-        "model": {
-            "model": {
-                "class_path": "cellarium.ml.models.OnePassMeanVarStd",
-                "init_args": init_args,
-            }
-        }
-    }
-    module = CellariumModule(model=model, config=config)
+    model = OnePassMeanVarStd(var_names_g=var_names_g)
+    module = CellariumModule(model=model)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(

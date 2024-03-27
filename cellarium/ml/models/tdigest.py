@@ -39,7 +39,11 @@ class TDigest(CellariumModel):
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.tdigests = [crick.tdigest.TDigest() for _ in range(self.n_vars)]
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+        self._dummy_param = torch.nn.Parameter(torch.empty(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
