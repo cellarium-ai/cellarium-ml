@@ -42,6 +42,7 @@ class OnePassMeanVarStd(CellariumModel):
         self.x_sums: torch.Tensor
         self.x_squared_sums: torch.Tensor
         self.x_size: torch.Tensor
+        self.x_shift: torch.Tensor | None
         self.register_buffer("x_sums", torch.empty(n_vars))
         self.register_buffer("x_squared_sums", torch.empty(n_vars))
         self.register_buffer("x_size", torch.empty(()))

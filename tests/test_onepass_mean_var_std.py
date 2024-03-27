@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -56,7 +57,7 @@ def test_onepass_mean_var_std_multi_device(
     shuffle: bool,
     num_workers: int,
     batch_size: int,
-    algorithm: str,
+    algorithm: Literal["naive", "shifted_data"],
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
@@ -113,7 +114,7 @@ def test_onepass_mean_var_std_multi_device(
 
 
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
-def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: str):
+def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["naive", "shifted_data"]):
     n, g = 3, 2
     var_names_g = [f"gene_{i}" for i in range(g)]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -158,7 +159,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: str):
 @pytest.mark.parametrize("mean", [1, 100])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["float32", "float64"])
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
-def test_accuracy(mean, dtype, algorithm):
+def test_accuracy(mean: float, dtype: torch.dtype, algorithm: Literal["naive", "shifted_data"]):
     n_trials = 5_000_000
     std = 0.1
     x = mean + std * torch.randn(n_trials, dtype=dtype)
