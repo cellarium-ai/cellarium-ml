@@ -17,6 +17,7 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
+
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('BatchNorm') != -1:
@@ -25,6 +26,7 @@ def weights_init(m):
     elif classname.find('Linear') != -1:
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
+
 
 def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
     """One hot a tensor of categories."""
@@ -480,17 +482,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRa
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         loss = torch.mean(rec_loss + kl_divergence_z)
-
-        # print('generative_outputs_px')
-        # print(generative_outputs["px"].mu)
-        # print(generative_outputs["px"].theta)
-
-        # print('rec_loss')
-        # print(torch.mean(rec_loss))
-        # print('kl_divergence_z')
-        # print(torch.mean(kl_divergence_z))
-        # print('total_loss')
-        # print(loss.item())
 
         return {"loss": loss}
 
