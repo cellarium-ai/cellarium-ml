@@ -11,11 +11,12 @@ from torch.distributions import kl_divergence as kl
 from cellarium.ml.models.common.decoder import DecoderSCVI
 from cellarium.ml.models.common.distributions import NegativeBinomial
 from cellarium.ml.models.common.encoder import Encoder
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, LogLearningRateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -25,6 +26,7 @@ def weights_init(m):
     elif classname.find('Linear') != -1:
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
+
 
 def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
     """One hot a tensor of categories."""
@@ -36,7 +38,7 @@ def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
     return onehot.type(torch.float32)
 
 
-class SingleCellVariationalInference(CellariumModel, PredictMixin):
+class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRateMixin):
     """
     Flexible version of single-cell variational inference (scVI) [1] re-implemented in Cellarium ML.
 
@@ -407,9 +409,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             #     scale=px_scale,
             # )
         elif self.gene_likelihood == "nb":
-            px = NegativeBinomial(mu=px_rate, theta=px_r, scale=px_scale)
+            px = NegativeBinomial(mu=px_rate, theta=px_r)
         elif self.gene_likelihood == "poisson":
-            px = Poisson(px_rate, scale=px_scale)
+            px = Poisson(rate=px_rate)
 
         # Priors
         if self.use_observed_lib_size:
