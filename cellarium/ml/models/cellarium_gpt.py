@@ -439,12 +439,17 @@ class GPTModel(nn.Module):
         value_tokens_ncd[labels_mask_nc] = mask_token
 
         hidden_state_ncd = (id_tokens_ncd + value_tokens_ncd) * self.input_mult
-        for block in self.blocks:
+        initial_state_ncd = hidden_state_ncd
+        self.hidden_states = [hidden_state_ncd]
+        for i, block in enumerate(self.blocks):
+            if i == self.n_blocks - 1:
+                hidden_state_ncd[labels_mask_nc] = initial_state_ncd[labels_mask_nc]
             hidden_state_ncd = block(
                 hidden_state_ncd,
                 prefix_len_n=prefix_len_n,
                 attention_type=attention_type,
             )
+            self.hidden_states.append(hidden_state_ncd)
 
         return hidden_state_ncd
 
@@ -582,18 +587,24 @@ class CellariumGPT(CellariumModel):
                 p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.gpt_model.n_blocks)))
 
     def tokenize(
-        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int, shuffle: bool
+        self,
+        x_ng: torch.Tensor,
+        total_mrna_umis_n: torch.Tensor | None,
+        context_size: int,
+        shuffle: bool,
+        indices_nc: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         n = x_ng.shape[0]
         device = x_ng.device
         ndx = torch.arange(n, device=device)
 
         genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
-        if shuffle:
-            indices_ng = torch.argsort(torch.rand_like(x_ng))
-            indices_nc = indices_ng[:, :genes_context_size]
-        else:
-            indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
+        if indices_nc is None:
+            if shuffle:
+                indices_ng = torch.argsort(torch.rand_like(x_ng))
+                indices_nc = indices_ng[:, :genes_context_size]
+            else:
+                indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
         values_nc = x_ng[ndx[:, None], indices_nc]
         if total_mrna_umis_n is not None:
             # concatenate total_mrna_umis to the random subset of genes
@@ -618,7 +629,7 @@ class CellariumGPT(CellariumModel):
         labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
 
         ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
-        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block")
         mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
 
         sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
@@ -638,6 +649,37 @@ class CellariumGPT(CellariumModel):
             "theta_nc": theta_nc,
         }
 
+    def predict(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        total_mrna_umis_n: torch.Tensor,
+        layer: int,
+        indices_nc: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        n = x_ng.shape[0]
+        device = x_ng.device
+
+        # prefix includes the total_mrna_umis and a random subset of genes
+        # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
+        # prefix_len_n = torch.full((n,), self.n_context - 12, device=device)
+        prefix_len_n = torch.full((n,), self.n_context, device=device)
+        labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
+
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=False, indices_nc=indices_nc)
+        # self.gpt_model.blocks[-1].attention.attention.backend = "torch"
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block")
+        mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
+        return {
+            "hidden_states_ncd": self.gpt_model.hidden_states[layer],
+            # "attention_probs_nqs": self.gpt_model.blocks[-1].attention.attention.attention_probs_nqs,
+            # "mu_nc": mu_nc,
+            # "theta_nc": theta_nc,
+        }
+
     @torch.no_grad()
     def on_batch_end(
         self,
@@ -647,7 +689,6 @@ class CellariumGPT(CellariumModel):
         batch: Any,
         batch_idx: int,
     ) -> None:
-
         if not self.log_metrics:
             return
 
