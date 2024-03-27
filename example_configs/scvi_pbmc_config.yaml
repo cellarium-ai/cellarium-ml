@@ -5,11 +5,17 @@ trainer:
   strategy: auto
   devices: auto
   num_nodes: 1
-  precision: 64
+  precision: 32
   logger: null
-  callbacks: null
+  # callbacks: 
+  #   class_path: lightning.pytorch.callbacks.early_stopping.EarlyStopping
+  #   init_args:
+  #     monitor: train_loss
+  #     min_delta: 0.0
+  #     patience: 45
+  #     mode: min
   fast_dev_run: false
-  max_epochs: 100
+  max_epochs: 50
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -22,7 +28,7 @@ trainer:
   val_check_interval: null
   check_val_every_n_epoch: 1
   num_sanity_val_steps: null
-  log_every_n_steps: 10
+  log_every_n_steps: 1
   enable_checkpointing: true
   enable_progress_bar: true
   enable_model_summary: null
@@ -48,8 +54,8 @@ model:
       var_names_g: null
       n_batch: null
       n_hidden: 128
-      n_latent: 20
-      n_layers: 3
+      n_latent: 10
+      n_layers: 1
       n_continuous_cov: 0
       n_cats_per_cov: null
       dropout_rate: 0.1
@@ -58,7 +64,7 @@ model:
       gene_likelihood: nb
       latent_distribution: normal
       encode_covariates: false
-      deeply_inject_covariates: true
+      deeply_inject_covariates: false
       batch_representation: one-hot
       use_batch_norm: both
       use_layer_norm: none
@@ -70,8 +76,9 @@ model:
       extra_encoder_kwargs: null
       extra_decoder_kwargs: null
       batch_embedding_kwargs: null
-  optim_fn: torch.optim.Adam # 
-  optim_kwargs: {"lr": 6e-4} # null
+  optim_fn: torch.optim.Adam
+  optim_kwargs: 
+    lr: 1e-3
   scheduler_fn: null
   scheduler_kwargs: null
   is_initialized: False
@@ -80,8 +87,8 @@ data:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
       filenames: gs://yx-data/pbmc_count.h5ad
-      limits: [31774] # null
-      shard_size: 100000
+      limits: [31774]
+      shard_size: 31774
       last_shard_size: null
       max_cache_size: 1
       cache_size_strictly_enforced: true
@@ -96,14 +103,13 @@ data:
       attr: X
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
-      attr: var
-      key: var_gene
+      attr: var_names
     batch_index_n:
       attr: obs
       key: batch
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 512
-  shuffle: false
+  shuffle: true
   seed: 0
   drop_last: false
   test_mode: false
