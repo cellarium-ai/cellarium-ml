@@ -12,7 +12,7 @@ from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.models.common.distributions import NegativeBinomial
 from cellarium.ml.models.common.fclayer import FCLayers
-from cellarium.ml.models.model import CellariumModel, PredictMixin, LogLearningRateMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -27,6 +27,42 @@ def weights_init(m):
     elif classname.find('Linear') != -1:
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
+
+
+# class EncoderSCVI(torch.nn.Module):
+#     """Encode data of ``n_input`` dimensions into a latent space of ``n_output`` dimensions.
+
+#     Uses a fully-connected neural network of ``n_hidden`` layers.
+
+#     Parameters
+#     ----------
+#     n_input
+#         The dimensionality of the input (data space)
+#     n_output
+#         The dimensionality of the output (latent space)
+#     n_cat_list
+#         A list containing the number of categories
+#         for each category of interest. Each category will be
+#         included using a one-hot encoding
+#     n_layers
+#         The number of fully-connected hidden layers
+#     n_hidden
+#         The number of nodes per hidden layer
+#     dropout_rate
+#         Dropout rate to apply to each of the hidden layers
+#     distribution
+#         Distribution of z
+#     var_eps
+#         Minimum value for the variance;
+#         used for numerical stability
+#     var_activation
+#         Callable used to ensure positivity of the variance.
+#         Defaults to :meth:`torch.exp`.
+#     return_dist
+#         Return directly the distribution of z instead of its parameters.
+#     **kwargs
+#         Keyword args for :class:`~scvi.nn.FCLayers`
+#     """
 
 
 class EncoderSCVI(torch.nn.Module):
@@ -244,7 +280,7 @@ class DecoderSCVI(torch.nn.Module):
         return px_scale, px_r, px_rate, px_dropout
 
 
-class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRateMixin):
+class SingleCellVariationalInference(CellariumModel, PredictMixin):
     """
     Flexible version of single-cell variational inference (scVI) [1] re-implemented in Cellarium ML.
 

@@ -7,8 +7,12 @@ trainer:
   num_nodes: 1
   precision: 32
   logger: null
-  # callbacks: 
-  #   class_path: lightning.pytorch.callbacks.early_stopping.EarlyStopping
+  callbacks: 
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
+      log_momentum: false
+  # - class_path: lightning.pytorch.callbacks.EarlyStopping
   #   init_args:
   #     monitor: train_loss
   #     min_delta: 0.0
@@ -54,6 +58,12 @@ model:
       var_names_g: null
       n_batch: null
       n_hidden: 128
+      # encoder_hidden:
+      # - cellarium.ml.models.common.fclayer.LinearInputBias:
+      #   in_features: 128
+      # decoder_hidden:
+      # - cellarium.ml.models.common.fclayer.LinearInputBias:
+      #   out_features: 128
       n_latent: 10
       n_layers: 1
       n_continuous_cov: 0
