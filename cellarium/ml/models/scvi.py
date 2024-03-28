@@ -4,6 +4,7 @@
 """Flexible modified version of single-cell variational inference (scVI) re-implemented in Cellarium ML."""
 
 from typing import Callable, Literal, Sequence, Iterable
+import importlib
 
 import numpy as np
 import torch
@@ -11,12 +12,19 @@ from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.models.common.distributions import NegativeBinomial
-from cellarium.ml.models.common.fclayer import FCLayers
+from cellarium.ml.models.common.fclayer import FCLayers, LinearInputBias, DressedLayer
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
+
+def instantiate_from_class_path(class_path, *args, **kwargs):
+    module_name, class_name = class_path.rsplit('.', 1)
+    module = importlib.import_module(module_name)
+    class_ = getattr(module, class_name)
+    return class_(*args, **kwargs)
 
 
 def weights_init(m):
@@ -27,6 +35,88 @@ def weights_init(m):
     elif classname.find('Linear') != -1:
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
+
+
+class EncoderSCVI(torch.nn.Module):
+    """
+    Encode data of ``in_features`` dimensions into a latent space of ``out_features`` dimensions.
+
+    Args:
+        in_features: The dimensionality of the input (data space)
+        out_features: The dimensionality of the output (latent space)
+        layers: A list of dictionaries, each containing the following keys:
+            * ``class_path``: the class path of the layer to use
+            * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
+                - must contain "out_features"
+        var_eps: Minimum value for the variance; used for numerical stability
+    """
+    
+    def __init__(
+        self, 
+        in_features: int, 
+        out_features: int, 
+        layers: list[dict],
+        var_eps: float = 1e-4,
+    ):
+
+        for layer in layers:
+            assert "out_features" in layer["init_args"], "out_features must be specified in init_args for encoder_hidden layers"
+        super().__init__()
+        if len(layers) == 0:
+            self.encoder = torch.nn.Identity()
+            penultimate_features = in_features
+        else:
+            module_list = []
+            n_hidden = [layer["init_args"].pop("out_features") for layer in layers]
+            for layer, n_in, n_out in zip(layers, [in_features] + n_hidden, n_hidden):
+                module_list.append(
+                    DressedLayer(
+                        instantiate_from_class_path(
+                            layer["class_path"], 
+                            n_in, 
+                            n_out, 
+                            bias=True,
+                        ),
+                        **layer["init_args"],
+                    )
+                )
+            self.encoder_module_list = torch.nn.ModuleList(module_list)
+            penultimate_features = module_list[-1].layer.out_features
+
+        self.mean_encoder = torch.nn.Linear(penultimate_features, out_features)
+        self.var_encoder = torch.nn.Linear(penultimate_features, out_features)
+        self.var_eps = var_eps
+
+    def forward(self, x: torch.Tensor, bias: torch.Tensor) -> tuple[torch.distributions.Distribution, torch.Tensor]:
+        q = x
+        for dressed_layer in self.encoder_module_list:
+            if isinstance(dressed_layer.layer, LinearInputBias):
+                assert dressed_layer.layer.bias.shape == bias.shape, "input bias shape must match layer out_features"
+                q = dressed_layer(q, bias=bias)
+            else:
+                q = dressed_layer(q)
+        q_m = self.mean_encoder(q)
+        q_v = torch.exp(self.var_encoder(q)) + self.var_eps
+        dist = torch.distributions.Normal(q_m, q_v.sqrt())
+        latent = dist.rsample()
+        return dist, latent
+    
+
+# class DecoderSCVI(torch.nn.Module):
+#     """
+#     Decode data from latent space of ``in_features`` dimensions into ``out_features`` dimensions.
+
+#     Args:
+#         in_features: The dimensionality of the input (latent space)
+#         out_features: The dimensionality of the output (data space)
+#         layers: A list of dictionaries, each containing the following keys:
+#             * ``class_path``: the class path of the layer to use
+#             * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
+#                 - must contain "in_features"
+
+#     """
+
+
 
 
 # class EncoderSCVI(torch.nn.Module):
@@ -64,105 +154,69 @@ def weights_init(m):
 #         Keyword args for :class:`~scvi.nn.FCLayers`
 #     """
 
+#     def __init__(
+#         self,
+#         n_input: int,
+#         n_output: int,
+#         n_cat_list: Iterable[int] = None,
+#         n_layers: int = 1,
+#         n_hidden: int = 128,
+#         dropout_rate: float = 0.1,
+#         distribution: str = "normal",  # TODO: fix ambiguity here
+#         var_eps: float = 1e-4,
+#         var_activation: Callable | None = None,
+#         **kwargs,
+#     ):
+#         super().__init__()
 
-class EncoderSCVI(torch.nn.Module):
-    """Encode data of ``n_input`` dimensions into a latent space of ``n_output`` dimensions.
+#         self.distribution = distribution
+#         self.var_eps = var_eps
+#         # TODO: make this more flexible so all hidden layers need not have same number of neurons
+#         self.encoder = FCLayers(
+#             n_in=n_input,
+#             n_out=n_hidden,
+#             n_cat_list=n_cat_list,
+#             n_layers=n_layers,
+#             n_hidden=n_hidden,
+#             dropout_rate=dropout_rate,
+#             **kwargs,
+#         )
+#         self.mean_encoder = torch.nn.Linear(n_hidden, n_output)
+#         self.var_encoder = torch.nn.Linear(n_hidden, n_output)
 
-    Uses a fully-connected neural network of ``n_hidden`` layers.
+#         if distribution == "ln":
+#             self.z_transformation = torch.nn.Softmax(dim=-1)
+#         else:
+#             self.z_transformation = torch.nn.Identity()
+#         self.var_activation = torch.exp if var_activation is None else var_activation
 
-    Parameters
-    ----------
-    n_input
-        The dimensionality of the input (data space)
-    n_output
-        The dimensionality of the output (latent space)
-    n_cat_list
-        A list containing the number of categories
-        for each category of interest. Each category will be
-        included using a one-hot encoding
-    n_layers
-        The number of fully-connected hidden layers
-    n_hidden
-        The number of nodes per hidden layer
-    dropout_rate
-        Dropout rate to apply to each of the hidden layers
-    distribution
-        Distribution of z
-    var_eps
-        Minimum value for the variance;
-        used for numerical stability
-    var_activation
-        Callable used to ensure positivity of the variance.
-        Defaults to :meth:`torch.exp`.
-    return_dist
-        Return directly the distribution of z instead of its parameters.
-    **kwargs
-        Keyword args for :class:`~scvi.nn.FCLayers`
-    """
+#     def forward(self, x: torch.Tensor, *cat_list: int):
+#         r"""The forward computation for a single sample.
 
-    def __init__(
-        self,
-        n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        dropout_rate: float = 0.1,
-        distribution: str = "normal",  # TODO: fix ambiguity here
-        var_eps: float = 1e-4,
-        var_activation: Callable | None = None,
-        **kwargs,
-    ):
-        super().__init__()
+#          #. Encodes the data into latent space using the encoder network
+#          #. Generates a mean \\( q_m \\) and variance \\( q_v \\)
+#          #. Samples a new value from an i.i.d. multivariate normal \\( \\sim Ne(q_m, \\mathbf{I}q_v) \\)
 
-        self.distribution = distribution
-        self.var_eps = var_eps
-        # TODO: make this more flexible so all hidden layers need not have same number of neurons
-        self.encoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            **kwargs,
-        )
-        self.mean_encoder = torch.nn.Linear(n_hidden, n_output)
-        self.var_encoder = torch.nn.Linear(n_hidden, n_output)
+#         Parameters
+#         ----------
+#         x
+#             tensor with shape (n_input,)
+#         cat_list
+#             list of category membership(s) for this sample
 
-        if distribution == "ln":
-            self.z_transformation = torch.nn.Softmax(dim=-1)
-        else:
-            self.z_transformation = torch.nn.Identity()
-        self.var_activation = torch.exp if var_activation is None else var_activation
+#         Returns
+#         -------
+#         3-tuple of :py:class:`torch.Tensor`
+#             tensors of shape ``(n_latent,)`` for mean and var, and sample
+#         """
+#         # Parameters for latent distribution
+#         q = self.encoder(x, *cat_list)
+#         q_m = self.mean_encoder(q)
+#         q_v = self.var_activation(self.var_encoder(q)) + self.var_eps
+#         dist = Normal(q_m, q_v.sqrt())
+#         latent = self.z_transformation(dist.rsample())
 
-    def forward(self, x: torch.Tensor, *cat_list: int):
-        r"""The forward computation for a single sample.
-
-         #. Encodes the data into latent space using the encoder network
-         #. Generates a mean \\( q_m \\) and variance \\( q_v \\)
-         #. Samples a new value from an i.i.d. multivariate normal \\( \\sim Ne(q_m, \\mathbf{I}q_v) \\)
-
-        Parameters
-        ----------
-        x
-            tensor with shape (n_input,)
-        cat_list
-            list of category membership(s) for this sample
-
-        Returns
-        -------
-        3-tuple of :py:class:`torch.Tensor`
-            tensors of shape ``(n_latent,)`` for mean and var, and sample
-        """
-        # Parameters for latent distribution
-        q = self.encoder(x, *cat_list)
-        q_m = self.mean_encoder(q)
-        q_v = self.var_activation(self.var_encoder(q)) + self.var_eps
-        dist = Normal(q_m, q_v.sqrt())
-        latent = self.z_transformation(dist.rsample())
-
-        return dist, latent
+#         return dist, latent
 
 
 class DecoderSCVI(torch.nn.Module):
@@ -292,8 +346,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
     Args:
         var_names_g:
             The variable names schema for the input data validation.
-        n_hidden:
+        encoder_hidden:
             Number of hidden units in all hidden layers of the encoder and decoder.
+        decoder_hidden:
+            Number of hidden units in all hidden layers of the decoder.
         n_latent:
             Dimension of the latent space.
         n_batch:
@@ -386,8 +442,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
     def __init__(
         self,
         var_names_g: Sequence[str],
+        encoder_hidden: list[dict],
+        decoder_hidden: list[dict],
         n_batch: int = 0,
-        n_hidden: int = 128,
         n_latent: int = 10,
         n_layers: int = 1,
         n_continuous_cov: int = 0,
@@ -474,20 +531,26 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         _extra_encoder_kwargs = extra_encoder_kwargs or {}
 
         self.z_encoder = EncoderSCVI(
-            n_input_encoder,
-            n_latent,
-            n_cat_list=encoder_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            distribution=latent_distribution,
-            inject_covariates=deeply_inject_covariates,
-            use_batch_norm=use_batch_norm_encoder,
-            use_layer_norm=use_layer_norm_encoder,
-            var_activation=var_activation,
-            # return_dist=True,
-            **_extra_encoder_kwargs,
+            in_features=self.n_input,
+            out_features=self.n_latent,
+            layers=encoder_hidden,
         )
+
+        # self.z_encoder = EncoderSCVI(
+        #     n_input_encoder,
+        #     n_latent,
+        #     n_cat_list=encoder_cat_list,
+        #     n_layers=n_layers,
+        #     n_hidden=n_hidden,
+        #     dropout_rate=dropout_rate,
+        #     distribution=latent_distribution,
+        #     inject_covariates=deeply_inject_covariates,
+        #     use_batch_norm=use_batch_norm_encoder,
+        #     use_layer_norm=use_layer_norm_encoder,
+        #     var_activation=var_activation,
+        #     # return_dist=True,
+        #     **_extra_encoder_kwargs,
+        # )
 
         n_input_decoder = n_latent + n_continuous_cov
         if self.batch_representation == "embedding":

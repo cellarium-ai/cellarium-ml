@@ -13,22 +13,23 @@ class LinearInputBias(torch.nn.Linear):
     Args:
         in_features: passed to `torch.nn.Linear`
         out_features: passed to `torch.nn.Linear`
+        bias: passed to `torch.nn.Linear`
     """
 
-    def __init__(self, in_features: int, out_features: int):
-        super().__init__(in_features, out_features, bias=False)
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        super().__init__(in_features, out_features, bias=bias)
 
     def forward(self, x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
         """
         Computes the forward pass of the layer as
-        out = x @ self.weight.T + bias
+        out = x @ self.weight.T + self.bias + bias
         """
         return super().forward(x) + bias
 
 
 class DressedLayer(torch.nn.Module):
     """
-    Small block comprising a linear layer with optional batch/layer normalization 
+    Small block comprising a `~torch.nn.Module` with optional batch/layer normalization 
     and configurable activation and dropout.
 
     Similar to
