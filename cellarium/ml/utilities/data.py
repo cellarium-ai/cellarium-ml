@@ -185,3 +185,17 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
         Numpy array.
     """
     return np.asarray(x.cat.codes)
+
+
+# def ncategories(x: pd.Series) -> int:
+#     """
+#     Get the number of unique categories from a pandas categorical Series.
+
+#     Args:
+#         x: Pandas Series.
+
+#     Returns:
+#         int
+#     """
+
+#     return x.nunique()
