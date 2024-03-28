@@ -5,20 +5,9 @@ import collections
 from collections.abc import Iterable
 
 import torch
-from torch import nn
 
 
-def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
-    """One hot a tensor of categories."""
-
-    # TODO: use pytorch one-hot instead
-
-    onehot = torch.zeros(index.size(0), n_cat, device=index.device)
-    onehot.scatter_(1, index.type(torch.long), 1)
-    return onehot.type(torch.float32)
-
-
-class FCLayers(nn.Module):
+class FCLayers(torch.nn.Module):
     """A helper class to build fully-connected layers for a neural network.
 
     Parameters
@@ -64,7 +53,7 @@ class FCLayers(nn.Module):
         use_activation: bool = True,
         bias: bool = True,
         inject_covariates: bool = True,
-        activation_fn: nn.Module = nn.ReLU,
+        activation_fn: torch.nn.Module = torch.nn.ReLU,
     ):
         super().__init__()
         self.inject_covariates = inject_covariates
@@ -77,22 +66,22 @@ class FCLayers(nn.Module):
             self.n_cat_list = []
 
         cat_dim = sum(self.n_cat_list)
-        self.fc_layers = nn.Sequential(
+        self.fc_layers = torch.nn.Sequential(
             collections.OrderedDict(
                 [
                     (
                         f"Layer {i}",
-                        nn.Sequential(
-                            nn.Linear(
+                        torch.nn.Sequential(
+                            torch.nn.Linear(
                                 n_in + cat_dim * self.inject_into_layer(i),
                                 n_out,
                                 bias=bias,
                             ),
                             # non-default params come from defaults in original Tensorflow implementation
-                            nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001) if use_batch_norm else None,
-                            nn.LayerNorm(n_out, elementwise_affine=False) if use_layer_norm else None,
+                            torch.nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001) if use_batch_norm else None,
+                            torch.nn.LayerNorm(n_out, elementwise_affine=False) if use_layer_norm else None,
                             activation_fn() if use_activation else None,
-                            nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None,
+                            torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None,
                         ),
                     )
                     for i, (n_in, n_out) in enumerate(zip(layers_dim[:-1], layers_dim[1:]))
@@ -123,7 +112,7 @@ class FCLayers(nn.Module):
             for layer in layers:
                 if i == 0 and not hook_first_layer:
                     continue
-                if isinstance(layer, nn.Linear):
+                if isinstance(layer, torch.nn.Linear):
                     if self.inject_into_layer(i):
                         w = layer.weight.register_hook(_hook_fn_weight)
                     else:
@@ -155,24 +144,24 @@ class FCLayers(nn.Module):
             if n_cat and cat is None:
                 raise ValueError("cat not provided while n_cat != 0 in init. params.")
             if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
-                # TODO: why do I need to do the following two lines???
+                if cat.ndim not in [1, 2]:
+                    raise ValueError("Injected categorical cat must be 1D or 2D tensor.")
                 if cat.ndim == 1:
-                    cat = cat.unsqueeze(1)
-                if cat.size(1) != n_cat:
-                    one_hot_cat = one_hot(cat, n_cat)
+                    one_hot_cat = torch.nn.functional.one_hot(cat.long(), n_cat).float()
                 else:
+                    assert cat.size(1) == n_cat, f"Injected categorical cat was 2D {cat.shape} but the second dim was not n_cat {n_cat}."
                     one_hot_cat = cat  # cat has already been one_hot encoded
                 one_hot_cat_list += [one_hot_cat]
         for i, layers in enumerate(self.fc_layers):
             for layer in layers:
                 if layer is not None:
-                    if isinstance(layer, nn.BatchNorm1d):
+                    if isinstance(layer, torch.nn.BatchNorm1d):
                         if x.dim() == 3:
                             x = torch.cat([(layer(slice_x)).unsqueeze(0) for slice_x in x], dim=0)
                         else:
                             x = layer(x)
                     else:
-                        if isinstance(layer, nn.Linear) and self.inject_into_layer(i):
+                        if isinstance(layer, torch.nn.Linear) and self.inject_into_layer(i):
                             if x.dim() == 3:
                                 one_hot_cat_list_layer = [
                                     o.unsqueeze(0).expand((x.size(0), o.size(0), o.size(1))) for o in one_hot_cat_list

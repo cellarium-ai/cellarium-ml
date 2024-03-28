@@ -597,10 +597,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRa
         if self.dispersion == "gene-label":
             raise NotImplementedError
             # px_r = linear(
-            #     torch.nn.functional.one_hot(y.squeeze(), self.n_labels).float(), self.px_r
+            #     torch.nn.functional.one_hot(y.squeeze().long(), self.n_labels).float(), self.px_r
             # )  # px_r gets transposed - last dimension is nb genes
         elif self.dispersion == "gene-batch":
-            px_r = linear(torch.nn.functional.one_hot(batch_index.squeeze(), self.n_batch).float(), self.px_r)
+            px_r = linear(torch.nn.functional.one_hot(batch_index.squeeze().long(), self.n_batch).float(), self.px_r)
         elif self.dispersion == "gene":
             px_r = self.px_r
 
