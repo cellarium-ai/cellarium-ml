@@ -328,7 +328,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         decoder_hidden: list[dict],
         n_batch: int = 0,
         n_latent: int = 10,
-        n_layers: int = 1,
         n_continuous_cov: int = 0,
         n_cats_per_cov: list[int] | None = None,
         dropout_rate: float = 0.1,
@@ -337,7 +336,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
         latent_distribution: Literal["normal", "ln"] = "normal",
         encode_covariates: bool = False,
-        deeply_inject_covariates: bool = True,
         batch_representation: Literal["one-hot", "embedding"] = "one-hot",
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -345,9 +343,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         use_observed_lib_size: bool = True,
         library_log_means: np.ndarray | None = None,
         library_log_vars: np.ndarray | None = None,
-        var_activation: Callable[[torch.Tensor], torch.Tensor] = None,
-        extra_encoder_kwargs: dict | None = None,
-        extra_decoder_kwargs: dict | None = None,
+        # var_activation: Callable[[torch.Tensor], torch.Tensor] = None,
+        # extra_encoder_kwargs: dict | None = None,
+        # extra_decoder_kwargs: dict | None = None,
         batch_embedding_kwargs: dict | None = None,
     ):
         super().__init__()

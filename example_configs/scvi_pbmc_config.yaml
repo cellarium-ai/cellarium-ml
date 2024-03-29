@@ -57,7 +57,6 @@ model:
     init_args:
       var_names_g: null
       n_batch: null
-      # n_hidden: 128
       encoder_hidden: 
       - class_path: cellarium.ml.models.common.nn.LinearInputBias
         init_args:
@@ -69,8 +68,7 @@ model:
       - class_path: cellarium.ml.models.common.nn.LinearInputBias
         init_args:
           out_features: 128
-      n_latent: 10
-      n_layers: 1
+      n_latent: 16
       n_continuous_cov: 0
       n_cats_per_cov: null
       dropout_rate: 0.1
@@ -79,7 +77,6 @@ model:
       gene_likelihood: nb
       latent_distribution: normal
       encode_covariates: false
-      deeply_inject_covariates: false
       batch_representation: one-hot
       use_batch_norm: both
       use_layer_norm: none
@@ -87,9 +84,9 @@ model:
       use_observed_lib_size: true
       library_log_means: null
       library_log_vars: null
-      var_activation: null
-      extra_encoder_kwargs: null
-      extra_decoder_kwargs: null
+      # var_activation: null
+      # extra_encoder_kwargs: null
+      # extra_decoder_kwargs: null
       batch_embedding_kwargs: null
   optim_fn: torch.optim.Adam
   optim_kwargs: 
@@ -128,5 +125,5 @@ data:
   seed: 0
   drop_last: false
   test_mode: false
-  num_workers: 1
+  num_workers: 4
 ckpt_path: null
