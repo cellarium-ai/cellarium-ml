@@ -3,7 +3,7 @@
 
 """Flexible modified version of single-cell variational inference (scVI) re-implemented in Cellarium ML."""
 
-from typing import Callable, Literal, Sequence, Iterable
+from typing import Callable, Literal, Sequence
 import importlib
 
 import numpy as np
@@ -12,7 +12,7 @@ from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.models.common.distributions import NegativeBinomial
-from cellarium.ml.models.common.fclayer import FCLayers, LinearInputBias, DressedLayer
+from cellarium.ml.models.common.nn import LinearInputBias, DressedLayer
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -128,6 +128,7 @@ class EncoderSCVI(torch.nn.Module):
     ):
         super().__init__()
         self.fully_connected = FullyConnectedInputBiasArchitecture(in_features, layers)
+        # TODO: if fully_connected is the Identity, then we need to use LinearInputBias instead of Linear for the following
         self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
         self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
         self.var_eps = var_eps
@@ -213,221 +214,6 @@ class DecoderSCVI(torch.nn.Module):
                 # dist = ZeroInflatedNegativeBinomial(count_mean_ng, inverse_overdispersion, self.dropout_decoder(q_nh))
 
         return dist
-
-
-# class EncoderSCVI(torch.nn.Module):
-#     """Encode data of ``n_input`` dimensions into a latent space of ``n_output`` dimensions.
-
-#     Uses a fully-connected neural network of ``n_hidden`` layers.
-
-#     Parameters
-#     ----------
-#     n_input
-#         The dimensionality of the input (data space)
-#     n_output
-#         The dimensionality of the output (latent space)
-#     n_cat_list
-#         A list containing the number of categories
-#         for each category of interest. Each category will be
-#         included using a one-hot encoding
-#     n_layers
-#         The number of fully-connected hidden layers
-#     n_hidden
-#         The number of nodes per hidden layer
-#     dropout_rate
-#         Dropout rate to apply to each of the hidden layers
-#     distribution
-#         Distribution of z
-#     var_eps
-#         Minimum value for the variance;
-#         used for numerical stability
-#     var_activation
-#         Callable used to ensure positivity of the variance.
-#         Defaults to :meth:`torch.exp`.
-#     return_dist
-#         Return directly the distribution of z instead of its parameters.
-#     **kwargs
-#         Keyword args for :class:`~scvi.nn.FCLayers`
-#     """
-
-#     def __init__(
-#         self,
-#         n_input: int,
-#         n_output: int,
-#         n_cat_list: Iterable[int] = None,
-#         n_layers: int = 1,
-#         n_hidden: int = 128,
-#         dropout_rate: float = 0.1,
-#         distribution: str = "normal",  # TODO: fix ambiguity here
-#         var_eps: float = 1e-4,
-#         var_activation: Callable | None = None,
-#         **kwargs,
-#     ):
-#         super().__init__()
-
-#         self.distribution = distribution
-#         self.var_eps = var_eps
-#         # TODO: make this more flexible so all hidden layers need not have same number of neurons
-#         self.encoder = FCLayers(
-#             n_in=n_input,
-#             n_out=n_hidden,
-#             n_cat_list=n_cat_list,
-#             n_layers=n_layers,
-#             n_hidden=n_hidden,
-#             dropout_rate=dropout_rate,
-#             **kwargs,
-#         )
-#         self.mean_encoder = torch.nn.Linear(n_hidden, n_output)
-#         self.var_encoder = torch.nn.Linear(n_hidden, n_output)
-
-#         if distribution == "ln":
-#             self.z_transformation = torch.nn.Softmax(dim=-1)
-#         else:
-#             self.z_transformation = torch.nn.Identity()
-#         self.var_activation = torch.exp if var_activation is None else var_activation
-
-#     def forward(self, x: torch.Tensor, *cat_list: int):
-#         r"""The forward computation for a single sample.
-
-#          #. Encodes the data into latent space using the encoder network
-#          #. Generates a mean \\( q_m \\) and variance \\( q_v \\)
-#          #. Samples a new value from an i.i.d. multivariate normal \\( \\sim Ne(q_m, \\mathbf{I}q_v) \\)
-
-#         Parameters
-#         ----------
-#         x
-#             tensor with shape (n_input,)
-#         cat_list
-#             list of category membership(s) for this sample
-
-#         Returns
-#         -------
-#         3-tuple of :py:class:`torch.Tensor`
-#             tensors of shape ``(n_latent,)`` for mean and var, and sample
-#         """
-#         # Parameters for latent distribution
-#         q = self.encoder(x, *cat_list)
-#         q_m = self.mean_encoder(q)
-#         q_v = self.var_activation(self.var_encoder(q)) + self.var_eps
-#         dist = Normal(q_m, q_v.sqrt())
-#         latent = self.z_transformation(dist.rsample())
-
-#         return dist, latent
-
-
-# class DecoderSCVI(torch.nn.Module):
-#     """Decodes data from latent space of ``n_input`` dimensions into ``n_output`` dimensions.
-
-#     Uses a fully-connected neural network of ``n_hidden`` layers.
-
-#     Parameters
-#     ----------
-#     n_input
-#         The dimensionality of the input (latent space)
-#     n_output
-#         The dimensionality of the output (data space)
-#     n_cat_list
-#         A list containing the number of categories
-#         for each category of interest. Each category will be
-#         included using a one-hot encoding
-#     n_layers
-#         The number of fully-connected hidden layers
-#     n_hidden
-#         The number of nodes per hidden layer
-#     dropout_rate
-#         Dropout rate to apply to each of the hidden layers
-#     inject_covariates
-#         Whether to inject covariates in each layer, or just the first (default).
-#     use_batch_norm
-#         Whether to use batch norm in layers
-#     use_layer_norm
-#         Whether to use layer norm in layers
-#     scale_activation
-#         Activation layer to use for px_scale_decoder
-#     **kwargs
-#         Keyword args for :class:`~scvi.nn.FCLayers`.
-#     """
-
-#     def __init__(
-#         self,
-#         n_input: int,
-#         n_output: int,
-#         n_cat_list: Iterable[int] = None,
-#         n_layers: int = 1,
-#         n_hidden: int = 128,
-#         inject_covariates: bool = True,
-#         use_batch_norm: bool = False,
-#         use_layer_norm: bool = False,
-#         scale_activation: Literal["softmax", "softplus"] = "softmax",
-#         **kwargs,
-#     ):
-#         super().__init__()
-#         self.px_decoder = FCLayers(
-#             n_in=n_input,
-#             n_out=n_hidden,
-#             n_cat_list=n_cat_list,
-#             n_layers=n_layers,
-#             n_hidden=n_hidden,
-#             dropout_rate=0,
-#             inject_covariates=inject_covariates,
-#             use_batch_norm=use_batch_norm,
-#             use_layer_norm=use_layer_norm,
-#             **kwargs,
-#         )
-
-#         # mean gamma
-#         if scale_activation == "softmax":
-#             px_scale_activation = torch.nn.Softmax(dim=-1)
-#         elif scale_activation == "softplus":
-#             px_scale_activation = torch.nn.Softplus()
-#         self.px_scale_decoder = torch.nn.Sequential(
-#             torch.nn.Linear(n_hidden, n_output),
-#             px_scale_activation,
-#         )
-
-#         # dispersion: here we only deal with gene-cell dispersion case
-#         self.px_r_decoder = torch.nn.Linear(n_hidden, n_output)
-
-#         # dropout
-#         self.px_dropout_decoder = torch.nn.Linear(n_hidden, n_output)
-
-#     def forward(self, dispersion: str, z: torch.Tensor, library: torch.Tensor, *cat_list: int):
-#         """The forward computation for a single sample.
-
-#          #. Decodes the data from the latent space using the decoder network
-#          #. Returns parameters for the ZINB distribution of expression
-#          #. If ``dispersion != 'gene-cell'`` then value for that param will be ``None``
-
-#         Parameters
-#         ----------
-#         dispersion
-#             One of the following
-
-#             * ``'gene'`` - dispersion parameter of NB is constant per gene across cells
-#             * ``'gene-batch'`` - dispersion can differ between different batches
-#             * ``'gene-label'`` - dispersion can differ between different labels
-#             * ``'gene-cell'`` - dispersion can differ for every gene in every cell
-#         z :
-#             tensor with shape ``(n_input,)``
-#         library_size
-#             library size
-#         cat_list
-#             list of category membership(s) for this sample
-
-#         Returns
-#         -------
-#         4-tuple of :py:class:`torch.Tensor`
-#             parameters for the ZINB distribution of expression
-
-#         """
-#         # The decoder returns values for the parameters of the ZINB distribution
-#         px = self.px_decoder(z, *cat_list)
-#         px_scale = self.px_scale_decoder(px)
-#         px_dropout = self.px_dropout_decoder(px)
-#         # Clamp to high value: exp(12) ~ 160000 to avoid nans (computational stability)
-#         px_rate = torch.exp(library) * px_scale  # torch.clamp( , max=12)
-#         px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
-#         return px_scale, px_r, px_rate, px_dropout
 
 
 class SingleCellVariationalInference(CellariumModel, PredictMixin):
@@ -650,23 +436,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layers=encoder_hidden,
         )
 
-        # self.z_encoder = EncoderSCVI(
-        #     n_input_encoder,
-        #     n_latent,
-        #     n_cat_list=encoder_cat_list,
-        #     n_layers=n_layers,
-        #     n_hidden=n_hidden,
-        #     dropout_rate=dropout_rate,
-        #     distribution=latent_distribution,
-        #     inject_covariates=deeply_inject_covariates,
-        #     use_batch_norm=use_batch_norm_encoder,
-        #     use_layer_norm=use_layer_norm_encoder,
-        #     var_activation=var_activation,
-        #     # return_dist=True,
-        #     **_extra_encoder_kwargs,
-        # )
-
-        # n_input_decoder = n_latent + n_continuous_cov
         if self.batch_representation == "embedding":
             raise NotImplementedError
             # n_input_decoder += batch_dim
@@ -680,21 +449,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             scale_activation="softplus" if use_size_factor_key else "softmax",
         )
 
-        # _extra_decoder_kwargs = extra_decoder_kwargs or {}
-        # self.decoder = DecoderSCVI(
-        #     dispersion,
-        #     gene_likelihood,
-        #     n_input_decoder,
-        #     self.n_input,
-        #     n_cat_list=cat_list,
-        #     n_layers=n_layers,
-        #     n_hidden=n_hidden,
-        #     inject_covariates=deeply_inject_covariates,
-        #     use_batch_norm=use_batch_norm_decoder,
-        #     use_layer_norm=use_layer_norm_decoder,
-        #     scale_activation="softplus" if use_size_factor_key else "softmax",
-        #     **_extra_decoder_kwargs,
-        # )
+        print("Encoder architecture:")
+        print(self.z_encoder)
+        print("Decoder architecture:")
+        print(self.decoder)
 
         self.reset_parameters()
 
@@ -792,7 +550,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         transform_batch: torch.Tensor | None = None,
     ) -> dict[str, Distribution | None]:
         """Runs the generative model."""
-        from torch.nn.functional import linear
 
         # Likelihood distribution
         # if cont_covs is None:
@@ -832,7 +589,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             case "gene-cell":
                 inverse_overdispersion = None
             case "gene-batch":
-                inverse_overdispersion = linear(
+                inverse_overdispersion = torch.nn.functional.linear(
                     torch.nn.functional.one_hot(batch_index.squeeze().long(), self.n_batch).float(), 
                     self.px_r,
                 ).exp()
