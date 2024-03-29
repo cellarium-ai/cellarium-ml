@@ -35,6 +35,8 @@ def weights_init(m):
     elif classname.find('Linear') != -1:
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
+    elif classname == 'Parameter':
+        torch.nn.init.normal_(m, 0.0, 0.1)
 
 
 class EncoderSCVI(torch.nn.Module):
@@ -63,7 +65,7 @@ class EncoderSCVI(torch.nn.Module):
             assert "out_features" in layer["init_args"], "out_features must be specified in init_args for encoder_hidden layers"
         super().__init__()
         if len(layers) == 0:
-            self.encoder = torch.nn.Identity()
+            self.encoder_module_list = torch.nn.ModuleList([torch.nn.Identity()])
             penultimate_features = in_features
         else:
             module_list = []
@@ -87,12 +89,15 @@ class EncoderSCVI(torch.nn.Module):
         self.var_encoder = torch.nn.Linear(penultimate_features, out_features)
         self.var_eps = var_eps
 
-    def forward(self, x: torch.Tensor, bias: torch.Tensor) -> tuple[torch.distributions.Distribution, torch.Tensor]:
+    def forward(self, x: torch.Tensor, biases: list[torch.Tensor]) -> tuple[torch.distributions.Distribution, torch.Tensor]:
         q = x
+        i = 0
         for dressed_layer in self.encoder_module_list:
             if isinstance(dressed_layer.layer, LinearInputBias):
-                assert dressed_layer.layer.bias.shape == bias.shape, "input bias shape must match layer out_features"
-                q = dressed_layer(q, bias=bias)
+                assert dressed_layer.layer.bias.shape[-1] == biases[i].shape[-1], \
+                    f"last dim of input bias shape {biases[i].shape} must match out_features {dressed_layer.layer.bias.shape}"
+                q = dressed_layer(q, bias=biases[i])
+                i += 1
             else:
                 q = dressed_layer(q)
         q_m = self.mean_encoder(q)
@@ -444,6 +449,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         var_names_g: Sequence[str],
         encoder_hidden: list[dict],
         decoder_hidden: list[dict],
+        n_hidden: int = 128,
         n_batch: int = 0,
         n_latent: int = 10,
         n_layers: int = 1,
@@ -530,6 +536,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         encoder_cat_list = cat_list if encode_covariates else None
         _extra_encoder_kwargs = extra_encoder_kwargs or {}
 
+        batch_biases = []
+        for layer in encoder_hidden:
+            layer["use_batch_norm"] = use_batch_norm_encoder
+            layer["use_layer_norm"] = use_layer_norm_encoder
+            if "LinearInputBias" in layer["class_path"]:
+                batch_biases.append(torch.zeros(self.n_latent, layer["init_args"]["out_features"]))
+        self.batch_biases = torch.nn.ParameterList(batch_biases)
+
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
             out_features=self.n_latent,
@@ -574,10 +588,20 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        self.z_encoder.encoder.fc_layers.apply(weights_init)
-        self.z_encoder.mean_encoder.apply(weights_init)
-        self.z_encoder.var_encoder.apply(weights_init)
-        self.decoder.px_decoder.fc_layers.apply(weights_init)
+        for m in self.z_encoder.modules():
+            m.apply(weights_init)
+        for m in self.decoder.modules():
+            m.apply(weights_init)
+        for p in self.batch_biases:
+            weights_init(p)
+    
+    def _compute_biases_from_batch_index(self, batch_index_n: torch.Tensor) -> list[torch.Tensor]:
+        biases = []
+        batch_index_n = batch_index_n.view(-1, 1).long()
+        for p_bh in self.batch_biases:
+            bias_nh = torch.gather(p_bh, 0, batch_index_n.expand(-1, p_bh.size(-1)))
+            biases.append(bias_nh)
+        return biases
 
     def inference(
         self,
@@ -613,7 +637,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             # encoder_input = torch.cat([encoder_input, batch_rep], dim=-1)
             # qz, z = self.z_encoder(encoder_input, *categorical_input)
         else:
-            qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
+            # qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
+            biases = self._compute_biases_from_batch_index(batch_index)
+            qz, z = self.z_encoder(encoder_input, biases)
 
         ql = None
         if not self.use_observed_lib_size:

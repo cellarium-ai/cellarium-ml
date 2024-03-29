@@ -57,7 +57,7 @@ model:
     init_args:
       var_names_g: null
       n_batch: null
-      # n_hidden: 128
+      n_hidden: 128
       encoder_hidden: 
       - class_path: cellarium.ml.models.common.fclayer.LinearInputBias
         init_args:
