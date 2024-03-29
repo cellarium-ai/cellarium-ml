@@ -39,6 +39,72 @@ def weights_init(m):
         torch.nn.init.normal_(m, 0.0, 0.1)
 
 
+class FullyConnectedInputBiasArchitecture(torch.nn.Module):
+    """
+    Fully connected block of layers (can be empty) that can include LinearInputBias layers. 
+    The forward pass takes in a list of biases, one for each LinearInputBias layer.
+
+    Args:
+        in_features: The dimensionality of the input
+        layers: A list of dictionaries, each containing the following keys:
+            * ``class_path``: the class path of the layer to use
+            * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
+                - must contain "out_features"
+    """
+
+    def __init__(
+        self,
+        in_features: int, 
+        layers: list[dict],
+    ) -> tuple[torch.nn.ModuleList, int]:
+        super().__init__()
+        for layer in layers:
+            assert "out_features" in layer["init_args"], \
+            """
+            "out_features" must be specified in init_args for hidden layers, e.g.
+
+            - class_path: cellarium.ml.models.common.fclayer.LinearInputBias
+            init_args:
+                out_features: 128
+            """
+        
+        if len(layers) == 0:
+            module_list = torch.nn.ModuleList([torch.nn.Identity()])
+            out_features = in_features
+        else:
+            module_list = []
+            n_hidden = [layer["init_args"].pop("out_features") for layer in layers]
+            for layer, n_in, n_out in zip(layers, [in_features] + n_hidden, n_hidden):
+                module_list.append(
+                    DressedLayer(
+                        instantiate_from_class_path(
+                            layer["class_path"], 
+                            n_in, 
+                            n_out, 
+                            bias=True,
+                        ),
+                        **layer["init_args"],
+                    )
+                )
+            module_list = torch.nn.ModuleList(module_list)
+            out_features = module_list[-1].layer.out_features
+        self.module_list = module_list
+        self.out_features = out_features
+
+    def forward(self, x: torch.Tensor, biases: list[torch.Tensor]) -> torch.Tensor:
+        q = x
+        i = 0
+        for dressed_layer in self.module_list:
+            if isinstance(dressed_layer.layer, LinearInputBias):
+                assert dressed_layer.layer.bias.shape[-1] == biases[i].shape[-1], \
+                    f"last dim of input bias shape {biases[i].shape} must match out_features {dressed_layer.layer.bias.shape}"
+                q = dressed_layer(q, bias=biases[i])
+                i += 1
+            else:
+                q = dressed_layer(q)
+        return q
+
+
 class EncoderSCVI(torch.nn.Module):
     """
     Encode data of ``in_features`` dimensions into a latent space of ``out_features`` dimensions.
@@ -60,68 +126,93 @@ class EncoderSCVI(torch.nn.Module):
         layers: list[dict],
         var_eps: float = 1e-4,
     ):
-
-        for layer in layers:
-            assert "out_features" in layer["init_args"], "out_features must be specified in init_args for encoder_hidden layers"
         super().__init__()
-        if len(layers) == 0:
-            self.encoder_module_list = torch.nn.ModuleList([torch.nn.Identity()])
-            penultimate_features = in_features
-        else:
-            module_list = []
-            n_hidden = [layer["init_args"].pop("out_features") for layer in layers]
-            for layer, n_in, n_out in zip(layers, [in_features] + n_hidden, n_hidden):
-                module_list.append(
-                    DressedLayer(
-                        instantiate_from_class_path(
-                            layer["class_path"], 
-                            n_in, 
-                            n_out, 
-                            bias=True,
-                        ),
-                        **layer["init_args"],
-                    )
-                )
-            self.encoder_module_list = torch.nn.ModuleList(module_list)
-            penultimate_features = module_list[-1].layer.out_features
-
-        self.mean_encoder = torch.nn.Linear(penultimate_features, out_features)
-        self.var_encoder = torch.nn.Linear(penultimate_features, out_features)
+        self.fully_connected = FullyConnectedInputBiasArchitecture(in_features, layers)
+        self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
+        self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
         self.var_eps = var_eps
 
-    def forward(self, x: torch.Tensor, biases: list[torch.Tensor]) -> tuple[torch.distributions.Distribution, torch.Tensor]:
-        q = x
-        i = 0
-        for dressed_layer in self.encoder_module_list:
-            if isinstance(dressed_layer.layer, LinearInputBias):
-                assert dressed_layer.layer.bias.shape[-1] == biases[i].shape[-1], \
-                    f"last dim of input bias shape {biases[i].shape} must match out_features {dressed_layer.layer.bias.shape}"
-                q = dressed_layer(q, bias=biases[i])
-                i += 1
-            else:
-                q = dressed_layer(q)
+    def forward(self, x: torch.Tensor, biases: list[torch.Tensor]) -> torch.distributions.Distribution:
+        q = self.fully_connected(x, biases)
         q_m = self.mean_encoder(q)
         q_v = torch.exp(self.var_encoder(q)) + self.var_eps
-        dist = torch.distributions.Normal(q_m, q_v.sqrt())
-        latent = dist.rsample()
-        return dist, latent
-    
-
-# class DecoderSCVI(torch.nn.Module):
-#     """
-#     Decode data from latent space of ``in_features`` dimensions into ``out_features`` dimensions.
-
-#     Args:
-#         in_features: The dimensionality of the input (latent space)
-#         out_features: The dimensionality of the output (data space)
-#         layers: A list of dictionaries, each containing the following keys:
-#             * ``class_path``: the class path of the layer to use
-#             * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
-#                 - must contain "in_features"
-
-#     """
+        return torch.distributions.Normal(q_m, q_v.sqrt())
 
 
+class DecoderSCVI(torch.nn.Module):
+    """
+    Encode data of ``in_features`` latent dimensions into data space of ``out_features`` dimensions.
+
+    Args:
+        in_features: The dimensionality of the input (latent space)
+        out_features: The dimensionality of the output (data space)
+        layers: A list of dictionaries, each containing the following keys:
+            * ``class_path``: the class path of the layer to use
+            * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
+                - must contain "out_features"
+        dispersion: Granularity at which the overdispersion of the negative binomial distribution is computed
+        gene_likelihood: Distribution to use for reconstruction in the generative process
+        scale_activation: Activation layer to use to compute normalized counts (before multiplying by library size)
+    """
+    def __init__(
+        self,
+        in_features: int, 
+        out_features: int, 
+        layers: list[dict],
+        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
+        gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
+        scale_activation: Literal["softmax", "softplus"] = "softmax",
+    ):
+        super().__init__()
+        if gene_likelihood == "zinb":
+            raise NotImplementedError("Zero-inflated negative binomial not yet implemented")
+        self.gene_likelihood = gene_likelihood
+        self.fully_connected = FullyConnectedInputBiasArchitecture(in_features, layers)
+        self.inverse_overdispersion_decoder = (
+            torch.nn.Linear(self.fully_connected.out_features, out_features) 
+            if ((gene_likelihood != "poisson") and (dispersion == "gene-cell")) 
+            else None
+        )
+        self.dropout_decoder = (
+            torch.nn.Linear(self.fully_connected.out_features, out_features) 
+            if (gene_likelihood == "zinb") 
+            else None
+        )
+        self.normalized_count_decoder = torch.nn.Sequential(
+            torch.nn.Linear(self.fully_connected.out_features, out_features),
+            torch.nn.Softmax(dim=-1) if (scale_activation == "softmax") else torch.nn.Softplus(),
+        )
+
+    def forward(
+        self, 
+        z: torch.Tensor, 
+        biases: list[torch.Tensor], 
+        inverse_overdispersion: torch.Tensor | None, 
+        library_size: torch.Tensor,
+    ) -> torch.distributions.Distribution:
+        q_nh = self.fully_connected(z, biases)
+
+        # mean counts
+        chi_ng = self.normalized_count_decoder(q_nh)
+        count_mean_ng = torch.exp(library_size) * chi_ng
+
+        # optional inverse overdispersion per cell
+        if inverse_overdispersion is None:
+            assert self.inverse_overdispersion_decoder is not None, \
+                "inverse_overdispersion must be provided when not using Poisson or gene-cell dispersion"
+            inverse_overdispersion = self.inverse_overdispersion_decoder(q_nh).exp()
+
+        # construct the count distribution
+        match self.gene_likelihood:
+            case "nb":
+                dist = NegativeBinomial(count_mean_ng, inverse_overdispersion)
+            case "poisson":
+                dist = Poisson(count_mean_ng)
+            case "zinb":
+                raise NotImplementedError("ZINB is not currently implemented")
+                # dist = ZeroInflatedNegativeBinomial(count_mean_ng, inverse_overdispersion, self.dropout_decoder(q_nh))
+
+        return dist
 
 
 # class EncoderSCVI(torch.nn.Module):
@@ -224,119 +315,119 @@ class EncoderSCVI(torch.nn.Module):
 #         return dist, latent
 
 
-class DecoderSCVI(torch.nn.Module):
-    """Decodes data from latent space of ``n_input`` dimensions into ``n_output`` dimensions.
+# class DecoderSCVI(torch.nn.Module):
+#     """Decodes data from latent space of ``n_input`` dimensions into ``n_output`` dimensions.
 
-    Uses a fully-connected neural network of ``n_hidden`` layers.
+#     Uses a fully-connected neural network of ``n_hidden`` layers.
 
-    Parameters
-    ----------
-    n_input
-        The dimensionality of the input (latent space)
-    n_output
-        The dimensionality of the output (data space)
-    n_cat_list
-        A list containing the number of categories
-        for each category of interest. Each category will be
-        included using a one-hot encoding
-    n_layers
-        The number of fully-connected hidden layers
-    n_hidden
-        The number of nodes per hidden layer
-    dropout_rate
-        Dropout rate to apply to each of the hidden layers
-    inject_covariates
-        Whether to inject covariates in each layer, or just the first (default).
-    use_batch_norm
-        Whether to use batch norm in layers
-    use_layer_norm
-        Whether to use layer norm in layers
-    scale_activation
-        Activation layer to use for px_scale_decoder
-    **kwargs
-        Keyword args for :class:`~scvi.nn.FCLayers`.
-    """
+#     Parameters
+#     ----------
+#     n_input
+#         The dimensionality of the input (latent space)
+#     n_output
+#         The dimensionality of the output (data space)
+#     n_cat_list
+#         A list containing the number of categories
+#         for each category of interest. Each category will be
+#         included using a one-hot encoding
+#     n_layers
+#         The number of fully-connected hidden layers
+#     n_hidden
+#         The number of nodes per hidden layer
+#     dropout_rate
+#         Dropout rate to apply to each of the hidden layers
+#     inject_covariates
+#         Whether to inject covariates in each layer, or just the first (default).
+#     use_batch_norm
+#         Whether to use batch norm in layers
+#     use_layer_norm
+#         Whether to use layer norm in layers
+#     scale_activation
+#         Activation layer to use for px_scale_decoder
+#     **kwargs
+#         Keyword args for :class:`~scvi.nn.FCLayers`.
+#     """
 
-    def __init__(
-        self,
-        n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        inject_covariates: bool = True,
-        use_batch_norm: bool = False,
-        use_layer_norm: bool = False,
-        scale_activation: Literal["softmax", "softplus"] = "softmax",
-        **kwargs,
-    ):
-        super().__init__()
-        self.px_decoder = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            dropout_rate=0,
-            inject_covariates=inject_covariates,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-            **kwargs,
-        )
+#     def __init__(
+#         self,
+#         n_input: int,
+#         n_output: int,
+#         n_cat_list: Iterable[int] = None,
+#         n_layers: int = 1,
+#         n_hidden: int = 128,
+#         inject_covariates: bool = True,
+#         use_batch_norm: bool = False,
+#         use_layer_norm: bool = False,
+#         scale_activation: Literal["softmax", "softplus"] = "softmax",
+#         **kwargs,
+#     ):
+#         super().__init__()
+#         self.px_decoder = FCLayers(
+#             n_in=n_input,
+#             n_out=n_hidden,
+#             n_cat_list=n_cat_list,
+#             n_layers=n_layers,
+#             n_hidden=n_hidden,
+#             dropout_rate=0,
+#             inject_covariates=inject_covariates,
+#             use_batch_norm=use_batch_norm,
+#             use_layer_norm=use_layer_norm,
+#             **kwargs,
+#         )
 
-        # mean gamma
-        if scale_activation == "softmax":
-            px_scale_activation = torch.nn.Softmax(dim=-1)
-        elif scale_activation == "softplus":
-            px_scale_activation = torch.nn.Softplus()
-        self.px_scale_decoder = torch.nn.Sequential(
-            torch.nn.Linear(n_hidden, n_output),
-            px_scale_activation,
-        )
+#         # mean gamma
+#         if scale_activation == "softmax":
+#             px_scale_activation = torch.nn.Softmax(dim=-1)
+#         elif scale_activation == "softplus":
+#             px_scale_activation = torch.nn.Softplus()
+#         self.px_scale_decoder = torch.nn.Sequential(
+#             torch.nn.Linear(n_hidden, n_output),
+#             px_scale_activation,
+#         )
 
-        # dispersion: here we only deal with gene-cell dispersion case
-        self.px_r_decoder = torch.nn.Linear(n_hidden, n_output)
+#         # dispersion: here we only deal with gene-cell dispersion case
+#         self.px_r_decoder = torch.nn.Linear(n_hidden, n_output)
 
-        # dropout
-        self.px_dropout_decoder = torch.nn.Linear(n_hidden, n_output)
+#         # dropout
+#         self.px_dropout_decoder = torch.nn.Linear(n_hidden, n_output)
 
-    def forward(self, dispersion: str, z: torch.Tensor, library: torch.Tensor, *cat_list: int):
-        """The forward computation for a single sample.
+#     def forward(self, dispersion: str, z: torch.Tensor, library: torch.Tensor, *cat_list: int):
+#         """The forward computation for a single sample.
 
-         #. Decodes the data from the latent space using the decoder network
-         #. Returns parameters for the ZINB distribution of expression
-         #. If ``dispersion != 'gene-cell'`` then value for that param will be ``None``
+#          #. Decodes the data from the latent space using the decoder network
+#          #. Returns parameters for the ZINB distribution of expression
+#          #. If ``dispersion != 'gene-cell'`` then value for that param will be ``None``
 
-        Parameters
-        ----------
-        dispersion
-            One of the following
+#         Parameters
+#         ----------
+#         dispersion
+#             One of the following
 
-            * ``'gene'`` - dispersion parameter of NB is constant per gene across cells
-            * ``'gene-batch'`` - dispersion can differ between different batches
-            * ``'gene-label'`` - dispersion can differ between different labels
-            * ``'gene-cell'`` - dispersion can differ for every gene in every cell
-        z :
-            tensor with shape ``(n_input,)``
-        library_size
-            library size
-        cat_list
-            list of category membership(s) for this sample
+#             * ``'gene'`` - dispersion parameter of NB is constant per gene across cells
+#             * ``'gene-batch'`` - dispersion can differ between different batches
+#             * ``'gene-label'`` - dispersion can differ between different labels
+#             * ``'gene-cell'`` - dispersion can differ for every gene in every cell
+#         z :
+#             tensor with shape ``(n_input,)``
+#         library_size
+#             library size
+#         cat_list
+#             list of category membership(s) for this sample
 
-        Returns
-        -------
-        4-tuple of :py:class:`torch.Tensor`
-            parameters for the ZINB distribution of expression
+#         Returns
+#         -------
+#         4-tuple of :py:class:`torch.Tensor`
+#             parameters for the ZINB distribution of expression
 
-        """
-        # The decoder returns values for the parameters of the ZINB distribution
-        px = self.px_decoder(z, *cat_list)
-        px_scale = self.px_scale_decoder(px)
-        px_dropout = self.px_dropout_decoder(px)
-        # Clamp to high value: exp(12) ~ 160000 to avoid nans (computational stability)
-        px_rate = torch.exp(library) * px_scale  # torch.clamp( , max=12)
-        px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
-        return px_scale, px_r, px_rate, px_dropout
+#         """
+#         # The decoder returns values for the parameters of the ZINB distribution
+#         px = self.px_decoder(z, *cat_list)
+#         px_scale = self.px_scale_decoder(px)
+#         px_dropout = self.px_dropout_decoder(px)
+#         # Clamp to high value: exp(12) ~ 160000 to avoid nans (computational stability)
+#         px_rate = torch.exp(library) * px_scale  # torch.clamp( , max=12)
+#         px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
+#         return px_scale, px_r, px_rate, px_dropout
 
 
 class SingleCellVariationalInference(CellariumModel, PredictMixin):
@@ -449,7 +540,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         var_names_g: Sequence[str],
         encoder_hidden: list[dict],
         decoder_hidden: list[dict],
-        n_hidden: int = 128,
         n_batch: int = 0,
         n_latent: int = 10,
         n_layers: int = 1,
@@ -533,16 +623,26 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         else:
             cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
 
-        encoder_cat_list = cat_list if encode_covariates else None
-        _extra_encoder_kwargs = extra_encoder_kwargs or {}
+        # encoder_cat_list = cat_list if encode_covariates else None
+        # _extra_encoder_kwargs = extra_encoder_kwargs or {}
 
-        batch_biases = []
+        # encoder layers and bias parameters
+        batch_biases_encoder = []
         for layer in encoder_hidden:
             layer["use_batch_norm"] = use_batch_norm_encoder
             layer["use_layer_norm"] = use_layer_norm_encoder
             if "LinearInputBias" in layer["class_path"]:
-                batch_biases.append(torch.zeros(self.n_latent, layer["init_args"]["out_features"]))
-        self.batch_biases = torch.nn.ParameterList(batch_biases)
+                batch_biases_encoder.append(torch.zeros(self.n_latent, layer["init_args"]["out_features"]))
+        self.batch_biases_encoder = torch.nn.ParameterList(batch_biases_encoder)
+
+        # decoder layers and bias parameters
+        batch_biases_decoder = []
+        for layer in decoder_hidden:
+            layer["use_batch_norm"] = use_batch_norm_decoder
+            layer["use_layer_norm"] = use_layer_norm_decoder
+            if "LinearInputBias" in layer["class_path"]:
+                batch_biases_decoder.append(torch.zeros(self.n_latent, layer["init_args"]["out_features"]))
+        self.batch_biases_decoder = torch.nn.ParameterList(batch_biases_decoder)
 
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
@@ -566,24 +666,35 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         #     **_extra_encoder_kwargs,
         # )
 
-        n_input_decoder = n_latent + n_continuous_cov
+        # n_input_decoder = n_latent + n_continuous_cov
         if self.batch_representation == "embedding":
             raise NotImplementedError
             # n_input_decoder += batch_dim
-
-        _extra_decoder_kwargs = extra_decoder_kwargs or {}
+        
         self.decoder = DecoderSCVI(
-            n_input_decoder,
-            self.n_input,
-            n_cat_list=cat_list,
-            n_layers=n_layers,
-            n_hidden=n_hidden,
-            inject_covariates=deeply_inject_covariates,
-            use_batch_norm=use_batch_norm_decoder,
-            use_layer_norm=use_layer_norm_decoder,
+            in_features=self.n_latent,
+            out_features=self.n_input,
+            layers=decoder_hidden,
+            dispersion=self.dispersion,
+            gene_likelihood=self.gene_likelihood,
             scale_activation="softplus" if use_size_factor_key else "softmax",
-            **_extra_decoder_kwargs,
         )
+
+        # _extra_decoder_kwargs = extra_decoder_kwargs or {}
+        # self.decoder = DecoderSCVI(
+        #     dispersion,
+        #     gene_likelihood,
+        #     n_input_decoder,
+        #     self.n_input,
+        #     n_cat_list=cat_list,
+        #     n_layers=n_layers,
+        #     n_hidden=n_hidden,
+        #     inject_covariates=deeply_inject_covariates,
+        #     use_batch_norm=use_batch_norm_decoder,
+        #     use_layer_norm=use_layer_norm_decoder,
+        #     scale_activation="softplus" if use_size_factor_key else "softmax",
+        #     **_extra_decoder_kwargs,
+        # )
 
         self.reset_parameters()
 
@@ -592,13 +703,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             m.apply(weights_init)
         for m in self.decoder.modules():
             m.apply(weights_init)
-        for p in self.batch_biases:
+        for p in self.batch_biases_encoder:
+            weights_init(p)
+        for p in self.batch_biases_decoder:
             weights_init(p)
     
-    def _compute_biases_from_batch_index(self, batch_index_n: torch.Tensor) -> list[torch.Tensor]:
+    @staticmethod
+    def _compute_biases_from_batch_index(batch_biases, batch_index_n: torch.Tensor) -> list[torch.Tensor]:
         biases = []
         batch_index_n = batch_index_n.view(-1, 1).long()
-        for p_bh in self.batch_biases:
+        for p_bh in batch_biases:
             bias_nh = torch.gather(p_bh, 0, batch_index_n.expand(-1, p_bh.size(-1)))
             biases.append(bias_nh)
         return biases
@@ -638,8 +752,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             # qz, z = self.z_encoder(encoder_input, *categorical_input)
         else:
             # qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
-            biases = self._compute_biases_from_batch_index(batch_index)
-            qz, z = self.z_encoder(encoder_input, biases)
+            biases = self._compute_biases_from_batch_index(self.batch_biases_encoder, batch_index)
+            qz = self.z_encoder(encoder_input, biases)
+            z = qz.rsample()
 
         ql = None
         if not self.use_observed_lib_size:
@@ -680,20 +795,21 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         from torch.nn.functional import linear
 
         # Likelihood distribution
-        if cont_covs is None:
-            decoder_input = z
-        elif z.dim() != cont_covs.dim():
-            decoder_input = torch.cat([z, cont_covs.unsqueeze(0).expand(z.size(0), -1, -1)], dim=-1)
-        else:
-            decoder_input = torch.cat([z, cont_covs], dim=-1)
+        # if cont_covs is None:
+        #     decoder_input = z
+        # elif z.dim() != cont_covs.dim():
+        #     decoder_input = torch.cat([z, cont_covs.unsqueeze(0).expand(z.size(0), -1, -1)], dim=-1)
+        # else:
+        #     decoder_input = torch.cat([z, cont_covs], dim=-1)
 
-        if cat_covs is not None:
-            categorical_input = torch.split(cat_covs, 1, dim=1)
-        else:
-            categorical_input = ()
+        # if cat_covs is not None:
+        #     categorical_input = torch.split(cat_covs, 1, dim=1)
+        # else:
+        #     categorical_input = ()
 
         if transform_batch is not None:
-            batch_index = torch.ones_like(batch_index) * transform_batch
+            raise NotImplementedError("transform_batch is not implemented in generative()... to be implemented elsewhere")
+            # batch_index = torch.ones_like(batch_index) * transform_batch
 
         if not self.use_size_factor_key:
             size_factor = library
@@ -709,53 +825,65 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             #     *categorical_input,
             #     y,
             # )
-        else:
-            px_scale, px_r, px_rate, px_dropout = self.decoder(
-                self.dispersion,
-                decoder_input,
-                size_factor,
-                batch_index,
-                *categorical_input,
-                # y,
-            )
 
-        if self.dispersion == "gene-label":
-            raise NotImplementedError
-            # px_r = linear(
-            #     torch.nn.functional.one_hot(y.squeeze().long(), self.n_labels).float(), self.px_r
-            # )  # px_r gets transposed - last dimension is nb genes
-        elif self.dispersion == "gene-batch":
-            px_r = linear(torch.nn.functional.one_hot(batch_index.squeeze().long(), self.n_batch).float(), self.px_r)
-        elif self.dispersion == "gene":
-            px_r = self.px_r
+        match self.dispersion:
+            case "gene":
+                inverse_overdispersion = self.px_r.exp()
+            case "gene-cell":
+                inverse_overdispersion = None
+            case "gene-batch":
+                inverse_overdispersion = linear(
+                    torch.nn.functional.one_hot(batch_index.squeeze().long(), self.n_batch).float(), 
+                    self.px_r,
+                ).exp()
+            case "gene-label":
+                inverse_overdispersion = None
+                raise NotImplementedError
+                # px_r = linear(
+                #     torch.nn.functional.one_hot(y.squeeze().long(), self.n_labels).float(), self.px_r
+                # )  # px_r gets transposed - last dimension is nb genes
 
-        px_r = torch.exp(px_r)
+        biases = self._compute_biases_from_batch_index(self.batch_biases_encoder, batch_index)
+        count_distribution = self.decoder(
+            z=z,
+            biases=biases, 
+            inverse_overdispersion=inverse_overdispersion, 
+            library_size=size_factor,
+        )
+            
+        # px_scale, px_r, px_rate, px_dropout = self.decoder(
+        #     self.dispersion,
+        #     decoder_input,
+        #     size_factor,
+        #     batch_index,
+        #     *categorical_input,
+        #     # y,
+        # )
 
-        if self.gene_likelihood == "zinb":
-            raise NotImplementedError
-            # px = ZeroInflatedNegativeBinomial(
-            #     mu=px_rate,
-            #     theta=px_r,
-            #     zi_logits=px_dropout,
-            #     scale=px_scale,
-            # )
-        elif self.gene_likelihood == "nb":
-            px = NegativeBinomial(mu=px_rate, theta=px_r)
-        elif self.gene_likelihood == "poisson":
-            px = Poisson(rate=px_rate)
+        # px_r = torch.exp(px_r)
+
+        # if self.gene_likelihood == "zinb":
+        #     raise NotImplementedError
+        #     # px = ZeroInflatedNegativeBinomial(
+        #     #     mu=px_rate,
+        #     #     theta=px_r,
+        #     #     zi_logits=px_dropout,
+        #     #     scale=px_scale,
+        #     # )
+        # elif self.gene_likelihood == "nb":
+        #     px = NegativeBinomial(mu=px_rate, theta=px_r)
+        # elif self.gene_likelihood == "poisson":
+        #     px = Poisson(rate=px_rate)
 
         # Priors
         if self.use_observed_lib_size:
             pl = None
         else:
-            (
-                local_library_log_means,
-                local_library_log_vars,
-            ) = self._compute_local_library_params(batch_index)
+            local_library_log_means, local_library_log_vars = self._compute_local_library_params(batch_index)
             pl = Normal(local_library_log_means, local_library_log_vars.sqrt())
         pz = Normal(torch.zeros_like(z), torch.ones_like(z))
 
-        return dict(px=px, pl=pl, pz=pz)
+        return dict(px=count_distribution, pl=pl, pz=pz)
 
     def forward(
         self,
