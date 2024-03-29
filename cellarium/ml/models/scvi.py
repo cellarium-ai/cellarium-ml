@@ -415,8 +415,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # encoder layers and bias parameters
         batch_biases_encoder = []
         for layer in encoder_hidden:
-            layer["use_batch_norm"] = use_batch_norm_encoder
-            layer["use_layer_norm"] = use_layer_norm_encoder
+            layer["init_args"]["use_batch_norm"] = use_batch_norm_encoder
+            layer["init_args"]["use_layer_norm"] = use_layer_norm_encoder
+            layer["init_args"]["dropout_rate"] = dropout_rate
             if "LinearInputBias" in layer["class_path"]:
                 batch_biases_encoder.append(torch.zeros(self.n_latent, layer["init_args"]["out_features"]))
         self.batch_biases_encoder = torch.nn.ParameterList(batch_biases_encoder)
@@ -424,8 +425,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # decoder layers and bias parameters
         batch_biases_decoder = []
         for layer in decoder_hidden:
-            layer["use_batch_norm"] = use_batch_norm_decoder
-            layer["use_layer_norm"] = use_layer_norm_decoder
+            layer["init_args"]["use_batch_norm"] = use_batch_norm_decoder
+            layer["init_args"]["use_layer_norm"] = use_layer_norm_decoder
+            layer["init_args"]["dropout_rate"] = dropout_rate
             if "LinearInputBias" in layer["class_path"]:
                 batch_biases_decoder.append(torch.zeros(self.n_latent, layer["init_args"]["out_features"]))
         self.batch_biases_decoder = torch.nn.ParameterList(batch_biases_decoder)
@@ -607,30 +609,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             inverse_overdispersion=inverse_overdispersion, 
             library_size=size_factor,
         )
-            
-        # px_scale, px_r, px_rate, px_dropout = self.decoder(
-        #     self.dispersion,
-        #     decoder_input,
-        #     size_factor,
-        #     batch_index,
-        #     *categorical_input,
-        #     # y,
-        # )
-
-        # px_r = torch.exp(px_r)
-
-        # if self.gene_likelihood == "zinb":
-        #     raise NotImplementedError
-        #     # px = ZeroInflatedNegativeBinomial(
-        #     #     mu=px_rate,
-        #     #     theta=px_r,
-        #     #     zi_logits=px_dropout,
-        #     #     scale=px_scale,
-        #     # )
-        # elif self.gene_likelihood == "nb":
-        #     px = NegativeBinomial(mu=px_rate, theta=px_r)
-        # elif self.gene_likelihood == "poisson":
-        #     px = Poisson(rate=px_rate)
 
         # Priors
         if self.use_observed_lib_size:
