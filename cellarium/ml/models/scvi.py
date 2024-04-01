@@ -19,14 +19,14 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('BatchNorm') != -1:
-        torch.nn.init.normal_(m.weight, 1.0, 0.02)
-        torch.nn.init.zeros_(m.bias)
-    elif classname.find('Linear') != -1:
-        torch.nn.init.xavier_normal_(m.weight)
-        torch.nn.init.zeros_(m.bias)
+# def weights_init(m):
+#     classname = m.__class__.__name__
+#     if classname.find('BatchNorm') != -1:
+#         torch.nn.init.normal_(m.weight, 1.0, 0.02)
+#         torch.nn.init.zeros_(m.bias)
+#     elif classname.find('Linear') != -1:
+#         torch.nn.init.xavier_normal_(m.weight)
+#         torch.nn.init.zeros_(m.bias)
 
 
 class EncoderSCVI(torch.nn.Module):
@@ -475,10 +475,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRa
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        self.z_encoder.encoder.fc_layers.apply(weights_init)
-        self.z_encoder.mean_encoder.apply(weights_init)
-        self.z_encoder.var_encoder.apply(weights_init)
-        self.decoder.px_decoder.fc_layers.apply(weights_init)
+        self.apply(self.init_parameters)
+
+    def init_parameters(self, m) -> None:
+        if isinstance(m, torch.nn.Module) and hasattr(m, 'weight'):
+            if isinstance(m, torch.nn.BatchNorm1d):
+                torch.nn.init.normal_(m.weight, 1.0, 0.02)
+            elif isinstance(m, torch.nn.Linear):
+                torch.nn.init.xavier_normal_(m.weight)
+            if m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
 
     def inference(
         self,
