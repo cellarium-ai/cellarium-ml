@@ -78,23 +78,3 @@ class PredictMixin(metaclass=ABCMeta):
         """
         Perform prediction.
         """
-
-class LogLearningRateMixin:
-    """
-    Mixin class for logging learning rate at each minibatch.
-    """
-
-    @torch.no_grad()
-    def on_batch_end(
-        self,
-        trainer: pl.Trainer,
-        pl_module: pl.LightningModule,
-        outputs: dict[str, torch.Tensor],
-        batch: Any,
-        batch_idx: int,
-    ) -> None:
-
-        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
-            return
-
-        pl_module.log("learning_rate", trainer.optimizers[0].param_groups[0]["lr"])
