@@ -260,7 +260,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_bais_sampled: True to sample the batch-specific biases from their distributions.
         n_continuous_cov: Number of continuous covariates.
         n_cats_per_cov: A list of integers containing the number of categories for each categorical covariate.
-        dropout_rate: Dropout rate for hidden units in the encoder and decoder.
+        dropout_rate: Dropout rate for hidden units in the encoder only.
         dispersion: Flexibility of the dispersion parameter when ``gene_likelihood`` is either ``"nb"`` or
             ``"zinb"``. One of the following:
                 * ``"gene"``: parameter is constant per gene across cells.
@@ -422,7 +422,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 layer["dressing_init_args"] = {}
             layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_decoder
             layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_decoder
-            layer["dressing_init_args"]["dropout_rate"] = dropout_rate
+            layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
 
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
