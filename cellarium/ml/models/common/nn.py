@@ -7,24 +7,56 @@ from collections.abc import Iterable
 import torch
 
 
-class LinearInputBias(torch.nn.Linear):
-    """A `torch.nn.Linear` layer where bias is an input to the forward pass.
+class LinearWithBatch(torch.nn.Linear):
+    """A `torch.nn.Linear` layer where batch indices are given as input to the forward pass.
 
     Args:
         in_features: passed to `torch.nn.Linear`
         out_features: passed to `torch.nn.Linear`
-        bias: passed to `torch.nn.Linear`
+        n_batch: total number of batches in dataset
+        sample: True to sample the bias weight matrix from a distribution
+        bias: passed to `torch.nn.Linear` (True is like the scvi-tools implementation)
     """
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+    def __init__(self, in_features: int, out_features: int, n_batch: int, sample: bool = False, bias: bool = True):
         super().__init__(in_features, out_features, bias=bias)
+        self.sample = sample
+        self.cached_biases = None
+        self.n_batch = n_batch
+        self.bias_mean_layer = torch.nn.Linear(in_features=n_batch, out_features=out_features, bias=False)
+        if sample:
+            self.bias_std_unconstrained_layer = torch.nn.Linear(in_features=n_batch, out_features=out_features, bias=False)
+    
+    def compute_bias(self, batch_n: torch.Tensor) -> torch.Tensor:
+        """
+        Returns the bias for a given list of batch indices.
 
-    def forward(self, x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+        Args:
+            batch_n: a tensor of batch indices of shape (n)
+
+        Returns:
+            a tensor of shape (n, out_features)
+        """
+        one_hot_batch_nb = torch.nn.functional.one_hot(batch_n.squeeze().long(), num_classes=self.n_batch).float()
+        mean_bias_nh = self.bias_mean_layer(one_hot_batch_nb)
+        if self.sample:
+            std_bias_nh = self.bias_std_unconstrained_layer(one_hot_batch_nb).exp()
+            self.cached_biases = mean_bias_nh + std_bias_nh * torch.randn_like(std_bias_nh)
+        else:
+            self.cached_biases = mean_bias_nh
+        return self.cached_biases
+
+    def forward(self, x: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         """
         Computes the forward pass of the layer as
         out = x @ self.weight.T + self.bias + bias
+
+        where bias is computed as
+        bias = batch_one_hot @ weight_batch.T
+
+        or is sampled from a distribution if sample=True
         """
-        return super().forward(x) + bias
+        return super().forward(x) + self.compute_bias(batch)
 
 
 class DressedLayer(torch.nn.Module):
