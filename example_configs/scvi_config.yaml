@@ -46,6 +46,10 @@ trainer:
   default_root_dir: null
 model:
   transforms: null
+#    - !CheckpointLoader
+#      file_path: tutorial/pca/lightning_logs/version_0/checkpoints/epoch=0-step=5.ckpt
+#      attr: null
+#      convert_fn: null
   model:
     class_path: cellarium.ml.models.SingleCellVariationalInference
     init_args:

@@ -128,7 +128,6 @@ class EncoderSCVI(torch.nn.Module):
 
         return dist, latent
 
-
 class DecoderSCVI(torch.nn.Module):
     """Decodes data from latent space of ``n_input`` dimensions into ``n_output`` dimensions.
 
@@ -242,7 +241,6 @@ class DecoderSCVI(torch.nn.Module):
         px_rate = torch.exp(library) * px_scale  # torch.clamp( , max=12)
         px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
         return px_scale, px_r, px_rate, px_dropout
-
 
 class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRateMixin):
     """
@@ -485,6 +483,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRa
                 torch.nn.init.xavier_normal_(m.weight)
             if m.bias is not None:
                 torch.nn.init.zeros_(m.bias)
+        elif isinstance(m,torch.nn.Parameter) and hasattr(m, 'weight'):
+            torch.nn.init.xavier_normal_(m.weight)
+            if m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
+
 
     def inference(
         self,
@@ -731,3 +734,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, LogLearningRa
             cat_covs=cat_covs_nd,
             n_samples=1,
         )
+
+    def save_checkpoint_pyro(self, filename, optimizer, guide):
+        """Stores the model weight parameters and optimizer status"""
+        # Builds dictionary with all elements for resuming training
+        if guide.state_dict():
+            checkpoint = {'model_state_dict': self.state_dict(),
+                          'optimizer_state_dict': optimizer.get_state(),
+                          'guide_state_dict': guide.state_dict()}
+        else:
+            checkpoint = {'model_state_dict': self.state_dict(),
+                          'optimizer_state_dict': optimizer.get_state(),
+                          'guide_state_dict': None}
+        torch.save(checkpoint, filename)
