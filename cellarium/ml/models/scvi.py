@@ -33,21 +33,13 @@ def instantiate_from_class_path(class_path, *args, **kwargs):
 
 
 def weights_init(m):
-    classname = m.__class__.__name__
-    # print(classname)
-    if classname == 'BatchNorm1d':
+    if isinstance(m, torch.nn.BatchNorm1d):
         torch.nn.init.normal_(m.weight, 1.0, 0.02)
         torch.nn.init.zeros_(m.bias)
-        # print('init batchnorm')
-    elif 'Linear' in classname:
+    elif isinstance(m, torch.nn.Linear) or isinstance(m, LinearWithBatch):
         torch.nn.init.xavier_normal_(m.weight)
         if m.bias is not None:
             torch.nn.init.zeros_(m.bias)
-        # print('init linear')
-    elif classname == 'Parameter':
-        pass
-        # torch.nn.init.normal_(m, 0.0, 0.1)
-        # print('init param')
 
 
 class FullyConnectedWithBatchArchitecture(torch.nn.Module):
@@ -370,7 +362,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             raise NotImplementedError
             # self.px_r = torch.nn.Parameter(torch.randn(self.n_input, n_labels))
         elif self.dispersion == "gene-cell":
-            pass
+            self.px_r = torch.nn.Parameter(torch.zeros(1))  # dummy
         else:
             raise ValueError(
                 "dispersion must be one of ['gene', "
@@ -453,8 +445,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
     def reset_parameters(self) -> None:
         for m in self.modules():
             m.apply(weights_init)
-        for p in self.parameters():
-            weights_init(p)
+        torch.nn.init.normal_(self.px_r, mean=0.0, std=1.0)
 
     def inference(
         self,
