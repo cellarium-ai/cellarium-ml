@@ -12,7 +12,7 @@ from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.models.common.distributions import NegativeBinomial
-from cellarium.ml.models.common.nn import LinearInputBias, DressedLayer
+from cellarium.ml.models.common.nn import LinearWithBatch, DressedLayer
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -20,26 +20,37 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-def instantiate_from_class_path(class_path, *args, **kwargs):
+def class_from_class_path(class_path: str):
     module_name, class_name = class_path.rsplit('.', 1)
     module = importlib.import_module(module_name)
-    class_ = getattr(module, class_name)
+    class_ref = getattr(module, class_name)
+    return class_ref
+
+
+def instantiate_from_class_path(class_path, *args, **kwargs):
+    class_ = class_from_class_path(class_path)
     return class_(*args, **kwargs)
 
 
 def weights_init(m):
     classname = m.__class__.__name__
-    if classname.find('BatchNorm') != -1:
+    # print(classname)
+    if classname == 'BatchNorm1d':
         torch.nn.init.normal_(m.weight, 1.0, 0.02)
         torch.nn.init.zeros_(m.bias)
-    elif classname.find('Linear') != -1:
+        # print('init batchnorm')
+    elif 'Linear' in classname:
         torch.nn.init.xavier_normal_(m.weight)
-        torch.nn.init.zeros_(m.bias)
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
+        # print('init linear')
     elif classname == 'Parameter':
-        torch.nn.init.normal_(m, 0.0, 0.1)
+        pass
+        # torch.nn.init.normal_(m, 0.0, 0.1)
+        # print('init param')
 
 
-class FullyConnectedInputBiasArchitecture(torch.nn.Module):
+class FullyConnectedWithBatchArchitecture(torch.nn.Module):
     """
     Fully connected block of layers (can be empty) that can include LinearInputBias layers. 
     The forward pass takes in a list of biases, one for each LinearInputBias layer.
@@ -63,8 +74,8 @@ class FullyConnectedInputBiasArchitecture(torch.nn.Module):
             """
             "out_features" must be specified in init_args for hidden layers, e.g.
 
-            - class_path: cellarium.ml.models.common.fclayer.LinearInputBias
-            init_args:
+            - class_path: cellarium.ml.models.common.fclayer.LinearWithBatch
+              init_args:
                 out_features: 128
             """
         
@@ -79,11 +90,12 @@ class FullyConnectedInputBiasArchitecture(torch.nn.Module):
                     DressedLayer(
                         instantiate_from_class_path(
                             layer["class_path"], 
-                            n_in, 
-                            n_out, 
+                            in_features=n_in, 
+                            out_features=n_out, 
                             bias=True,
+                            **layer["init_args"],
                         ),
-                        **layer["init_args"],
+                        **layer["dressing_init_args"],
                     )
                 )
             module_list = torch.nn.ModuleList(module_list)
@@ -91,18 +103,13 @@ class FullyConnectedInputBiasArchitecture(torch.nn.Module):
         self.module_list = module_list
         self.out_features = out_features
 
-    def forward(self, x: torch.Tensor, biases: list[torch.Tensor]) -> torch.Tensor:
-        q = x
-        i = 0
+    def forward(self, x: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
+        x_ = x
         for dressed_layer in self.module_list:
-            if isinstance(dressed_layer.layer, LinearInputBias):
-                assert dressed_layer.layer.bias.shape[-1] == biases[i].shape[-1], \
-                    f"last dim of input bias shape {biases[i].shape} must match out_features {dressed_layer.layer.bias.shape}"
-                q = dressed_layer(q, bias=biases[i])
-                i += 1
-            else:
-                q = dressed_layer(q)
-        return q
+            x_ = (dressed_layer(x_, batch=batch) 
+                  if (hasattr(dressed_layer, "layer") and isinstance(dressed_layer.layer, LinearWithBatch)) 
+                  else dressed_layer(x_))
+        return x_
 
 
 class EncoderSCVI(torch.nn.Module):
@@ -116,6 +123,9 @@ class EncoderSCVI(torch.nn.Module):
             * ``class_path``: the class path of the layer to use
             * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
                 - must contain "out_features"
+        n_batch: Total number of batches in dataset
+        output_bias: If True, the output layer will have a batch-specific bias added 
+            (scvi-tools does not include this)
         var_eps: Minimum value for the variance; used for numerical stability
     """
     
@@ -124,19 +134,25 @@ class EncoderSCVI(torch.nn.Module):
         in_features: int, 
         out_features: int, 
         layers: list[dict],
+        n_batch: int,
+        output_bias: bool = False,
         var_eps: float = 1e-4,
     ):
         super().__init__()
-        self.fully_connected = FullyConnectedInputBiasArchitecture(in_features, layers)
-        # TODO: if fully_connected is the Identity, then we need to use LinearInputBias instead of Linear for the following
-        self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
-        self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
+        self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, layers)
+        self.mean_encoder_takes_batch = output_bias
+        if output_bias:
+            self.mean_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch)
+            self.var_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch)
+        else:
+            self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
+            self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
         self.var_eps = var_eps
 
-    def forward(self, x: torch.Tensor, biases: list[torch.Tensor]) -> torch.distributions.Distribution:
-        q = self.fully_connected(x, biases)
-        q_m = self.mean_encoder(q)
-        q_v = torch.exp(self.var_encoder(q)) + self.var_eps
+    def forward(self, x: torch.Tensor, batch: torch.Tensor) -> torch.distributions.Distribution:
+        q = self.fully_connected(x, batch)
+        q_m = self.mean_encoder(q, batch) if self.mean_encoder_takes_batch else self.mean_encoder(q)
+        q_v = torch.exp(self.var_encoder(q, batch) if self.mean_encoder_takes_batch else self.var_encoder(q)) + self.var_eps
         return torch.distributions.Normal(q_m, q_v.sqrt())
 
 
@@ -151,6 +167,9 @@ class DecoderSCVI(torch.nn.Module):
             * ``class_path``: the class path of the layer to use
             * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
                 - must contain "out_features"
+        n_batch: Total number of batches in dataset
+        output_bias: If True, the output layer will have a batch-specific bias added 
+            (scvi-tools does not include this)
         dispersion: Granularity at which the overdispersion of the negative binomial distribution is computed
         gene_likelihood: Distribution to use for reconstruction in the generative process
         scale_activation: Activation layer to use to compute normalized counts (before multiplying by library size)
@@ -160,6 +179,8 @@ class DecoderSCVI(torch.nn.Module):
         in_features: int, 
         out_features: int, 
         layers: list[dict],
+        n_batch: int,
+        output_bias: bool = False,
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
         scale_activation: Literal["softmax", "softplus"] = "softmax",
@@ -168,7 +189,7 @@ class DecoderSCVI(torch.nn.Module):
         if gene_likelihood == "zinb":
             raise NotImplementedError("Zero-inflated negative binomial not yet implemented")
         self.gene_likelihood = gene_likelihood
-        self.fully_connected = FullyConnectedInputBiasArchitecture(in_features, layers)
+        self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, layers)
         self.inverse_overdispersion_decoder = (
             torch.nn.Linear(self.fully_connected.out_features, out_features) 
             if ((gene_likelihood != "poisson") and (dispersion == "gene-cell")) 
@@ -179,22 +200,27 @@ class DecoderSCVI(torch.nn.Module):
             if (gene_likelihood == "zinb") 
             else None
         )
-        self.normalized_count_decoder = torch.nn.Sequential(
-            torch.nn.Linear(self.fully_connected.out_features, out_features),
-            torch.nn.Softmax(dim=-1) if (scale_activation == "softmax") else torch.nn.Softplus(),
+        self.count_decoder_takes_batch = output_bias
+        self.normalized_count_decoder = (
+            torch.nn.Linear(self.fully_connected.out_features, out_features) if not output_bias 
+            else LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch)
         )
+        self.normalized_count_activation = torch.nn.Softmax(dim=-1) if (scale_activation == "softmax") else torch.nn.Softplus()
 
     def forward(
         self, 
         z: torch.Tensor, 
-        biases: list[torch.Tensor], 
+        batch: torch.Tensor, 
         inverse_overdispersion: torch.Tensor | None, 
         library_size: torch.Tensor,
     ) -> torch.distributions.Distribution:
-        q_nh = self.fully_connected(z, biases)
+        q_nh = self.fully_connected(z, batch)
 
         # mean counts
-        chi_ng = self.normalized_count_decoder(q_nh)
+        unnormalized_chi_ng = (self.normalized_count_decoder(q_nh, batch) 
+                               if self.count_decoder_takes_batch 
+                               else self.normalized_count_decoder(q_nh))
+        chi_ng = self.normalized_count_activation(unnormalized_chi_ng)
         count_mean_ng = torch.exp(library_size) * chi_ng
 
         # optional inverse overdispersion per cell
@@ -324,9 +350,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
     def __init__(
         self,
         var_names_g: Sequence[str],
-        encoder_hidden: list[dict],
-        decoder_hidden: list[dict],
+        encoder: dict[str, list[dict] | bool],
+        decoder: dict[str, list[dict] | bool],
         n_batch: int = 0,
+        batch_bais_sampled: bool = False,
         n_latent: int = 10,
         n_continuous_cov: int = 0,
         n_cats_per_cov: list[int] | None = None,
@@ -410,30 +437,32 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # encoder_cat_list = cat_list if encode_covariates else None
         # _extra_encoder_kwargs = extra_encoder_kwargs or {}
 
-        # encoder layers and bias parameters
-        batch_biases_encoder = []
-        for layer in encoder_hidden:
-            layer["init_args"]["use_batch_norm"] = use_batch_norm_encoder
-            layer["init_args"]["use_layer_norm"] = use_layer_norm_encoder
-            layer["init_args"]["dropout_rate"] = dropout_rate
-            if "LinearInputBias" in layer["class_path"]:
-                batch_biases_encoder.append(torch.zeros(self.n_latent, layer["init_args"]["out_features"]))
-        self.batch_biases_encoder = torch.nn.ParameterList(batch_biases_encoder)
+        # encoder layers
+        for layer in encoder["layers"]:
+            if layer["class_path"] == "cellarium.ml.models.common.nn.LinearWithBatch":
+                layer["init_args"]["n_batch"] = self.n_batch
+            if "dressing_init_args" not in layer:
+                layer["dressing_init_args"] = {}
+            layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_encoder
+            layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_encoder
+            layer["dressing_init_args"]["dropout_rate"] = dropout_rate
 
-        # decoder layers and bias parameters
-        batch_biases_decoder = []
-        for layer in decoder_hidden:
-            layer["init_args"]["use_batch_norm"] = use_batch_norm_decoder
-            layer["init_args"]["use_layer_norm"] = use_layer_norm_decoder
-            layer["init_args"]["dropout_rate"] = dropout_rate
-            if "LinearInputBias" in layer["class_path"]:
-                batch_biases_decoder.append(torch.zeros(self.n_latent, layer["init_args"]["out_features"]))
-        self.batch_biases_decoder = torch.nn.ParameterList(batch_biases_decoder)
+        # decoder layers
+        for layer in decoder["layers"]:
+            if layer["class_path"] == "cellarium.ml.models.common.nn.LinearWithBatch":
+                layer["init_args"]["n_batch"] = self.n_batch
+            if "dressing_init_args" not in layer:
+                layer["dressing_init_args"] = {}
+            layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_decoder
+            layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_decoder
+            layer["dressing_init_args"]["dropout_rate"] = dropout_rate
 
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
             out_features=self.n_latent,
-            layers=encoder_hidden,
+            layers=encoder["layers"],
+            n_batch=self.n_batch,
+            output_bias=encoder["output_bias"],
         )
 
         if self.batch_representation == "embedding":
@@ -443,37 +472,22 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.decoder = DecoderSCVI(
             in_features=self.n_latent,
             out_features=self.n_input,
-            layers=decoder_hidden,
+            layers=decoder["layers"],
+            n_batch=self.n_batch,
+            output_bias=decoder["output_bias"],
             dispersion=self.dispersion,
             gene_likelihood=self.gene_likelihood,
             scale_activation="softplus" if use_size_factor_key else "softmax",
         )
 
-        print("Encoder architecture:")
-        print(self.z_encoder)
-        print("Decoder architecture:")
-        print(self.decoder)
-
+        print(self)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        for m in self.z_encoder.modules():
+        for m in self.modules():
             m.apply(weights_init)
-        for m in self.decoder.modules():
-            m.apply(weights_init)
-        for p in self.batch_biases_encoder:
+        for p in self.parameters():
             weights_init(p)
-        for p in self.batch_biases_decoder:
-            weights_init(p)
-    
-    @staticmethod
-    def _compute_biases_from_batch_index(batch_biases, batch_index_n: torch.Tensor) -> list[torch.Tensor]:
-        biases = []
-        batch_index_n = batch_index_n.view(-1, 1).long()
-        for p_bh in batch_biases:
-            bias_nh = torch.gather(p_bh, 0, batch_index_n.expand(-1, p_bh.size(-1)))
-            biases.append(bias_nh)
-        return biases
 
     def inference(
         self,
@@ -510,8 +524,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             # qz, z = self.z_encoder(encoder_input, *categorical_input)
         else:
             # qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
-            biases = self._compute_biases_from_batch_index(self.batch_biases_encoder, batch_index)
-            qz = self.z_encoder(encoder_input, biases)
+            # biases = self._compute_biases_from_batch_index(self.batch_biases_encoder, batch_index)
+            qz = self.z_encoder(encoder_input, batch_index)
             z = qz.rsample()
 
         ql = None
@@ -600,10 +614,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 #     torch.nn.functional.one_hot(y.squeeze().long(), self.n_labels).float(), self.px_r
                 # )  # px_r gets transposed - last dimension is nb genes
 
-        biases = self._compute_biases_from_batch_index(self.batch_biases_encoder, batch_index)
+        # biases = self._compute_biases_from_batch_index(self.batch_biases_decoder, batch_index)
         count_distribution = self.decoder(
             z=z,
-            biases=biases, 
+            batch=batch_index, 
             inverse_overdispersion=inverse_overdispersion, 
             library_size=size_factor,
         )
