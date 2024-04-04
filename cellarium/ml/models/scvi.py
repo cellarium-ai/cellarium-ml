@@ -356,19 +356,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
             self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
 
-        if self.dispersion == "gene":
-            self.px_r = torch.nn.Parameter(torch.randn(self.n_input))
-        elif self.dispersion == "gene-label":
-            raise NotImplementedError
-            # self.px_r = torch.nn.Parameter(torch.randn(self.n_input, n_labels))
-        elif self.dispersion == "gene-cell":
-            self.px_r = torch.nn.Parameter(torch.zeros(1))  # dummy
-        else:
-            raise ValueError(
-                "dispersion must be one of ['gene', "
-                " 'gene-label', 'gene-cell'], but input was "
-                "{}".format(self.dispersion)
-            )
+        self.px_r = torch.nn.Parameter(torch.torch.empty(self.n_input))
 
         self.batch_representation = batch_representation
         if self.batch_representation == "embedding":
@@ -445,7 +433,19 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
     def reset_parameters(self) -> None:
         for m in self.modules():
             m.apply(weights_init)
-        torch.nn.init.normal_(self.px_r, mean=0.0, std=1.0)
+
+        if self.dispersion == "gene":
+            torch.nn.init.normal_(self.px_r, mean=0.0, std=1.0)
+        elif self.dispersion == "gene-label":
+            raise NotImplementedError
+        elif self.dispersion == "gene-cell":
+            torch.nn.init.zeros_(self.px_r)
+        else:
+            raise ValueError(
+                "dispersion must be one of ['gene', "
+                " 'gene-label', 'gene-cell'], but input was "
+                "{}".format(self.dispersion)
+            )
 
     def inference(
         self,
