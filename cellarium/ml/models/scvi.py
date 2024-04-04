@@ -356,7 +356,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
             self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
 
-        self.px_r = torch.nn.Parameter(torch.torch.empty(self.n_input))
+        self.px_r = torch.nn.Parameter(torch.empty(self.n_input))
 
         self.batch_representation = batch_representation
         if self.batch_representation == "embedding":
