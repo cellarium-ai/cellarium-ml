@@ -65,8 +65,6 @@ model:
             out_features: 128
         output_bias: true
       decoder:
-        # layers: []
-        # output_bias: true
         layers:
         - class_path: cellarium.ml.models.common.nn.LinearWithBatch
           init_args:
@@ -102,7 +100,11 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: gs://yx-data/pbmc_count.h5ad
+      #filenames: gs://yx-data/pbmc_count.h5ad
+      #filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
+      #filenames: /opt/project/pbmc_count.h5ad
+      filenames: ../data/pbmc_count.h5ad
+      #filenames: /home/lys/Dropbox/PostDoc_Glycomics/pbmc_count.h5ad
       limits: [31774]
       shard_size: 31774
       last_shard_size: null
@@ -129,5 +131,5 @@ data:
   seed: 0
   drop_last: false
   test_mode: false
-  num_workers: 4
+  num_workers: 0
 ckpt_path: null

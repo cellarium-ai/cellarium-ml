@@ -140,6 +140,7 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
         Dictionary with the same keys as the input dictionaries, but with values concatenated along
         the batch dimension.
     """
+    batch = batch.copy()
     keys = batch[0].keys()
     collated_batch = {}
     if len(batch) > 1:
