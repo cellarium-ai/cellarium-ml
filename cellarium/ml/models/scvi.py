@@ -446,20 +446,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 "{}".format(self.dispersion)
             )
 
-    def init_parameters(self, m) -> None:
-        if isinstance(m, torch.nn.Module) and hasattr(m, 'weight'):
-            if isinstance(m, torch.nn.BatchNorm1d):
-                torch.nn.init.normal_(m.weight, 1.0, 0.02)
-            elif isinstance(m, torch.nn.Linear):
-                torch.nn.init.xavier_normal_(m.weight)
-            if m.bias is not None:
-                torch.nn.init.zeros_(m.bias)
-        elif isinstance(m,torch.nn.Parameter) and hasattr(m, 'weight'):
-            torch.nn.init.xavier_normal_(m.weight)
-            if m.bias is not None:
-                torch.nn.init.zeros_(m.bias)
-
-
     def inference(
         self,
         x,
