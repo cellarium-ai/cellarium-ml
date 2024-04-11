@@ -8,12 +8,9 @@ import os
 import scanpy as sc
 config_file = "../example_configs/scvi_pbmc_config.yaml"
 
-subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file])
+#subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file])
 
-
-exit()
-checkpoint_file = 'lightning_logs/version_0/checkpoints/epoch=49-step=3150.ckpt'
-
+checkpoint_file = 'lightning_logs/version_1/checkpoints/epoch=49-step=3150.ckpt'
 # load the trained model
 scvi_model = CellariumModule.load_from_checkpoint(checkpoint_file).model
 

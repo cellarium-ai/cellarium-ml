@@ -432,7 +432,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
     def reset_parameters(self) -> None:
         for m in self.modules():
             m.apply(weights_init)
-
         if self.dispersion == "gene":
             torch.nn.init.normal_(self.px_r, mean=0.0, std=1.0)
         elif self.dispersion == "gene-label":
