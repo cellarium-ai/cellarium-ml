@@ -14,3 +14,7 @@ lightning_logs/
 build/
 notebooks/.ipynb_checkpoints/
 output/
+
+*.png
+
+*.pdf

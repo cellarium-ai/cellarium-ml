@@ -73,6 +73,7 @@ def get_dataset_from_anndata(
         file,
         shard_size=shard_size,
         max_cache_size=1,
+        #limits = [1000] #31774 -> leave unassigned to have the entire dataset
     )
 
     dataset = IterableDistributedAnnDataCollectionDataset(
@@ -87,6 +88,7 @@ def get_dataset_from_anndata(
         seed=seed,
         drop_last=drop_last,
     )
+
     return dataset
 
 def embed(
@@ -120,7 +122,7 @@ def embed(
     adata.obsm[obsm_key_added] = np.zeros((len(adata), latent_space_dim), dtype=np.float32)
     with torch.no_grad():
         for batch in tqdm.tqdm(dataset):
-            batch['x_ng'] = torch.from_numpy(batch['x_ng']).to(device)
+            batch['x_ng'] = torch.from_numpy(batch['x_ng'].copy()).to(device)
             batch['batch_index_n'] = torch.from_numpy(batch['batch_index_n']).to(device)
             out = pipeline.predict(batch)
             z_mean_nk = out['qz'].mean

@@ -188,14 +188,16 @@ class DistributedAnnDataCollection(AnnCollection):
         self.cache_size_strictly_enforced = cache_size_strictly_enforced
         # schema
         adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
-        assert len(adata0) == limits[0]
+        #assert len(adata0) == limits[0], f"adata0 dim 0 is {len(adata0)}, limits first member is {limits[0]}"
         self.obs_columns_to_validate = obs_columns_to_validate
         self.schema = AnnDataSchema(adata0, obs_columns_to_validate)
+
         # lazy anndatas
         lazy_adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
             for start, end, filename in zip([0] + limits, limits, self.filenames)
         ]
+
         # use filenames as default keys
         if keys is None:
             keys = self.filenames

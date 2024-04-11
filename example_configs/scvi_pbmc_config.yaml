@@ -19,7 +19,7 @@ trainer:
   #     patience: 45
   #     mode: min
   fast_dev_run: false
-  max_epochs: 5
+  max_epochs: 50
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -102,7 +102,7 @@ data:
     init_args:
       #filenames: gs://yx-data/pbmc_count.h5ad
       #filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
-      #filenames: /opt/project/pbmc_count.h5ad
+      #filenames: /opt/project/pbmc_count.h5ad #use with cli.py
       filenames: ../data/pbmc_count.h5ad
       #filenames: /home/lys/Dropbox/PostDoc_Glycomics/pbmc_count.h5ad
       limits: [31774]
@@ -131,5 +131,5 @@ data:
   seed: 0
   drop_last: false
   test_mode: false
-  num_workers: 0
+  num_workers: 0 #changed from 4 to 0 to avoid emmory complaints
 ckpt_path: null

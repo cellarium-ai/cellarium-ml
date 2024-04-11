@@ -144,8 +144,7 @@ class EncoderSCVI(torch.nn.Module):
     def forward(self, x: torch.Tensor, batch: torch.Tensor) -> torch.distributions.Distribution:
         q = self.fully_connected(x, batch)
         q_m = self.mean_encoder(q, batch) if self.mean_encoder_takes_batch else self.mean_encoder(q)
-        q_v = torch.exp(
-            self.var_encoder(q, batch) if self.mean_encoder_takes_batch else self.var_encoder(q)) + self.var_eps
+        q_v = torch.exp(self.var_encoder(q, batch) if self.mean_encoder_takes_batch else self.var_encoder(q)) + self.var_eps
         return torch.distributions.Normal(q_m, q_v.sqrt())
 
 
