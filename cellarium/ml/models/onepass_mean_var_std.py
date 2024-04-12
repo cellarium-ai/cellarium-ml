@@ -46,7 +46,10 @@ class OnePassMeanVarStd(CellariumModel):
         self.register_buffer("x_sums", torch.empty(n_vars))
         self.register_buffer("x_squared_sums", torch.empty(n_vars))
         self.register_buffer("x_size", torch.empty(()))
-        self.register_buffer("x_shift", None)
+        if self.algorithm == "shifted_data":
+            self.register_buffer("x_shift", torch.empty(n_vars))
+        else:
+            self.register_buffer("x_shift", None)
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self.reset_parameters()
 
@@ -54,6 +57,8 @@ class OnePassMeanVarStd(CellariumModel):
         self.x_sums.zero_()
         self.x_squared_sums.zero_()
         self.x_size.zero_()
+        if self.x_shift is not None:
+            self.x_shift.zero_()
         self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
@@ -75,7 +80,8 @@ class OnePassMeanVarStd(CellariumModel):
             self.x_squared_sums = self.x_squared_sums + (x_ng**2).sum(dim=0)
             self.x_size = self.x_size + x_ng.shape[0]
         elif self.algorithm == "shifted_data":
-            if self.x_shift is None:
+            assert self.x_shift is not None
+            if (self.x_shift == 0).all():
                 _, world_size = get_rank_and_num_replicas()
                 if world_size > 1:
                     gathered_x_ng = torch.zeros(
