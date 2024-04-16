@@ -528,7 +528,8 @@ class CellariumGPT(CellariumModel):
         backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
         log_metrics: bool = True,
         log_plots: bool = False,
-        log_plots_every_n_steps_multiplier: int = 10) -> None:
+        log_plots_every_n_steps_multiplier: int = 10,
+    ) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.n_vars = len(var_names_g)
@@ -652,7 +653,6 @@ class CellariumGPT(CellariumModel):
         batch: Any,
         batch_idx: int,
     ) -> None:
-
         if not self.log_metrics:
             return
 
@@ -672,10 +672,7 @@ class CellariumGPT(CellariumModel):
 
         self._log_plots(trainer, outputs)
 
-    def _log_metrics(
-            self,
-            pl_module: pl.LightningModule,
-            outputs: dict[str, torch.Tensor]) -> None:
+    def _log_metrics(self, pl_module: pl.LightningModule, outputs: dict[str, torch.Tensor]) -> None:
         values_nc = outputs["values_nc"]
         labels_mask_nc = outputs["labels_mask_nc"]
         sample_weights_nc = outputs["sample_weights_nc"]
@@ -697,11 +694,7 @@ class CellariumGPT(CellariumModel):
         pl_module.log("zero_loss", zero_loss, sync_dist=True)
         pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
 
-    def _log_plots(
-            self,
-            trainer: pl.Trainer,
-            outputs: dict[str, torch.Tensor]):
-
+    def _log_plots(self, trainer: pl.Trainer, outputs: dict[str, torch.Tensor]):
         import matplotlib.pyplot as plt
 
         values_nc = outputs["values_nc"]
@@ -772,3 +765,160 @@ class CellariumGPT(CellariumModel):
                     global_step=trainer.global_step,
                 )
 
+
+class CellariumGPTCEHeadModel(CellariumModel):
+    """
+    Cellarium GPT model with Cross Entropy Head.
+
+    Args:
+        var_names_g:
+            The variable names schema for the input data validation.
+        d_model:
+            Dimensionality of the embeddings and hidden states.
+        d_ffn:
+            Dimensionality of the inner feed-forward layers.
+        n_heads:
+            Number of attention heads.
+        n_blocks:
+            Number of transformer blocks.
+        dropout:
+            Dropout probability.
+        use_bias:
+            Whether to use bias in the linear transformations.
+        n_context:
+            Number of context variables.
+        attn_mult:
+            Multiplier for the attention scores.
+        input_mult:
+            Multiplier for the input embeddings.
+        output_mult:
+            Multiplier for the output embeddings.
+        initializer_range:
+            The standard deviation of the truncated normal initializer.
+        backend:
+            Backend for the attention computation.
+        log_metrics:
+            Whether to log the zero and nonzero losses and predictions.
+    """
+
+    def __init__(
+        self,
+        var_names_g: Sequence[str],
+        d_model: int = 128,
+        d_ffn: int = 256,
+        n_heads: int = 4,
+        n_blocks: int = 6,
+        dropout: float = 0.0,
+        use_bias: bool = False,
+        n_context: int = 2048,
+        attn_mult: float = 1.0,
+        input_mult: float = 1.0,
+        output_mult: float = 1.0,
+        initializer_range: float = 0.02,
+        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
+        log_metrics: bool = True,
+    ) -> None:
+        super().__init__()
+        self.var_names_g = np.array(var_names_g)
+        self.n_vars = len(var_names_g)
+        self.gpt_model = GPTModel(
+            self.n_vars,
+            d_model,
+            d_ffn,
+            n_heads,
+            n_blocks,
+            dropout,
+            use_bias,
+            attn_mult,
+            input_mult,
+            backend,
+        )
+        self.ce_head = nn.Linear(d_model, self.n_vars + 1, use_bias)
+        assert n_context <= self.n_vars + 1, "n_context must be less than or equal to the number of genes + 1"
+        self.n_context = n_context
+        self.initializer_range = initializer_range
+        self.output_mult = output_mult
+        self.reset_parameters()
+
+        self.log_metrics = log_metrics
+
+    def reset_parameters(self) -> None:
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module) -> None:
+        """Initialize the weights."""
+        if isinstance(module, nn.Linear):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            # assert self.optimizer == "adam", "Only Adam(W) optimizer is supported for now."
+            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            if module.bias is not None:
+                module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+        # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
+        #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
+        #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
+        #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
+        #
+        # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
+        for name, p in module.named_parameters():
+            if name == "dense2.weight" or name == "Wo.weight":
+                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
+                p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.gpt_model.n_blocks)))
+
+    def tokenize(
+        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int, shuffle: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n = x_ng.shape[0]
+        device = x_ng.device
+        ndx = torch.arange(n, device=device)
+
+        genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
+        if shuffle:
+            indices_ng = torch.argsort(torch.rand_like(x_ng))
+            indices_nc = indices_ng[:, :genes_context_size]
+        else:
+            indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
+        values_nc = x_ng[ndx[:, None], indices_nc]
+        if total_mrna_umis_n is not None:
+            # concatenate total_mrna_umis to the random subset of genes
+            values_nc = torch.cat([total_mrna_umis_n[:, None], values_nc], dim=1)
+            ids_nc = torch.cat([torch.zeros((n, 1), dtype=torch.long, device=device), indices_nc + 1], dim=1)
+        else:
+            ids_nc = indices_nc + 1
+        return ids_nc, values_nc
+
+    def forward(
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        n = x_ng.shape[0]
+        device = x_ng.device
+
+        # prefix includes the total_mrna_umis and a random subset of genes
+        # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
+        prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
+        labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
+
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
+        ce_logits_ncg = self.ce_head(hidden_state_ncd) * self.output_mult
+
+        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+        loss_fn = nn.CrossEntropyLoss(reduction="none")
+        sample_weights = sample_weights_nc[labels_mask_nc]
+        loss = (
+            loss_fn(ce_logits_ncg[labels_mask_nc], ids_nc[labels_mask_nc]) * sample_weights
+        ).sum() / sample_weights.sum()
+
+        return {"loss": loss}
