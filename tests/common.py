@@ -24,6 +24,23 @@ class BoringDataset(torch.utils.data.Dataset):
             data["var_names_g"] = self.var_names
         return data
 
+class BoringDatasetSCVI(torch.utils.data.Dataset):
+    """A simple dataset for testing purposes."""
+
+    def __init__(self, data: np.ndarray, batch_index_n: np.array, var_names: np.ndarray | None = None) -> None:
+        self.data = data
+        self.batch_index_n = batch_index_n
+        self.var_names = var_names
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
+        data = {"x_ng": self.data[idx, None], "batch_index_n": self.batch_index_n[idx]}
+        if self.var_names is not None:
+            data["var_names_g"] = self.var_names
+        return data
+
 
 class BoringModel(CellariumModel):
     """
