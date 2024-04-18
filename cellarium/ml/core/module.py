@@ -216,7 +216,7 @@ class CellariumModule(pl.LightningModule):
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
-            self.log("train_loss", loss)
+            self.log("train_loss", loss, sync_dist=True)
         return loss
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
@@ -316,23 +316,23 @@ class CellariumModule(pl.LightningModule):
         if callable(on_train_start):
             on_train_start(self.trainer)
     
-    def on_before_optimizer_step(self, optimizer) -> None:
-        rank, num_replicas = get_rank_and_num_replicas()
+#     def on_before_optimizer_step(self, optimizer) -> None:
+#         rank, num_replicas = get_rank_and_num_replicas()
         
-        with open(f'/home/jupyter/bw-bican-data/logs/sgd_grad__{rank}of{num_replicas}.txt', 'a') as f:
-            f.write(f'GPU {rank} OF {num_replicas}\n')
-            for name, param in self.model.named_parameters():
-                if param.requires_grad:
-                    f.write(f'{name}\n')
-                    f.write(f'{param.grad}\n')
+#         with open(f'/home/jupyter/bw-bican-data/logs/sgd_grad__{rank}of{num_replicas}.txt', 'a') as f:
+#             f.write(f'GPU {rank} OF {num_replicas}\n')
+#             for name, param in self.model.named_parameters():
+#                 if param.requires_grad:
+#                     f.write(f'{name}\n')
+#                     f.write(f'{param.grad}\n')
                     
-                    self.grads[name].append(param)
+#                     self.grads[name].append(param)
     
-    def on_train_end(self):
-        rank, num_replicas = get_rank_and_num_replicas()
+#     def on_train_end(self):
+#         rank, num_replicas = get_rank_and_num_replicas()
         
-        grads_tensors = {name: torch.stack(grads) for name, grads in self.grads.items()}
-        torch.save(grads_tensors, f'/home/jupyter/bw-bican-data/logs/grads__{rank}of{num_replicas}.pt')
+#         grads_tensors = {name: torch.stack(grads) for name, grads in self.grads.items()}
+#         torch.save(grads_tensors, f'/home/jupyter/bw-bican-data/logs/grads__{rank}of{num_replicas}.pt')
 
     def on_train_epoch_end(self) -> None:
         """

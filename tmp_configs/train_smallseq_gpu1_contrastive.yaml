@@ -1,0 +1,87 @@
+ckpt_path: null
+data:
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
+    var_names_g:
+      attr: var_names
+      convert_fn: null
+  batch_size: 1024
+  cache_size_strictly_enforced: true
+  drop_last: true
+  filenames: /home/jupyter/bw-bican-data/smallseq_1024.h5ad
+  index_unique: null
+  indices_strict: true
+  keys: null
+  label: null
+  last_shard_size: 1024
+  limits: null
+  max_cache_size: 2
+  num_workers: 2
+  seed: 0
+  shard_size: 1024
+  shuffle: true
+  test_mode: false
+model:
+  config: null
+  default_lr: 0.001
+  model:
+    class_path: cellarium.ml.models.ContrastiveMLP
+    init_args:
+      out_channel: 256
+  optim_fn: torch.optim.SGD
+  optim_kwargs:
+    lr: 0.001
+  scheduler_fn: null
+  scheduler_kwargs: null
+  transforms:
+    - class_path: cellarium.ml.transforms.Duplicate
+    - class_path: cellarium.ml.transforms.NormalizeTotal
+      init_args:
+        target_count: 10000
+    - class_path: cellarium.ml.transforms.Log1p
+seed_everything: 12
+trainer:
+  accelerator: auto
+  accumulate_grad_batches: 1
+  barebones: false
+  benchmark: null
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: step
+  check_val_every_n_epoch: 1
+  default_root_dir: runs/contrastive/smallseq_gpu1
+  detect_anomaly: false
+  deterministic: null
+  devices: 1
+  enable_checkpointing: true
+  enable_model_summary: null
+  enable_progress_bar: true
+  fast_dev_run: false
+  gradient_clip_algorithm: null
+  gradient_clip_val: null
+  inference_mode: true
+  limit_predict_batches: null
+  limit_test_batches: null
+  limit_train_batches: null
+  limit_val_batches: null
+  log_every_n_steps: 1
+  logger: null
+  max_epochs: null
+  max_steps: 10
+  max_time: null
+  min_epochs: null
+  min_steps: null
+  num_nodes: 1
+  num_sanity_val_steps: null
+  overfit_batches: 0.0
+  plugins: null
+  precision: 64
+  profiler: null
+  reload_dataloaders_every_n_epochs: 0
+  strategy: auto
+  sync_batchnorm: true
+  use_distributed_sampler: true
+  val_check_interval: null
