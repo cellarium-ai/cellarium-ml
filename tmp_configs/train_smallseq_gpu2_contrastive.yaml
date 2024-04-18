@@ -29,7 +29,12 @@ model:
   model:
     class_path: cellarium.ml.models.ContrastiveMLP
     init_args:
-      out_channel: 256
+      embed_dim: 256
+      hidden_size:
+        - 2048
+        - 1024
+        - 512
+      temperature: 1.0
   optim_fn: torch.optim.SGD
   optim_kwargs:
     lr: 0.001
