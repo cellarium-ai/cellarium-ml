@@ -32,4 +32,6 @@ class Randomize(nn.Module):
         Returns:
             Gene counts with randomly applied transform.
         """
-        return self.transform(x_ng) if torch.rand(1) < self.p_apply else x_ng
+        if torch.rand(1) < self.p_apply:
+            x_ng = self.transform(x_ng)
+        return {'x_ng': x_ng}

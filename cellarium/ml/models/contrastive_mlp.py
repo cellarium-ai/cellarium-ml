@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -10,11 +10,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from cellarium.ml.models.gather import GatherLayer
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.models.nt_xent import NT_Xent
 from cellarium.ml.transforms import Log1p, NormalizeTotal, Randomize, ZScore
 from cellarium.ml.utilities.data import get_rank_and_num_replicas
+
+from lightly.loss import NTXentLoss
 
 import logging
 
@@ -30,10 +31,7 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
         embed_dim: int,
         batch_size: int,
         world_size: int,
-        augment: nn.Module | Sequence[nn.Module | str],
-        stats_path: str | None = None,
         temperature: float = 1.0,
-        target_count: int = 10_000,
     ):
         super(ContrastiveMLP, self).__init__()
 
@@ -51,47 +49,30 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
 
         self.layers = nn.Sequential(*layer_list)
 
-        stats = None if stats_path is None else torch.load(stats_path)
-        
-        self.transform = nn.Sequential(NormalizeTotal(target_count), Log1p())
-        
-        if isinstance(augment, Sequence):
-            augment[augment.index('transform')] = self.transform
-            if stats is not None:
-                augment[augment.index('zscore')] = ZScore(stats["mean_g"], stats["std_g"], None)
-            augment = nn.Sequential(*augment)
-        self.augment = augment
-
         self.world_size = world_size
-        self.Xent_loss = NT_Xent(batch_size, world_size, temperature)
+        self.Xent_loss = NTXentLoss(temperature=1, gather_distributed=True)
+            
+        # self.Xent_loss = NT_Xent(batch_size, world_size, temperature)
         
-        self.toy_ds = np.load('/home/jupyter/bw-bican-data/toy_ds.npy')
+        self.toy_ds = np.load('/home/jupyter/bw-bican-data/toy_ds_40.npy')
+        # logger.debug('RAW DATA')
+        # logger.debug(self.toy_ds)
 
-    @staticmethod
-    def _get_fn_args_from_batch(tensor_dict):
-        x = tensor_dict["X"]
-        return (x,), {}
-
-    def forward(self, x_ng):
-#         rank, num_replicas = get_rank_and_num_replicas()
+    
+    def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
+        rank, num_replicas = get_rank_and_num_replicas()
 #         logger.debug(f'RANK {rank}, N_REPLICA {num_replicas}')
 #         logger.debug(f'WORLD {self.world_size}')
         
-#         x_ng_full = torch.cat(GatherLayer.apply(x_ng), dim=0)
-#         x_ng_full = x_ng
-#         logger.debug('mini-batch')
-#         logger.debug([
-#             np.where((self.toy_ds == row).all(axis=1))[0].item() for row in x_ng.cpu().numpy()
-#         ])
-#         logger.debug('full batch')
-#         logger.debug([
-#             np.where((self.toy_ds == row).all(axis=1))[0].item() for row in x_ng_full.cpu().numpy()
-#         ])
+        # split input into augmented halves
+        x_aug1, x_aug2 = torch.chunk(x_ng, 2)
         
-        # data augmentation for contrastive learning
-        x_ng_twice = x_ng.repeat((2, 1))
-        x_aug = x_ng_twice if self.augment is None else self.augment(x_ng_twice)
-        x_aug1, x_aug2 = torch.chunk(x_aug, 2)
+        # np.save(f'/home/jupyter/bw-bican-data/toy_ds_40_aug_gpu-{num_replicas}_rank-{rank}.npy', x_aug1.cpu().numpy())
+        
+        # logger.debug('mini-batch dupe')
+        # logger.debug([
+        #     np.where((self.toy_ds == row).all(axis=1))[0].item() for row in x_ng.cpu().numpy()
+        # ])
 
         # compute deep embeddings
         z1 = F.normalize(self.layers(x_aug1))
@@ -99,12 +80,10 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
 
         # SimCLR loss
         loss = self.Xent_loss(z1, z2)
-        return loss
+        return {'loss': loss}
 
     def predict(self, x_ng: torch.Tensor, **kwargs: Any):
         with torch.no_grad():
-            if self.transform is not None:
-                x_ng = self.transform(x_ng)
             z = F.normalize(self.layers(x_ng))
 
         return z

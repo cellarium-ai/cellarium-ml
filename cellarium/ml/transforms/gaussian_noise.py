@@ -4,7 +4,7 @@
 
 import torch
 from torch import nn
-from torch.distributions import Normal, Uniform
+from torch.distributions import Bernoulli, Normal, Uniform
 
 
 class GaussianNoise(nn.Module):
@@ -26,11 +26,12 @@ class GaussianNoise(nn.Module):
             Upper bound on Gaussian sigma parameter.
     """
 
-    def __init__(self, sigma_min, sigma_max):
+    def __init__(self, sigma_min, sigma_max, p_apply):
         super().__init__()
 
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
+        self.p_apply = p_apply
 
     def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
         """
@@ -41,5 +42,9 @@ class GaussianNoise(nn.Module):
             Gene counts with added Gaussian noise.
         """
         sigma_ng = Uniform(self.sigma_min, self.sigma_max).sample(x_ng.shape).type_as(x_ng)
+        p_apply_n = Bernoulli(probs=self.p_apply).sample(x_ng.shape[:1]).type_as(x_ng).bool()
+        
+        x_aug = x_ng + Normal(0, sigma_ng).sample()
 
-        return x_ng + Normal(0, sigma_ng).sample()
+        x_ng = torch.where(p_apply_n.unsqueeze(1), x_ng, x_aug)
+        return {'x_ng': x_ng}

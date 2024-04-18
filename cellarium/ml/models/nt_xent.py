@@ -5,6 +5,12 @@ import torch
 from torch import nn
 
 from cellarium.ml.models.gather import GatherLayer
+from cellarium.ml.utilities.data import get_rank_and_num_replicas
+
+import logging
+
+# logging.basicConfig(level=logging.DEBUG)
+# logger = logging.getLogger()
 
 
 class NT_Xent(nn.Module):
@@ -22,7 +28,12 @@ class NT_Xent(nn.Module):
             update step.
     """
 
-    def __init__(self, batch_size: int, world_size: int, temperature: float = 1.0):
+    def __init__(
+        self,
+        batch_size: int,
+        world_size: int,
+        temperature: float = 1.0,
+    ):
         super(NT_Xent, self).__init__()
 
         self.batch_size = batch_size
@@ -30,23 +41,24 @@ class NT_Xent(nn.Module):
 
         self.temperature = temperature
 
-        self.negative_mask = self._get_negative_mask(self.world_size * self.batch_size)
+        self.negative_mask_full = ~torch.eye(self.world_size * self.batch_size, dtype=bool).repeat((1, 2))
+        
         self.criterion = nn.CrossEntropyLoss(reduction="mean")
 
         # equivalent to CosineSimilarity on normalized inputs
         self.similarity_f = lambda x1, x2: torch.einsum("nc,mc->nm", x1, x2)
 
-    def _get_negative_mask(self, n_batch: int) -> torch.Tensor:
+    def _slice_negative_mask(self, rank: int) -> torch.Tensor:
         """
-        Computes a (2n x 2n) boolean mask, where element m_ij == 1
-        iff elements i and j correspond to different identities.
+        Returns row slice of full negative mask corresponding to the segment
+        of the full batch held by the specified device.
 
         Args:
-            n_batch:
-                The value of n.
+            rank:
+                The rank of the specified device.
         """
 
-        mask = ~torch.eye(n_batch, dtype=bool).repeat((2, 2))
+        mask = torch.chunk(self.negative_mask_full, self.world_size, dim=0)[rank]
         return mask
 
     def forward(self, z_i: torch.Tensor, z_j: torch.Tensor) -> torch.Tensor:
@@ -59,25 +71,42 @@ class NT_Xent(nn.Module):
 
         # gather embeddings from distributed processing
         if self.world_size > 1:
-            z_i = torch.cat(GatherLayer.apply(z_i), dim=0)
-            z_j = torch.cat(GatherLayer.apply(z_j), dim=0)
+            z_i_full = torch.cat(GatherLayer.apply(z_i), dim=0)
+            z_j_full = torch.cat(GatherLayer.apply(z_j), dim=0)
+        else:
+            z_i_full = z_i
+            z_j_full = z_j
+        
+        assert len(z_i_full) == self.batch_size * self.world_size
 
-        full_batch_size = z_i.shape[0]
-        negative_mask = (
-            self.negative_mask
-            if full_batch_size == self.batch_size * self.world_size
-            else self._get_negative_mask(full_batch_size)
-        )
+        rank, _ = get_rank_and_num_replicas()
+        negative_mask = self._slice_negative_mask(rank)
+        
+        # logger.debug(rank)
 
-        z_all = torch.cat((z_i, z_j), dim=0)
+        z_both_full = torch.cat((z_i_full, z_j_full), dim=0)
 
-        sim = self.similarity_f(z_all, z_all) / self.temperature
+        sim_i = self.similarity_f(z_i, z_both_full) / self.temperature
+        sim_j = self.similarity_f(z_j, z_both_full) / self.temperature
 
-        sim_ij = torch.diag(sim, full_batch_size)
-        sim_ji = torch.diag(sim, -full_batch_size)
+        pos_i = torch.diag(sim_i, (self.world_size + rank) * self.batch_size)
+        pos_j = torch.diag(sim_j, rank * self.batch_size)
+        
+        # logger.debug(sim_i)
+        # logger.debug(pos_i)
+        # logger.debug(sim_j)
+        # logger.debug(pos_j)
 
-        positive_samples = torch.cat((sim_ij, sim_ji))
-        negative_samples = sim[negative_mask].reshape(2 * full_batch_size, -1)
+        positive_samples = torch.cat((pos_i, pos_j))
+        negative_samples = torch.cat([
+            sim_i[negative_mask].reshape(self.batch_size, -1),
+            sim_j[negative_mask].reshape(self.batch_size, -1)])
+        
+#         logger.debug('positive_samples')
+#         logger.debug(positive_samples.shape)
+        
+#         logger.debug('negative_samples')
+#         logger.debug(negative_samples.shape)
 
         labels = torch.zeros_like(positive_samples).long()
         logits = torch.cat((positive_samples.unsqueeze(1), negative_samples), dim=1)

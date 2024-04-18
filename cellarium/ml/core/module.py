@@ -16,6 +16,15 @@ from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.core.saving import _load_state
 from cellarium.ml.models import CellariumModel
 
+from cellarium.ml.utilities.data import get_rank_and_num_replicas
+
+import hashlib
+import logging
+import pickle
+
+# logging.basicConfig(level=logging.DEBUG)
+# logger = logging.getLogger()
+
 
 class CellariumModule(pl.LightningModule):
     """
@@ -86,6 +95,8 @@ class CellariumModule(pl.LightningModule):
 
         if config is not None:
             self._set_hparams(config)
+        
+        self.grads = {name: [] for name, param in self.model.named_parameters() if param.requires_grad}
 
     @property
     def model(self) -> CellariumModel:
@@ -257,9 +268,71 @@ class CellariumModule(pl.LightningModule):
         If the :attr:`model` attribute has ``on_train_start`` method defined, then
         ``on_train_start`` must be called at the beginning of training.
         """
+#         def get_cpu_state_dict(state_dict: dict, write_state=False) -> dict:
+#             cpu_state_dict = dict()
+            
+#             rank, num_replicas = get_rank_and_num_replicas()
+#             with open(f'/home/jupyter/bw-bican-data/logs/sgd_optimizer__{rank}of{num_replicas}.txt', 'a') as f:
+#                 for k, v in state_dict.items():
+#                     if write_state:
+#                         f.write(f'{k}\t{v}\n')
+#                     # logger.debug(k)
+#                     if isinstance(v, torch.Tensor):
+#                         cpu_state_dict[k] = v.detach().cpu().numpy()
+#                     elif isinstance(v, dict):
+#                         cpu_state_dict[k] = get_cpu_state_dict(v)
+#                     else:
+#                         cpu_state_dict[k] = v
+#                 if write_state:
+#                     f.write(f'\n\n')
+#             return cpu_state_dict
+
+#         def print_hash(
+#                 model,
+#                 optimizer,
+#                 scheduler):
+
+#             # logger.debug('optimizer full')
+#             # logger.debug(optimizer)
+
+#             rank, num_replicas = get_rank_and_num_replicas()
+            
+#             with open(f'/home/jupyter/bw-bican-data/logs/sgd_hash__{rank}of{num_replicas}.txt', 'a') as f:
+#                 # f.write(f'RANK {rank} of {num_replicas}')
+
+#                 model_md5_hash = hashlib.md5(pickle.dumps(get_cpu_state_dict(model.state_dict()))).hexdigest()
+
+#                 f.write(f'model MD5 hash: {model_md5_hash}\n')
+
+#                 if optimizer is not None:
+#                     optimizer_md5_hash = hashlib.md5(pickle.dumps(get_cpu_state_dict(optimizer.state_dict(), True))).hexdigest()
+#                     f.write(f'optimizer MD5 hash: {optimizer_md5_hash}\n')
+                
+#                 f.write('------------------\nTRAIN START\n------------------\n')
+
+#         print_hash(self.model, self.optimizers(), self.lr_schedulers())
+        
         on_train_start = getattr(self.model, "on_train_start", None)
         if callable(on_train_start):
             on_train_start(self.trainer)
+    
+    def on_before_optimizer_step(self, optimizer) -> None:
+        rank, num_replicas = get_rank_and_num_replicas()
+        
+        with open(f'/home/jupyter/bw-bican-data/logs/sgd_grad__{rank}of{num_replicas}.txt', 'a') as f:
+            f.write(f'GPU {rank} OF {num_replicas}\n')
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    f.write(f'{name}\n')
+                    f.write(f'{param.grad}\n')
+                    
+                    self.grads[name].append(param)
+    
+    def on_train_end(self):
+        rank, num_replicas = get_rank_and_num_replicas()
+        
+        grads_tensors = {name: torch.stack(grads) for name, grads in self.grads.items()}
+        torch.save(grads_tensors, f'/home/jupyter/bw-bican-data/logs/grads__{rank}of{num_replicas}.pt')
 
     def on_train_epoch_end(self) -> None:
         """
@@ -267,6 +340,54 @@ class CellariumModule(pl.LightningModule):
         If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
         ``on_epoch_end`` must be called at the end of every epoch.
         """
+        
+#         rank, num_replicas = get_rank_and_num_replicas()
+        
+#         def get_cpu_state_dict(state_dict: dict, write_state=False) -> dict:
+#             cpu_state_dict = dict()
+            
+#             with open(f'/home/jupyter/bw-bican-data/logs/sgd_optimizer__{rank}of{num_replicas}.txt', 'a') as f:
+#                 for k, v in state_dict.items():
+#                     if write_state:
+#                         f.write(f'{k}\t{v}\n')
+#                     # logger.debug(k)
+#                     if isinstance(v, torch.Tensor):
+#                         cpu_state_dict[k] = v.detach().cpu().numpy()
+#                     elif isinstance(v, dict):
+#                         cpu_state_dict[k] = get_cpu_state_dict(v)
+#                     else:
+#                         cpu_state_dict[k] = v
+#                 if write_state:
+#                     f.write(f'\n\n')
+#             return cpu_state_dict
+
+#         def print_hash(
+#                 model,
+#                 optimizer,
+#                 scheduler):
+
+#             # logger.debug('optimizer full')
+#             # logger.debug(optimizer)
+            
+#             with open(f'/home/jupyter/bw-bican-data/logs/sgd_hash__{rank}of{num_replicas}.txt', 'a') as f:
+#                 # f.write(f'RANK {rank} of {num_replicas}')
+
+#                 model_md5_hash = hashlib.md5(pickle.dumps(get_cpu_state_dict(model.state_dict()))).hexdigest()
+
+#                 f.write(f'model MD5 hash: {model_md5_hash}\n')
+
+#                 if optimizer is not None:
+#                     optimizer_md5_hash = hashlib.md5(pickle.dumps(get_cpu_state_dict(optimizer.state_dict(), True))).hexdigest()
+#                     f.write(f'optimizer MD5 hash: {optimizer_md5_hash}\n')
+
+#         print_hash(self.model, self.optimizers(), self.lr_schedulers())
+
+#         with open(f'/home/jupyter/bw-bican-data/logs/sgd_grad__{rank}of{num_replicas}.txt', 'a') as f:
+#             for name, param in self.model.named_parameters():
+#                 if param.requires_grad:
+#                     f.write(f'{name}\n')
+#                     f.write(f'{param.data}\n')
+        
         on_epoch_end = getattr(self.model, "on_epoch_end", None)
         if callable(on_epoch_end):
             on_epoch_end(self.trainer)

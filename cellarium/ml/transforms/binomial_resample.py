@@ -4,7 +4,7 @@
 
 import torch
 from torch import nn
-from torch.distributions import Binomial, Uniform
+from torch.distributions import Bernoulli, Binomial, Uniform
 
 
 class BinomialResample(nn.Module):
@@ -26,13 +26,14 @@ class BinomialResample(nn.Module):
             Upper bound on binomial distribution parameter.
     """
 
-    def __init__(self, p_binom_min, p_binom_max):
+    def __init__(self, p_binom_min, p_binom_max, p_apply):
         super().__init__()
 
         self.p_binom_min = p_binom_min
         self.p_binom_max = p_binom_max
+        self.p_apply = p_apply
 
-    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, p_binom_ng, p_apply_n) -> torch.Tensor:
         """
         Args:
             x_ng: Gene counts.
@@ -41,6 +42,9 @@ class BinomialResample(nn.Module):
             Binomially resampled gene counts.
         """
         p_binom_ng = Uniform(self.p_binom_min, self.p_binom_max).sample(x_ng.shape).type_as(x_ng)
+        p_apply_n = Bernoulli(probs=self.p_apply).sample(x_ng.shape[:1]).type_as(x_ng).bool()
 
         x_aug = Binomial(total_count=x_ng, probs=p_binom_ng).sample()
-        return x_aug
+        
+        x_ng = torch.where(p_apply_n.unsqueeze(1), x_ng, x_aug)
+        return {'x_ng': x_ng}

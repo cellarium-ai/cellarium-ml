@@ -26,11 +26,12 @@ class Dropout(nn.Module):
             Upper bound on dropout parameter.
     """
 
-    def __init__(self, p_dropout_min, p_dropout_max):
+    def __init__(self, p_dropout_min, p_dropout_max, p_apply):
         super().__init__()
 
         self.p_dropout_min = p_dropout_min
         self.p_dropout_max = p_dropout_max
+        self.p_apply = p_apply
 
     def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
         """
@@ -41,6 +42,10 @@ class Dropout(nn.Module):
             Gene counts with random dropout.
         """
         p_dropout_ng = Uniform(self.p_dropout_min, self.p_dropout_max).sample(x_ng.shape).type_as(x_ng)
+        p_apply_n = Bernoulli(probs=self.p_apply).sample(x_ng.shape[:1]).type_as(x_ng).bool()
 
-        x_ng[Bernoulli(probs=p_dropout_ng).sample().bool()] = 0
-        return x_ng
+        x_aug = torch.clone(x_ng)
+        x_aug[Bernoulli(probs=p_dropout_ng).sample().bool()] = 0
+        
+        x_ng = torch.where(p_apply_n.unsqueeze(1), x_ng, x_aug)
+        return {'x_ng': x_ng}
