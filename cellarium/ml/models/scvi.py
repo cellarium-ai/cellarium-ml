@@ -177,7 +177,6 @@ class DecoderSCVI(torch.nn.Module):
             layers: list[dict],
             n_batch: int,
             output_bias: bool = False,
-            load_path : str = "",
             dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
             gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
             scale_activation: Literal["softmax", "softplus"] = "softmax",
@@ -200,7 +199,7 @@ class DecoderSCVI(torch.nn.Module):
         self.count_decoder_takes_batch = output_bias
         self.normalized_count_decoder = (
             torch.nn.Linear(self.fully_connected.out_features, out_features) if not output_bias
-            else LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,load_path=load_path)
+            else LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,precomputed_bias=None)
         )
         self.normalized_count_activation = torch.nn.Softmax(dim=-1) if (
                 scale_activation == "softmax") else torch.nn.Softplus()
@@ -339,8 +338,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             batch_embedding_kwargs: dict | None = None,
             precomputed_bias =None,
     ):
-        print(type(precomputed_bias))
-        exit()
+
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.n_input = len(self.var_names_g)
@@ -353,6 +351,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.encode_covariates = encode_covariates
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
+        self.precomputed_bias = precomputed_bias
 
 
         if batch_bias_sampled:
@@ -435,7 +434,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layers=encoder["layers"],
             n_batch=self.n_batch,
             output_bias=encoder["output_bias"],
-            precomputed_bias= ""
+            precomputed_bias= self.precomputed_bias
         )
 
         if self.batch_representation == "embedding":
@@ -447,7 +446,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             out_features=self.n_input,
             layers=decoder["layers"],
             n_batch=self.n_batch,
-            load_path="",
             output_bias=decoder["output_bias"],
             dispersion=self.dispersion,
             gene_likelihood=self.gene_likelihood,

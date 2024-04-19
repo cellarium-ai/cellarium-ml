@@ -23,7 +23,7 @@ class LinearWithBatch(torch.nn.Linear):
         self.sample = sample
         self.cached_biases = None
         self.n_batch = n_batch
-        self.precomputed_bias = precomputed_bias
+        self.precomputed_bias = None
         if self.precomputed_bias:
             self.batch_bias_fx = self.load_precomputed_bias
         else:
@@ -52,9 +52,7 @@ class LinearWithBatch(torch.nn.Linear):
         return self.cached_biases
 
     def load_precomputed_bias(self, batch: torch.Tensor) -> torch.Tensor:
-        print("Made i here")
-        print(self.load_path)
-        exit()
+        return self.precomputed_bias[0]
 
 
     def forward(self, x: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
