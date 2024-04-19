@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
-from operator import attrgetter
+from operator import attrgetter,itemgetter
 from typing import Any
 
 import numpy as np
@@ -28,6 +28,31 @@ from cellarium.ml.utilities.data import collate_fn
 
 cached_loaders = {}
 
+def resolve_itemattr(obj, attr):
+    """Function to suscessfully escape retrieving an attribute or an item from an object
+    Args
+        obj: object to extract the attribute or item from (i.e dict or torch.nn.Module)
+        attr: key to extract from the object
+    """
+
+    for name in attr.split("."):
+        try:
+            obj = obj[name]
+        except TypeError:
+            obj = getattr(obj, name)
+    return obj
+
+
+def itemattrgetter(attr):
+    """
+    Integration of itemgetter and attrgetter
+    Args
+            attr:
+            An attribute to get from the loaded object. If ``None`` the loaded object is returned.
+    """
+    def g(obj):
+        return resolve_itemattr(obj, attr)
+    return g
 
 @dataclass
 class FileLoader:
@@ -66,23 +91,23 @@ class FileLoader:
     convert_fn: Callable[[Any], Any] | str | None = None
 
     def __new__(cls, file_path, loader_fn, attr, convert_fn):
-        if isinstance(loader_fn, str):
-            loader_fn = import_object(loader_fn)
-        if loader_fn not in cached_loaders:
-            cached_loaders[loader_fn] = cache(loader_fn)
-        loader_fn = cached_loaders[loader_fn]
-        obj = loader_fn(file_path)
+        #with torch.device("meta"):
+            if isinstance(loader_fn, str):
+                loader_fn = import_object(loader_fn)
+            if loader_fn not in cached_loaders:
+                cached_loaders[loader_fn] = cache(loader_fn)
+            loader_fn = cached_loaders[loader_fn]
+            obj = loader_fn(file_path)
 
-        if attr is not None:
-            obj = attrgetter(attr)(obj)
 
-        if isinstance(convert_fn, str):
-            convert_fn = import_object(convert_fn)
-        if convert_fn is not None:
-            obj = convert_fn(obj)
+            if attr is not None:
+                obj = itemattrgetter(attr)(obj)
+            if isinstance(convert_fn, str):
+                convert_fn = import_object(convert_fn)
+            if convert_fn is not None:
+                obj = convert_fn(obj)
 
-        return obj
-
+            return obj
 
 @dataclass
 class CheckpointLoader(FileLoader):
@@ -95,7 +120,7 @@ class CheckpointLoader(FileLoader):
     .. code-block:: yaml
 
         model:
-          transorms:
+          transforms:
             - class_path: cellarium.ml.transforms.DivideByScale
               init_args:
                 scale_g:
@@ -135,9 +160,7 @@ loader = DefaultLoader
 loader.add_constructor("!FileLoader", file_loader_constructor)
 loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
 
-
 REGISTERED_MODELS = {}
-
 
 def register_model(model: Callable[[ArgsType], None]):
     REGISTERED_MODELS[model.__name__] = model
@@ -251,7 +274,6 @@ def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDat
         output = fake_pipeline(fake_batch)
     return output["var_names_g"]
 
-
 def lightning_cli_factory(
     model_class_path: str,
     link_arguments: list[LinkArguments] | None = None,
@@ -290,6 +312,7 @@ def lightning_cli_factory(
         A :class:`LightningCLI` class with the given model and argument linking.
     """
 
+    #TODO: Override with decorators?
     class NewLightningCLI(LightningCLI):
         def __init__(self, args: ArgsType = None) -> None:
             super().__init__(
@@ -304,6 +327,7 @@ def lightning_cli_factory(
                 # skip the initialization of model parameters
                 # parameters are later initialized by the  `CellariumModule.configure_model` method
                 return super().instantiate_classes()
+
 
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
             if link_arguments is not None:
@@ -573,12 +597,15 @@ def scvi(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.SingleCellVariationalInference",
         link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
-            # LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+            LinkArguments(("model.transforms","data"), "model.model.init_args.var_names_g", compute_var_names_g),
+            #LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
             LinkArguments("data", "model.model.init_args.n_batch", nunique_scvi),
         ],
     )
+
+
     cli(args=args)
+
 
 
 @register_model

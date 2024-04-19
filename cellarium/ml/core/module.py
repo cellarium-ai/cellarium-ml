@@ -60,7 +60,6 @@ class CellariumModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
-
     def configure_model(self) -> None:
         # This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
         # implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
@@ -85,6 +84,7 @@ class CellariumModule(pl.LightningModule):
         model, self.hparams["model"] = copy_module(
             self.hparams["model"], self_device=self.device, copy_device=torch.device("meta")
         )
+
         if self.hparams["transforms"]:
             transforms, self.hparams["transforms"] = zip(
                 *(
@@ -221,6 +221,79 @@ class CellariumModule(pl.LightningModule):
             on_epoch_end(self.trainer)
 
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
+        """
+        Calls the ``on_batch_end`` method on the module.
+        """
+        on_batch_end = getattr(self.model, "on_batch_end", None)
+        if callable(on_batch_end):
+            on_batch_end(self.trainer, self, outputs, batch, batch_idx)
+
+    def validation_step(  # type: ignore[override]
+        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
+    ) -> torch.Tensor | None:
+        """
+        Forward pass for validation step.
+
+        Args:
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
+
+        Returns:
+            Loss tensor or ``None`` if no loss.
+        """
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+        with torch.no_grad(): #just in case
+            output = self.pipeline(batch)
+        loss = output.get("loss")
+        if loss is not None:
+            # Logging to TensorBoard by default
+            self.log("val_loss", loss)
+        return loss
+
+    def on_validation_epoch_start(self) -> None:
+        """
+        Calls the ``set_epoch`` method on the iterable dataset of the given dataloader.
+
+        If the dataset is ``IterableDataset`` and has ``set_epoch`` method defined, then
+        ``set_epoch`` must be called at the beginning of every epoch to ensure shuffling
+        applies a new ordering. This has no effect if shuffling is off.
+        """
+        # dataloader is wrapped in a combined loader and can be accessed via
+        # flattened property which returns a list of dataloaders
+        # https://lightning.ai/docs/pytorch/stable/api/lightning.pytorch.utilities.combined_loader.html
+        combined_loader = self.trainer.validate_loop._combined_loader
+        assert combined_loader is not None
+        dataloaders = combined_loader.flattened
+        for dataloader in dataloaders:
+            dataset = dataloader.dataset
+            set_epoch = getattr(dataset, "set_epoch", None)
+            if callable(set_epoch):
+                set_epoch(self.current_epoch)
+
+    def on_validation_start(self) -> None:
+        """
+        Calls the ``on_train_start`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_train_start`` method defined, then
+        ``on_train_start`` must be called at the beginning of training.
+        """
+        on_validation_start = getattr(self.model, "on_validation_start", None)
+        if callable(on_validation_start):
+            on_validation_start(self.trainer)
+
+    def on_validation_epoch_end(self) -> None:
+        """
+        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
+        ``on_epoch_end`` must be called at the end of every epoch.
+        """
+        on_epoch_end = getattr(self.model, "on_epoch_end", None)
+        if callable(on_epoch_end):
+            on_epoch_end(self.trainer)
+
+    def on_validation_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         """
         Calls the ``on_batch_end`` method on the module.
         """

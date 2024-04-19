@@ -51,13 +51,24 @@ trainer:
   reload_dataloaders_every_n_epochs: 0
   default_root_dir: null
 model:
-  transforms: null
+#  transforms:
+#   - !CheckpointLoader #do not remove the - , otherwise it messes everything up
+#      file_path: ../notebooks/lightning_logs/version_7/checkpoints/epoch=49-step=3150.ckpt
+#      attr: model
+#      #attr: model._modules.z_encoder.mean_encoder.bias #here we extract the parameter we are looking for model._modules["z_encoder"].mean_encoder.bias
+#      convert_fn: cellarium.ml.transforms.load.to_device
   model:
     class_path: cellarium.ml.models.SingleCellVariationalInference
     init_args:
       var_names_g: null
       n_batch: null
-      batch_bais_sampled: false
+      batch_bias_sampled: false
+      loaded_bias:
+        - !CheckpointLoader #do not remove the - , otherwise it messes everything up
+          file_path: ../notebooks/lightning_logs/version_7/checkpoints/epoch=49-step=3150.ckpt
+          attr: model
+          #attr: model._modules.z_encoder.mean_encoder.bias #here we extract the parameter we are looking for model._modules["z_encoder"].mean_encoder.bias
+          convert_fn: cellarium.ml.transforms.load.to_device
       encoder: 
         layers:
         - class_path: cellarium.ml.models.common.nn.LinearWithBatch

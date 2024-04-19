@@ -11,6 +11,7 @@ import torch
 from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
+
 from cellarium.ml.models.common.distributions import NegativeBinomial
 from cellarium.ml.models.common.nn import LinearWithBatch, DressedLayer
 from cellarium.ml.models.model import CellariumModel, PredictMixin
@@ -18,6 +19,7 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
 
 
 def class_from_class_path(class_path: str):
@@ -129,13 +131,14 @@ class EncoderSCVI(torch.nn.Module):
             n_batch: int,
             output_bias: bool = False,
             var_eps: float = 1e-4,
+            load_path:str = "",
     ):
         super().__init__()
         self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, layers)
         self.mean_encoder_takes_batch = output_bias
         if output_bias:
-            self.mean_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch)
-            self.var_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch)
+            self.mean_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,load_path=load_path)
+            self.var_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,load_path=load_path)
         else:
             self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
             self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
@@ -174,6 +177,7 @@ class DecoderSCVI(torch.nn.Module):
             layers: list[dict],
             n_batch: int,
             output_bias: bool = False,
+            load_path : str = "",
             dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
             gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
             scale_activation: Literal["softmax", "softplus"] = "softmax",
@@ -196,7 +200,7 @@ class DecoderSCVI(torch.nn.Module):
         self.count_decoder_takes_batch = output_bias
         self.normalized_count_decoder = (
             torch.nn.Linear(self.fully_connected.out_features, out_features) if not output_bias
-            else LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch)
+            else LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,load_path=load_path)
         )
         self.normalized_count_activation = torch.nn.Softmax(dim=-1) if (
                 scale_activation == "softmax") else torch.nn.Softplus()
@@ -314,7 +318,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             encoder: dict[str, list[dict] | bool],
             decoder: dict[str, list[dict] | bool],
             n_batch: int = 0,
-            batch_bais_sampled: bool = False,
+            batch_bias_sampled: bool = False,
             n_latent: int = 10,
             n_continuous_cov: int = 0,
             n_cats_per_cov: list[int] | None = None,
@@ -346,8 +350,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
 
-        if batch_bais_sampled:
-            raise NotImplementedError("batch_bais_sampled is not yet implemented in SingleCellVariationalInference")
+        # print("SCVi function print")
+        # print(ckpt_load)
+        # exit()
+        if batch_bias_sampled:
+            raise NotImplementedError("batch_bias_sampled is not yet implemented in SingleCellVariationalInference")
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -360,11 +367,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(self.n_input))
+            #self.register_buffer('px_r', self.px_r)
         elif self.dispersion == "gene-label":
             raise NotImplementedError
             # self.px_r = torch.nn.Parameter(torch.randn(self.n_input, n_labels))
         elif self.dispersion == "gene-cell":
             self.px_r = torch.nn.Parameter(torch.zeros(1))  # dummy
+            #self.register_buffer('px_r', self.px_r)
         else:
             raise ValueError(
                 "dispersion must be one of ['gene', "
@@ -424,6 +433,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layers=encoder["layers"],
             n_batch=self.n_batch,
             output_bias=encoder["output_bias"],
+            load_path= ""
         )
 
         if self.batch_representation == "embedding":
@@ -435,13 +445,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             out_features=self.n_input,
             layers=decoder["layers"],
             n_batch=self.n_batch,
+            load_path="",
             output_bias=decoder["output_bias"],
             dispersion=self.dispersion,
             gene_likelihood=self.gene_likelihood,
             scale_activation="softplus" if use_size_factor_key else "softmax",
         )
 
-        print(self)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:

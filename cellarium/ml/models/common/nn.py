@@ -18,11 +18,17 @@ class LinearWithBatch(torch.nn.Linear):
         bias: passed to `torch.nn.Linear` (True is like the scvi-tools implementation)
     """
 
-    def __init__(self, in_features: int, out_features: int, n_batch: int, sample: bool = False, bias: bool = True):
+    def __init__(self, in_features: int, out_features: int, n_batch: int, sample: bool = False, bias: bool = True, load_path: str = ""):
         super().__init__(in_features, out_features, bias=bias)
         self.sample = sample
         self.cached_biases = None
         self.n_batch = n_batch
+        #self.load_batch_biases = True
+        self.load_path = load_path
+        if load_path:
+            self.batch_bias_fx = self.load_bias
+        else:
+            self.batch_bias_fx = self.compute_bias
         self.bias_mean_layer = torch.nn.Linear(in_features=n_batch, out_features=out_features, bias=False)
         if sample:
             self.bias_std_unconstrained_layer = torch.nn.Linear(in_features=n_batch, out_features=out_features, bias=False)
@@ -46,6 +52,12 @@ class LinearWithBatch(torch.nn.Linear):
             self.cached_biases = mean_bias_nh
         return self.cached_biases
 
+    def load_bias(self, batch: torch.Tensor) -> torch.Tensor:
+        print("Made i here")
+        print(self.load_path)
+        exit()
+
+
     def forward(self, x: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         """
         Computes the forward pass of the layer as
@@ -56,7 +68,8 @@ class LinearWithBatch(torch.nn.Linear):
 
         or is sampled from a distribution if sample=True
         """
-        return super().forward(x) + self.compute_bias(batch)
+
+        return super().forward(x) + self.batch_bias_fx(batch)
 
 
 class DressedLayer(torch.nn.Module):
