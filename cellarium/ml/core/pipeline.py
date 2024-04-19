@@ -34,7 +34,7 @@ class CellariumPipeline(torch.nn.ModuleList):
     """
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
-        from cellarium.ml import CellariumModule
+        from cellarium.ml import CellariumModule #is this import here to avoid circular import issues?
 
         for module in self:
             if isinstance(module, CellariumModule):

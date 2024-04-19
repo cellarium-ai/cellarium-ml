@@ -131,14 +131,14 @@ class EncoderSCVI(torch.nn.Module):
             n_batch: int,
             output_bias: bool = False,
             var_eps: float = 1e-4,
-            load_path:str = "",
+            precomputed_bias:torch.Tensor = None,
     ):
         super().__init__()
         self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, layers)
         self.mean_encoder_takes_batch = output_bias
         if output_bias:
-            self.mean_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,load_path=load_path)
-            self.var_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,load_path=load_path)
+            self.mean_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,precomputed_bias=precomputed_bias)
+            self.var_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch,precomputed_bias=precomputed_bias)
         else:
             self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
             self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
@@ -310,6 +310,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             ``use_observed_lib_size`` is ``False``.
         batch_embedding_kwargs: Keyword arguments passed into :class:`~scvi.nn.Embedding` if ``batch_representation`` is
             set to ``"embedding"``.
+        precomputed_bias
     """
 
     def __init__(
@@ -336,7 +337,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             library_log_means: np.ndarray | None = None,
             library_log_vars: np.ndarray | None = None,
             batch_embedding_kwargs: dict | None = None,
+            precomputed_bias =None,
     ):
+        print(type(precomputed_bias))
+        exit()
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.n_input = len(self.var_names_g)
@@ -350,9 +354,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
 
-        # print("SCVi function print")
-        # print(ckpt_load)
-        # exit()
+
         if batch_bias_sampled:
             raise NotImplementedError("batch_bias_sampled is not yet implemented in SingleCellVariationalInference")
 
@@ -433,7 +435,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layers=encoder["layers"],
             n_batch=self.n_batch,
             output_bias=encoder["output_bias"],
-            load_path= ""
+            precomputed_bias= ""
         )
 
         if self.batch_representation == "embedding":
