@@ -183,14 +183,6 @@ class EncoderSCVI(torch.nn.Module):
     ):
         super().__init__()
         self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, hidden_layers)
-        # self.mean_encoder_takes_batch = output_bias
-        # if output_bias:
-        #     # TODO: batch_to_bias_hidden_layers=[] is a hack
-        #     self.mean_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
-        #     self.var_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
-        # else:
-        #     self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
-        #     self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
         self.mean_encoder = instantiate_from_class_path(
             final_layer["class_path"], 
             in_features=self.fully_connected.out_features, 
@@ -260,12 +252,6 @@ class DecoderSCVI(torch.nn.Module):
             if (gene_likelihood == "zinb") 
             else None
         )
-        # self.count_decoder_takes_batch = output_bias
-        # self.normalized_count_decoder = (
-        #     torch.nn.Linear(self.fully_connected.out_features, out_features) if not output_bias 
-        #     # TODO: batch_to_bias_hidden_layers=[] is a hack
-        #     else LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
-        # )
         self.normalized_count_decoder = instantiate_from_class_path(
             final_layer["class_path"], 
             in_features=self.fully_connected.out_features, 
@@ -321,32 +307,6 @@ class DecoderSCVI(torch.nn.Module):
                 # dist = ZeroInflatedNegativeBinomial(count_mean_ng, inverse_overdispersion, self.dropout_decoder(q_nh))
 
         return dist
-    
-
-class FullyConnectedSpecifyHiddenLayers(torch.nn.Module):
-    """
-    Fully connected network that translates from ``in_features`` to ``out_features`` dimensions.
-
-    Args:
-        in_features: The dimensionality of the input (latent space)
-        out_features: The dimensionality of the output (data space)
-        layers: A list of dictionaries, each containing the following keys:
-            * ``class_path``: the class path of the layer to use
-            * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
-                - must contain "out_features"
-    """
-    def __init__(
-        self,
-        in_features: int, 
-        out_features: int, 
-        layers: list[dict],
-    ):
-        super().__init__()
-        self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, layers)
-        self.output_linear = torch.nn.Linear(self.fully_connected.out_features, out_features)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.output_linear(self.fully_connected(x))
 
 
 class SingleCellVariationalInference(CellariumModel, PredictMixin):
@@ -537,7 +497,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layer["dressing_init_args"]["dropout_rate"] = dropout_rate
         if encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
             encoder["final_layer"]["init_args"]["n_batch"] = self.n_batch
-            # encoder["final_layer"]["init_args"]["out_features"] = self.n_latent
 
         # decoder layers
         for layer in decoder["hidden_layers"]:
@@ -550,7 +509,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
         if decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
             decoder["final_layer"]["init_args"]["n_batch"] = self.n_batch
-            # decoder["final_layer"]["init_args"]["out_features"] = self.n_input
 
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
@@ -583,7 +541,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         torch.nn.init.normal_(self.px_r, mean=0.0, std=1.0)
         with torch.no_grad():
             self.batch_representation_mean_bd.data.copy_(torch.eye(self.n_batch, self.n_latent_batch))
-            # self.batch_representation_mean_bd.data.fill_(0.0)
             self.batch_representation_std_unconstrained_bd.data.fill_(0.0)
 
     def batch_embedding_distribution(self, batch_index_n: torch.Tensor) -> Distribution:
@@ -644,8 +601,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             # encoder_input = torch.cat([encoder_input, batch_rep], dim=-1)
             # qz, z = self.z_encoder(encoder_input, *categorical_input)
         else:
-            # qz, z = self.z_encoder(encoder_input, batch_index, *categorical_input)
-            # biases = self._compute_biases_from_batch_index(self.batch_biases_encoder, batch_index)
             qz = self.z_encoder(x_ng=encoder_input, batch_nb=batch_nb)
             z = qz.rsample()
 
