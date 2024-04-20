@@ -392,7 +392,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         encoder: dict[str, list[dict] | bool],
         decoder: dict[str, list[dict] | bool],
         n_batch: int = 0,
-        batch_bais_sampled: bool = False,
         n_latent: int = 10,
         n_continuous_cov: int = 0,
         n_cats_per_cov: list[int] | None = None,
@@ -401,6 +400,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         log_variational: bool = True,
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
         latent_distribution: Literal["normal", "ln"] = "normal",
+        batch_embedded: bool = False,
+        batch_representation_sampled: bool = False,
+        n_latent_batch: int | None = None,
+        batch_kl_weight: float = 0.0,
         encode_covariates: bool = False,
         batch_representation: Literal["one-hot", "embedding"] = "one-hot",
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
@@ -423,9 +426,21 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.encode_covariates = encode_covariates
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
+        self.batch_embedded = batch_embedded
+        self.batch_representation_sampled = batch_representation_sampled
+        self.n_latent_batch = n_latent_batch
+        assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
+        self.batch_kl_weight = batch_kl_weight
 
-        if batch_bais_sampled:
-            raise NotImplementedError("batch_bais_sampled is not yet implemented in SingleCellVariationalInference")
+        if self.batch_embedded:
+            if self.n_latent_batch is None:
+                self.n_latent_batch = self.n_batch  # same dim as one-hot would be
+            # initialize the means as one-hot, std as 1 (after exp)
+            self.batch_representation_mean_bd = torch.nn.Parameter(torch.eye(self.n_batch, self.n_latent_batch))
+            self.batch_representation_std_unconstrained_bd = torch.nn.Parameter(torch.zeros(self.n_batch, self.n_latent_batch))
+        else:
+            self.batch_representation_mean_bd = None
+            self.batch_representation_std_unconstrained_bd = None
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -526,16 +541,33 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         for m in self.modules():
             m.apply(weights_init)
         torch.nn.init.normal_(self.px_r, mean=0.0, std=1.0)
+        with torch.no_grad():
+            self.batch_representation_mean_bd.data.copy_(torch.eye(self.n_batch, self.n_latent_batch))
+            # self.batch_representation_mean_bd.data.fill_(0.0)
+            self.batch_representation_std_unconstrained_bd.data.fill_(0.0)
+
+    def batch_embedding_distribution(self, batch_index_n: torch.Tensor) -> Distribution:
+        return Normal(
+            self.batch_representation_mean_bd[batch_index_n.long(), :], 
+            self.batch_representation_std_unconstrained_bd[batch_index_n.long(), :].exp() + 1e-5,
+        )
 
     def batch_representation_from_batch_index(self, batch_index_n: torch.Tensor) -> torch.Tensor:
-        # if self.batch_representation_sampled:
-        #     batch_nb = Normal(
-        #         self.batch_representation_mean, 
-        #         self.batch_representation_var,
-        #     ).sample()
-        # else:
-
-        batch_nb = torch.nn.functional.one_hot(batch_index_n.squeeze().long(), num_classes=self.n_batch).float()
+        """Compute a batch representation from batch indices.
+        
+        If self.batch_embedded is False, the batch representation will be one-hot (like scvi-tools)
+        If self.batch_embedded is True:
+            If self.batch_representation_sampled is True, the batch representation is sampled from a normal distribution
+            If self.batch_representation_sampled is False, the batch representation is a point estimate
+        
+        """
+        if not self.batch_embedded:
+            batch_nb = torch.nn.functional.one_hot(batch_index_n.squeeze().long(), num_classes=self.n_batch).float()
+        else:
+            if self.batch_representation_sampled:
+                batch_nb = self.batch_embedding_distribution(batch_index_n=batch_index_n).rsample()
+            else:
+                batch_nb = self.batch_representation_mean_bd[batch_index_n.long(), :]
         return batch_nb
 
     def inference(
@@ -735,16 +767,20 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # KL divergence for z
         kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
-        # # optional KL divergence for batch representation
-        # if self.batch_kl_weight == 0:
-        #     kl_divergence_batch = 0  # don't bother doing backprop
-        # else:
-        #     kl_divergence_batch = kl(Normal(), Normal()) * self.batch_kl_weight
+        # optional KL divergence for batch representation
+        if self.batch_representation_sampled and (self.batch_kl_weight > 0):
+            kl_divergence_batch = self.batch_kl_weight * kl(
+                self.batch_embedding_distribution(batch_index_n=batch_index_n), 
+                Normal(torch.zeros_like(batch_nb), torch.ones_like(batch_nb))
+            ).sum(dim=1)
+        else:
+            kl_divergence_batch = 0
 
         # reconstruction loss
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
-        loss = torch.mean(rec_loss + kl_divergence_z)# + kl_divergence_batch)
+        # full loss
+        loss = torch.mean(rec_loss + kl_divergence_z + kl_divergence_batch)
 
         return {"loss": loss}
 
@@ -775,9 +811,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the loss value.
         """
+        batch_nb = self.batch_representation_from_batch_index(batch_index_n)
+
         return self.inference(
             x_ng=x_ng,
-            batch_index_n=batch_index_n,
+            batch_nb=batch_nb,
             cont_covs=cont_covs_nc,
             cat_covs=cat_covs_nd,
             n_samples=1,
