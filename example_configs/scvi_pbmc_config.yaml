@@ -62,21 +62,29 @@ model:
       n_latent_batch: null
       batch_kl_weight: 0.01
       encoder: 
-        layers:
+        hidden_layers:
         - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
             out_features: 128
             batch_to_bias_hidden_layers: []
-        output_bias: true
+        final_layer:
+          class_path: torch.nn.Linear
+          init_args: {}
       decoder:
-        # layers: []
-        # output_bias: true
-        layers:
+        # hidden_layers: []
+        hidden_layers:
+        # - class_path: torch.nn.Linear
+        #   init_args:
+        #     out_features: 128
         - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
             out_features: 128
             batch_to_bias_hidden_layers: []
-        output_bias: true
+        final_layer: 
+          class_path: cellarium.ml.models.scvi.LinearWithBatch
+          init_args:
+            batch_to_bias_hidden_layers: []
+        final_additive_bias: true
       n_latent: 10
       n_continuous_cov: 0
       n_cats_per_cov: null

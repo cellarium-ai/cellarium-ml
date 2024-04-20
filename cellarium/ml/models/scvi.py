@@ -163,11 +163,11 @@ class EncoderSCVI(torch.nn.Module):
     Args:
         in_features: The dimensionality of the input (data space)
         out_features: The dimensionality of the output (latent space)
-        layers: A list of dictionaries, each containing the following keys:
+        hidden_layers: A list of dictionaries, each containing the following keys:
             * ``class_path``: the class path of the layer to use
             * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
                 - must contain "out_features"
-        n_batch: Total number of batches in dataset
+        final_layer: Same as hidden_layers, but for the final layer
         output_bias: If True, the output layer will have a batch-specific bias added 
             (scvi-tools does not include this)
         var_eps: Minimum value for the variance; used for numerical stability
@@ -177,21 +177,35 @@ class EncoderSCVI(torch.nn.Module):
         self, 
         in_features: int, 
         out_features: int, 
-        layers: list[dict],
-        n_batch: int,
-        output_bias: bool = False,
+        hidden_layers: list[dict],
+        final_layer: dict,
         var_eps: float = 1e-4,
     ):
         super().__init__()
-        self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, layers)
-        self.mean_encoder_takes_batch = output_bias
-        if output_bias:
-            # TODO: batch_to_bias_hidden_layers=[] is a hack
-            self.mean_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
-            self.var_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
-        else:
-            self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
-            self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
+        self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, hidden_layers)
+        # self.mean_encoder_takes_batch = output_bias
+        # if output_bias:
+        #     # TODO: batch_to_bias_hidden_layers=[] is a hack
+        #     self.mean_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
+        #     self.var_encoder = LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
+        # else:
+        #     self.mean_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
+        #     self.var_encoder = torch.nn.Linear(self.fully_connected.out_features, out_features)
+        self.mean_encoder = instantiate_from_class_path(
+            final_layer["class_path"], 
+            in_features=self.fully_connected.out_features, 
+            out_features=out_features, 
+            bias=final_layer["init_args"].pop("bias", True),
+            **final_layer["init_args"],
+        )
+        self.var_encoder = instantiate_from_class_path(
+            final_layer["class_path"], 
+            in_features=self.fully_connected.out_features, 
+            out_features=out_features, 
+            bias=final_layer["init_args"].pop("bias", True),
+            **final_layer["init_args"],
+        )
+        self.mean_encoder_takes_batch = isinstance(self.mean_encoder, LinearWithBatch)
         self.var_eps = var_eps
 
     def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor) -> torch.distributions.Distribution:
@@ -208,33 +222,34 @@ class DecoderSCVI(torch.nn.Module):
     Args:
         in_features: The dimensionality of the input (latent space)
         out_features: The dimensionality of the output (data space)
-        layers: A list of dictionaries, each containing the following keys:
+        hidden_layers: A list of dictionaries, each containing the following keys:
             * ``class_path``: the class path of the layer to use
             * ``init_args``: a dictionary of keyword arguments to pass to the layer's constructor
                 - must contain "out_features"
-        n_batch: Total number of batches in dataset
-        output_bias: If True, the output layer will have a batch-specific bias added 
-            (scvi-tools does not include this)
+        final_layer: Same as hidden_layers, but for the final layer
         dispersion: Granularity at which the overdispersion of the negative binomial distribution is computed
         gene_likelihood: Distribution to use for reconstruction in the generative process
         scale_activation: Activation layer to use to compute normalized counts (before multiplying by library size)
+        final_additive_bias: If True, the final layer will have a batch-specific bias added after the activation.
+            If final_layer is a LinearWithBatch layer and final_additive_bias is True, the last layer of the decoder 
+            will act as a batch-specific affine transformation.
     """
     def __init__(
         self,
         in_features: int, 
         out_features: int, 
-        layers: list[dict],
-        n_batch: int,
-        output_bias: bool = False,
+        hidden_layers: list[dict],
+        final_layer: dict,
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
         scale_activation: Literal["softmax", "softplus"] = "softmax",
+        final_additive_bias: bool = False,
     ):
         super().__init__()
         if gene_likelihood == "zinb":
             raise NotImplementedError("Zero-inflated negative binomial not yet implemented")
         self.gene_likelihood = gene_likelihood
-        self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, layers)
+        self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, hidden_layers)
         self.inverse_overdispersion_decoder = (
             torch.nn.Linear(self.fully_connected.out_features, out_features) 
             if ((gene_likelihood != "poisson") and (dispersion == "gene-cell")) 
@@ -245,13 +260,33 @@ class DecoderSCVI(torch.nn.Module):
             if (gene_likelihood == "zinb") 
             else None
         )
-        self.count_decoder_takes_batch = output_bias
-        self.normalized_count_decoder = (
-            torch.nn.Linear(self.fully_connected.out_features, out_features) if not output_bias 
-            # TODO: batch_to_bias_hidden_layers=[] is a hack
-            else LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
+        # self.count_decoder_takes_batch = output_bias
+        # self.normalized_count_decoder = (
+        #     torch.nn.Linear(self.fully_connected.out_features, out_features) if not output_bias 
+        #     # TODO: batch_to_bias_hidden_layers=[] is a hack
+        #     else LinearWithBatch(self.fully_connected.out_features, out_features, n_batch=n_batch, batch_to_bias_hidden_layers=[])
+        # )
+        self.normalized_count_decoder = instantiate_from_class_path(
+            final_layer["class_path"], 
+            in_features=self.fully_connected.out_features, 
+            out_features=out_features, 
+            bias=final_layer["init_args"].pop("bias", True),
+            **final_layer["init_args"],
         )
+        self.count_decoder_takes_batch = isinstance(self.normalized_count_decoder, LinearWithBatch)
         self.normalized_count_activation = torch.nn.Softmax(dim=-1) if (scale_activation == "softmax") else torch.nn.Softplus()
+        if final_additive_bias:
+            self.final_additive_bias_layer = torch.nn.Sequential(
+                FullyConnectedLinear(
+                    in_features=final_layer["init_args"]["n_batch"],
+                    out_features=out_features,
+                    n_hidden=[],
+                    dressing_init_kwargs={},
+                ),
+                torch.nn.ReLU(),
+            )
+        else:
+            self.final_additive_bias_layer = lambda x: 0
 
     def forward(
         self, 
@@ -267,7 +302,7 @@ class DecoderSCVI(torch.nn.Module):
                                if self.count_decoder_takes_batch 
                                else self.normalized_count_decoder(q_nh))
         chi_ng = self.normalized_count_activation(unnormalized_chi_ng)
-        count_mean_ng = torch.exp(library_size_n) * chi_ng
+        count_mean_ng = torch.exp(library_size_n) * chi_ng + self.final_additive_bias_layer(batch_nb)
 
         # optional inverse overdispersion per cell
         if inverse_overdispersion is None:
@@ -389,8 +424,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
     def __init__(
         self,
         var_names_g: Sequence[str],
-        encoder: dict[str, list[dict] | bool],
-        decoder: dict[str, list[dict] | bool],
+        encoder: dict[str, list[dict] | dict | bool],
+        decoder: dict[str, list[dict] | dict | bool],
         n_batch: int = 0,
         n_latent: int = 10,
         n_continuous_cov: int = 0,
@@ -492,7 +527,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # _extra_encoder_kwargs = extra_encoder_kwargs or {}
 
         # encoder layers
-        for layer in encoder["layers"]:
+        for layer in encoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
                 layer["init_args"]["n_batch"] = self.n_batch
             if "dressing_init_args" not in layer:
@@ -500,9 +535,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_encoder
             layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_encoder
             layer["dressing_init_args"]["dropout_rate"] = dropout_rate
+        if encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
+            encoder["final_layer"]["init_args"]["n_batch"] = self.n_batch
+            # encoder["final_layer"]["init_args"]["out_features"] = self.n_latent
 
         # decoder layers
-        for layer in decoder["layers"]:
+        for layer in decoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
                 layer["init_args"]["n_batch"] = self.n_batch
             if "dressing_init_args" not in layer:
@@ -510,13 +548,15 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_decoder
             layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_decoder
             layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
+        if decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
+            decoder["final_layer"]["init_args"]["n_batch"] = self.n_batch
+            # decoder["final_layer"]["init_args"]["out_features"] = self.n_input
 
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
             out_features=self.n_latent,
-            layers=encoder["layers"],
-            n_batch=self.n_batch,
-            output_bias=encoder["output_bias"],
+            hidden_layers=encoder["hidden_layers"],
+            final_layer=encoder["final_layer"],
         )
 
         if self.batch_representation == "embedding":
@@ -526,12 +566,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.decoder = DecoderSCVI(
             in_features=self.n_latent,
             out_features=self.n_input,
-            layers=decoder["layers"],
-            n_batch=self.n_batch,
-            output_bias=decoder["output_bias"],
+            hidden_layers=decoder["hidden_layers"],
+            final_layer=decoder["final_layer"],
             dispersion=self.dispersion,
             gene_likelihood=self.gene_likelihood,
             scale_activation="softplus" if use_size_factor_key else "softmax",
+            final_additive_bias=decoder["final_additive_bias"],
         )
 
         print(self)
