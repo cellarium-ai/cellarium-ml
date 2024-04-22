@@ -43,7 +43,7 @@ def test_negative_binomial(logits_shape: torch.Size, total_counts_shape: torch.S
     np.testing.assert_allclose(pyro_log_prob, cellarium_log_prob, rtol=1e-5)
 
     # sample
-    samples = cellarium_nb.sample(torch.Size([10_000]))
+    samples = cellarium_nb.sample(torch.Size([50_000]))
 
     expected_mean = cellarium_nb.mean
     actual_mean = samples.mean(0)
