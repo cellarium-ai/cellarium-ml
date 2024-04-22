@@ -4,7 +4,8 @@
 import numpy as np
 import torch
 
-from cellarium.ml.models import CellariumModel, GatherLayer
+from cellarium.ml.distributed import GatherLayer
+from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.data import get_rank_and_num_replicas
 
 

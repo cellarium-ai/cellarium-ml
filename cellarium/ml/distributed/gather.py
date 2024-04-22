@@ -10,14 +10,11 @@ class GatherLayer(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input: torch.Tensor) -> tuple[torch.Tensor, ...]:  # type: ignore
-        ctx.save_for_backward(input)
-        output = [torch.zeros_like(input) for _ in range(dist.get_world_size())]
+        output = [torch.empty_like(input) for _ in range(dist.get_world_size())]
         dist.all_gather(output, input)
         return tuple(output)
 
     @staticmethod
     def backward(ctx, *grads) -> torch.Tensor:
-        (input,) = ctx.saved_tensors
-        grad_out = torch.zeros_like(input)
-        grad_out[:] = grads[dist.get_rank()]
+        grad_out = dist.all_reduce(grads[dist.get_rank()], op=dist.ReduceOp.SUM)
         return grad_out
