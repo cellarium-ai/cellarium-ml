@@ -16,5 +16,6 @@ class GatherLayer(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grads) -> torch.Tensor:
-        grad_out = dist.all_reduce(grads[dist.get_rank()], op=dist.ReduceOp.SUM)
+        grad_out = grads[dist.get_rank()].contiguous()
+        dist.all_reduce(grad_out, op=dist.ReduceOp.SUM)
         return grad_out
