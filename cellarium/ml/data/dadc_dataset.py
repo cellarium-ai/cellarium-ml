@@ -349,7 +349,11 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
         indices = indices[rank * per_replica : (rank + 1) * per_replica]
-        assert len(indices) == per_replica
+        if len(indices) != per_replica:
+            raise ValueError(
+                f"The number of indices must be equal to the per_replica size. "
+                f"Got {len(indices)} != {per_replica} at rank {rank}."
+            )
 
         yield from (self[indices[i : i + self.batch_size]] for i in range(iter_start, iter_end, self.batch_size))
         # Sets epoch for persistent workers

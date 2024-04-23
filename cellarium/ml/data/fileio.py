@@ -23,7 +23,8 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
     Args:
         filename: Path to the data file in Cloud Storage.
     """
-    assert filename.startswith("gs:")
+    if not filename.startswith("gs:"):
+        raise ValueError("The filename must start with 'gs://' protocol name.")
     # parse bucket and blob names from the filename
     filename = re.sub(r"^gs://?", "", filename)
     bucket_name, blob_name = filename.split("/", 1)
@@ -51,7 +52,8 @@ def read_h5ad_url(filename: str) -> AnnData:
     Args:
         filename: URL of the data file.
     """
-    assert any(filename.startswith(scheme) for scheme in url_schemes)
+    if not any(filename.startswith(scheme) for scheme in url_schemes):
+        raise ValueError("The filename must start with 'http:', 'https:', or 'ftp:' protocol name.")
     with urllib.request.urlopen(filename) as response:
         with tempfile.TemporaryFile() as tmp_file:
             shutil.copyfileobj(response, tmp_file)
@@ -65,7 +67,8 @@ def read_h5ad_local(filename: str) -> AnnData:
     Args:
         filename: Path to the local data file.
     """
-    assert filename.startswith("file:")
+    if not filename.startswith("file:"):
+        raise ValueError("The filename must start with 'file:' protocol name.")
     filename = re.sub(r"^file://?", "", filename)
     return read_h5ad(filename)
 

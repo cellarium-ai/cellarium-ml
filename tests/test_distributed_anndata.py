@@ -146,7 +146,7 @@ def test_indexing(
     oidx, n_adatas = row_select
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
+        with pytest.raises(ValueError, match="Expected the number of anndata files"):
             dat_view = dat[oidx, vidx]
     else:
         adt_view = adt[oidx, vidx]
@@ -201,7 +201,7 @@ def test_indexing_dataset(
     )
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
+        with pytest.raises(ValueError, match="Expected the number of anndata files"):
             dataset_X = dataset[oidx]["x_ng"]
     else:
         adt_X = adt[oidx].X
