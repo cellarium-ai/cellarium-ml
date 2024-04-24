@@ -568,19 +568,21 @@ def main(args: ArgsType = None) -> None:
             or the ``model_name`` key if ``args`` is a dictionary or ``Namespace``.
     """
     if isinstance(args, (dict, Namespace)):
-        assert "model_name" in args, "'model_name' key must be specified in args"
+        if "model_name" not in args:
+            raise ValueError("'model_name' key must be specified in args")
         model_name = args.pop("model_name")
     elif isinstance(args, list):
-        assert len(args) > 0, "'model_name' must be specified as the first argument in args"
+        if len(args) == 0:
+            raise ValueError("'model_name' must be specified as the first argument in args")
         model_name = args.pop(0)
     elif args is None:
         args = sys.argv[1:].copy()
-        assert len(args) > 0, "'model_name' must be specified after cellarium-ml"
+        if len(args) == 0:
+            raise ValueError("'model_name' must be specified after cellarium-ml")
         model_name = args.pop(0)
 
-    assert (
-        model_name in REGISTERED_MODELS
-    ), f"'model_name' must be one of {list(REGISTERED_MODELS.keys())}. Got '{model_name}'"
+    if model_name not in REGISTERED_MODELS:
+        raise ValueError(f"'model_name' must be one of {list(REGISTERED_MODELS.keys())}. Got '{model_name}'")
     model_cli = REGISTERED_MODELS[model_name]
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="Transforming to str index.")
