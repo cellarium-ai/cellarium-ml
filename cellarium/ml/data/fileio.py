@@ -24,7 +24,7 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
         filename: Path to the data file in Cloud Storage.
     """
     if not filename.startswith("gs:"):
-        raise ValueError("The filename must start with 'gs://' protocol name.")
+        raise ValueError("The filename must start with 'gs:' protocol name.")
     # parse bucket and blob names from the filename
     filename = re.sub(r"^gs://?", "", filename)
     bucket_name, blob_name = filename.split("/", 1)
