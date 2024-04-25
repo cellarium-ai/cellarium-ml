@@ -13,6 +13,7 @@ cellarium-ml onepass_mean_var_std fit --config onepass_train_config.yaml
 cellarium-ml incremental_pca fit --config ipca_train_config.yaml
 cellarium-ml logistic_regression fit --config lr_train_config.yaml
 ```
+
 ## `OnePassMeanVarStd`
 
 Generate a default config file:
@@ -59,7 +60,7 @@ Change `OnePassMeanVarStd`'s algorithm to `shifted_data`:
 
 ### data
 
-Configure the `DistributedAnnDataCollection`. Here we validate `obs` columns that are used by the transforms and the model (`total_mrna_umis`):
+Configure the `DistributedAnnDataCollection`. Here we validate `obs` columns that are used by the transforms and the model (`total_mrna_umis`). Validation is done for each loaded AnnData file against the first (reference) AnnData file by checking that column names and dtypes match between the two:
 
 ```diff
 <       filenames: null
@@ -120,6 +121,8 @@ Change the number of devices and set the path for logs and weights:
 
 Add `NormalizeTotal` and `Log1p`, and `ZScore` transforms. Note, that `mean_g`, `std_g`, and `var_names_g` of `ZScore` transform are loaded from the `OnePassMeanVarStd` checkpoint:
 
+> **_NOTE:_**  `cellarium-ml` does not perform any validation on the transforms being applied to the data. Please, always verify it yourself that the transforms are configured correctly. If not configured correctly, your model will silently produce wrong results. In the example below, we first apply `NormalizeTotal` and `Log1p` transforms to the data and then apply `ZScore` transform. Importantly, `mean_g` and `std_g` parameters of the `ZScore` transform were calculated using `OnePassMeanVarStd` model on the data that was also transformed with `NormalizeTotal` and `Log1p`.
+
 ```diff
 <   transforms: null
 ---
@@ -147,14 +150,12 @@ Add `NormalizeTotal` and `Log1p`, and `ZScore` transforms. Note, that `mean_g`, 
 >           convert_fn: numpy.ndarray.tolist
 ```
 
-Set the number of components and mean correction option to true for `IncrementalPCA`:
+Set the number of components for `IncrementalPCA`:
 
 ```diff
 <       n_components: null
-<       perform_mean_correction: false
 ---
 >       n_components: 50
->       perform_mean_correction: true
 ```
 
 ### data
@@ -206,7 +207,7 @@ Below we highlight the changes made to the default configuration file.
 
 ### train
 
-Change the number of devices, change strategy to `ddp_find_unused_parameters_true` (because trained PCA model contains parameters that are fixed during training), set the number of epochs, and set the path for logs and weights:
+Change the number of devices, change strategy to `ddp_find_unused_parameters_true` (because trained PCA model contains a dummy parameter that is not used in producing the loss during training; read more about `find_unused_parameters` option in the [DDP docs](https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html#torch.nn.parallel.DistributedDataParallel)), set the number of epochs, and set the path for logs and weights:
 
 ```diff
 <   strategy: auto
