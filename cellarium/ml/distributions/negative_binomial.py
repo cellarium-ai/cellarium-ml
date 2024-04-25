@@ -7,6 +7,8 @@ import torch
 from pyro.distributions import TorchDistribution, constraints
 from torch.distributions.utils import broadcast_all, lazy_property
 
+THETA_THRESHOLD_STIRLING_SWITCH = 200
+
 
 class NegativeBinomial(TorchDistribution):
     """Negative binomial distribution.
@@ -66,7 +68,7 @@ class NegativeBinomial(TorchDistribution):
         #       - torch.lgamma(value + 1)
         #   )
         delta = torch.where(
-            (value / self.theta < 1e-2) & (self.theta > 1e2),
+            self.theta > THETA_THRESHOLD_STIRLING_SWITCH,
             (value + self.theta - 0.5) * torch.log1p(value / self.theta) - value,
             (value + self.theta).lgamma() - self.theta.lgamma() - torch.xlogy(value, self.theta),
         )
