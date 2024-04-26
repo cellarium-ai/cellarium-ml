@@ -261,7 +261,8 @@ class DecoderSCVI(torch.nn.Module):
         )
         self.count_decoder_takes_batch = isinstance(self.normalized_count_decoder, LinearWithBatch)
         self.normalized_count_activation = torch.nn.Softmax(dim=-1) if (scale_activation == "softmax") else torch.nn.Softplus()
-        if final_additive_bias:
+        self.final_additive_bias = final_additive_bias
+        if self.final_additive_bias:
             self.final_additive_bias_layer = torch.nn.Sequential(
                 FullyConnectedLinear(
                     in_features=final_layer["init_args"]["n_batch"],
@@ -272,7 +273,7 @@ class DecoderSCVI(torch.nn.Module):
                 torch.nn.ReLU(),
             )
         else:
-            self.final_additive_bias_layer = lambda x: 0
+            self.final_additive_bias_layer = None
 
     def forward(
         self, 
@@ -288,7 +289,10 @@ class DecoderSCVI(torch.nn.Module):
                                if self.count_decoder_takes_batch 
                                else self.normalized_count_decoder(q_nh))
         chi_ng = self.normalized_count_activation(unnormalized_chi_ng)
-        count_mean_ng = torch.exp(library_size_n) * chi_ng + self.final_additive_bias_layer(batch_nb)
+        if self.final_additive_bias:
+            count_mean_ng = torch.exp(library_size_n) * chi_ng + self.final_additive_bias_layer(batch_nb)
+        else:
+            count_mean_ng = torch.exp(library_size_n) * chi_ng
 
         # optional inverse overdispersion per cell
         if inverse_overdispersion is None:
@@ -427,9 +431,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
         self.batch_kl_weight = batch_kl_weight
 
+        # if you use one-hot and try to specify a different latent batch than n_batch, raise an error
+        if (not self.batch_embedded) and (self.n_latent_batch is not None) and (self.n_latent_batch != self.n_batch):
+            raise ValueError("n_latent_batch must be equal to n_batch if batch_embedded is False")
+
+        # if n_latent_batch not specified, set it to n_batch
+        if self.n_latent_batch is None:
+            self.n_latent_batch = self.n_batch  # same dim as one-hot would be
+
+        # handle the embedded batch posterior
         if self.batch_embedded:
-            if self.n_latent_batch is None:
-                self.n_latent_batch = self.n_batch  # same dim as one-hot would be
             # initialize the means as one-hot, std as 1 (after exp)
             self.batch_representation_mean_bd = torch.nn.Parameter(torch.eye(self.n_batch, self.n_latent_batch))
             self.batch_representation_std_unconstrained_bd = torch.nn.Parameter(torch.zeros(self.n_batch, self.n_latent_batch))
@@ -475,13 +486,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         use_layer_norm_encoder = use_layer_norm == "encoder" or use_layer_norm == "both"
         use_layer_norm_decoder = use_layer_norm == "decoder" or use_layer_norm == "both"
 
-        n_input_encoder = self.n_input + n_continuous_cov * encode_covariates
-        if self.batch_representation == "embedding":
-            raise NotImplementedError
-            # n_input_encoder += batch_dim * encode_covariates
-            # cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)
-        else:
-            cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
+        # n_input_encoder = self.n_input + n_continuous_cov * encode_covariates
+        # if self.batch_representation == "embedding":
+        #     raise NotImplementedError
+        #     # n_input_encoder += batch_dim * encode_covariates
+        #     # cat_list = list([] if n_cats_per_cov is None else n_cats_per_cov)
+        # else:
+        #     cat_list = [n_batch] + list([] if n_cats_per_cov is None else n_cats_per_cov)
 
         # encoder_cat_list = cat_list if encode_covariates else None
         # _extra_encoder_kwargs = extra_encoder_kwargs or {}
@@ -489,26 +500,26 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # encoder layers
         for layer in encoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
-                layer["init_args"]["n_batch"] = self.n_batch
+                layer["init_args"]["n_batch"] = self.n_latent_batch
             if "dressing_init_args" not in layer:
                 layer["dressing_init_args"] = {}
             layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_encoder
             layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_encoder
             layer["dressing_init_args"]["dropout_rate"] = dropout_rate
         if encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
-            encoder["final_layer"]["init_args"]["n_batch"] = self.n_batch
+            encoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
 
         # decoder layers
         for layer in decoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
-                layer["init_args"]["n_batch"] = self.n_batch
+                layer["init_args"]["n_batch"] = self.n_latent_batch
             if "dressing_init_args" not in layer:
                 layer["dressing_init_args"] = {}
             layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_decoder
             layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_decoder
             layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
         if decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
-            decoder["final_layer"]["init_args"]["n_batch"] = self.n_batch
+            decoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
 
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
@@ -539,9 +550,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         for m in self.modules():
             m.apply(weights_init)
         torch.nn.init.normal_(self.px_r, mean=0.0, std=1.0)
-        with torch.no_grad():
-            self.batch_representation_mean_bd.data.copy_(torch.eye(self.n_batch, self.n_latent_batch))
-            self.batch_representation_std_unconstrained_bd.data.fill_(0.0)
+        if self.batch_representation_mean_bd is not None:
+            with torch.no_grad():
+                self.batch_representation_mean_bd.data.copy_(torch.eye(self.n_batch, self.n_latent_batch))
+                self.batch_representation_std_unconstrained_bd.data.fill_(0.0)
 
     def batch_embedding_distribution(self, batch_index_n: torch.Tensor) -> Distribution:
         return Normal(
