@@ -63,7 +63,9 @@ class AnnDataSchema:
                 for col in ref_value.columns:
                     if ref_value[col].dtype != value[col].dtype:
                         if ref_value[col].dtype == "category":
-                            diff = set(ref_value[col].cat.categories).symmetric_difference(set(value[col].cat.categories))
+                            diff = set(ref_value[col].cat.categories).symmetric_difference(
+                                set(value[col].cat.categories)
+                            )
                             raise ValueError(
                                 f".obs['{col}'].cat.categories for anndata passed in "
                                 f"do not match those in the reference anndata. symmetric_differece: {diff}"
