@@ -11,7 +11,7 @@ import torch
 from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
-from cellarium.ml.models.common.distributions import NegativeBinomial
+from cellarium.ml.distributions import NegativeBinomial
 from cellarium.ml.models.common.nn import DressedLayer, FullyConnectedLinear
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
@@ -649,7 +649,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         cat_covs: torch.Tensor | None = None,
         size_factor: torch.Tensor | None = None,
         # y: torch.Tensor | None = None,
-        transform_batch: torch.Tensor | None = None,
     ) -> dict[str, Distribution | None]:
         """Runs the generative model."""
 
@@ -665,10 +664,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         #     categorical_input = torch.split(cat_covs, 1, dim=1)
         # else:
         #     categorical_input = ()
-
-        if transform_batch is not None:
-            raise NotImplementedError("transform_batch is not implemented in generative()... to be implemented elsewhere")
-            # batch_index = torch.ones_like(batch_index) * transform_batch
 
         if not self.use_size_factor_key:
             size_factor = library_n
@@ -818,6 +813,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the loss value.
         """
+
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
 
         return self.inference(
@@ -827,3 +826,68 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             cat_covs=cat_covs_nd,
             n_samples=1,
         )
+    
+    def reconstruct(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        batch_index_n: torch.Tensor,
+        cont_covs_nc: torch.Tensor | None = None,
+        cat_covs_nd: torch.Tensor | None = None,
+        size_factor_n: torch.Tensor | None = None,
+        transform_batch: int | None = None,
+        sample: bool = True,
+    ):
+        """
+        Reconstruct the data using the VAE, optionally transforming the batch.
+
+        Args:
+            x_ng:
+                Gene counts matrix.
+            var_names_g:
+                The list of the variable names in the input data.
+            batch_index_n:
+                Batch indices of input cells as integers.
+            cont_covs_nc:
+                Continuous covariates for each cell (c-dimensional).
+            cat_covs_nd:
+                Categorical covariates for each cell (d-dimensional).
+            size_factor_n:
+                Library size factor for each cell.
+            transform_batch:
+                If not None, transform the batch to this index before reconstruction.
+            sample:
+                If True, sample from the generative model. If False, use the mean.
+        """
+
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        if transform_batch is not None:
+            if transform_batch >= self.n_batch:
+                raise ValueError(f"transform_batch must be less than self.n_batch: {self.n_batch}")
+            batch_index_n = torch.ones_like(batch_index_n) * transform_batch
+
+        batch_nb = self.batch_representation_from_batch_index(batch_index_n)
+
+        inference_outputs = self.inference(
+            x_ng=x_ng,
+            batch_nb=batch_nb,
+            cont_covs=cont_covs_nc,
+            cat_covs=cat_covs_nd,
+            n_samples=1,
+        )
+
+        generative_outputs = self.generative(
+            z_nk=inference_outputs["z"],
+            library_n=inference_outputs["library"],
+            batch_nb=batch_nb,
+            cont_covs=cont_covs_nc,
+            cat_covs=cat_covs_nd,
+            size_factor=size_factor_n,
+        )
+
+        if sample:
+            return generative_outputs["px"].sample()
+        else:
+            return generative_outputs["px"].mean
