@@ -32,6 +32,7 @@ dependencies = [
   "pytest",
   "torch>=2.2.0",
   "transformers",
+  "umap-learn",
 ]
 
 dynamic = ["version"]
