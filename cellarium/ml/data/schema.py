@@ -71,8 +71,8 @@ class AnnDataSchema:
                                 f"do not match those in the reference anndata. symmetric_differece: {diff}"
                             )
                         raise ValueError(
-                            f".obs['{col}'] dtype for anndata passed in {value[col].dtype} "
-                            f"does not match .obs['{col}'] dtype of the reference anndata {ref_value[col].dtype}"
+                            f".obs['{col}'] dtype for anndata passed in ({value[col].dtype}) "
+                            f"does not match .obs['{col}'] dtype of the reference anndata ({ref_value[col].dtype})"
                         )
             elif attr in ["var", "var_names"]:
                 # For var compare if two DataFrames have the same shape and elements
