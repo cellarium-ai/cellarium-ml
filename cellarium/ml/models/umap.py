@@ -31,7 +31,7 @@ def distance_to_log_prob(distance: torch.Tensor, a: float = 1.0, b: float = 1.0)
     Returns:
         tensor containing log probabilities of edges, same shape as distance
     """
-    return -torch.log1p(a * torch.power(distance, 2 * b))
+    return -torch.log1p(a * torch.pow(distance, 2 * b))
 
 
 def umap_loss(
@@ -66,12 +66,13 @@ def umap_loss(
     weight_n = knn_graph.data  # TODO: what is the right way to use these weights?
 
     # randomly sample negative_sample_rate times as many (very probably) non-edges
-    neg_head_p = np.random.randint(0, n_vertices, size=int(negative_sample_rate * len(head)))
-    neg_tail_p = np.random.randint(0, n_vertices, size=int(negative_sample_rate * len(head)))
+    neg_head_p = np.random.randint(0, n_vertices, size=int(negative_sample_rate * len(head_n)))
+    neg_tail_p = np.random.randint(0, n_vertices, size=int(negative_sample_rate * len(head_n)))
 
     # put together a long list of indices that define edges of interest
     head_inds_m = torch.from_numpy(np.hstack([head_n, neg_head_p])).long()
     tail_inds_m = torch.from_numpy(np.hstack([tail_n, neg_tail_p])).long()
+    weight_m = torch.from_numpy(np.hstack([weight_n, np.ones(len(neg_head_p))])).float()
 
     # compute their distances in the embedding
     distances_m = torch.norm(embedding_nk[head_inds_m, :] - embedding_nk[tail_inds_m, :], dim=1)
@@ -84,13 +85,13 @@ def umap_loss(
 
     # compute the binary cross-entropy loss
     # loss = torch.nn.BCELoss(weight=None)(log_prob_m.exp(), true_edges_m)  # weight? stability?
-    loss = torch.nn.BCEWithLogitsLoss(weight=None)(log_prob_m, true_edges_m)  # weight?
+    loss = torch.nn.BCEWithLogitsLoss(weight=weight_m)(log_prob_m, true_edges_m)  # weight?
     # I don't know why, but it sure looks like they're doing "WithLogits" in umap.parametric_umap.compute_cross_entropy
 
     return loss
 
 
-class SubsampledApproximateUMAP(CellariumModel, UMAP, PredictMixin):
+class SubsampledApproximateUMAP(UMAP, torch.nn.Module, PredictMixin):
     """
     Scalable model for a UMAP embedding parameterized by an encoder neural network.
 
@@ -115,8 +116,8 @@ class SubsampledApproximateUMAP(CellariumModel, UMAP, PredictMixin):
         encoder: torch.nn.Module,
         **umap_kwargs,
     ) -> None:
-        super(CellariumModel, self).__init__()
-        super(UMAP, self).__init__(**umap_kwargs)
+        torch.nn.Module.__init__(self)
+        UMAP.__init__(self, **umap_kwargs)
         self.var_names_g = np.array(var_names_g)
         self.encoder = encoder
         self._differentiable_loss = None
@@ -146,10 +147,11 @@ class SubsampledApproximateUMAP(CellariumModel, UMAP, PredictMixin):
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         # the call to `~umap.UMAP.fit` calls self._fit_embed_data which stores a loss
-        super(UMAP, self).fit(x_ng)
+        # super(UMAP, self).fit(x_ng)
+        self.fit(x_ng)
         return {"loss": self._differentiable_loss}
     
-    def _fit_embed_data(self, X, n_epochs, init, random_state):
+    def _fit_embed_data(self, X, n_epochs, init, random_state) -> tuple[np.ndarray, dict[str, any]]:
         """
         Overrides method in `~umap.UMAP` superclass. Computes the loss rather than iterating 
         on the embedding to convergence.
@@ -157,7 +159,7 @@ class SubsampledApproximateUMAP(CellariumModel, UMAP, PredictMixin):
         self.graph_ is the kNN graph of the data passed in this minibatch, computed by 
         the superclass `~umap.UMAP.fit` method which calls this method.
         """
-        x_ng = X
+        x_ng = torch.from_numpy(X)
         embedding_nk = self.encoder(x_ng)
 
         self._differentiable_loss = umap_loss(
@@ -166,8 +168,9 @@ class SubsampledApproximateUMAP(CellariumModel, UMAP, PredictMixin):
             negative_sample_rate=self.negative_sample_rate,
             a=self._a,
             b=self._b,
-            n_steps_max=self.n_epochs,  # probably wrong
+            # n_steps_max=self.n_epochs,  # probably wrong
         )
+        return embedding_nk.detach().numpy(), {}
 
     def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> torch.Tensor:
         """
