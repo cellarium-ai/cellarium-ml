@@ -526,6 +526,7 @@ class CellariumGPT(CellariumModel):
         output_mult: float = 1.0,
         initializer_range: float = 0.02,
         backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
+        # head_type: Literal["nb", "ce"] = "ce",
         log_metrics: bool = True,
         log_plots: bool = False,
         log_plots_every_n_steps_multiplier: int = 10,
@@ -545,8 +546,11 @@ class CellariumGPT(CellariumModel):
             input_mult,
             backend,
         )
-        # self.nb_head = NegativeBinomialHead(d_model, use_bias, output_mult)
-        self.head = nn.Linear(d_model, 10_000, use_bias)
+        self.head_type = "nb"
+        if self.head_type == "nb":
+            self.nb_head = NegativeBinomialHead(d_model, use_bias, output_mult)
+        else:
+            self.head = nn.Linear(d_model, 10_000, use_bias)
         assert n_context <= self.n_vars + 1, "n_context must be less than or equal to the number of genes + 1"
         self.n_context = n_context
         self.initializer_range = initializer_range
@@ -627,21 +631,25 @@ class CellariumGPT(CellariumModel):
 
         ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
         hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
-        # mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
-        logits_ncg = self.head(hidden_state_ncd) * self.output_mult
+        if self.head_type == "nb":
+            mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
 
-        labels_mask_nc = labels_mask_nc & (values_nc < 10_000)
-        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
-        loss_fn = nn.CrossEntropyLoss(reduction="none")
-        sample_weights = sample_weights_nc[labels_mask_nc]
-        values_nc = values_nc.long()
-        loss = (
-            loss_fn(logits_ncg[labels_mask_nc], values_nc[labels_mask_nc]) * sample_weights
-        ).sum() / sample_weights.sum()
-        # nb_dist = NegativeBinomial(mu=mu_nc[labels_mask_nc], theta=theta_nc[labels_mask_nc])
-        # log_prob = nb_dist.log_prob(values_nc[labels_mask_nc])
-        # sample_weights = sample_weights_nc[labels_mask_nc]
-        # loss = -(log_prob * sample_weights).sum() / sample_weights.sum()
+            sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+            nb_dist = NegativeBinomial(mu=mu_nc[labels_mask_nc], theta=theta_nc[labels_mask_nc])
+            log_prob = nb_dist.log_prob(values_nc[labels_mask_nc])
+            sample_weights = sample_weights_nc[labels_mask_nc]
+            loss = -(log_prob * sample_weights).sum() / sample_weights.sum()
+        else:
+            logits_ncg = self.head(hidden_state_ncd) * self.output_mult
+
+            labels_mask_nc = labels_mask_nc & (values_nc < 10_000)
+            sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+            loss_fn = nn.CrossEntropyLoss(reduction="none")
+            sample_weights = sample_weights_nc[labels_mask_nc]
+            values_nc = values_nc.long()
+            loss = (
+                loss_fn(logits_ncg[labels_mask_nc], values_nc[labels_mask_nc]) * sample_weights
+            ).sum() / sample_weights.sum()
 
         return {
             "loss": loss,
@@ -651,9 +659,69 @@ class CellariumGPT(CellariumModel):
             "labels_mask_nc": labels_mask_nc,
             "sample_weights_nc": sample_weights_nc,
             "logits_ncg": logits_ncg,
+            "ids_nc": ids_nc,
             # "mu_nc": mu_nc,
             # "theta_nc": theta_nc,
         }
+
+    def predict(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        total_mrna_umis_n: torch.Tensor,
+        prefix_len_n: torch.Tensor | None,
+        shuffle: bool,
+    ) -> dict[str, torch.Tensor]:
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        n = x_ng.shape[0]
+        device = x_ng.device
+
+        # prefix includes the total_mrna_umis and a random subset of genes
+        # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
+        if prefix_len_n is None:
+            prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
+        labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
+
+        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=shuffle)
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
+        if self.head_type == "nb":
+            mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
+
+            return {
+                "values_nc": values_nc,
+                "total_mrna_umis_n": total_mrna_umis_n,
+                "prefix_len_n": prefix_len_n,
+                "labels_mask_nc": labels_mask_nc,
+                "ids_nc": ids_nc,
+                "mu_nc": mu_nc,
+                "theta_nc": theta_nc,
+            }
+        else:
+            logits_ncg = self.head(hidden_state_ncd) * self.output_mult
+
+            return {
+                "values_nc": values_nc,
+                "total_mrna_umis_n": total_mrna_umis_n,
+                "prefix_len_n": prefix_len_n,
+                "labels_mask_nc": labels_mask_nc,
+                "logits_ncg": logits_ncg,
+                "ids_nc": ids_nc,
+            }
+
+        # labels_mask_nc = labels_mask_nc & (values_nc < 10_000)
+        # sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
+        # loss_fn = nn.CrossEntropyLoss(reduction="none")
+        # sample_weights = sample_weights_nc[labels_mask_nc]
+        # values_nc = values_nc.long()
+        # loss = (
+        #     loss_fn(logits_ncg[labels_mask_nc], values_nc[labels_mask_nc]) * sample_weights
+        # ).sum() / sample_weights.sum()
+        # nb_dist = NegativeBinomial(mu=mu_nc[labels_mask_nc], theta=theta_nc[labels_mask_nc])
+        # log_prob = nb_dist.log_prob(values_nc[labels_mask_nc])
+        # sample_weights = sample_weights_nc[labels_mask_nc]
+        # loss = -(log_prob * sample_weights).sum() / sample_weights.sum()
 
     @torch.no_grad()
     def on_batch_end(

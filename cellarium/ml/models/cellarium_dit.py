@@ -10,12 +10,9 @@ from typing import Any, Literal
 import lightning.pytorch as pl
 import numpy as np
 import torch
-import torch.distributions as dist
 from pykeops.torch import LazyTensor
 from torch import nn
 from torch.backends.cuda import sdp_kernel
-from torch.distributions import constraints
-from torch.distributions.utils import broadcast_all
 
 from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.utilities.testing import (
@@ -393,32 +390,7 @@ class GPTModel(nn.Module):
         return hidden_state_ncd
 
 
-class NegativeBinomialHead(nn.Module):
-    """
-    Negative binomial head.
-
-    Args:
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        use_bias:
-            Whether to use bias in the linear transformations.
-        output_mult:
-            Multiplier for the output embeddings.
-    """
-
-    def __init__(self, d_model: int, use_bias: bool, output_mult: float) -> None:
-        super().__init__()
-        self.dense = nn.Linear(d_model, 2, bias=use_bias)
-        self.output_mult = output_mult
-
-    def forward(self, hidden_state_ncd) -> tuple[torch.Tensor, torch.Tensor]:
-        output = self.dense(hidden_state_ncd) * self.output_mult
-        mu_nc = output[..., 0].exp()
-        theta_nc = output[..., 1].exp()
-        return mu_nc, theta_nc
-
-
-class CellariumGPT(CellariumModel):
+class CellariumDiT(CellariumModel):
     """
     Cellarium GPT model.
 
@@ -553,6 +525,9 @@ class CellariumGPT(CellariumModel):
             ids_nc = indices_nc + 1
         return ids_nc, values_nc
 
+    def downsample(self, x_ng: torch.Tensor, p: float) -> torch.Tensor:
+        return x_ng
+
     def forward(
         self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor
     ) -> dict[str, torch.Tensor]:
@@ -562,9 +537,10 @@ class CellariumGPT(CellariumModel):
         n = x_ng.shape[0]
         device = x_ng.device
 
+        y_ng = self.downsample(x_ng, p)
+
         # prefix includes the total_mrna_umis and a random subset of genes
         # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
-        prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
         labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
 
         ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
