@@ -226,7 +226,7 @@ class CellariumModule(pl.LightningModule):
         """
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
-            on_batch_end(self.trainer, self, outputs, batch, batch_idx)
+            on_batch_end(self.trainer)
 
     def validation_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int

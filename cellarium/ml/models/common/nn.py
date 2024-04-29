@@ -1,72 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import collections
-from collections.abc import Iterable
-
 import torch
-
-
-class LinearWithBatch(torch.nn.Linear):
-    """A `torch.nn.Linear` layer where batch indices are given as input to the forward pass.
-
-    Args:
-        in_features: passed to `torch.nn.Linear`
-        out_features: passed to `torch.nn.Linear`
-        n_batch: total number of batches in dataset
-        sample: True to sample the bias weight matrix from a distribution
-        bias: passed to `torch.nn.Linear` (True is like the scvi-tools implementation)
-    """
-
-    def __init__(self, in_features: int, out_features: int, n_batch: int, sample: bool = False, bias: bool = True, precomputed_bias: torch.Tensor | None = None):
-        super().__init__(in_features, out_features, bias=bias)
-        self.sample = sample
-        self.cached_biases = None
-        self.n_batch = n_batch
-        self.precomputed_bias = None
-        if self.precomputed_bias:
-            self.batch_bias_fx = self.load_precomputed_bias
-        else:
-            self.batch_bias_fx = self.compute_bias
-        self.bias_mean_layer = torch.nn.Linear(in_features=n_batch, out_features=out_features, bias=False)
-        if sample:
-            self.bias_std_unconstrained_layer = torch.nn.Linear(in_features=n_batch, out_features=out_features, bias=False)
-    
-    def compute_bias(self, batch_n: torch.Tensor) -> torch.Tensor:
-        """
-        Returns the bias for a given list of batch indices.
-
-        Args:
-            batch_n: a tensor of batch indices of shape (n)
-
-        Returns:
-            a tensor of shape (n, out_features)
-        """
-        one_hot_batch_nb = torch.nn.functional.one_hot(batch_n.squeeze().long(), num_classes=self.n_batch).float()
-        mean_bias_nh = self.bias_mean_layer(one_hot_batch_nb)
-        if self.sample:
-            std_bias_nh = self.bias_std_unconstrained_layer(one_hot_batch_nb).exp()
-            self.cached_biases = mean_bias_nh + std_bias_nh * torch.randn_like(std_bias_nh)
-        else:
-            self.cached_biases = mean_bias_nh
-        return self.cached_biases
-
-    def load_precomputed_bias(self, batch: torch.Tensor) -> torch.Tensor:
-        return self.precomputed_bias[0]
-
-
-    def forward(self, x: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
-        """
-        Computes the forward pass of the layer as
-        out = x @ self.weight.T + self.bias + bias
-
-        where bias is computed as
-        bias = batch_one_hot @ weight_batch.T
-
-        or is sampled from a distribution if sample=True
-        """
-
-        return super().forward(x) + self.batch_bias_fx(batch)
 
 
 class DressedLayer(torch.nn.Module):
@@ -121,3 +56,47 @@ class DressedLayer(torch.nn.Module):
         """
         x = self.layer(*args, **kwargs)
         return self.dressing(x)
+
+
+class FullyConnectedLinear(torch.nn.Module):
+    """
+    Fully connected block of layers (can be empty).
+
+    Args:
+        in_features: The dimensionality of the input
+        out_features: The dimensionality of the output
+        n_hidden: A list of sizes of torch.nn.Linear hidden layers
+        dressing_init_kwargs: A dictionary of keyword arguments to pass ``DressedLayer``'s constructor
+        bias: True to include a bias in the final linear layer
+    """
+
+    def __init__(
+        self,
+        in_features: int, 
+        out_features: int,
+        n_hidden: list[int],
+        dressing_init_kwargs: dict[str, any] = {},
+        bias: bool = False,
+    ):
+        super().__init__()
+        module_list = []
+        layer_size = in_features
+        if len(n_hidden) > 0:
+            for n_in, n_out in zip([in_features] + n_hidden, n_hidden):
+                module_list.append(
+                    DressedLayer(
+                        torch.nn.Linear(in_features=n_in, out_features=n_out, bias=True),
+                        **dressing_init_kwargs,
+                    )
+                )
+            layer_size = n_out
+        module_list.append(torch.nn.Linear(layer_size, out_features, bias=bias))
+        module_list = torch.nn.ModuleList(module_list)
+        self.module_list = module_list
+        self.out_features = out_features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_ = x
+        for layer in self.module_list:
+            x_ = layer(x_)
+        return x_

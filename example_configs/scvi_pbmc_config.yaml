@@ -60,28 +60,46 @@ model:
   model:
     class_path: cellarium.ml.models.SingleCellVariationalInference
     init_args:
+
+      # these are pulled from data, leave null
       var_names_g: null
       n_batch: null
-      batch_bias_sampled: false
-      precomputed_bias:
-        - !CheckpointLoader #do not remove the - , otherwise it messes everything up
-          file_path: ../notebooks/lightning_logs/version_7/checkpoints/epoch=49-step=3150.ckpt
-          #attr: model
-          attr: model._modules.z_encoder.mean_encoder.bias #here we extract the parameter we are looking for model._modules["z_encoder"].mean_encoder.bias
-          convert_fn: cellarium.ml.transforms.load.to_device
+
+      # these can be changed
+      batch_embedded: true
+      batch_representation_sampled: true
+      n_latent_batch: null
+      batch_kl_weight: 0.01
       encoder: 
-        layers:
-        - class_path: cellarium.ml.models.common.nn.LinearWithBatch
+        hidden_layers:
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
             out_features: 128
-        output_bias: true
+            batch_to_bias_hidden_layers: []  # one linear transformation: what scvi-tools does
+        final_layer:
+          class_path: torch.nn.Linear
+          init_args: {}
       decoder:
-        layers:
-        - class_path: cellarium.ml.models.common.nn.LinearWithBatch
+        hidden_layers:
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
             out_features: 128
-        output_bias: true
-      n_latent: 16
+            batch_to_bias_hidden_layers: []
+              # hidden_layers:
+              # - class_path: torch.nn.Linear
+              #     init_args:
+              #       out_features: 10
+              # - class_path: torch.nn.Linear
+              #     init_args:
+              #       out_features: 20
+        final_layer: 
+          class_path: cellarium.ml.models.scvi.LinearWithBatch
+          init_args:
+            batch_to_bias_hidden_layers: []
+        final_additive_bias: true
+      n_latent: 10
+
+      # probably leave these alone
       n_continuous_cov: 0
       n_cats_per_cov: null
       dropout_rate: 0.1
@@ -97,11 +115,8 @@ model:
       use_observed_lib_size: true
       library_log_means: null
       library_log_vars: null
-      # var_activation: null
-      # extra_encoder_kwargs: null
-      # extra_decoder_kwargs: null
       batch_embedding_kwargs: null
-  optim_fn: torch.optim.Adam
+  optim_fn: torch.optim.AdamW
   optim_kwargs: 
     lr: 1e-3
   scheduler_fn: null
