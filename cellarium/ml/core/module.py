@@ -146,6 +146,28 @@ class CellariumModule(pl.LightningModule):
             return output
         return None
 
+    def validation_step(
+        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
+    ) -> dict[str, np.ndarray | torch.Tensor]:
+        """
+        Forward pass for validation step.
+
+        Args:
+            batch: A dictionary containing the batch data.
+            batch_idx: The index of the batch.
+
+        Returns:
+            A dictionary containing the batch data and validation outputs.
+        """
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        batch["prefix_len"] = batch_idx * 40
+        output = self.pipeline(batch)
+        batch.pop("prefix_len")
+        loss = output.get("loss")
+        self.log("val_loss", loss, sync_dist=True, on_epoch=True)
+
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Forward pass for inference step.

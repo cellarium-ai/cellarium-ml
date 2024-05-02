@@ -100,11 +100,32 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
            setup is called from every process across all the nodes. Setting state here is recommended.
 
         """
-        self.dataset = IterableDistributedAnnDataCollectionDataset(
-            dadc=self.dadc,
+        dadc_train = DistributedAnnDataCollection(
+            self.dadc.filenames[:-1],
+            limits=self.dadc.limits[:-1],
+            max_cache_size=self.dadc.max_cache_size,
+            obs_columns_to_validate=self.dadc.obs_columns_to_validate,
+        )
+        dadc_val = DistributedAnnDataCollection(
+            self.dadc.filenames[-1:],
+            limits=[10_000],
+            max_cache_size=self.dadc.max_cache_size,
+            obs_columns_to_validate=self.dadc.obs_columns_to_validate,
+        )
+        self.dataset_train = IterableDistributedAnnDataCollectionDataset(
+            dadc=dadc_train,
             batch_keys=self.batch_keys,
             batch_size=self.batch_size,
             shuffle=self.shuffle,
+            seed=self.seed,
+            drop_last=self.drop_last,
+            test_mode=self.test_mode,
+        )
+        self.dataset_val = IterableDistributedAnnDataCollectionDataset(
+            dadc=dadc_val,
+            batch_keys=self.batch_keys,
+            batch_size=self.batch_size,
+            shuffle=False,
             seed=self.seed,
             drop_last=self.drop_last,
             test_mode=self.test_mode,
@@ -113,7 +134,15 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         """Training dataloader."""
         return torch.utils.data.DataLoader(
-            self.dataset,
+            self.dataset_train,
+            num_workers=self.num_workers,
+            collate_fn=collate_fn,
+        )
+
+    def val_dataloader(self) -> torch.utils.data.DataLoader:
+        """Validation dataloader."""
+        return torch.utils.data.DataLoader(
+            self.dataset_val,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
         )
@@ -121,7 +150,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
         """Prediction dataloader."""
         return torch.utils.data.DataLoader(
-            self.dataset,
+            self.dataset_train,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
         )
