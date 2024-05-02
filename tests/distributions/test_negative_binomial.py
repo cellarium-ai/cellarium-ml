@@ -55,7 +55,7 @@ def test_negative_binomial(logits_shape: torch.Size, total_counts_shape: torch.S
 
 
 @pytest.mark.parametrize("mu", torch.logspace(-4, 3, 8))
-@pytest.mark.parametrize("theta", torch.logspace(-2, 3, 6))
+@pytest.mark.parametrize("theta", torch.logspace(-2, 6, 9))
 def test_total_probability(mu: torch.Tensor, theta: torch.Tensor) -> None:
     values = torch.arange(0, 2 + int(mu * 1e3))
     log_probs = NegativeBinomial(mu, theta).log_prob(values)
