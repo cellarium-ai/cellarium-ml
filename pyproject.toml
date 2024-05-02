@@ -31,7 +31,7 @@ dependencies = [
   "pykeops>=2.1.0",
   "pyro-ppl",
   "pytest",
-  "torch>=2.0.0",
+  "torch>=2.2.0",
   "transformers",
 ]
 
