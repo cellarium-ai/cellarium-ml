@@ -662,7 +662,7 @@ class CellariumGPT(CellariumModel):
             logits = logits_ncg[nonzero_mask][i].cpu()
             n_umis = total_mrna_umis_nc[nonzero_mask][i].item()
 
-            x = torch.arange(0, label * 3 + 5)
+            x = torch.arange(0, min(label * 3 + 5, self.max_count + 1))
             y = logits.softmax(dim=-1)[: len(x)]
             plt.plot(x, y, "o")
             plt.vlines(label, 0, y[label], color="r")
@@ -688,7 +688,7 @@ class CellariumGPT(CellariumModel):
             logits = logits_ncg[zero_mask][i].cpu()
             n_umis = total_mrna_umis_nc[zero_mask][i].item()
 
-            x = torch.arange(0, label * 3 + 5)
+            x = torch.arange(0, min(label * 3 + 5, self.max_count + 1))
             y = logits.softmax(dim=-1)[: len(x)]
             plt.plot(x, y, "o")
             plt.vlines(label, 0, y[label], color="r")
