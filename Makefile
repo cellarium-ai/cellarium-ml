@@ -8,7 +8,7 @@ uninstall: FORCE
 
 lint: FORCE
 	ruff check .
-	black --check .
+	ruff format --check .
 
 docs: FORCE
 	cd docs && make html
@@ -18,7 +18,7 @@ license: FORCE
 
 format: license FORCE
 	ruff check --fix .
-	black .
+	ruff format .
 
 typecheck: FORCE
 	mypy cellarium tests

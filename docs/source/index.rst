@@ -14,6 +14,7 @@ Table of Contents
    cli
    core
    data
+   distributed
    lr_schedulers
    models
    transforms

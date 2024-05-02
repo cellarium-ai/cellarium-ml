@@ -151,7 +151,7 @@ class DistributedAnnDataCollection(AnnCollection):
             This parameter can be set to ``False`` if the order in the returned arrays
             is not important, for example, when using them for stochastic gradient descent.
             In this case the performance of subsetting can be a bit better.
-        obs_columns:
+        obs_columns_to_validate:
             Subset of columns to validate in the :attr:`obs` attribute.
             If ``None``, all columns are validated.
     """
@@ -169,27 +169,37 @@ class DistributedAnnDataCollection(AnnCollection):
         index_unique: str | None = None,
         convert: ConvertType | None = None,
         indices_strict: bool = True,
-        obs_columns: Sequence | None = None,
+        obs_columns_to_validate: Sequence[str] | None = None,
     ):
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
             raise ValueError("If `last_shard_size` is specified then `shard_size` must also be specified.")
         if limits is None:
-            assert shard_size is not None, "If `limits` is `None` then `shard_size` must be specified`"
+            if shard_size is None:
+                raise ValueError("If `limits` is `None` then `shard_size` must be specified`")
             limits = [shard_size * (i + 1) for i in range(len(self.filenames))]
             if last_shard_size is not None:
                 limits[-1] = limits[-1] - shard_size + last_shard_size
         else:
             limits = list(limits)
-        assert len(limits) == len(self.filenames)
+        if len(limits) != len(self.filenames):
+            raise ValueError(
+                f"The number of points in `limits` ({len(limits)}) must match "
+                f"the number of `filenames` ({len(self.filenames)})."
+            )
         # lru cache
         self.cache = LRU(max_cache_size)
         self.max_cache_size = max_cache_size
         self.cache_size_strictly_enforced = cache_size_strictly_enforced
         # schema
         adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
-        assert len(adata0) == limits[0]
-        self.schema = AnnDataSchema(adata0, obs_columns)
+        if len(adata0) != limits[0]:
+            raise ValueError(
+                f"The number of cells in the first anndata file ({len(adata0)}) "
+                f"does not match the first limit ({limits[0]})."
+            )
+        self.obs_columns_to_validate = obs_columns_to_validate
+        self.schema = AnnDataSchema(adata0, obs_columns_to_validate)
         # lazy anndatas
         lazy_adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
@@ -198,7 +208,10 @@ class DistributedAnnDataCollection(AnnCollection):
         # use filenames as default keys
         if keys is None:
             keys = self.filenames
-        assert len(keys) == len(self.filenames)
+        if len(keys) != len(self.filenames):
+            raise ValueError(
+                f"The number of keys ({len(keys)}) must match the number of `filenames` ({len(filenames)})."
+            )
         with lazy_getattr():
             super().__init__(
                 adatas=lazy_adatas,
@@ -237,10 +250,11 @@ class DistributedAnnDataCollection(AnnCollection):
         adata_idx_to_oidx = {i: oidx for i, oidx in enumerate(adatas_oidx) if oidx is not None}
         n_adatas = len(adata_idx_to_oidx)
         if self.cache_size_strictly_enforced:
-            assert n_adatas <= self.max_cache_size, (
-                f"Expected the number of anndata files ({n_adatas}) to be "
-                f"no more than the max cache size ({self.max_cache_size})."
-            )
+            if n_adatas > self.max_cache_size:
+                raise ValueError(
+                    f"Expected the number of anndata files ({n_adatas}) to be "
+                    f"no more than the max cache size ({self.max_cache_size})."
+                )
         adatas = [None] * n_adatas
         # first fetch cached anndata files
         # this ensures that they are not popped if they were lru
@@ -275,15 +289,22 @@ class DistributedAnnDataCollection(AnnCollection):
         state = self.__dict__.copy()
         del state["cache"]
         del state["adatas"]
+        del state["obs_names"]
+        del state["schema"]
+        del state["_obs"]
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.cache = LRU(self.max_cache_size)
+        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
+        self.schema = AnnDataSchema(adata0, self.obs_columns_to_validate)
         self.adatas = [
             LazyAnnData(filename, (start, end), self.schema, self.cache)
             for start, end, filename in zip([0] + self.limits, self.limits, self.filenames)
         ]
+        self.obs_names = pd.Index([f"cell_{i}" for i in range(self.limits[-1])])
+        self._obs = pd.DataFrame(index=self.obs_names)
 
 
 class LazyAnnData:
@@ -367,10 +388,11 @@ class LazyAnnData:
             # fetch anndata
             adata = read_h5ad_file(self.filename)
             # validate anndata
-            assert self.n_obs == adata.n_obs, (
-                "Expected n_obs for LazyAnnData object and backed anndata to match "
-                f"but found {self.n_obs} and {adata.n_obs}, respectively."
-            )
+            if self.n_obs != adata.n_obs:
+                raise ValueError(
+                    "Expected `n_obs` for LazyAnnData object and backed anndata to match "
+                    f"but found {self.n_obs} and {adata.n_obs}, respectively."
+                )
             self.schema.validate_anndata(adata)
             # cache anndata
             if len(self.cache) < self.cache.max_size:

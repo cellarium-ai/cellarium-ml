@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -49,12 +50,14 @@ def dadc(adata: AnnData, tmp_path: Path):
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
+@pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
 def test_onepass_mean_var_std_multi_device(
     adata: AnnData,
     dadc: DistributedAnnDataCollection,
     shuffle: bool,
     num_workers: int,
     batch_size: int,
+    algorithm: Literal["naive", "shifted_data"],
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
@@ -75,7 +78,7 @@ def test_onepass_mean_var_std_multi_device(
     transforms = [NormalizeTotal(target_count=10_000), Log1p()]
 
     # fit
-    model = OnePassMeanVarStd(var_names_g=dadc.var_names)
+    model = OnePassMeanVarStd(var_names_g=dadc.var_names, algorithm=algorithm)
     module = CellariumModule(transforms=transforms, model=model)
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -110,29 +113,22 @@ def test_onepass_mean_var_std_multi_device(
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
 
 
-def test_load_from_checkpoint_multi_device(tmp_path: Path):
+@pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
+def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["naive", "shifted_data"]):
     n, g = 3, 2
+    var_names_g = [f"gene_{i}" for i in range(g)]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array([f"gene_{i}" for i in range(g)]),
+            np.array(var_names_g),
         ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"var_names_g": [f"gene_{i}" for i in range(g)]}
-    model = OnePassMeanVarStd(**init_args)  # type: ignore[arg-type]
-    config = {
-        "model": {
-            "model": {
-                "class_path": "cellarium.ml.models.OnePassMeanVarStd",
-                "init_args": init_args,
-            }
-        }
-    }
-    module = CellariumModule(model=model, config=config)
+    model = OnePassMeanVarStd(var_names_g=var_names_g)
+    module = CellariumModule(model=model)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -157,3 +153,29 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g, atol=1e-6)
+    assert model.algorithm == loaded_model.algorithm
+
+
+@pytest.mark.parametrize("mean", [1, 100])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["float32", "float64"])
+@pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
+def test_accuracy(mean: float, dtype: torch.dtype, algorithm: Literal["naive", "shifted_data"]):
+    n_trials = 5_000_000
+    std = 0.1
+    x = mean + std * torch.randn(n_trials, dtype=dtype)
+
+    onepass = OnePassMeanVarStd(var_names_g=["x"], algorithm=algorithm)
+    for chunk in x.split(1000):
+        onepass(x_ng=chunk[:, None], var_names_g=["x"])
+
+    mean_expected = x.mean().item()
+    mean_actual = onepass.mean_g[0].item()
+    assert mean_actual == pytest.approx(mean_expected, rel=1e-5)
+
+    var_expected = x.var(correction=0).item()
+    var_actual = onepass.var_g[0].item()
+    if algorithm == "naive" and dtype == torch.float32 and mean == 100:
+        with pytest.raises(AssertionError):
+            assert var_actual == pytest.approx(var_expected, rel=1e-3)
+    else:
+        assert var_actual == pytest.approx(var_expected, rel=1e-3)
