@@ -50,47 +50,38 @@ def test_scaled_dot_product_attention(backend, attention_type):
     assert torch.allclose(actual, expected, atol=1e-6)
 
 
-def test_load_from_checkpoint_multi_device(tmp_path: Path):
+def test_load_from_checkpoint_multi_device(tmp_path: Path) -> None:
     n, g = 4, 3
-    var_names = np.array([f"gene_{i}" for i in range(g)])
+    var_names = [f"gene_{i}" for i in range(g)]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     data = np.arange(n * g).reshape(n, g).astype(np.float32)
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             data,
-            var_names=var_names,
+            var_names=np.array(var_names),
             total_mrna_umis=data.sum(-1),
         ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {
-        "var_names_g": var_names,
-        "d_model": 2,
-        "d_ffn": 4,
-        "n_heads": 1,
-        "n_blocks": 1,
-        "dropout": 0.0,
-        "use_bias": False,
-        "n_context": 3,
-        "attn_mult": math.sqrt(2),
-        "input_mult": 2.0,
-        "output_mult": 1.0,
-        "initializer_range": 0.02,
-        "backend": "torch",
-        "log_metrics": False,
-    }
-    model = CellariumGPT(**init_args)  # type: ignore[arg-type]
-    config = {
-        "model": {
-            "model": {
-                "class_path": "cellarium.ml.models.CellariumGPT",
-                "init_args": init_args,
-            }
-        }
-    }
-    module = CellariumModule(model=model, config=config)
+    model = CellariumGPT(
+        var_names_g=var_names,
+        d_model=2,
+        d_ffn=4,
+        n_heads=1,
+        n_blocks=1,
+        dropout=0.0,
+        use_bias=False,
+        n_context=3,
+        attn_mult=math.sqrt(2),
+        input_mult=2.0,
+        output_mult=1.0,
+        initializer_range=0.02,
+        backend="torch",
+        log_metrics=False,
+    )
+    module = CellariumModule(model=model, optim_fn=torch.optim.AdamW)
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",
