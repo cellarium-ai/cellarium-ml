@@ -10,7 +10,7 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 from torch import nn
-from torch.backends.cuda import sdp_kernel
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.utilities.testing import (
@@ -18,14 +18,10 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
-
 backend_map = {
-    "math": {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
-    "flash": {"enable_math": False, "enable_flash": True, "enable_mem_efficient": False},
-    "mem_efficient": {"enable_math": False, "enable_flash": False, "enable_mem_efficient": True},
+    "math": SDPBackend.MATH,
+    "flash": SDPBackend.FLASH_ATTENTION,
+    "mem_efficient": SDPBackend.EFFICIENT_ATTENTION,
 }
 
 
@@ -83,7 +79,7 @@ class ScaledDotProductAttention(nn.Module):
         else:
             raise ValueError(f"Unsupported attention type: {attention_type}")
 
-        with sdp_kernel(**backend_map[self.backend]):
+        with sdpa_kernel(backend_map[self.backend]):
             return nn.functional.scaled_dot_product_attention(
                 queries_nhqk,
                 keys_nhsk,
