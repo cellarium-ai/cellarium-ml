@@ -18,3 +18,7 @@ output/
 *.png
 
 *.pdf
+
+*.h5ad
+
+*.jpg
