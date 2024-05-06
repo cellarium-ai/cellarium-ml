@@ -1,6 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
-
+import os.path
 import re
 import shutil
 import tempfile
@@ -86,4 +86,8 @@ def read_h5ad_file(filename: str, **kwargs) -> AnnData:
     if any(filename.startswith(scheme) for scheme in url_schemes):
         return read_h5ad_url(filename)
 
-    return read_h5ad(filename)
+    if os.path.exists(filename):
+        return read_h5ad(filename)
+    else:
+        raise ValueError("Given filename path {} does not exist".format(filename))
+

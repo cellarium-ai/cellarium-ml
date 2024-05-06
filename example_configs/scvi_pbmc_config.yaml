@@ -128,11 +128,11 @@ data:
     init_args:
       #filenames: gs://yx-data/pbmc_count.h5ad
       #filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
-      #filenames: /opt/project/pbmc_count.h5ad #use with cli.py
-      filenames: ../data/pbmc_count.h5ad
-      #filenames: /home/lys/Dropbox/PostDoc_Glycomics/pbmc_count.h5ad
-      limits: [31774]
-      shard_size: 31774
+      #filenames: /opt/project/cellarium-ml/data/pbmc_count.h5ad #use with cli.py
+      #filenames: ../data/pbmc_count.h5ad # use with scvi_demo.py #31774 limits cells
+      filenames: /opt/project/cellarium-ml/data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad
+      limits: [10000]
+      shard_size: 10000
       last_shard_size: null
       max_cache_size: 1
       cache_size_strictly_enforced: true

@@ -61,7 +61,17 @@ class AnnDataField:
     def __call__(self, adata: AnnData | AnnCollection, idx: int | list[int] | slice) -> np.ndarray:
         value = getattr(adata[idx], self.attr)
         if self.key is not None:
-            value = value[self.key]
+            if hasattr(value,"columns"):
+                if self.key in value.columns:
+                    value = value[self.key]
+                else:
+                    value = None
+            else:
+                try:
+                    value = value[self.key]
+                except:
+                    warnings.warn("Attribute : {} not found in object {}".format(self.key,value))
+                    value = None
 
         if self.convert_fn is not None:
             value = self.convert_fn(value)
@@ -185,7 +195,11 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
     Returns:
         Numpy array.
     """
-    return np.asarray(x.cat.codes)
+    if x is not None:
+        return np.asarray(x.cat.codes)
+    else:
+        warnings.warn("Batch information not specified, setting number of categories to 2")
+        return np.asarray([2])
 
 
 # def ncategories(x: pd.Series) -> int:

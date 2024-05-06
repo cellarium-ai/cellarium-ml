@@ -246,9 +246,18 @@ def nunique_scvi(data: CellariumAnnDataDataModule) -> int:
     # return data.batch_keys["batch_index_n"].nunique()
     field = data.batch_keys["batch_index_n"]
     value = getattr(data.dadc[0], field.attr)
-    if field.key is not None:
-        value = value[field.key]
-    return len(value.cat.categories)
+
+    if hasattr(value,"columns"):
+        if field.key in value.columns:
+            if field.key is not None:
+                value = value[field.key]
+            return len(value.cat.categories)
+        else:
+            warnings.warn("Number of categories (batch) not found, setting them to 3")
+            return 3 #find out why does it have to be larger than "batch"
+    else:
+        warnings.warn("Number of categories (batch) not found, setting them to 3")
+        return 3
 
 
 def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDataDataModule) -> np.ndarray:
@@ -264,7 +273,14 @@ def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDat
     Returns:
         The variable names.
     """
+
     batch = {key: field(data.dadc, 0) for key, field in data.batch_keys.items()}
+
+    if batch["batch_index_n"] is None:
+        warnings.warn("batch has not been specified, setting it to np.array([2],dtype=np.int8)")
+        batch["batch_index_n"] = np.array([2],dtype=np.int8)
+
+
     pipeline = CellariumPipeline(transforms)
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
@@ -272,6 +288,8 @@ def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDat
             fake_pipeline = copy.deepcopy(pipeline)
         fake_pipeline.to("cpu")
         output = fake_pipeline(fake_batch)
+
+
     return output["var_names_g"]
 
 def lightning_cli_factory(

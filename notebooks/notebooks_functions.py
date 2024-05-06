@@ -18,11 +18,41 @@ import umap
 import matplotlib.pyplot as plt
 import matplotlib
 import tempfile
-import os
+import os,shutil
 import yaml
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import Normalize
 from matplotlib.colorbar import Colorbar
+
+
+
+
+
+def folders(folder_name,basepath,overwrite=True):
+    """ Creates a folder at the indicated location. It rewrites folders with the same name
+    :param str folder_name: name of the folder
+    :param str basepath: indicates the place where to create the folder
+    """
+    #basepath = os.getcwd()
+    if not basepath:
+        newpath = folder_name
+    else:
+        newpath = basepath + "/%s" % folder_name
+    if not os.path.exists(newpath):
+        try:
+            original_umask = os.umask(0)
+            os.makedirs(newpath, 0o777)
+        finally:
+            os.umask(original_umask)
+    else:
+        if overwrite:
+            print("Removing folder and subdirectories. Review that this is the desired behaviour or set overwrite to False)") #if this is reached is because you are running the folders function twice with the same folder name
+            shutil.rmtree(newpath)  # removes all the subdirectories!
+            os.makedirs(newpath,0o777)
+        else:
+            pass
+
+
 
 class AutosizedDistributedAnnDataCollection(DistributedAnnDataCollection):
 
@@ -196,6 +226,7 @@ def reconstruct_debatched(
 
 def plot_raw_data(adata: anndata.AnnData,filepath: str):
 
+
     #sc.set_figure_params(fontsize=14, vector_friendly=True)
     sc.set_figure_params(fontsize=14, vector_friendly=True)
     sc.pp.normalize_total(adata)
@@ -207,10 +238,15 @@ def plot_raw_data(adata: anndata.AnnData,filepath: str):
     sc.tl.umap(adata)
     #sc.rapids_singlecell.tl.umap(adata)
     adata.obsm['X_raw_umap'] = adata.obsm['X_umap'].copy()
-    sc.pl.embedding(adata, basis='raw_umap', color=['final_annotation', 'batch'],
-                           ncols=1,show=False,save=".pdf")
-    plt.clf()
-    plt.close()
+
+    try:
+        sc.pl.embedding(adata, basis='raw_umap', color=['final_annotation', 'batch'],
+                               ncols=1,show=False,save=".pdf")
+        plt.clf()
+        plt.close()
+    except:
+        pass
+
     adata.write(filepath)
     return adata
 
@@ -219,9 +255,12 @@ def plot_latent_representation(adata: anndata.AnnData,filepath: str):
     sc.pp.neighbors(adata, use_rep='X_scvi', n_neighbors=15, metric='euclidean', method='umap')
     sc.tl.umap(adata)
     adata.obsm['X_scvi_umap'] = adata.obsm['X_umap'].copy()
-    sc.pl.embedding(adata, basis='scvi_umap',color=['final_annotation', 'batch'], ncols=1,show=False,save=".pdf")
-    plt.clf()
-    plt.close()
+    try:
+        sc.pl.embedding(adata, basis='scvi_umap',color=['final_annotation', 'batch'], ncols=1,show=False,save=".pdf")
+        plt.clf()
+        plt.close()
+    except:
+        pass
     adata.write(filepath)
     return adata
 
