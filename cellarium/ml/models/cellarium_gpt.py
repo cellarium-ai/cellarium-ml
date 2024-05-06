@@ -4,11 +4,13 @@
 import math
 import random
 from collections.abc import Callable, Sequence
+from functools import cached_property
 from typing import Any, Literal
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
+import tqdm
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
@@ -329,15 +331,16 @@ class GPTModel(nn.Module):
         self,
         ids_nc: torch.Tensor,
         values_nc: torch.Tensor,
-        labels_mask_c: torch.Tensor,
         prefix_len: int,
         attention_type: Literal["block", "block_diagonal", "full"],
     ) -> torch.Tensor:
         device = ids_nc.device
+        n_context = ids_nc.shape[1]
 
         id_tokens_ncd = self.id_embedding(ids_nc)
         value_tokens_ncd = self.value_embedding(torch.log1p(values_nc.float()).unsqueeze(-1))
         mask_token = self.mask_embedding(torch.tensor(0, device=device))
+        labels_mask_c = torch.arange(n_context, device=device) >= prefix_len
         value_tokens_ncd[:, labels_mask_c] = mask_token
 
         hidden_state_ncd = (id_tokens_ncd + value_tokens_ncd) * self.input_mult
@@ -467,6 +470,14 @@ class CellariumGPT(CellariumModel):
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.gpt_model.n_blocks)))
 
+    @cached_property
+    def token_to_id(self) -> dict[str, int]:
+        return {var_name: i + 1 for i, var_name in enumerate(self.var_names_g)}
+
+    @cached_property
+    def vectorized_token_to_id(self):
+        return np.vectorize(lambda x: self.token_to_id[x])
+
     def tokenize(
         self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None, context_size: int, shuffle: bool
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -503,7 +514,7 @@ class CellariumGPT(CellariumModel):
         labels_mask_c = torch.arange(self.n_context, device=device) >= prefix_len
 
         ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
-        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_c, prefix_len, "block_diagonal")
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, prefix_len, "block_diagonal")
         logits_ncg = self.head(hidden_state_ncd) * self.output_mult
 
         labels_mask_nc = labels_mask_c & (values_nc < self.max_count + 1)
@@ -526,64 +537,65 @@ class CellariumGPT(CellariumModel):
             "ids_nc": ids_nc,
         }
 
+    @torch.inference_mode()
     def predict(
         self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
+        prompt_name_ns: np.ndarray | None,
+        prompt_value_ns: torch.Tensor | None,
+        query_name_nq: np.ndarray,
         total_mrna_umis_n: torch.Tensor,
-        prefix_len_n: torch.Tensor | None,
-        shuffle: bool,
     ) -> dict[str, torch.Tensor]:
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+        device = total_mrna_umis_n.device
+        n = len(total_mrna_umis_n)
 
-        n = x_ng.shape[0]
-        device = x_ng.device
+        values_nc = total_mrna_umis_n[:, None]
+        ids_nc = torch.zeros((n, 1), dtype=torch.long, device=device)
 
-        # prefix includes the total_mrna_umis and a random subset of genes
-        # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
-        if prefix_len_n is None:
-            prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
-        labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
+        if prompt_name_ns is not None:
+            prompt_id_ns = torch.tensor(self.vectorized_token_to_id(prompt_name_ns), dtype=torch.long, device=device)
+            values_nc = torch.cat([values_nc, prompt_value_ns], dim=1)
+            ids_nc = torch.cat([ids_nc, prompt_id_ns], dim=1)
 
-        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=shuffle)
-        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
-        if self.head_type == "nb":
-            mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
+        prefix_len = values_nc.shape[1]
 
-            return {
-                "values_nc": values_nc,
-                "total_mrna_umis_n": total_mrna_umis_n,
-                "prefix_len_n": prefix_len_n,
-                "labels_mask_nc": labels_mask_nc,
-                "ids_nc": ids_nc,
-                "mu_nc": mu_nc,
-                "theta_nc": theta_nc,
-            }
+        query_id_nq = torch.tensor(self.vectorized_token_to_id(query_name_nq), dtype=torch.long, device=device)
+        values_nc = torch.cat([values_nc, torch.zeros_like(query_id_nq)], dim=1)
+        ids_nc = torch.cat([ids_nc, query_id_nq], dim=1)
+
+        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, prefix_len, "block_diagonal")
+        logits_ncp = self.head(hidden_state_ncd) * self.output_mult
+
+        return {
+            "logits_nqp": logits_ncp[:, prefix_len:],
+            "query_name_nq": query_name_nq,
+        }
+
+    @torch.inference_mode()
+    def generate(
+        self, var_names_ng: np.ndarray, total_mrna_umis_n: torch.Tensor, prompt_value_ns: torch.Tensor | None
+    ) -> dict[str, torch.Tensor]:
+        if prompt_value_ns is None:
+            prompt_len = 0
         else:
-            logits_ncg = self.head(hidden_state_ncd) * self.output_mult
+            prompt_len = prompt_value_ns.shape[1]
+        total_len = var_names_ng.shape[1]
 
-            return {
-                "values_nc": values_nc,
-                "total_mrna_umis_n": total_mrna_umis_n,
-                "prefix_len_n": prefix_len_n,
-                "labels_mask_nc": labels_mask_nc,
-                "logits_ncg": logits_ncg,
-                "ids_nc": ids_nc,
-            }
+        for i in tqdm.tqdm(range(prompt_len, total_len)):
+            if prompt_value_ns is None:
+                prompt_name_ns = None
+            else:
+                prompt_name_ns = var_names_ng[:, :i]
 
-        # labels_mask_nc = labels_mask_nc & (values_nc < 10_000)
-        # sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
-        # loss_fn = nn.CrossEntropyLoss(reduction="none")
-        # sample_weights = sample_weights_nc[labels_mask_nc]
-        # values_nc = values_nc.long()
-        # loss = (
-        #     loss_fn(logits_ncg[labels_mask_nc], values_nc[labels_mask_nc]) * sample_weights
-        # ).sum() / sample_weights.sum()
-        # nb_dist = NegativeBinomial(mu=mu_nc[labels_mask_nc], theta=theta_nc[labels_mask_nc])
-        # log_prob = nb_dist.log_prob(values_nc[labels_mask_nc])
-        # sample_weights = sample_weights_nc[labels_mask_nc]
-        # loss = -(log_prob * sample_weights).sum() / sample_weights.sum()
+            logits_n1p = self.predict(prompt_name_ns, prompt_value_ns, var_names_ng[:, i : i + 1], total_mrna_umis_n)[
+                "logits_nqp"
+            ]
+            probs_np = logits_n1p[:, 0].softmax(dim=-1)
+            value_n1 = torch.multinomial(probs_np, 1)
+            if prompt_value_ns is None:
+                prompt_value_ns = value_n1
+            else:
+                prompt_value_ns = torch.cat([prompt_value_ns, value_n1], dim=1)
+        return prompt_value_ns
 
     @torch.no_grad()
     def on_batch_end(
