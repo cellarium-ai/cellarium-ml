@@ -466,7 +466,6 @@ class CellariumGPT(CellariumModel):
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         total_mrna_umis_n: torch.Tensor,
-        prefix_len: int | None = None,
     ) -> dict[str, torch.Tensor]:
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
@@ -477,8 +476,7 @@ class CellariumGPT(CellariumModel):
 
         # prefix includes the total_mrna_umis and a random subset of genes
         # the length of the prefix is sampled uniformly from 1 to context_len - 1 (inclusive)
-        if prefix_len is None:
-            prefix_len = random.randint(1, self.context_len - 1)
+        prefix_len = random.randint(1, self.context_len - 1)
         hidden_state_ncd = self.transformer(token_id_nc, value_nc, prefix_len)
         logits_ncg = self.head(hidden_state_ncd) * self.output_mult
 
@@ -501,6 +499,16 @@ class CellariumGPT(CellariumModel):
             "sample_weight_nc": sample_weight_nc,
             "logits_ncg": logits_ncg,
         }
+
+    def validate(
+        self,
+        x_ng: torch.Tensor,
+        obs_names_n: np.ndarray,
+        var_names_g: np.ndarray,
+        total_mrna_umis_n: torch.Tensor,
+        pl_module: pl.LightningModule,
+    ) -> dict[str, torch.Tensor]:
+        pass
 
     @torch.no_grad()
     def on_batch_end(
