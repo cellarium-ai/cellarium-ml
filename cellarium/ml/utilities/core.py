@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import copy
+import math
 
 import torch
+
+from cellarium.ml.utilities.testing import assert_nonnegative, assert_positive
 
 
 def copy_module(
@@ -34,3 +37,64 @@ def copy_module(
         module.to(device=self_device)
         module_copy.to(device=copy_device)
     return module, module_copy
+
+
+def train_val_split(n_samples: int, train_size: float | int | None, val_size: float | int | None) -> tuple[int, int]:
+    """
+    Validate the train and validation sizes and return the number of samples for each.
+
+    Args:
+        n_samples:
+            The number of samples in the dataset.
+        train_size:
+            Size of the train split. If :class:`float`, should be between ``0.0`` and ``1.0`` and represent
+            the proportion of the dataset to include in the train split. If :class:`int`, represents
+            the absolute number of train samples. If ``None``, the value is automatically set to the complement
+            of the ``val_size``.
+        val_size:
+            Size of the validation split. If :class:`float`, should be between ``0.0`` and ``1.0`` and represent
+            the proportion of the dataset to include in the validation split. If :class:`int`, represents
+            the absolute number of validation samples. If ``None``, the value is set to the complement of
+            the ``train_size``. If ``train_size`` is also ``None``, it will be set to ``0``.
+
+    Returns:
+        A tuple of the number of samples for training and validation.
+    """
+    if train_size is None and val_size is None:
+        n_val = 0
+        n_train = n_samples
+
+    elif train_size is None:
+        if isinstance(val_size, int):
+            n_val = val_size
+        elif isinstance(val_size, float):
+            n_val = math.ceil(n_samples * val_size)
+        n_train = n_samples - n_val
+
+    elif val_size is None:
+        if isinstance(train_size, int):
+            n_train = train_size
+        elif isinstance(train_size, float):
+            n_train = math.ceil(n_samples * train_size)
+        n_val = n_samples - n_train
+
+    else:
+        if isinstance(train_size, int):
+            n_train = train_size
+        elif isinstance(train_size, float):
+            n_train = math.ceil(n_samples * train_size)
+
+        if isinstance(val_size, int):
+            n_val = val_size
+        elif isinstance(val_size, float):
+            n_val = math.ceil(n_samples * val_size)
+
+    assert_positive("n_train", n_train)
+    assert_nonnegative("n_val", n_val)
+    if n_train + n_val > n_samples:
+        raise ValueError(
+            f"Size of train and validation splits ({n_train + n_val}) is greater than "
+            f"the number of samples ({n_samples})"
+        )
+
+    return n_train, n_val

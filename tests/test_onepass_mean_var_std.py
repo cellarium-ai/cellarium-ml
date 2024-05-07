@@ -127,7 +127,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
         collate_fn=collate_fn,
     )
     # model
-    model = OnePassMeanVarStd(var_names_g=var_names_g)
+    model = OnePassMeanVarStd(var_names_g=var_names_g, algorithm=algorithm)
     module = CellariumModule(model=model)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
@@ -150,9 +150,12 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     assert ckpt_path.is_file()
     loaded_model: OnePassMeanVarStd = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
-    np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
+    np.testing.assert_allclose(model.mean_g, loaded_model.mean_g, atol=1e-6)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g, atol=1e-6)
+    if algorithm == "shifted_data":
+        assert model.x_shift is not None and loaded_model.x_shift is not None
+        np.testing.assert_allclose(model.x_shift, loaded_model.x_shift, atol=1e-6)
     assert model.algorithm == loaded_model.algorithm
 
 

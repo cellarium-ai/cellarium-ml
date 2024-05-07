@@ -7,6 +7,7 @@ import torch
 from anndata import AnnData
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 
@@ -59,6 +60,16 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
             the replicas.
+        train_size:
+            Size of the train split. If :class:`float`, should be between ``0.0`` and ``1.0`` and represent
+            the proportion of the dataset to include in the train split. If :class:`int`, represents
+            the absolute number of train samples. If ``None``, the value is automatically set to the complement
+            of the ``val_size``.
+        val_size:
+            Size of the validation split. If :class:`float`, should be between ``0.0`` and ``1.0`` and represent
+            the proportion of the dataset to include in the validation split. If :class:`int`, represents
+            the absolute number of validation samples. If ``None``, the value is set to the complement of
+            the ``train_size``. If ``train_size`` is also ``None``, it will be set to ``0``.
         test_mode:
             If ``True`` enables tracking of cache and worker informations.
         num_workers:
@@ -74,6 +85,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         shuffle: bool = False,
         seed: int = 0,
         drop_last: bool = False,
+        train_size: float | int | None = None,
+        val_size: float | int | None = None,
         test_mode: bool = False,
         # DataLoader args
         num_workers: int = 0,
@@ -90,6 +103,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.shuffle = shuffle
         self.seed = seed
         self.drop_last = drop_last
+        self.n_train, self.n_val = train_val_split(len(dadc), train_size, val_size)
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
@@ -99,42 +113,49 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         .. note::
            setup is called from every process across all the nodes. Setting state here is recommended.
 
+        .. note::
+            :attr:`val_dataset` is not shuffled.
+
         """
-        dadc_train = DistributedAnnDataCollection(
-            self.dadc.filenames[:-1],
-            limits=self.dadc.limits[:-1],
-            max_cache_size=self.dadc.max_cache_size,
-            obs_columns_to_validate=self.dadc.obs_columns_to_validate,
-        )
-        dadc_val = DistributedAnnDataCollection(
-            self.dadc.filenames[-1:],
-            limits=[10_000],
-            max_cache_size=self.dadc.max_cache_size,
-            obs_columns_to_validate=self.dadc.obs_columns_to_validate,
-        )
-        self.dataset_train = IterableDistributedAnnDataCollectionDataset(
-            dadc=dadc_train,
-            batch_keys=self.batch_keys,
-            batch_size=self.batch_size,
-            shuffle=self.shuffle,
-            seed=self.seed,
-            drop_last=self.drop_last,
-            test_mode=self.test_mode,
-        )
-        self.dataset_val = IterableDistributedAnnDataCollectionDataset(
-            dadc=dadc_val,
-            batch_keys=self.batch_keys,
-            batch_size=self.batch_size,
-            shuffle=False,
-            seed=self.seed,
-            drop_last=self.drop_last,
-            test_mode=self.test_mode,
-        )
+        if stage == "fit":
+            self.train_dataset = IterableDistributedAnnDataCollectionDataset(
+                dadc=self.dadc,
+                batch_keys=self.batch_keys,
+                batch_size=self.batch_size,
+                shuffle=self.shuffle,
+                seed=self.seed,
+                drop_last=self.drop_last,
+                test_mode=self.test_mode,
+                start_idx=0,
+                end_idx=self.n_train,
+            )
+            self.val_dataset = IterableDistributedAnnDataCollectionDataset(
+                dadc=self.dadc,
+                batch_keys=self.batch_keys,
+                batch_size=self.batch_size,
+                shuffle=False,
+                seed=self.seed,
+                drop_last=False,
+                test_mode=self.test_mode,
+                start_idx=self.n_train,
+                end_idx=self.n_train + self.n_val,
+            )
+
+        if stage == "predict":
+            self.predict_dataset = IterableDistributedAnnDataCollectionDataset(
+                dadc=self.dadc,
+                batch_keys=self.batch_keys,
+                batch_size=self.batch_size,
+                shuffle=self.shuffle,
+                seed=self.seed,
+                drop_last=self.drop_last,
+                test_mode=self.test_mode,
+            )
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         """Training dataloader."""
         return torch.utils.data.DataLoader(
-            self.dataset_train,
+            self.train_dataset,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
         )
@@ -142,7 +163,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
     def val_dataloader(self) -> torch.utils.data.DataLoader:
         """Validation dataloader."""
         return torch.utils.data.DataLoader(
-            self.dataset_val,
+            self.val_dataset,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
         )
@@ -150,7 +171,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
         """Prediction dataloader."""
         return torch.utils.data.DataLoader(
-            self.dataset_train,
+            self.predict_dataset,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
         )
