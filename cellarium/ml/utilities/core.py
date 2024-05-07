@@ -66,15 +66,21 @@ def train_val_split(n_samples: int, train_size: float | int | None, val_size: fl
 
     elif train_size is None:
         if isinstance(val_size, int):
+            assert_nonnegative("val_size", val_size)
             n_val = val_size
         elif isinstance(val_size, float):
+            if val_size < 0.0 or val_size >= 1.0:
+                raise ValueError(f"If validation size is a float it should be 0.0 <= val_size < 1.0. Got {val_size}")
             n_val = math.ceil(n_samples * val_size)
         n_train = n_samples - n_val
 
     elif val_size is None:
         if isinstance(train_size, int):
+            assert_positive("train_size", train_size)
             n_train = train_size
         elif isinstance(train_size, float):
+            if train_size <= 0.0 or train_size > 1.0:
+                raise ValueError(f"If train size is a float it should be 0.0 < train_size <= 1.0. Got {train_size}")
             n_train = math.ceil(n_samples * train_size)
         n_val = n_samples - n_train
 
@@ -89,8 +95,6 @@ def train_val_split(n_samples: int, train_size: float | int | None, val_size: fl
         elif isinstance(val_size, float):
             n_val = math.ceil(n_samples * val_size)
 
-    assert_positive("n_train", n_train)
-    assert_nonnegative("n_val", n_val)
     if n_train + n_val > n_samples:
         raise ValueError(
             f"Size of train and validation splits ({n_train + n_val}) is greater than "

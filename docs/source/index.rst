@@ -15,6 +15,7 @@ Table of Contents
    core
    data
    distributed
+   distributions
    lr_schedulers
    models
    transforms

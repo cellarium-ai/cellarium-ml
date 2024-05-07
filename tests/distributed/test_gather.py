@@ -1,3 +1,6 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
 import os
 
 import torch
@@ -23,14 +26,11 @@ def run(rank: int, world_size: int, return_dict: dict) -> None:
     #  |  /   \  |
     # loss_0   loss_1
 
-    # loss_0 = w_0 + w_1
-    # loss_1 = w_0 + w_1
-
-    # dloss/dw_0 = dloss_0/dw_0 + dloss_1/dw_0 = 2
-    # dloss/dw_1 = dloss_0/dw_1 + dloss_1/dw_1 = 2
-    w = torch.ones(1, requires_grad=True)  # w_rank
-    gathered_w = GatherLayer.apply(w)  # (w_0, w_1)
-    loss = gathered_w[0] + gathered_w[1]  # w_0 + w_1
+    # loss_rank = coeff[rank, 0] * w[0] + coeff[rank, 1] * w[1]
+    coeff = torch.tensor([[1, 2], [3, 4]])
+    w_rank = torch.ones(1, requires_grad=True)  # w_rank
+    w = GatherLayer.apply(w_rank)  # (w_0, w_1)
+    loss = coeff[rank, 0] * w[0] + coeff[rank, 1] * w[1]
     loss.backward()
     return_dict[rank] = w.grad
 
@@ -49,12 +49,15 @@ def test_gather_layer():
         p.join()
 
     # Single GPU
-    # loss = w + w
-    # dloss/dw = 2
-    w = torch.ones(1, requires_grad=True)
-    gathered_w = (w, w)
-    loss = gathered_w[0] + gathered_w[1]  # w + w
+    # loss = coeff[0, 0] * w[0] + coeff[0, 1] * w[1] + coeff[1, 0] * w[0] + coeff[1, 1] * w[1]
+    #        ---------------- rank 0 ---------------   ---------------- rank 1 ---------------
+    # dloss/dw[0] = coeff[0, 0] + coeff[1, 0]
+    # dloss/dw[1] = coeff[0, 1] + coeff[1, 1]
+    coeff = torch.tensor([[1, 2], [3, 4]])
+    w = torch.tensor([1.0, 1.0], requires_grad=True)
+    loss = (coeff[0] * w).sum() + (coeff[1] * w).sum()
     loss.backward()
 
-    for w_grad in return_dict.values():
-        assert w_grad == w.grad
+    for rank, w_grad in return_dict.items():
+        assert w.grad is not None
+        assert w_grad == w.grad[rank] == coeff[:, rank].sum()
