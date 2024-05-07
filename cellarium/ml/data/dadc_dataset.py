@@ -71,6 +71,11 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
             the replicas.
+        start_idx:
+            The starting index of the dataset. If ``None``, then the dataset will start from the first index.
+        end_idx:
+            The ending index (exclusive) of the dataset. If ``None``, then the dataset will end at
+            the last index (inclusive).
         test_mode:
             If ``True``, then tracking of cache and worker informations will be enabled.
     """
@@ -83,6 +88,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         shuffle: bool = False,
         seed: int = 0,
         drop_last: bool = False,
+        start_idx: int | None = None,
+        end_idx: int | None = None,
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
@@ -94,6 +101,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.shuffle = shuffle
         self.seed = seed
         self.drop_last = drop_last
+        self.start_idx = 0 if start_idx is None else start_idx
+        self.end_idx = dadc.n_obs if end_idx is None else end_idx
         self.epoch = 0
         self.test_mode = test_mode
 
@@ -103,12 +112,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
         _, num_replicas = get_rank_and_num_replicas()
 
-        if self.drop_last and len(self.dadc) % num_replicas != 0:
+        n_obs = self.end_idx - self.start_idx
+        if self.drop_last and n_obs % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data.
-            per_replica = len(self.dadc) // num_replicas
+            per_replica = n_obs // num_replicas
         else:
-            per_replica = math.ceil(len(self.dadc) / num_replicas)
+            per_replica = math.ceil(n_obs / num_replicas)
         return math.ceil(per_replica / float(self.batch_size))
 
     def set_epoch(self, epoch: int) -> None:
@@ -327,7 +337,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         if self.shuffle:
             rng = torch.Generator()
             rng.manual_seed(self.seed + self.epoch)
-            iter_limits = list(zip([0] + self.dadc.limits, self.dadc.limits))
+            limits = [idx for idx in self.dadc.limits if idx > self.start_idx and idx < self.end_idx]
+            iter_limits = list(zip([self.start_idx] + limits, limits + [self.end_idx]))
             # shuffle shards
             limit_indices = torch.randperm(len(iter_limits), generator=rng).tolist()
             indices = []
@@ -336,7 +347,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 # shuffle cells within shards
                 indices.extend((torch.randperm(upper - lower, generator=rng) + lower).tolist())
         else:
-            indices = list(range(len(self.dadc)))
+            indices = list(range(self.start_idx, self.end_idx))
 
         if not self.drop_last:
             # add extra samples to make it evenly divisible
