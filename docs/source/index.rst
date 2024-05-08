@@ -24,6 +24,12 @@ Table of Contents
 
 .. toctree::
    :maxdepth: 1
+   :caption: Examples
+
+   examples/cli_workflow
+
+.. toctree::
+   :maxdepth: 1
    :caption: Tutorials
 
    tutorials/mup_mlp
