@@ -16,40 +16,6 @@ from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDataset
 
 
-@pytest.mark.parametrize("backend", ["keops", "torch", "math"])
-@pytest.mark.parametrize("attention_type", ["block", "block_diagonal", "full"])
-def test_scaled_dot_product_attention(backend, attention_type):
-    batch_size = 2
-    query_len = 3
-    seq_len = 4
-    dim = 5
-    queries_nqd = torch.rand(batch_size, query_len, dim)
-    keys_nsd = torch.rand(batch_size, seq_len, dim)
-    values_nsv = torch.rand(batch_size, seq_len, dim)
-    prefix_len_n = torch.tensor([2, 1])
-    if attention_type == "block":
-        block_mask_nqs = torch.arange(seq_len).expand([query_len, seq_len]) < prefix_len_n[:, None, None]
-        attention_mask_nqs = block_mask_nqs
-    elif attention_type == "block_diagonal":
-        block_mask_nqs = torch.arange(seq_len).expand([query_len, seq_len]) < prefix_len_n[:, None, None]
-        diag_mask_qs = torch.arange(query_len)[:, None] == torch.arange(seq_len)
-        attention_mask_nqs = block_mask_nqs | diag_mask_qs
-    elif attention_type == "full":
-        attention_mask_nqs = None
-
-    attn = ScaledDotProductAttention(dropout=0, attn_mult=math.sqrt(dim), backend=backend)
-    actual = attn(queries_nqd, keys_nsd, values_nsv, prefix_len_n, attention_type)
-    expected = torch.nn.functional.scaled_dot_product_attention(
-        queries_nqd.unsqueeze(0),
-        keys_nsd.unsqueeze(0),
-        values_nsv.unsqueeze(0),
-        attention_mask_nqs,
-        scale=1 / math.sqrt(dim),
-    ).squeeze(0)
-    assert actual.size() == (batch_size, query_len, dim)
-    assert torch.allclose(actual, expected, atol=1e-6)
-
-
 def test_load_from_checkpoint_multi_device(tmp_path: Path) -> None:
     n, g = 4, 3
     var_names = [f"gene_{i}" for i in range(g)]

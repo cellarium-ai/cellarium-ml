@@ -95,6 +95,6 @@ class CellariumPipeline(torch.nn.ModuleList):
         # allow all keys to be passed to the predict method
         if "kwargs" in ann:
             input_keys |= batch.keys()
-        batch |= model.validate(**{key: batch[key] for key in input_keys})
+        model.validate(**{key: batch[key] for key in input_keys})
 
         return batch

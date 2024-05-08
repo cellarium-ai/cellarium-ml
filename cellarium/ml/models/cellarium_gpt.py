@@ -3,6 +3,7 @@
 
 import math
 import random
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
@@ -376,8 +377,8 @@ class CellariumGPT(CellariumModel):
         initializer_range: float = 0.02,
         attn_backend: Literal["math", "flash", "mem_efficient"] = "mem_efficient",
         log_metrics: bool = True,
-        log_plots: bool = True,
-        log_plots_every_n_steps_multiplier: int = 10,
+        # log_plots: bool = True,
+        # log_plots_every_n_steps_multiplier: int = 10,
     ) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -408,8 +409,8 @@ class CellariumGPT(CellariumModel):
         self.reset_parameters()
 
         self.log_metrics = log_metrics
-        self.log_plots = log_plots
-        self.log_plots_every_n_steps_multiplier = log_plots_every_n_steps_multiplier
+        # self.log_plots = log_plots
+        # self.log_plots_every_n_steps_multiplier = log_plots_every_n_steps_multiplier
 
     def reset_parameters(self) -> None:
         self.apply(self._init_weights)
@@ -495,20 +496,86 @@ class CellariumGPT(CellariumModel):
             "value_nc": value_nc,
             "total_mrna_umis_n": total_mrna_umis_n,
             "prefix_len": prefix_len,
-            "label_mask_nc": label_mask_nc,
             "sample_weight_nc": sample_weight_nc,
             "logits_ncg": logits_ncg,
         }
 
     def validate(
         self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
         x_ng: torch.Tensor,
         obs_names_n: np.ndarray,
         var_names_g: np.ndarray,
         total_mrna_umis_n: torch.Tensor,
-        pl_module: pl.LightningModule,
+        batch_idx: int,
     ) -> dict[str, torch.Tensor]:
-        pass
+        device = x_ng.device
+        n = x_ng.shape[0]
+        ndx = torch.arange(n, device=device)
+
+        loss = self(x_ng, var_names_g, total_mrna_umis_n)["loss"]
+        pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
+
+        losses = defaultdict(dict)
+        suffix_len = 100
+        n_seeds = 3
+        prefix_lens = [1, 50, 500, 1000, 2000, 4000, 8000]
+        for i in range(n_seeds):
+            rng_n = [torch.Generator(device=device) for _ in range(x_ng.shape[0])]
+            [rng.manual_seed(int(obs_name) + i) for rng, obs_name in zip(rng_n, obs_names_n)]
+            index_ng = torch.stack([torch.randperm(x_ng.shape[1], generator=rng, device=device) for rng in rng_n])
+
+            for prefix_len in prefix_lens:
+                context_len = prefix_len + suffix_len
+                token_id_nc = torch.cat(
+                    [
+                        torch.zeros((n, 1), dtype=torch.long, device=device),
+                        index_ng[:, : prefix_len - 1] + 1,
+                        index_ng[:, -suffix_len:] + 1,
+                    ],
+                    dim=1,
+                )
+                value_nc = torch.cat(
+                    [
+                        total_mrna_umis_n[:, None],
+                        x_ng[ndx[:, None], index_ng[:, : prefix_len - 1]],
+                        x_ng[ndx[:, None], index_ng[:, -suffix_len:]],
+                    ],
+                    dim=1,
+                )
+
+                logits = []
+                for token_id, value in zip(torch.split(token_id_nc, 25), torch.split(value_nc, 25)):
+                    hidden_state = self.transformer(token_id, value, prefix_len)
+                    logits.append(self.head(hidden_state) * self.output_mult)
+                logits_ncg = torch.cat(logits, dim=0)
+
+                label_mask_c = torch.arange(context_len, device=device) >= prefix_len
+                label_mask_nc = label_mask_c & (value_nc < self.max_value + 1)
+                sample_weight_nc = 1 / label_mask_nc.sum(dim=1, keepdim=True).expand(-1, context_len)
+                loss_fn = nn.CrossEntropyLoss(reduction="none")
+                sample_weights = sample_weight_nc[label_mask_nc]
+                value_nc = value_nc.long()
+                loss = (
+                    loss_fn(logits_ncg[label_mask_nc], value_nc[label_mask_nc]) * sample_weights
+                ).sum() / sample_weights.sum()
+                losses[prefix_len][i] = loss
+
+                if trainer.global_rank == batch_idx == i == 0:
+                    self._log_plots(
+                        trainer,
+                        value_nc[:, prefix_len:],
+                        logits_ncg[:, prefix_len:],
+                        total_mrna_umis_n,
+                        prefix_len,
+                    )
+
+        loss_dict = {}
+        for prefix_len in prefix_lens:
+            loss = torch.mean(torch.stack([losses[prefix_len][i] for i in range(n_seeds)], dim=0))
+            loss_dict[f"val_loss_prefix_{prefix_len}"] = loss
+        pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
 
     @torch.no_grad()
     def on_batch_end(
@@ -527,24 +594,23 @@ class CellariumGPT(CellariumModel):
 
         self._log_metrics(pl_module, outputs)
 
-        if not self.log_plots:
-            return
+        # if not self.log_plots:
+        #     return
 
-        if trainer.global_rank != 0:
-            return
+        # if trainer.global_rank != 0:
+        #     return
 
-        if (trainer.global_step + 1) % (trainer.log_every_n_steps * self.log_plots_every_n_steps_multiplier) != 0:  # type: ignore[attr-defined]
-            return
+        # if (trainer.global_step + 1) % (trainer.log_every_n_steps * self.log_plots_every_n_steps_multiplier) != 0:  # type: ignore[attr-defined]
+        #     return
 
-        self._log_plots(trainer, outputs)
+        # self._log_plots(trainer, outputs)
 
     def _log_metrics(self, pl_module: pl.LightningModule, outputs: dict[str, torch.Tensor]) -> None:
         value_nc = outputs["value_nc"]
-        label_mask_nc = outputs["label_mask_nc"]
         sample_weight_nc = outputs["sample_weight_nc"]
         logits_ncg = outputs["logits_ncg"]
-        nonzero_mask = (value_nc > 0) & label_mask_nc
-        zero_mask = (value_nc == 0) & label_mask_nc
+        nonzero_mask = (value_nc > 0) & (value_nc < self.max_value + 1)
+        zero_mask = value_nc == 0
 
         nonzero_log_prob = nn.functional.cross_entropy(
             logits_ncg[nonzero_mask], value_nc[nonzero_mask], reduction="none"
@@ -559,68 +625,47 @@ class CellariumGPT(CellariumModel):
         pl_module.log("zero_loss", zero_loss, sync_dist=True)
         pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
 
-    def _log_plots(self, trainer: pl.Trainer, outputs: dict[str, torch.Tensor]):
+    def _log_plots(
+        self,
+        trainer: pl.Trainer,
+        value_nq: torch.Tensor,
+        logits_nqg: torch.Tensor,
+        total_mrna_umis_n: torch.Tensor,
+        prefix_len: int,
+    ) -> None:
         import matplotlib.pyplot as plt
 
-        value_nc = outputs["value_nc"]
-        total_mrna_umis_n = outputs["total_mrna_umis_n"]
-        prefix_len = outputs["prefix_len"]
-        label_mask_nc = outputs["label_mask_nc"]
-        logits_ncg = outputs["logits_ncg"]
-        nonzero_mask = (value_nc > 0) & label_mask_nc
-        zero_mask = (value_nc == 0) & label_mask_nc
+        nonzero_mask_nq = (value_nq > 0) & (value_nq < self.max_value + 1)
+        zero_mask_nq = value_nq == 0
+        q = value_nq.shape[1]
 
-        prefix_len_nc = torch.full(value_nc.shape, prefix_len, device=value_nc.device)
-        total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, self.context_len)
+        total_mrna_umis_nq = total_mrna_umis_n[:, None].expand(-1, q)
 
-        fig = plt.figure(figsize=(12, 15))
-        nonzero_indices = random.sample(range(int(nonzero_mask.sum().item())), 24)
+        fig = plt.figure(figsize=(12, 8))
 
-        for idx, i in enumerate(nonzero_indices):
-            plt.subplot(8, 4, idx + 1)
-            prefix = prefix_len_nc[nonzero_mask][i].item()
-            label = value_nc[nonzero_mask][i].item()
-            logits = logits_ncg[nonzero_mask][i].cpu()
-            n_umis = total_mrna_umis_nc[nonzero_mask][i].item()
+        for i in range(12):
+            plt.subplot(3, 4, i + 1)
+            if i < 8:
+                label = value_nq[nonzero_mask_nq][i].item()
+                logits = logits_nqg[nonzero_mask_nq][i].cpu()
+                total_mrna_umis = total_mrna_umis_nq[nonzero_mask_nq][i].item()
+            else:
+                label = value_nq[zero_mask_nq][i].item()
+                logits = logits_nqg[zero_mask_nq][i].cpu()
+                total_mrna_umis = total_mrna_umis_nq[zero_mask_nq][i].item()
 
-            x = torch.arange(0, min(label * 3 + 5, self.max_count + 1))
+            x = torch.arange(0, min(label * 3 + 5, self.max_value + 1))
             y = logits.softmax(dim=-1)[: len(x)]
             plt.plot(x, y, "o")
             plt.vlines(label, 0, y[label], color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
+            plt.title(f"total UMIs={total_mrna_umis}, x={label}")
 
         plt.tight_layout()
 
         for logger in trainer.loggers:
             if isinstance(logger, pl.loggers.TensorBoardLogger):
                 logger.experiment.add_figure(
-                    "nonzero predictions",
+                    f"val_pred_prefix_{prefix_len}",
                     fig,
-                    global_step=trainer.global_step,
-                )
-
-        zero_fig = plt.figure(figsize=(12, 15))
-        zero_indices = random.sample(range(int(zero_mask.sum().item())), 24)
-
-        for idx, i in enumerate(zero_indices):
-            plt.subplot(8, 4, idx + 1)
-            prefix = prefix_len_nc[zero_mask][i].item()
-            label = value_nc[zero_mask][i].item()
-            logits = logits_ncg[zero_mask][i].cpu()
-            n_umis = total_mrna_umis_nc[zero_mask][i].item()
-
-            x = torch.arange(0, min(label * 3 + 5, self.max_count + 1))
-            y = logits.softmax(dim=-1)[: len(x)]
-            plt.plot(x, y, "o")
-            plt.vlines(label, 0, y[label], color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
-
-        plt.tight_layout()
-
-        for logger in trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                logger.experiment.add_figure(
-                    "zero predictions",
-                    zero_fig,
                     global_step=trainer.global_step,
                 )
