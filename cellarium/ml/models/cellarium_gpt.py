@@ -498,6 +498,7 @@ class CellariumGPT(CellariumModel):
             "prefix_len": prefix_len,
             "sample_weight_nc": sample_weight_nc,
             "logits_ncg": logits_ncg,
+            "label_mask_nc": label_mask_nc,
         }
 
     def validate(
@@ -609,8 +610,9 @@ class CellariumGPT(CellariumModel):
         value_nc = outputs["value_nc"]
         sample_weight_nc = outputs["sample_weight_nc"]
         logits_ncg = outputs["logits_ncg"]
-        nonzero_mask = (value_nc > 0) & (value_nc < self.max_value + 1)
-        zero_mask = value_nc == 0
+        label_mask_nc = outputs["label_mask_nc"]
+        nonzero_mask = (value_nc > 0) & label_mask_nc
+        zero_mask = (value_nc == 0) & label_mask_nc
 
         nonzero_log_prob = nn.functional.cross_entropy(
             logits_ncg[nonzero_mask], value_nc[nonzero_mask], reduction="none"
