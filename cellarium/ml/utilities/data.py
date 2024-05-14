@@ -146,13 +146,13 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
         if not all(keys == data.keys() for data in batch[1:]):
             raise ValueError("All dictionaries in the batch must have the same keys.")
     for key in keys:
-        if key == "obs_names":
+        if key == "obs_names_n":
             collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
-        elif key in ["var_names", "var_names_g"]:
-            # Check that all var_names are the same
+        elif key == "var_names_g":
+            # Check that all var_names_g are the same
             if len(batch) > 1:
                 if not all(np.array_equal(batch[0][key], data[key]) for data in batch[1:]):
-                    raise ValueError("All dictionaries in the batch must have the same var_names.")
+                    raise ValueError("All dictionaries in the batch must have the same var_names_g.")
             # If so, just take the first one
             collated_batch[key] = batch[0][key]
         else:

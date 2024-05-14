@@ -4,7 +4,7 @@
 import numpy as np
 import torch
 
-from cellarium.ml.models import PredictMixin
+from cellarium.ml.models import PredictMixin, ValidateMixin
 
 
 class CellariumPipeline(torch.nn.ModuleList):
@@ -74,3 +74,25 @@ class CellariumPipeline(torch.nn.ModuleList):
         batch |= model.predict(**{key: batch[key] for key in input_keys})
 
         return batch
+
+    def validate(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        model = self[-1]
+        if not isinstance(model, ValidateMixin):
+            raise TypeError(f"The last module in the pipeline must be an instance of {ValidateMixin}. Got {model}")
+
+        for module in self[:-1]:
+            # get the module input keys
+            ann = module.forward.__annotations__
+            input_keys = {key for key in ann if key != "return" and key in batch}
+            # allow all keys to be passed to the module
+            if "kwargs" in ann:
+                input_keys |= batch.keys()
+            batch |= module(**{key: batch[key] for key in input_keys})
+
+        # get the model validate input keys
+        ann = model.validate.__annotations__
+        input_keys = {key for key in ann if key != "return" and key in batch}
+        # allow all keys to be passed to the predict method
+        if "kwargs" in ann:
+            input_keys |= batch.keys()
+        model.validate(**{key: batch[key] for key in input_keys})
