@@ -359,7 +359,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
-        indices = indices[rank * per_replica : (rank + 1) * per_replica]
+        # indices = indices[rank * per_replica : (rank + 1) * per_replica]
+        indices = indices[rank:total_size:num_replicas]
         if len(indices) != per_replica:
             raise ValueError(
                 f"The number of indices must be equal to the per_replica size. "

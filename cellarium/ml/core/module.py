@@ -121,8 +121,8 @@ class CellariumModule(pl.LightningModule):
         return self.pipeline[:-1]
 
     def training_step(  # type: ignore[override]
-        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
-    ) -> dict[str, np.ndarray | torch.Tensor] | None:
+        self, batch: dict[str, np.ndarray | torch.Tensor | int], batch_idx: int
+    ) -> torch.Tensor | None:
         """
         Forward pass for training step.
 
@@ -133,22 +133,20 @@ class CellariumModule(pl.LightningModule):
                 The index of the batch.
 
         Returns:
-            Output dictionary containing the loss value or ``None`` if no loss is returned.
+            Loss tensor or ``None`` if no loss.
         """
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
+        batch["batch_idx"] = batch_idx
         output = self.pipeline(batch)
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
             self.log("train_loss", loss, sync_dist=True)
-            return output
-        return None
+        return loss
 
-    def validation_step(
-        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
-    ) -> dict[str, np.ndarray | torch.Tensor]:
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
         """
         Forward pass for validation step.
 
@@ -157,7 +155,7 @@ class CellariumModule(pl.LightningModule):
             batch_idx: The index of the batch.
 
         Returns:
-            A dictionary containing the batch data and validation outputs.
+            ``None``
         """
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
@@ -248,4 +246,4 @@ class CellariumModule(pl.LightningModule):
         """
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
-            on_batch_end(self.trainer, self, outputs, batch, batch_idx)
+            on_batch_end(self.trainer)

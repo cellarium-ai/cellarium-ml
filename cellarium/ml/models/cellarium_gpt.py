@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-import random
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from typing import Any, Literal
+from functools import cached_property
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -111,7 +111,7 @@ class MultiHeadAttention(nn.Module):
         query_ncd: torch.Tensor,
         key_ncd: torch.Tensor,
         value_ncd: torch.Tensor,
-        prefix_len: int | None,
+        prefix_len: int,
     ) -> torch.Tensor:
         device = query_ncd.device
         c = query_ncd.shape[1]
@@ -342,8 +342,10 @@ class CellariumGPT(CellariumModel):
             Dropout probability.
         use_bias:
             Whether to use bias in the linear transformations.
-        context_len:
-            Length of the context.
+        max_prefix_len:
+            Maximum length of the prefix. Must be greater than or equal to 1.
+        min_suffix_len:
+            Minimum length of the suffix. Must be greater than or equal to 1.
         max_value:
             Maximum count value (inclusive).
         attn_mult:
@@ -356,8 +358,6 @@ class CellariumGPT(CellariumModel):
             The standard deviation of the truncated normal initializer.
         backend:
             Backend for the attention computation.
-        log_metrics:
-            Whether to log the zero and nonzero losses and predictions.
     """
 
     def __init__(
@@ -369,26 +369,40 @@ class CellariumGPT(CellariumModel):
         n_blocks: int = 4,
         dropout_p: float = 0.0,
         use_bias: bool = False,
-        context_len: int = 2048,
+        max_prefix_len: int = 1000,
+        suffix_len: int | None = None,
+        context_len: int | None = None,
         max_value: int = 1000,
         attn_mult: float = 6.0,
         input_mult: float = 1.0,
         output_mult: float = 1.0,
         initializer_range: float = 0.02,
         attn_backend: Literal["math", "flash", "mem_efficient"] = "mem_efficient",
-        log_metrics: bool = True,
-        # log_plots: bool = True,
-        # log_plots_every_n_steps_multiplier: int = 10,
     ) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.n_vars = len(var_names_g)
         self.max_value = max_value
-        if context_len > self.n_vars + 1:
-            raise ValueError(
-                "`context_len` must be less than or equal to the number of genes + 1. "
-                f"Got {context_len} > {self.n_vars + 1}."
-            )
+        if (suffix_len is None) == (context_len is None):
+            raise ValueError("Either `suffix_len` or `context_len` must be specified, but not both.")
+        if context_len is not None:
+            if context_len > self.n_vars + 1:
+                raise ValueError(
+                    "`context_len` must be less than or equal to the number of genes + 1. "
+                    f"Got {context_len} > {self.n_vars + 1}."
+                )
+            if max_prefix_len >= context_len:
+                raise ValueError(
+                    "`max_prefix_len` must be less than `context_len`. Got {max_prefix_len} >= {context_len}."
+                )
+        if suffix_len is not None:
+            if max_prefix_len + suffix_len > self.n_vars + 1:
+                raise ValueError(
+                    "`max_prefix_len + suffix_len` must be less than or equal to the number of genes + 1. "
+                    f"Got {max_prefix_len + suffix_len} > {self.n_vars + 1}."
+                )
+        self.max_prefix_len = max_prefix_len
+        self.suffix_len = suffix_len
         self.context_len = context_len
         self.output_mult = output_mult
 
@@ -408,9 +422,7 @@ class CellariumGPT(CellariumModel):
         self.initializer_range = initializer_range
         self.reset_parameters()
 
-        self.log_metrics = log_metrics
-        # self.log_plots = log_plots
-        # self.log_plots_every_n_steps_multiplier = log_plots_every_n_steps_multiplier
+        # self.log_metrics = log_metrics
 
     def reset_parameters(self) -> None:
         self.apply(self._init_weights)
@@ -444,8 +456,16 @@ class CellariumGPT(CellariumModel):
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.transformer.n_blocks)))
 
+    @cached_property
+    def token_to_id(self) -> dict[str, int]:
+        return {var_name: i + 1 for i, var_name in enumerate(self.var_names_g)}
+
+    @cached_property
+    def vectorized_token_to_id(self):
+        return np.vectorize(lambda x: self.token_to_id[x])
+
     def tokenize(
-        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor, shuffle: bool
+        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor, shuffle: bool, context_len: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
         n = x_ng.shape[0]
         device = x_ng.device
@@ -453,13 +473,13 @@ class CellariumGPT(CellariumModel):
 
         if shuffle:
             index_ng = torch.argsort(torch.rand_like(x_ng))
-            index_nc = index_ng[:, : self.context_len - 1]
+            index_nc = index_ng[:, : context_len - 1]
         else:
-            index_nc = torch.arange(self.context_len, device=device).expand(n, -1)
+            index_nc = torch.arange(context_len - 1, device=device).expand(n, -1)
 
         # add total_mrna_umis to the prefix
         token_id_nc = torch.cat([torch.zeros((n, 1), dtype=torch.long, device=device), index_nc + 1], dim=1)
-        value_nc = torch.cat([total_mrna_umis_n[:, None], x_ng[ndx[:, None], index_nc]], dim=1)
+        value_nc = torch.cat([total_mrna_umis_n[:, None], x_ng[ndx[:, None], index_nc]], dim=1).long()
         return token_id_nc, value_nc
 
     def forward(
@@ -467,39 +487,40 @@ class CellariumGPT(CellariumModel):
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         total_mrna_umis_n: torch.Tensor,
+        batch_idx: int,
     ) -> dict[str, torch.Tensor]:
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         device = x_ng.device
 
-        token_id_nc, value_nc = self.tokenize(x_ng, total_mrna_umis_n, shuffle=True)
-
+        # use the same prefix_len for all samples in the mini-batch across all devices
+        rng = torch.Generator(device=device)
+        rng.manual_seed(batch_idx)
         # prefix includes the total_mrna_umis and a random subset of genes
         # the length of the prefix is sampled uniformly from 1 to context_len - 1 (inclusive)
-        prefix_len = random.randint(1, self.context_len - 1)
+        prefix_len = int(torch.randint(1, self.max_prefix_len + 1, (), generator=rng, device=device))
+        if self.context_len is not None:
+            # use the fixed context length
+            context_len = self.context_len
+        elif self.suffix_len is not None:
+            # compute the context length dynamically based on the prefix length
+            context_len = prefix_len + self.suffix_len
+        token_id_nc, value_nc = self.tokenize(x_ng, total_mrna_umis_n, shuffle=True, context_len=context_len)
+
         hidden_state_ncd = self.transformer(token_id_nc, value_nc, prefix_len)
         logits_ncg = self.head(hidden_state_ncd) * self.output_mult
 
-        label_mask_c = torch.arange(self.context_len, device=device) >= prefix_len
+        label_mask_c = torch.arange(context_len, device=device) >= prefix_len
         label_mask_nc = label_mask_c & (value_nc < self.max_value + 1)
-        sample_weight_nc = 1 / label_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.context_len)
+        sample_weight_nc = 1 / label_mask_nc.sum(dim=1, keepdim=True).expand(-1, context_len)
         loss_fn = nn.CrossEntropyLoss(reduction="none")
         sample_weights = sample_weight_nc[label_mask_nc]
-        value_nc = value_nc.long()
         loss = (
             loss_fn(logits_ncg[label_mask_nc], value_nc[label_mask_nc]) * sample_weights
         ).sum() / sample_weights.sum()
 
-        return {
-            "loss": loss,
-            "value_nc": value_nc,
-            "total_mrna_umis_n": total_mrna_umis_n,
-            "prefix_len": prefix_len,
-            "sample_weight_nc": sample_weight_nc,
-            "logits_ncg": logits_ncg,
-            "label_mask_nc": label_mask_nc,
-        }
+        return {"loss": loss}
 
     def validate(
         self,
@@ -510,15 +531,15 @@ class CellariumGPT(CellariumModel):
         var_names_g: np.ndarray,
         total_mrna_umis_n: torch.Tensor,
         batch_idx: int,
-    ) -> dict[str, torch.Tensor]:
+    ) -> None:
         device = x_ng.device
         n = x_ng.shape[0]
         ndx = torch.arange(n, device=device)
 
-        loss = self(x_ng, var_names_g, total_mrna_umis_n)["loss"]
+        loss = self.forward(x_ng, var_names_g, total_mrna_umis_n, batch_idx=batch_idx)["loss"]
         pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
 
-        losses = defaultdict(dict)
+        losses: dict[int, dict[int, torch.Tensor]] = defaultdict(dict)
         suffix_len = 100
         n_seeds = 3
         prefix_lens = [1, 50, 500, 1000, 2000, 4000, 8000]
@@ -578,54 +599,90 @@ class CellariumGPT(CellariumModel):
             loss_dict[f"val_loss_prefix_{prefix_len}"] = loss
         pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
 
-    @torch.no_grad()
-    def on_batch_end(
+    @torch.inference_mode()
+    def predict(
         self,
-        trainer: pl.Trainer,
-        pl_module: pl.LightningModule,
-        outputs: dict[str, torch.Tensor],
-        batch: Any,
-        batch_idx: int,
-    ) -> None:
-        if not self.log_metrics:
-            return
+        prompt_name_ns: np.ndarray | None,
+        prompt_value_ns: torch.Tensor | None,
+        query_name_nq: np.ndarray,
+        total_mrna_umis_n: torch.Tensor,
+    ) -> dict[str, np.ndarray | torch.Tensor]:
+        device = total_mrna_umis_n.device
+        n = len(total_mrna_umis_n)
 
-        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
-            return
+        values_nc = total_mrna_umis_n[:, None]
+        ids_nc = torch.zeros((n, 1), dtype=torch.long, device=device)
 
-        self._log_metrics(pl_module, outputs)
+        if prompt_name_ns is not None and prompt_value_ns is not None:
+            prompt_id_ns = torch.tensor(self.vectorized_token_to_id(prompt_name_ns), dtype=torch.long, device=device)
+            values_nc = torch.cat([values_nc, prompt_value_ns], dim=1)
+            ids_nc = torch.cat([ids_nc, prompt_id_ns], dim=1)
 
-        # if not self.log_plots:
-        #     return
+        prefix_len = values_nc.shape[1]
 
-        # if trainer.global_rank != 0:
-        #     return
+        query_id_nq = torch.tensor(self.vectorized_token_to_id(query_name_nq), dtype=torch.long, device=device)
+        values_nc = torch.cat([values_nc, torch.zeros_like(query_id_nq)], dim=1)
+        ids_nc = torch.cat([ids_nc, query_id_nq], dim=1)
 
-        # if (trainer.global_step + 1) % (trainer.log_every_n_steps * self.log_plots_every_n_steps_multiplier) != 0:  # type: ignore[attr-defined]
-        #     return
+        hidden_state_ncd = self.transformer(ids_nc, values_nc, prefix_len)
+        logits_ncp = self.head(hidden_state_ncd) * self.output_mult
 
-        # self._log_plots(trainer, outputs)
+        return {
+            "logits_nqp": logits_ncp[:, prefix_len:],
+            "query_name_nq": query_name_nq,
+        }
 
-    def _log_metrics(self, pl_module: pl.LightningModule, outputs: dict[str, torch.Tensor]) -> None:
-        value_nc = outputs["value_nc"]
-        sample_weight_nc = outputs["sample_weight_nc"]
-        logits_ncg = outputs["logits_ncg"]
-        label_mask_nc = outputs["label_mask_nc"]
-        nonzero_mask = (value_nc > 0) & label_mask_nc
-        zero_mask = (value_nc == 0) & label_mask_nc
+    # def log_prob(self, var_names_ng: np.ndarray, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
+    #     prompt_value_ns = None
+    #     log_probs = []
+    #     ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
 
-        nonzero_log_prob = nn.functional.cross_entropy(
-            logits_ncg[nonzero_mask], value_nc[nonzero_mask], reduction="none"
-        )
-        nonzero_sample_weights = sample_weight_nc[nonzero_mask]
-        nonzero_loss = (nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
+    #     for i in tqdm.tqdm(range(var_names_ng.shape[1])):
+    #         if prompt_value_ns is None:
+    #             prompt_name_ns = None
+    #         else:
+    #             prompt_name_ns = var_names_ng[:, :i]
 
-        zero_log_prob = nn.functional.cross_entropy(logits_ncg[zero_mask], value_nc[zero_mask], reduction="none")
-        zero_sample_weights = sample_weight_nc[zero_mask]
-        zero_loss = (zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
+    #         logits_n1p: torch.Tensor = self.predict(
+    #             prompt_name_ns, prompt_value_ns, var_names_ng[:, i : i + 1], total_mrna_umis_n
+    #         )["logits_nqp"]
+    #         logits_n1p = logits_n1p - logits_n1p.logsumexp(dim=-1, keepdim=True)
+    #         value_n1 = x_ng[:, i : i + 1]
+    #         log_prob_n1 = logits_n1p[ndx[:, None], 0, value_n1.long()]
+    #         log_probs.append(log_prob_n1)
+    #         if prompt_value_ns is None:
+    #             prompt_value_ns = value_n1
+    #         else:
+    #             prompt_value_ns = torch.cat([prompt_value_ns, value_n1], dim=1)
 
-        pl_module.log("zero_loss", zero_loss, sync_dist=True)
-        pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
+    #     return torch.cat(log_probs, dim=1)
+
+    # @torch.inference_mode()
+    # def sample(
+    #     self, var_names_ng: np.ndarray, total_mrna_umis_n: torch.Tensor, prompt_value_ns: torch.Tensor | None
+    # ) -> dict[str, torch.Tensor]:
+    #     if prompt_value_ns is None:
+    #         prompt_len = 0
+    #     else:
+    #         prompt_len = prompt_value_ns.shape[1]
+    #     total_len = var_names_ng.shape[1]
+
+    #     for i in tqdm.tqdm(range(prompt_len, total_len)):
+    #         if prompt_value_ns is None:
+    #             prompt_name_ns = None
+    #         else:
+    #             prompt_name_ns = var_names_ng[:, :i]
+
+    #         logits_n1p = self.predict(prompt_name_ns, prompt_value_ns, var_names_ng[:, i : i + 1], total_mrna_umis_n)[
+    #             "logits_nqp"
+    #         ]
+    #         probs_np = logits_n1p[:, 0].softmax(dim=-1)
+    #         value_n1 = torch.multinomial(probs_np, 1)
+    #         if prompt_value_ns is None:
+    #             prompt_value_ns = value_n1
+    #         else:
+    #             prompt_value_ns = torch.cat([prompt_value_ns, value_n1], dim=1)
+    #     return prompt_value_ns
 
     def _log_plots(
         self,
@@ -659,6 +716,7 @@ class CellariumGPT(CellariumModel):
             x = torch.arange(0, min(label * 3 + 5, self.max_value + 1))
             y = logits.softmax(dim=-1)[: len(x)]
             plt.plot(x, y, "o")
+            assert isinstance(label, int)
             plt.vlines(label, 0, y[label], color="r")
             plt.title(f"total UMIs={total_mrna_umis}, x={label}")
 
