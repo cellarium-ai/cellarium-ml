@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -42,19 +43,27 @@ def dadc(tmp_path: Path, request: pytest.FixtureRequest):
     dadc = DistributedAnnDataCollection(
         filenames,
         limits,
-        max_cache_size=2,
+        max_cache_size=3,
         cache_size_strictly_enforced=True,
     )
     return dadc
 
 
+@pytest.mark.parametrize("iteration_strategy", ["same_order", "cache_efficient"])
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
 @pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
 @pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
-def test_iterable_dataset(dadc: DistributedAnnDataCollection, shuffle: bool, num_workers: int, batch_size: int):
+def test_iterable_dataset(
+    dadc: DistributedAnnDataCollection,
+    iteration_strategy: Literal["same_order", "cache_efficient"],
+    shuffle: bool,
+    num_workers: int,
+    batch_size: int,
+):
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
+        iteration_strategy=iteration_strategy,
         batch_keys={"x_ng": AnnDataField("X")},
         batch_size=batch_size,
         shuffle=shuffle,
@@ -66,31 +75,37 @@ def test_iterable_dataset(dadc: DistributedAnnDataCollection, shuffle: bool, num
         collate_fn=collate_fn,
     )
 
-    miss_counts = list(int(i) for batch in data_loader for i in batch["miss_count"])
+    miss_counts = list(int(batch["miss_count"]) for batch in data_loader for _ in batch["x_ng"])
+    actual_idx = list(int(i) for batch in data_loader for i in batch["x_ng"])
 
     if num_workers > 1:
-        worker_ids = list(int(i) for batch in data_loader for i in batch["worker_id"])
+        worker_ids = list(int(batch["worker_id"]) for batch in data_loader for _ in batch["x_ng"])
+        adatas_oidx = np.searchsorted([0] + dadc.limits, actual_idx, side="right")
         for worker in range(num_workers):
             miss_count = max(c for c, w in zip(miss_counts, worker_ids) if w == worker)
-            assert miss_count == math.ceil(len(dadc.limits) / num_workers)
+            assert miss_count == len(set([o for o, w in zip(adatas_oidx, worker_ids) if w == worker]))
     else:
         miss_count = max(miss_counts)
         assert miss_count == len(dadc.limits)
 
-    actual_idx = list(int(i) for batch in data_loader for i in batch["x_ng"])
     expected_idx = list(range(n_obs))
 
     # assert entire dataset is sampled
-    assert len(expected_idx) == len(actual_idx)
-    assert set(expected_idx) == set(actual_idx)
+    if not shuffle and iteration_strategy == "same_order":
+        assert expected_idx == actual_idx
+    else:
+        assert len(expected_idx) == len(actual_idx)
+        assert set(expected_idx) == set(actual_idx)
 
 
+@pytest.mark.parametrize("iteration_strategy", ["same_order", "cache_efficient"])
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
 @pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
 @pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
 @pytest.mark.parametrize("drop_last", [False, True], ids=["no drop last", "drop last"])
 def test_iterable_dataset_multi_device(
     dadc: DistributedAnnDataCollection,
+    iteration_strategy: Literal["same_order", "cache_efficient"],
     shuffle: bool,
     num_workers: int,
     batch_size: int,
@@ -100,6 +115,7 @@ def test_iterable_dataset_multi_device(
     n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
+        iteration_strategy=iteration_strategy,
         batch_keys={"x_ng": AnnDataField("X")},
         batch_size=batch_size,
         shuffle=shuffle,
