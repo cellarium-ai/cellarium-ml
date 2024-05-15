@@ -267,7 +267,7 @@ CONFIGS = [
                         "convert_fn": "cellarium.ml.utilities.data.densify",
                     },
                     "var_names_g": {"attr": "var_names"},
-                    "obs_names": {"attr": "obs_names"},
+                    "obs_names_n": {"attr": "obs_names"},
                     "total_mrna_umis_n": {
                         "attr": "obs",
                         "key": "total_mrna_umis",
