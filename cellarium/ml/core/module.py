@@ -138,7 +138,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        batch["batch_idx"] = batch_idx
+        # batch["batch_idx"] = batch_idx
         output = self.pipeline(batch)
         loss = output.get("loss")
         if loss is not None:

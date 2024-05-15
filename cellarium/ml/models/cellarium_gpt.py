@@ -487,7 +487,7 @@ class CellariumGPT(CellariumModel):
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         total_mrna_umis_n: torch.Tensor,
-        batch_idx: int,
+        batch_idx: int | None = None,
     ) -> dict[str, torch.Tensor]:
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
@@ -495,11 +495,14 @@ class CellariumGPT(CellariumModel):
         device = x_ng.device
 
         # use the same prefix_len for all samples in the mini-batch across all devices
-        rng = torch.Generator(device=device)
-        rng.manual_seed(batch_idx)
-        # prefix includes the total_mrna_umis and a random subset of genes
-        # the length of the prefix is sampled uniformly from 1 to context_len - 1 (inclusive)
-        prefix_len = int(torch.randint(1, self.max_prefix_len + 1, (), generator=rng, device=device))
+        if batch_idx is not None:
+            rng = torch.Generator(device=device)
+            rng.manual_seed(batch_idx)
+            # prefix includes the total_mrna_umis and a random subset of genes
+            # the length of the prefix is sampled uniformly from 1 to context_len - 1 (inclusive)
+            prefix_len = int(torch.randint(1, self.max_prefix_len + 1, (), generator=rng, device=device))
+        else:
+            prefix_len = int(torch.randint(1, self.max_prefix_len + 1, (), device=device))
         if self.context_len is not None:
             # use the fixed context length
             context_len = self.context_len
