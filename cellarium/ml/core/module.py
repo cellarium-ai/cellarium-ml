@@ -160,6 +160,24 @@ class CellariumModule(pl.LightningModule):
 
         return self.pipeline.predict(batch)
 
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
+        """
+        Forward pass for validation step.
+
+        Args:
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
+
+        Returns:
+            None
+        """
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        self.pipeline.validate(batch)
+
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
         """Configure optimizers for the model."""
         optim_fn = self.hparams["optim_fn"]
