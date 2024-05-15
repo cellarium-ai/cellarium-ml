@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from cellarium.ml.models import PredictMixin, ValidateMixin
+from cellarium.ml.utilities.core import call_func_with_batch
 
 
 class CellariumPipeline(torch.nn.ModuleList):
@@ -34,65 +35,27 @@ class CellariumPipeline(torch.nn.ModuleList):
     """
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
-        from cellarium.ml import CellariumModule
-
         for module in self:
-            if isinstance(module, CellariumModule):
-                # in case module is a CellariumModule, e.g. PCA checkpoint is used as a transform
-                batch |= module(batch)
-            else:
-                # get the module input keys
-                ann = module.forward.__annotations__
-                input_keys = {key for key in ann if key != "return" and key in batch}
-                # allow all keys to be passed to the module
-                if "kwargs" in ann:
-                    input_keys |= batch.keys()
-                batch |= module(**{key: batch[key] for key in input_keys})
+            batch |= call_func_with_batch(module.forward, batch)
 
         return batch
 
     def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
+        for module in self[:-1]:
+            batch |= call_func_with_batch(module.forward, batch)
+
         model = self[-1]
         if not isinstance(model, PredictMixin):
             raise TypeError(f"The last module in the pipeline must be an instance of {PredictMixin}. Got {model}")
-
-        for module in self[:-1]:
-            # get the module input keys
-            ann = module.forward.__annotations__
-            input_keys = {key for key in ann if key != "return" and key in batch}
-            # allow all keys to be passed to the module
-            if "kwargs" in ann:
-                input_keys |= batch.keys()
-            batch |= module(**{key: batch[key] for key in input_keys})
-
-        # get the model predict input keys
-        ann = model.predict.__annotations__
-        input_keys = {key for key in ann if key != "return" and key in batch}
-        # allow all keys to be passed to the predict method
-        if "kwargs" in ann:
-            input_keys |= batch.keys()
-        batch |= model.predict(**{key: batch[key] for key in input_keys})
+        batch |= call_func_with_batch(model.predict, batch)
 
         return batch
 
     def validate(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        for module in self[:-1]:
+            batch |= call_func_with_batch(module.forward, batch)
+
         model = self[-1]
         if not isinstance(model, ValidateMixin):
             raise TypeError(f"The last module in the pipeline must be an instance of {ValidateMixin}. Got {model}")
-
-        for module in self[:-1]:
-            # get the module input keys
-            ann = module.forward.__annotations__
-            input_keys = {key for key in ann if key != "return" and key in batch}
-            # allow all keys to be passed to the module
-            if "kwargs" in ann:
-                input_keys |= batch.keys()
-            batch |= module(**{key: batch[key] for key in input_keys})
-
-        # get the model validate input keys
-        ann = model.validate.__annotations__
-        input_keys = {key for key in ann if key != "return" and key in batch}
-        # allow all keys to be passed to the predict method
-        if "kwargs" in ann:
-            input_keys |= batch.keys()
-        model.validate(**{key: batch[key] for key in input_keys})
+        call_func_with_batch(model.validate, batch)
