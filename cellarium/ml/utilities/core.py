@@ -3,6 +3,8 @@
 
 import copy
 import math
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -102,3 +104,33 @@ def train_val_split(n_samples: int, train_size: float | int | None, val_size: fl
         )
 
     return n_train, n_val
+
+
+def call_func_with_batch(
+    func: Callable,
+    batch: dict[str, Any],
+) -> Any:
+    """
+    Call a function with a batch dictionary. If the function is a method of a :class:`CellariumModule`, the function
+    is called with the batch dictionary as its only argument. Otherwise, the function is called with the keys from
+    the batch dictionary that are present in its annotations. If the function has a ``kwargs`` annotation, all keys from
+    the batch dictionary are passed to the function.
+
+    Args:
+        func:
+            The function to call.
+        batch:
+            The batch dictionary.
+    """
+    from cellarium.ml import CellariumModule
+
+    if isinstance(getattr(func, "__self__", None), CellariumModule):
+        # in case module is a CellariumModule, e.g. PCA checkpoint is used as a transform
+        return func(batch)
+
+    ann = func.__annotations__
+    input_keys = {key for key in ann if key != "return" and key in batch}
+    # allow all keys to be passed to the function
+    if "kwargs" in ann:
+        input_keys |= batch.keys()
+    return func(**{key: batch[key] for key in input_keys})

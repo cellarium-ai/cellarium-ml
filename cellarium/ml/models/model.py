@@ -77,3 +77,15 @@ class PredictMixin(metaclass=ABCMeta):
         """
         Perform prediction.
         """
+
+
+class ValidateMixin(metaclass=ABCMeta):
+    """
+    Abstract mixin class for models that can perform validation.
+    """
+
+    @abstractmethod
+    def validate(self, *args: Any, **kwargs: Any) -> None:
+        """
+        Perform validation.
+        """
