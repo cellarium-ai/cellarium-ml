@@ -64,6 +64,7 @@ def gpt_predict(
     return adata_out
 
 
+@torch.no_grad()
 def create_perturbed_dataset(
     adata, 
     n_perturbations: int, 
@@ -94,43 +95,46 @@ def create_perturbed_dataset(
     
     assert len(adata) == 1, "Only one cell allowed in adata for create_perturbed_dataset"
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     adata_perturbed = anndata.concat([adata for _ in range(n_perturbations)], axis=0, merge="same", index_unique="-pert")
     adata_perturbed.layers["measured"] = adata_perturbed.X.copy()
     if sp.issparse(adata_perturbed.X):
         counts_ng = adata_perturbed.X.toarray()
     else:
         counts_ng = adata_perturbed.X
-    counts_ng = torch.from_numpy(counts_ng)
+    counts_ng = torch.from_numpy(counts_ng).to(device)
     torch.manual_seed(seed)
 
     if cell_perturbations_coherent:
         # all genes in a cell go the same way, by the same amount, i.e. epsilon_ng = epsilon_n
-        epsilon_ng = torch.randn(counts_ng.shape[0], 1).expand(-1, counts_ng.shape[1])
+        epsilon_ng = torch.randn(counts_ng.shape[0], 1, device=device).expand(-1, counts_ng.shape[1])
     else:
-        epsilon_ng = torch.randn(counts_ng.shape)
+        epsilon_ng = torch.randn(counts_ng.shape, device=device)
 
     epsilon_ng_sign = epsilon_ng.sign()
     
     if square_epsilon:
         epsilon_ng = epsilon_ng.square()
 
-    scale_per_gene_g = torch.from_numpy(scale_per_gene_g)
+    scale_per_gene_g = torch.from_numpy(scale_per_gene_g).to(device).squeeze()
 
     # define the perturbation
+    assert (scale_per_gene_g > 0).all(), "automatically-compute gene scales are negative: do you have raw counts in adata.X ?"
     perturbation_ng = epsilon_ng_sign * torch.distributions.Poisson(
-        perturbation_scale * epsilon_ng.abs() * scale_per_gene_g.unsqueeze(0)
+        perturbation_scale * (epsilon_ng.abs() + 1e-10) * scale_per_gene_g.unsqueeze(0)
     ).sample()
 
     # restrict the perturbation to genes specified
     if len(genes_to_perturb) > 0:
-        genes_to_perturb = torch.tensor(genes_to_perturb).long()
-        unperturbed_genes_g = torch.zeros(counts_ng.shape[1]).scatter_(0, genes_to_perturb, 1).bool().logical_not()
+        genes_to_perturb = torch.tensor(genes_to_perturb, device=device).long()
+        unperturbed_genes_g = torch.zeros(counts_ng.shape[1], device=device).scatter_(0, genes_to_perturb, 1).bool().logical_not()
         perturbation_ng[:, unperturbed_genes_g] = 0.0
 
     # apply the perturbation
     perturbed_counts_ng = torch.clamp(counts_ng + perturbation_ng, min=0.0).squeeze()
 
-    adata_perturbed.X = sp.csr_matrix(perturbed_counts_ng.numpy())
+    adata_perturbed.X = sp.csr_matrix(perturbed_counts_ng.cpu().numpy())
     assert adata_perturbed.X.min() >= 0, "Negative counts in the perturbed dataset"
     adata_perturbed.layers["perturbed"] = adata_perturbed.X.copy()
 
@@ -414,7 +418,7 @@ def snap_noised_data_to_manifold_and_analyze(
         layer='perturbed',
         key_added='perturbed_gpt',
     )
-    adata_perturbed_set_out.layers['measured_gpt'] = np.tile(measured_gpt, (len(adata_perturbed_set_out), 1))
+    adata_perturbed_set_out.layers['measured_gpt'] = sp.vstack([measured_gpt] * len(adata_perturbed_set_out))
 
     # do PCA and ICA
     adata_perturbed_set_out = analyze_lfc(
@@ -433,6 +437,7 @@ def noise_prompt_gene_set(
     n_perturbations: int = 1000, 
     perturbation_scale: float = 1.0,
     var_key_include_genes: str = 'gpt_include',
+    var_gene_names: str = 'gene_name',
     seed: int = 0,
     **analyze_kwargs,
 ):
@@ -447,6 +452,7 @@ def noise_prompt_gene_set(
         n_perturbations: number of perturbations to perform
         perturbation_scale: scale of the perturbation
         var_key_include_genes: key in adata.var to use for gene inclusion
+        var_gene_names: key in adata.var to use for gene names
         seed: random seed
         **analyze_kwargs: keyword arguments for analyze_lfc, such as n_pcs and n_ics
 
@@ -458,10 +464,12 @@ def noise_prompt_gene_set(
     assert len(adata) == 1, 'only give one cell to noise_prompt_gene_set'
     assert var_key_include_genes in adata.var.keys(), \
         f'var_key_include_genes "{var_key_include_genes}" must be in adata.var.keys()'
+    assert var_gene_names in adata.var.keys(), \
+        f'var_gene_names "{var_gene_names}" must be in adata.var.keys()'
 
     # limit gene set to genes going through gpt
     highly_expressed_gene_inds = torch.tensor(np.where(adata.var[var_key_include_genes])[0]).long()
-    highly_expressed_gene_names_set = set(adata.var_names[adata.var[var_key_include_genes]])
+    highly_expressed_gene_names_set = set(adata.var[var_gene_names].values[adata.var[var_key_include_genes]])
     gene_set = [g for g in gene_set if g in highly_expressed_gene_names_set]
 
     if len(gene_set) * fraction_of_set_to_perturb < 1:
@@ -564,6 +572,7 @@ def noise_prompt_gene_set_collection(
     msigdb: GeneSetRecords,
     collection: str = 'C5:GO:BP',
     fraction_of_set_to_perturb: float = 0.5, 
+    n_random_splits: int = 3,
     n_perturbations: int = 1000, 
     perturbation_scale: float = 1.0,
     min_gene_set_length: int = 10,
@@ -587,6 +596,7 @@ def noise_prompt_gene_set_collection(
         msigdb: GeneSetRecords object
         collection: name of the gene set collection
         fraction_of_set_to_perturb: fraction of gene set to perturb
+        n_random_splits: number of times to choose perturbed genes from the set
         n_perturbations: number of perturbations to perform
         perturbation_scale: scale of the perturbation
         min_gene_set_length: minimum gene set length
@@ -606,6 +616,8 @@ def noise_prompt_gene_set_collection(
         f'var_key_include_genes "{var_key_include_genes}" must be in adata.var.keys()'
     assert var_gene_names in adata.var.keys(), \
         f'var_gene_names "{var_gene_names}" must be in adata.var.keys()'
+
+    np.random.seed(seed)
     
     # append some fake sets for testing purposes
     control_collection_name = 'random_controls'
@@ -648,56 +660,62 @@ def noise_prompt_gene_set_collection(
             gene_set = msigdb.get_gene_set_dict().get(gene_set_name, [])
             gene_set = [g for g in gene_set if g in highly_expressed_gene_names_set]
 
-            # perturb a fraction of the genes in the set
-            out = noise_prompt_gene_set(
-                adata,
-                pipeline=pipeline,
-                gene_set=gene_set,
-                fraction_of_set_to_perturb=fraction_of_set_to_perturb,
-                n_perturbations=n_perturbations,
-                perturbation_scale=perturbation_scale,
-                var_key_include_genes=var_key_include_genes,
-                seed=seed,
-                **analyze_kwargs,
-            )
-            pc_var_ratios = out['adata'].uns['pca']['variance_ratio']
+            for i in range(n_random_splits):
 
-            # get the loadings of genes on different PCs and compute set enrichment
-            for pc_number in range(n_pcs_in_output):
-                df = get_pc_loadings(out['adata'], pc_number=pc_number)
-
-                rank_statistic = 'gene_loading'
-
-                # compute a p-value for the perturbed genes in the set
-                gsea_perturbed_stats = silent(gsea)(
-                    df=df, 
-                    gene_group=out['genes_perturbed'], 
-                    gene_name_key='gene_name', 
-                    value_key=rank_statistic,
-                    n_perm=gsea_n_perm,
-                    seed=seed,
+                # perturb a fraction of the genes in the set
+                out = noise_prompt_gene_set(
+                    adata,
+                    pipeline=pipeline,
+                    gene_set=gene_set,
+                    fraction_of_set_to_perturb=fraction_of_set_to_perturb,
+                    n_perturbations=n_perturbations,
+                    perturbation_scale=perturbation_scale,
+                    var_key_include_genes=var_key_include_genes,
+                    var_gene_names=var_gene_names,
+                    seed=i,
+                    **analyze_kwargs,
                 )
+                pc_var_ratios = out['adata'].uns['pca']['variance_ratio']
 
-                # compute a p-value for the unperturbed genes in the set
-                gsea_not_perturbed_stats = silent(gsea)(
-                    df=df, 
-                    gene_group=out['genes_not_perturbed'], 
-                    gene_name_key='gene_name', 
-                    value_key=rank_statistic,
-                    n_perm=gsea_n_perm,
-                    seed=seed,
-                )
+                # get the loadings of genes on different PCs and compute set enrichment
+                for pc_number in range(n_pcs_in_output):
+                    df = get_pc_loadings(out['adata'], pc_number=pc_number)
 
-                # add to lists
-                gene_set_names.append(gene_set_name)
-                pval_perturbed.append(gsea_perturbed_stats['pval'])
-                es_perturbed.append(gsea_perturbed_stats['es'])
-                pval_unperturbed.append(gsea_not_perturbed_stats['pval'])
-                es_unperturbed.append(gsea_not_perturbed_stats['pval'])
-                pc.append(pc_number)
-                pc_frac_var.append(pc_var_ratios[pc_number])
-                genes_perturbed_list.append(out['genes_perturbed'])
-                genes_unperturbed_list.append(out['genes_not_perturbed'])
+                    rank_statistic = 'gene_loading'
+
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+
+                        # compute a p-value for the perturbed genes in the set
+                        gsea_perturbed_stats = silent(gsea)(
+                            df=df, 
+                            gene_group=out['genes_perturbed'], 
+                            gene_name_key='gene_name', 
+                            value_key=rank_statistic,
+                            n_perm=gsea_n_perm,
+                            seed=seed,
+                        )
+
+                        # compute a p-value for the unperturbed genes in the set
+                        gsea_not_perturbed_stats = silent(gsea)(
+                            df=df, 
+                            gene_group=out['genes_not_perturbed'], 
+                            gene_name_key='gene_name', 
+                            value_key=rank_statistic,
+                            n_perm=gsea_n_perm,
+                            seed=seed,
+                        )
+
+                    # add to lists
+                    gene_set_names.append(gene_set_name)
+                    pval_perturbed.append(gsea_perturbed_stats['pval'])
+                    es_perturbed.append(gsea_perturbed_stats['es'])
+                    pval_unperturbed.append(gsea_not_perturbed_stats['pval'])
+                    es_unperturbed.append(gsea_not_perturbed_stats['es'])
+                    pc.append(pc_number)
+                    pc_frac_var.append(pc_var_ratios[pc_number])
+                    genes_perturbed_list.append(out['genes_perturbed'])
+                    genes_unperturbed_list.append(out['genes_not_perturbed'])
 
     except KeyboardInterrupt:
         pass

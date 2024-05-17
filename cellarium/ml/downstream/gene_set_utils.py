@@ -19,6 +19,10 @@ class GeneSetRecords:
         self.df = load_gene_set_json(file)
         self._reindex()
 
+    def __repr__(self) -> str:
+        collection_names = "\n\t".join(self.get_collections())
+        return f'GeneSetRecords with {len(self.df)} gene sets from the collections\n\t{collection_names}'
+
     def _reindex(self):
 
         # gene set name: set of genes
