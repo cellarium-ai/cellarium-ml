@@ -8,6 +8,7 @@ version 1.0
 
 task run_noise_prompting {
     input {
+        String trained_model_ckpt = "gs://dsp-cell-annotation-service/cellarium/trained_models/cerebras/lightning_logs/version_0/checkpoints/epoch=2-step=83250.ckpt"
         String h5ad_file
         String cell_type_name
         String msigdb_json_file
@@ -61,7 +62,7 @@ task run_noise_prompting {
             cd /cromwell_root
         fi
 
-        pip install tqdm scikit-learn gseapy
+        pip install tqdm scikit-learn gseapy scanpy
 
         python <<CODE
 
@@ -75,7 +76,10 @@ task run_noise_prompting {
         print(torch.cuda.is_available())
 
         # pretrained model
-        pipeline = get_pretrained_model_as_pipeline(device="cuda" if torch.cuda.is_available() else "cpu")
+        pipeline = get_pretrained_model_as_pipeline(
+            trained_model="~{trained_model_ckpt}",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
         print(f"pipeline is on device: {pipeline.device}")
 
         # data
