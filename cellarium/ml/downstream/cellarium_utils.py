@@ -11,6 +11,7 @@ import numpy as np
 import scipy.sparse as sp
 import os
 import tempfile
+from google.cloud import storage
 
 
 def get_pretrained_model_as_pipeline(
@@ -21,10 +22,14 @@ def get_pretrained_model_as_pipeline(
 
     # download the trained model
     with tempfile.TemporaryDirectory() as tmpdir:
-
-        # download file
         tmp_file = os.path.join(tmpdir, 'model.ckpt')
-        os.system(f"gsutil cp {trained_model} {tmp_file}")
+
+        client = storage.Client()
+        bucket_name = trained_model.split("/")[2]
+        blob_name = "/".join(trained_model.split("/")[3:])
+        bucket = client.get_bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.download_to_filename(tmp_file)
 
         # load the model
         model = CellariumModule.load_from_checkpoint(tmp_file).model
