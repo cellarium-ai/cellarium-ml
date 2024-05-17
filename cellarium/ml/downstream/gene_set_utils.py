@@ -75,6 +75,10 @@ class GeneSetRecords:
         )
         self._reindex()
 
+    def remove_gene_sets(self, gene_set_names: list[str]) -> None:
+        self.df = self.df.drop(gene_set_names)
+        self._reindex()
+    
     def remove_gene_sets_from_collection(self, gene_set_names: list[str], collection: str) -> None:
         collection_df = self.df[self.df['collection'] == collection]
         collection_df = collection_df.drop(gene_set_names)
