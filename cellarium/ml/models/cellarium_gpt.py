@@ -317,8 +317,13 @@ class Transformer(nn.Module):
         value_embedding_ncd[:, prefix_len:] = mask_embedding_d
 
         hidden_state_ncd = (token_embedding_ncd + value_embedding_ncd) * self.input_mult
-        for block in self.blocks:
-            hidden_state_ncd = block(hidden_state_ncd, prefix_len)
+        suffix_state_ncd = hidden_state_ncd[:, prefix_len:]
+        prefix_state_ncd = hidden_state_ncd[:, :prefix_len]
+        for i, block in enumerate(self.blocks):
+            if i == self.n_blocks - 1:
+                hidden_state_ncd = block(torch.cat([prefix_state_ncd, suffix_state_ncd], dim=1), prefix_len)
+            else:
+                prefix_state_ncd = block(prefix_state_ncd, prefix_len)
 
         return hidden_state_ncd
 
