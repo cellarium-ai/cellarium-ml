@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -323,7 +323,7 @@ class Transformer(nn.Module):
         return hidden_state_ncd
 
 
-class CellariumGPT(CellariumModel):
+class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     """
     Cellarium GPT model.
 
