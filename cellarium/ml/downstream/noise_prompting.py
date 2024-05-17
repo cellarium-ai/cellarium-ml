@@ -98,7 +98,8 @@ def create_perturbed_dataset(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    adata_perturbed = anndata.concat([adata for _ in range(n_perturbations)], axis=0, merge="same", index_unique="-pert")
+    adata_perturbed = anndata.concat([adata for _ in range(n_perturbations)], 
+                                     axis=0, merge="same", index_unique="-pert", uns_merge="first")
     adata_perturbed.layers["measured"] = adata_perturbed.X.copy()
     if sp.issparse(adata_perturbed.X):
         counts_ng = adata_perturbed.X.toarray()
@@ -385,6 +386,7 @@ def snap_noised_data_to_manifold_and_analyze(
     adata_perturbed: anndata.AnnData,
     pipeline: CellariumPipeline,
     highly_expressed_gene_inds: torch.LongTensor,
+    measured_gpt_uns_key: str = 'measured_gpt',
     **analyze_kwargs,
 ):
     """
@@ -401,15 +403,13 @@ def snap_noised_data_to_manifold_and_analyze(
         AnnData object with PCA and ICA components stored in adata_out.varm
     """
 
-    # put the measured dataset through the pipeline
-    adata_measured_cell_out = silent(gpt_predict)(
-        adata_perturbed[0],  # only need one cell because all cells are the same
-        pipeline=pipeline, 
-        gene_inds=highly_expressed_gene_inds,
-        layer='measured',  # in the "measured" layer
-        key_added='measured_gpt',
-    )
-    measured_gpt = adata_measured_cell_out.layers['measured_gpt'].copy()
+    assert measured_gpt_uns_key in adata_perturbed.uns.keys(), \
+        f'measured_gpt_uns_key "{measured_gpt_uns_key}" must be precomputed in adata_perturbed.uns.keys(), try:\n' \
+        """\tadata.uns['measured_gpt'] = snap_measured_data_to_manifold(
+            adata=adata, 
+            pipeline=pipeline, 
+            highly_expressed_gene_inds=highly_expressed_gene_inds,
+        )"""
 
     # put the perturbed dataset through the pipeline
     adata_perturbed_set_out = silent(gpt_predict)(
@@ -419,7 +419,7 @@ def snap_noised_data_to_manifold_and_analyze(
         layer='perturbed',
         key_added='perturbed_gpt',
     )
-    adata_perturbed_set_out.layers['measured_gpt'] = sp.vstack([measured_gpt] * len(adata_perturbed_set_out))
+    adata_perturbed_set_out.layers['measured_gpt'] = sp.vstack([adata_perturbed.uns['measured_gpt']] * len(adata_perturbed_set_out))
 
     # do PCA and ICA
     adata_perturbed_set_out = analyze_lfc(
@@ -428,6 +428,37 @@ def snap_noised_data_to_manifold_and_analyze(
         **analyze_kwargs,
     )
     return adata_perturbed_set_out
+
+
+def snap_measured_data_to_manifold(
+    adata: anndata.AnnData,
+    pipeline: CellariumPipeline,
+    highly_expressed_gene_inds: torch.LongTensor,
+) -> sp.csr_matrix:
+    """
+    Snap the measured data to the GPT manifold.
+
+    Args:
+        adata: AnnData object with a single cell
+        pipeline: CellariumPipeline object
+        highly_expressed_gene_inds: indices of highly expressed genes
+
+    Returns:
+        sparse matrix with predicted on-manifold expression (floats)
+    """
+
+    assert len(adata) == 1, 'only give one cell to snap_measured_data_to_manifold'
+    assert 'measured' in adata.layers.keys(), '"measured" must be in adata.layers'
+
+    # put the measured dataset through the pipeline
+    adata_out = silent(gpt_predict)(
+        adata,
+        pipeline=pipeline, 
+        gene_inds=highly_expressed_gene_inds,
+        layer='measured',
+        key_added='measured_gpt',
+    )
+    return adata_out.layers['measured_gpt']
 
 
 def noise_prompt_gene_set(
@@ -543,6 +574,14 @@ def noise_prompt_random(
 
     # limit gene set to genes going through gpt
     highly_expressed_gene_inds = torch.tensor(np.where(adata.var[var_key_include_genes])[0]).long()
+    adata.layers['measured'] = adata.X.copy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adata.uns['measured_gpt'] = snap_measured_data_to_manifold(
+            adata=adata, 
+            pipeline=pipeline, 
+            highly_expressed_gene_inds=highly_expressed_gene_inds,
+        )
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -583,6 +622,7 @@ def noise_prompt_gene_set_collection(
     var_gene_names: str = 'gene_name',
     gsea_n_perm: int = 1000,
     seed: int = 0,
+    add_random_controls: bool = True,
     save_intermediates_to_tmp_file: str | None = None,
     **analyze_kwargs,
 ):
@@ -608,6 +648,7 @@ def noise_prompt_gene_set_collection(
         var_gene_names: key in adata.var with gene names
         gsea_n_perm: number of permutations for GSEA p-value computation
         seed: random seed
+        add_random_controls: True to add random control gene sets
         save_intermediates_to_tmp_file: path to save intermediate results, and resume from checkpoint
         **analyze_kwargs: keyword arguments for analyze_lfc, such as n_pcs and n_ics
 
@@ -623,15 +664,16 @@ def noise_prompt_gene_set_collection(
     np.random.seed(seed)
     
     # append some fake sets for testing purposes
-    control_collection_name = 'random_controls'
-    if control_collection_name not in msigdb.get_collections():
-        append_random_control_collection(
-            msigdb=msigdb, 
-            gene_names=adata.var[var_gene_names].values[adata.var[var_key_include_genes]],
-            sizes=[10, 50, 100],
-            repeats=10,
-            collection_name=control_collection_name,
-        )
+    if add_random_controls:
+        control_collection_name = 'random_controls'
+        if control_collection_name not in msigdb.get_collections():
+            append_random_control_collection(
+                msigdb=msigdb, 
+                gene_names=adata.var[var_gene_names].values[adata.var[var_key_include_genes]],
+                sizes=[10, 50, 100],
+                repeats=10,
+                collection_name=control_collection_name,
+            )
 
     # keep track of results in a list of dataframes
     dfs = []
@@ -643,7 +685,12 @@ def noise_prompt_gene_set_collection(
 
     # figure out up front which sets will be included based on cutoffs
     highly_expressed_gene_names_set = set(adata.var[var_gene_names][adata.var[var_key_include_genes]].values)
-    all_gene_set_names = msigdb.get_gene_set_names(control_collection_name) + msigdb.get_gene_set_names(collection)
+
+    if add_random_controls:
+        all_gene_set_names = msigdb.get_gene_set_names(control_collection_name) + msigdb.get_gene_set_names(collection)
+    else:
+        all_gene_set_names = msigdb.get_gene_set_names(collection)
+
     all_gene_set_names = [s for s in all_gene_set_names if s not in gene_sets_completed]
     subset_gene_set_names = []
     for gene_set_name in all_gene_set_names:
@@ -651,6 +698,17 @@ def noise_prompt_gene_set_collection(
         gene_set = [g for g in gene_set if g in highly_expressed_gene_names_set]
         if (len(gene_set) >= min_gene_set_length) and (len(gene_set) <= max_gene_set_length):
             subset_gene_set_names.append(gene_set_name)
+
+    # compute the measured data snapped to manifold one time
+    highly_expressed_gene_inds = torch.tensor(np.where(adata.var[var_key_include_genes])[0]).long()
+    adata.layers['measured'] = adata.X.copy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        adata.uns['measured_gpt'] = snap_measured_data_to_manifold(
+            adata=adata, 
+            pipeline=pipeline, 
+            highly_expressed_gene_inds=highly_expressed_gene_inds,
+        )
 
     # allow keyboard interrupts
     try:
