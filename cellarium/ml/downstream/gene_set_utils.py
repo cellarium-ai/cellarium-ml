@@ -75,6 +75,11 @@ class GeneSetRecords:
         )
         self._reindex()
 
+    def remove_gene_sets_from_collection(self, gene_set_names: list[str], collection: str) -> None:
+        collection_df = self.df[self.df['collection'] == collection]
+        collection_df = collection_df.drop(gene_set_names)
+        self._reindex()
+
 
 def gsea(
     df: pd.DataFrame, 
@@ -98,10 +103,15 @@ def gsea(
     Returns:
         dict with 'pval' p-value, 'es' enrichment score
     """
+    # check for a failure condition: all the genes in the group have a zero loading
+    n_genes_with_nonzero_loading = sum([g in gene_group for g in df[df[value_key] != 0][gene_name_key].unique()])
+    if n_genes_with_nonzero_loading == 0:
+        return {'pval': 1.0, 'es': np.nan}
+    
     es, es_null, hit_ind, es_g = enrichment_score(
-        gene_list=df[gene_name_key],
+        gene_list=df[gene_name_key].unique(),
         correl_vector=df[value_key],
-        gene_set=gene_group,
+        gene_set=np.unique(gene_group),
         weight=1.0,
         nperm=n_perm,
         seed=seed,
