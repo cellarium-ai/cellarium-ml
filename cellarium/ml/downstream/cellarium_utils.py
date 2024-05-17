@@ -21,7 +21,7 @@ def get_pretrained_model_as_pipeline(
     with tempfile.TemporaryDirectory() as tmpdir:
 
         # download file
-        tmp_file = 'model.ckpt'
+        tmp_file = tmpdir / 'model.ckpt'
         os.system(f"gsutil cp {trained_model} {tmp_file}")
 
         # load the model
@@ -53,7 +53,7 @@ def get_datamodule(
     """
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        anndata_filename = os.path.join(tmpdir, "test_cm.h5ad")
+        anndata_filename = os.path.join(tmpdir, "tmp.h5ad")
         adata.write(anndata_filename)
         dm = CellariumAnnDataDataModule(
             anndata_filename,

@@ -13,6 +13,7 @@ from sklearn.decomposition import FastICA
 from sklearn.metrics import explained_variance_score
 from tqdm import tqdm
 import io
+import os
 from operator import truediv
 import warnings
 from contextlib import redirect_stdout
@@ -582,6 +583,7 @@ def noise_prompt_gene_set_collection(
     var_gene_names: str = 'gene_name',
     gsea_n_perm: int = 1000,
     seed: int = 0,
+    save_intermediates_to_tmp_file: str | None = None,
     **analyze_kwargs,
 ):
     """
@@ -606,6 +608,7 @@ def noise_prompt_gene_set_collection(
         var_gene_names: key in adata.var with gene names
         gsea_n_perm: number of permutations for GSEA p-value computation
         seed: random seed
+        save_intermediates_to_tmp_file: path to save intermediate results, and resume from checkpoint
         **analyze_kwargs: keyword arguments for analyze_lfc, such as n_pcs and n_ics
 
     Returns:
@@ -630,19 +633,18 @@ def noise_prompt_gene_set_collection(
             collection_name=control_collection_name,
         )
 
-    gene_set_names = []
-    pval_perturbed = []
-    es_perturbed = []
-    pval_unperturbed = []
-    es_unperturbed = []
-    genes_perturbed_list = []
-    genes_unperturbed_list = []
-    pc = []
-    pc_frac_var = []
+    # keep track of results in a list of dataframes
+    dfs = []
+    gene_sets_completed = set()
+    if save_intermediates_to_tmp_file is not None:
+        if os.path.exists(save_intermediates_to_tmp_file):
+            dfs.append(pd.read_csv(save_intermediates_to_tmp_file))  # pick up from checkpoint
+            gene_sets_completed.update(dfs[-1]['gene_set_name'].unique().tolist())
 
     # figure out up front which sets will be included based on cutoffs
     highly_expressed_gene_names_set = set(adata.var[var_gene_names][adata.var[var_key_include_genes]].values)
     all_gene_set_names = msigdb.get_gene_set_names(control_collection_name) + msigdb.get_gene_set_names(collection)
+    all_gene_set_names = [s for s in all_gene_set_names if s not in gene_sets_completed]
     subset_gene_set_names = []
     for gene_set_name in all_gene_set_names:
         gene_set = msigdb.get_gene_set_dict().get(gene_set_name, [])
@@ -706,30 +708,27 @@ def noise_prompt_gene_set_collection(
                             seed=seed,
                         )
 
-                    # add to lists
-                    gene_set_names.append(gene_set_name)
-                    pval_perturbed.append(gsea_perturbed_stats['pval'])
-                    es_perturbed.append(gsea_perturbed_stats['es'])
-                    pval_unperturbed.append(gsea_not_perturbed_stats['pval'])
-                    es_unperturbed.append(gsea_not_perturbed_stats['es'])
-                    pc.append(pc_number)
-                    pc_frac_var.append(pc_var_ratios[pc_number])
-                    genes_perturbed_list.append(out['genes_perturbed'])
-                    genes_unperturbed_list.append(out['genes_not_perturbed'])
+                    # add to list of dataframes
+                    data = {
+                        'gene_set_name': gene_set_name,
+                        'pval_perturbed': gsea_perturbed_stats['pval'],
+                        'es_perturbed': gsea_perturbed_stats['es'],
+                        'pval_unperturbed': gsea_not_perturbed_stats['pval'],
+                        'es_unperturbed': gsea_not_perturbed_stats['es'],
+                        'pc': pc_number,
+                        'pc_frac_variance_explained': pc_var_ratios[pc_number],
+                        'genes_perturbed': [out['genes_perturbed']],
+                        'genes_not_perturbed': [out['genes_not_perturbed']],
+                    }
+                    dfs.append(pd.DataFrame(data=data))
+
+            # once all splits and PCs are done (i.e. set is complete), save if called for
+            if save_intermediates_to_tmp_file is not None:
+                pd.concat(dfs, axis=0).to_csv(save_intermediates_to_tmp_file, index=False)
 
     except KeyboardInterrupt:
         pass
 
-    # package results in a dataframe
-    df = pd.DataFrame(data={
-        'gene_set_name': gene_set_names,
-        'pval_perturbed': pval_perturbed,
-        'es_perturbed': es_perturbed,
-        'pval_unperturbed': pval_unperturbed,
-        'es_unperturbed': es_unperturbed,
-        'pc': pc,
-        'pc_frac_variance_explained': pc_frac_var,
-        'genes_perturbed': genes_perturbed_list,
-        'genes_not_perturbed': genes_unperturbed_list,
-    })
+    # package results in a big dataframe
+    df = pd.concat(dfs, axis=0)
     return df
