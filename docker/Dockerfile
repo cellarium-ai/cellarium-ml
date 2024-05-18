@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && chmod +x $HOME/miniconda.sh \
  && $HOME/miniconda.sh -b -p $CONDA_DIR \
  && rm $HOME/miniconda.sh \
+# install g++ for pykeops
+ && conda install -c conda-forge gxx \
 # install package and its dependencies
  && yes | pip install --no-cache-dir -U git+https://github.com/cellarium-ai/cellarium-ml.git@$GIT_SHA \
  && conda clean -yaf \
