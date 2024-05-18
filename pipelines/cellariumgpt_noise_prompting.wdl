@@ -73,6 +73,7 @@ task run_noise_prompting {
         from cellarium.ml.downstream.noise_prompting import noise_prompt_gene_set_collection
         import anndata
         import torch
+        import numpy as np
 
         print("torch.cuda.is_available()")
         print(torch.cuda.is_available())
@@ -92,7 +93,10 @@ task run_noise_prompting {
         assert "gene_name" in adata_cell.var.keys(), "adata.var must contain the key 'gene_name' with the gene names"
         assert "ensembl_id" in adata_cell.var.keys(), "adata.var must contain the key 'ensembl_id' with the Ensembl IDs"
         adata_cell.X = adata_cell.layers["count"].copy()
+        gpt_include = adata_cell.var["gpt_include"].copy()
         adata_cell = harmonize_anndata_with_model(adata=adata_cell, pipeline=pipeline)
+        adata_cell.var["gpt_include"] = gpt_include
+        print(adata_cell)
         print("Cell type:")
         print(adata_cell.obs["cell_type"].item())
 
