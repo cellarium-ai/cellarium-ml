@@ -86,11 +86,13 @@ task run_noise_prompting {
 
         # data
         adata_cell = anndata.read_h5ad("~{h5ad_file}")
+        print(adata_cell)
         assert "gpt_include" in adata_cell.var.keys(), "adata.var must contain the key 'gpt_include' to indicate which genes to include in the analysis"
         assert "count" in adata_cell.layers.keys(), "adata.layers must contain the key 'count' with the raw count matrix"
         assert "gene_name" in adata_cell.var.keys(), "adata.var must contain the key 'gene_name' with the gene names"
-        adata_cell = harmonize_anndata_with_model(adata=adata_cell, pipeline=pipeline)
+        assert "ensembl_id" in adata_cell.var.keys(), "adata.var must contain the key 'ensembl_id' with the Ensembl IDs"
         adata_cell.X = adata_cell.layers["count"].copy()
+        adata_cell = harmonize_anndata_with_model(adata=adata_cell, pipeline=pipeline)
         print("Cell type:")
         print(adata_cell.obs["cell_type"].item())
 
@@ -98,13 +100,13 @@ task run_noise_prompting {
         msigdb = GeneSetRecords("~{msigdb_json_file}")
 
         # subset to sets that are in cutoffs
-        all_gene_set_names = msigdb.get_gene_set_names(collection=collection)
+        all_gene_set_names = msigdb.get_gene_set_names(collection="~{collection}")
         highly_expressed_gene_names_set = set(adata_cell.var["gene_name"][adata_cell.var["gpt_include"]].values)
         subset_gene_set_names = []
         for gene_set_name in all_gene_set_names:
             gene_set = msigdb.get_gene_set_dict().get(gene_set_name, [])
             gene_set = [g for g in gene_set if g in highly_expressed_gene_names_set]
-            if (len(gene_set) >= min_gene_set_length) and (len(gene_set) <= max_gene_set_length):
+            if (len(gene_set) >= ~{min_gene_set_length}) and (len(gene_set) <= ~{max_gene_set_length}):
                 subset_gene_set_names.append(gene_set_name)
 
         # handle the shard
