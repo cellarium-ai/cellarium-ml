@@ -9,12 +9,12 @@ version 1.0
 task run_noise_prompting {
     input {
         String trained_model_ckpt = "gs://dsp-cell-annotation-service/cellarium/trained_models/cerebras/lightning_logs/version_0/checkpoints/epoch=2-step=83250.ckpt"
-        String h5ad_file
+        File h5ad_file
+        File msigdb_json_file
+        String collection
         Int shard
         Int n_shards
         String cell_type_name
-        String msigdb_json_file
-        String collection
         Float fraction_of_set_to_perturb = 0.5
         Int n_random_splits = 5
         Int n_perturbations = 500
@@ -83,7 +83,6 @@ task run_noise_prompting {
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
         print(pipeline)
-        print(f"pipeline is on device: {pipeline.device}")
 
         # data
         adata_cell = anndata.read_h5ad("~{h5ad_file}")
@@ -213,6 +212,16 @@ task consolidate_outputs {
 
     output {
         File output_csv = "~{output_file}"
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsde-methods/scanpy:1.5.1"
+        bootDiskSizeGb: 20
+        disks: "local-disk 500 HDD"
+        memory: "16G"
+        cpu: 4
+        preemptible: 0
+        maxRetries: 2
     }
 }
 
