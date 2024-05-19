@@ -87,6 +87,10 @@ class MultiHeadAttention(nn.Module):
         self.Wk = nn.Linear(d_model, d_model, bias=use_bias)
         self.Wv = nn.Linear(d_model, d_model, bias=use_bias)
         self.Wo = nn.Linear(d_model, d_model, bias=use_bias)
+        self.Qq = nn.Linear(d_model, d_model, bias=use_bias)
+        self.Qk = nn.Linear(d_model, d_model, bias=use_bias)
+        self.Qv = nn.Linear(d_model, d_model, bias=use_bias)
+        self.Qo = nn.Linear(d_model, d_model, bias=use_bias)
         self.n_heads = n_heads
         self.dropout_p = dropout_p
         self.attn_mult = attn_mult
@@ -117,9 +121,9 @@ class MultiHeadAttention(nn.Module):
         c = query_ncd.shape[1]
 
         n_heads = self.n_heads
-        query_ncd = self.Wq(query_ncd)
-        key_ncd = self.Wk(key_ncd)
-        value_ncd = self.Wv(value_ncd)
+        query_ncd = torch.cat([self.Wq(query_ncd[:, :prefix_len]), self.Qq(query_ncd[:, prefix_len:])], dim=1)
+        key_ncd = torch.cat([self.Wk(key_ncd[:, :prefix_len]), self.Qk(key_ncd[:, prefix_len:])], dim=1)
+        value_ncd = torch.cat([self.Wv(value_ncd[:, :prefix_len]), self.Qv(value_ncd[:, prefix_len:])], dim=1)
         # d = k * h
         query_nhck = self.split_heads(query_ncd, n_heads)
         key_nhck = self.split_heads(key_ncd, n_heads)
@@ -139,7 +143,7 @@ class MultiHeadAttention(nn.Module):
             )
 
         output_ncd = self.merge_heads(output_nhck)
-        return self.Wo(output_ncd)  # _ncd
+        return torch.cat([self.Wo(output_ncd[:, :prefix_len]), self.Qo(output_ncd[:, prefix_len:])], dim=1)
 
 
 class PositionWiseFFN(nn.Module):
@@ -161,8 +165,13 @@ class PositionWiseFFN(nn.Module):
         self.relu = nn.ReLU()
         self.dense2 = nn.Linear(d_ffn, d_model, bias=use_bias)
 
-    def forward(self, hidden_state_ncd: torch.Tensor) -> torch.Tensor:
-        return self.dense2(self.relu(self.dense1(hidden_state_ncd)))  # _ncd
+        self.dense3 = nn.Linear(d_model, d_ffn, bias=use_bias)
+        self.dense4 = nn.Linear(d_ffn, d_model, bias=use_bias)
+
+    def forward(self, hidden_state_ncd: torch.Tensor, prefix_len: int) -> torch.Tensor:
+        prefix_ncd = self.dense2(self.relu(self.dense1(hidden_state_ncd[:, :prefix_len])))  # _ncd
+        suffix_ncd = self.dense4(self.relu(self.dense3(hidden_state_ncd[:, prefix_len:])))  # _ncd
+        return torch.cat([prefix_ncd, suffix_ncd], dim=1)  # _ncd
 
 
 class ValueEmbedding(nn.Module):
@@ -200,10 +209,14 @@ class NormAdd(nn.Module):
     def __init__(self, norm_shape: int, dropout_p: float) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout_p)
-        self.ln = nn.LayerNorm(norm_shape)
+        self.ln1 = nn.LayerNorm(norm_shape)
+        self.ln2 = nn.LayerNorm(norm_shape)
 
-    def forward(self, hidden_state_ncd: torch.Tensor, sublayer: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
-        return hidden_state_ncd + self.dropout(sublayer(self.ln(hidden_state_ncd)))  # _ncd
+    def forward(
+        self, hidden_state_ncd: torch.Tensor, sublayer: Callable[[torch.Tensor], torch.Tensor], prefix_len: int
+    ) -> torch.Tensor:
+        X = torch.cat([self.ln1(hidden_state_ncd[:, :prefix_len]), self.ln2(hidden_state_ncd[:, prefix_len:])], dim=1)
+        return hidden_state_ncd + self.dropout(sublayer(X))  # _ncd
 
 
 class TransformerBlock(nn.Module):
@@ -244,8 +257,8 @@ class TransformerBlock(nn.Module):
         self.normadd2 = NormAdd(d_model, dropout_p)
 
     def forward(self, hidden_state_ncd: torch.Tensor, prefix_len: int) -> torch.Tensor:
-        hidden_state_ncd = self.normadd1(hidden_state_ncd, lambda X: self.attention(X, X, X, prefix_len))
-        return self.normadd2(hidden_state_ncd, lambda Y: self.ffn(Y))  # _ncd
+        hidden_state_ncd = self.normadd1(hidden_state_ncd, lambda X: self.attention(X, X, X, prefix_len), prefix_len)
+        return self.normadd2(hidden_state_ncd, lambda Y: self.ffn(Y, prefix_len), prefix_len)  # _ncd
 
 
 class Transformer(nn.Module):
@@ -317,13 +330,8 @@ class Transformer(nn.Module):
         value_embedding_ncd[:, prefix_len:] = mask_embedding_d
 
         hidden_state_ncd = (token_embedding_ncd + value_embedding_ncd) * self.input_mult
-        suffix_state_ncd = hidden_state_ncd[:, prefix_len:]
-        prefix_state_ncd = hidden_state_ncd[:, :prefix_len]
-        for i, block in enumerate(self.blocks):
-            if i == self.n_blocks - 1:
-                hidden_state_ncd = block(torch.cat([prefix_state_ncd, suffix_state_ncd], dim=1), prefix_len)
-            else:
-                prefix_state_ncd = block(prefix_state_ncd, prefix_len)
+        for block in self.blocks:
+            hidden_state_ncd = block(hidden_state_ncd, prefix_len)
 
         return hidden_state_ncd
 
@@ -457,7 +465,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         #
         # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
         for name, p in module.named_parameters():
-            if name == "dense2.weight" or name == "Wo.weight":
+            if name == "dense2.weight" or name == "Wo.weight" or name == "dense4.weight" or name == "Qo.weight":
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.transformer.n_blocks)))
 
