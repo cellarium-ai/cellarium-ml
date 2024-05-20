@@ -17,6 +17,7 @@ import os
 from operator import truediv
 import warnings
 from contextlib import redirect_stdout
+import tempfile
 
 from .cellarium_utils import get_datamodule
 from .gene_set_utils import GeneSetRecords, append_random_control_collection, gsea
@@ -782,7 +783,11 @@ def noise_prompt_gene_set_collection(
 
             # once all splits and PCs are done (i.e. set is complete), save if called for
             if save_intermediates_to_tmp_file is not None:
-                pd.concat(dfs, axis=0).to_csv(save_intermediates_to_tmp_file, index=False)
+                # atomic write
+                with tempfile.TemporaryDirectory() as d:
+                    tmpfile = os.path.join(d, "tmp.csv")
+                    pd.concat(dfs, axis=0).to_csv(tmpfile, index=False)
+                    os.replace(tmpfile, save_intermediates_to_tmp_file)
 
     except KeyboardInterrupt:
         pass
