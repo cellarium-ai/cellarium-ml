@@ -679,7 +679,7 @@ def noise_prompt_gene_set_collection(
     dfs = []
     gene_sets_completed = set()
     if save_intermediates_to_tmp_file is not None:
-        if os.path.exists(save_intermediates_to_tmp_file):
+        if os.path.exists(save_intermediates_to_tmp_file) and (os.stat(save_intermediates_to_tmp_file).st_size > 0):
             dfs.append(pd.read_csv(save_intermediates_to_tmp_file))  # pick up from checkpoint
             gene_sets_completed.update(dfs[-1]['gene_set_name'].unique().tolist())
 
