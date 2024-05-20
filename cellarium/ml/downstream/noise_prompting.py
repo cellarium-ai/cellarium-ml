@@ -359,7 +359,7 @@ def get_loadings(adata, varm_key, component: int = 0):
         'loading_sign': np.sign(loadings[component, :]),
     })
     df = df.sort_values(by="gene_power", ascending=False)
-    df = df[df["gene_loading"] != 0]
+    df = df[~df['gene_name'].isnull()].copy()
     return df
 
 
