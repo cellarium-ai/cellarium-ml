@@ -625,6 +625,7 @@ def noise_prompt_gene_set_collection(
     seed: int = 0,
     add_random_controls: bool = True,
     save_intermediates_to_tmp_file: str | None = None,
+    verbose: bool = True,
     **analyze_kwargs,
 ):
     """
@@ -651,6 +652,7 @@ def noise_prompt_gene_set_collection(
         seed: random seed
         add_random_controls: True to add random control gene sets
         save_intermediates_to_tmp_file: path to save intermediate results, and resume from checkpoint
+        verbose: True to print out each gene set name
         **analyze_kwargs: keyword arguments for analyze_lfc, such as n_pcs and n_ics
 
     Returns:
@@ -700,6 +702,9 @@ def noise_prompt_gene_set_collection(
         if (len(gene_set) >= min_gene_set_length) and (len(gene_set) <= max_gene_set_length):
             subset_gene_set_names.append(gene_set_name)
 
+    if verbose:
+        print(f'gene sets to analyze: {len(subset_gene_set_names)}')
+
     # compute the measured data snapped to manifold one time
     highly_expressed_gene_inds = torch.tensor(np.where(adata.var[var_key_include_genes])[0]).long()
     adata.layers['measured'] = adata.X.copy()
@@ -716,6 +721,9 @@ def noise_prompt_gene_set_collection(
 
         # for each gene set
         for gene_set_name in tqdm(subset_gene_set_names):
+
+            if verbose:
+                print(gene_set_name)
 
             # get gene set
             gene_set = msigdb.get_gene_set_dict().get(gene_set_name, [])
