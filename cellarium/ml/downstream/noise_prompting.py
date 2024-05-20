@@ -680,9 +680,8 @@ def noise_prompt_gene_set_collection(
     gene_sets_completed = set()
     if save_intermediates_to_tmp_file is not None:
         if os.path.exists(save_intermediates_to_tmp_file):
-            if (os.path.getsize(save_intermediates_to_tmp_file) > 0):
-                dfs.append(pd.read_csv(save_intermediates_to_tmp_file))  # pick up from checkpoint
-                gene_sets_completed.update(dfs[-1]['gene_set_name'].unique().tolist())
+            dfs.append(pd.read_csv(save_intermediates_to_tmp_file))  # pick up from checkpoint
+            gene_sets_completed.update(dfs[-1]['gene_set_name'].unique().tolist())
 
     # figure out up front which sets will be included based on cutoffs
     highly_expressed_gene_names_set = set(adata.var[var_gene_names][adata.var[var_key_include_genes]].values)
