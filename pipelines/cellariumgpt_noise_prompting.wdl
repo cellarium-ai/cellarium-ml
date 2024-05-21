@@ -36,7 +36,7 @@ task run_noise_prompting {
         Int hardware_disk_size_GB = 50
         Int hardware_boot_disk_size_GB = 20
         Int hardware_preemptible_tries = 10
-        Int hardware_max_retries = 0
+        Int hardware_max_retries = 2  # nvidia driver install failures in cromwell
         Int hardware_cpu_count = 4
         Int hardware_memory_GB = 16
         String hardware_gpu_type = "nvidia-tesla-t4"
