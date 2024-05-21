@@ -675,7 +675,7 @@ def noise_prompt_gene_set_collection(
                 msigdb=msigdb, 
                 gene_names=adata.var[var_gene_names].values[adata.var[var_key_include_genes] & ~adata.var[var_gene_names].isnull()],
                 sizes=[10, 50, 100],
-                repeats=10,
+                repeats=5,
                 collection_name=control_collection_name,
             )
 
