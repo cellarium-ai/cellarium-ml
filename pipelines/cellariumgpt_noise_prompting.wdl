@@ -47,21 +47,15 @@ task run_noise_prompting {
     String output_file = "noise_prompting_~{cell_type_name}_~{collection}_shard~{shard}.csv"
 
     command <<<
-        set -e  # fail the workflow if there is an error
+
+        set -e
 
         # install a specific commit from github if called for
         if [[ ~{install_from_git} == true ]]; then
-            echo "Uninstalling pre-installed cellarium-ml"
-            yes | pip uninstall cellarium-ml
             echo "Installing cellarium-ml from github"
-            # this more succinct version is broken in some older versions of cellbender
-            echo "pip install --no-cache-dir -U git+https://github.com/ellarium-ai/cellarium-ml.git@~{git_hash}"
-            git clone -q https://github.com/ellarium-ai/cellarium-ml.git /cromwell_root/cellarium
-            cd /cromwell_root/cellarium
-            git checkout -q ~{git_hash}
-            yes | pip install --no-cache-dir -U -e /cromwell_root/cellarium
+            echo "pip install --no-cache-dir -U git+https://github.com/cellarium-ai/cellarium-ml.git@~{git_hash}"
+            pip install --no-cache-dir -U git+https://github.com/cellarium-ai/cellarium-ml.git@~{git_hash}
             pip list
-            cd /cromwell_root
         fi
 
         pip install tqdm scikit-learn gseapy scanpy
@@ -73,6 +67,7 @@ task run_noise_prompting {
         from cellarium.ml.downstream.noise_prompting import noise_prompt_gene_set_collection
         import anndata
         import torch
+        import numpy as np
 
         print("torch.cuda.is_available()")
         print(torch.cuda.is_available())
@@ -92,7 +87,10 @@ task run_noise_prompting {
         assert "gene_name" in adata_cell.var.keys(), "adata.var must contain the key 'gene_name' with the gene names"
         assert "ensembl_id" in adata_cell.var.keys(), "adata.var must contain the key 'ensembl_id' with the Ensembl IDs"
         adata_cell.X = adata_cell.layers["count"].copy()
+        gpt_include = adata_cell.var["gpt_include"].copy()
         adata_cell = harmonize_anndata_with_model(adata=adata_cell, pipeline=pipeline)
+        adata_cell.var["gpt_include"] = gpt_include
+        print(adata_cell)
         print("Cell type:")
         print(adata_cell.obs["cell_type"].item())
 
@@ -137,7 +135,7 @@ task run_noise_prompting {
             n_pcs=~{n_pcs},
             n_ics=~{n_ics},
             add_random_controls=True if (this_shard == 0) else False,  # only add random controls once
-            save_intermediates_to_tmp_file="~{output_file}",
+            save_intermediates_to_tmp_file=None, #"tmp.csv",
         )
         df.to_csv("~{output_file}", index=False)
         print("saved final outputs to ~{output_file}")
@@ -162,7 +160,7 @@ task run_noise_prompting {
         zones: "${hardware_zones}"
         gpuCount: hardware_gpu_count
         gpuType: "${hardware_gpu_type}"
-        checkpointFile: "${output_file}"
+        # checkpointFile: "tmp.csv"
         preemptible: hardware_preemptible_tries
         maxRetries: hardware_max_retries  # can be used in case of a PAPI error code 2 failure to install GPU drivers
     }
@@ -201,8 +199,9 @@ task consolidate_outputs {
 
         python <<CODE
         import pandas as pd
+        import glob
         dfs = []
-        for file in ~{run_noise_prompting_output_csvs}:
+        for file in glob.glob("*.csv"):
             print(f'reading {file}')
             dfs.append(pd.read_csv(file))
         print(f'concatenating {len(dfs)} dataframes')
