@@ -23,6 +23,7 @@ from .cellarium_utils import get_datamodule
 from .gene_set_utils import GeneSetRecords, append_random_control_collection, gsea
 
 
+@torch.no_grad()
 def gpt_predict(
     adata, 
     pipeline: CellariumPipeline, 
@@ -51,15 +52,14 @@ def gpt_predict(
     adata_out = adata[:, gene_inds.cpu().numpy()].copy()
 
     # predict
-    with torch.no_grad():
-        i = 0
-        for batch in dm.predict_dataloader():
-            batch["x_ng"] = batch["x_ng"].to(device)
-            batch["total_mrna_umis_n"] = batch["x_ng"].sum(-1)
-            batch["context_inds_c"] = gene_inds
-            out = pipeline.predict(batch)
-            adata_out.X[i:i + batch["x_ng"].shape[0]] = out["mu_nc"][:, 1:].cpu().numpy()
-            i += batch["x_ng"].shape[0]
+    i = 0
+    for batch in dm.predict_dataloader():
+        batch["x_ng"] = batch["x_ng"].to(device)
+        batch["total_mrna_umis_n"] = batch["x_ng"].sum(-1)
+        batch["context_inds_c"] = gene_inds
+        out = pipeline.predict(batch)
+        adata_out.X[i:i + batch["x_ng"].shape[0]] = out["mu_nc"][:, 1:].cpu().numpy()
+        i += batch["x_ng"].shape[0]
 
     adata_out.layers[key_added] = adata_out.X.copy()
     
