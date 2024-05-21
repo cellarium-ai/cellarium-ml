@@ -40,7 +40,7 @@ task run_noise_prompting {
         Int hardware_cpu_count = 4
         Int hardware_memory_GB = 16
         String hardware_gpu_type = "nvidia-tesla-t4"
-        Int hardware_gpu_count = 0
+        Int hardware_gpu_count = 1
     }
 
     Boolean install_from_git = (if defined(git_hash) then true else false)
@@ -96,6 +96,7 @@ task run_noise_prompting {
 
         # gene sets
         msigdb = GeneSetRecords("~{msigdb_json_file}")
+        print(msigdb)
 
         # subset to sets that are in cutoffs
         all_gene_set_names = msigdb.get_gene_set_names(collection="~{collection}")
@@ -117,6 +118,8 @@ task run_noise_prompting {
             gene_sets_in_shard = sharded_gene_sets[this_shard]
             gene_sets_not_in_shard = set(all_gene_sets) - set(gene_sets_in_shard)
             msigdb.remove_gene_sets(gene_sets_not_in_shard)
+            
+        print(msigdb)
         
         df = noise_prompt_gene_set_collection(
             adata_cell,
@@ -135,7 +138,7 @@ task run_noise_prompting {
             n_pcs=~{n_pcs},
             n_ics=~{n_ics},
             add_random_controls=True if (this_shard == 0) else False,  # only add random controls once
-            save_intermediates_to_tmp_file=None, #"tmp.csv",
+            save_intermediates_to_tmp_file="tmp.csv",
         )
         df.to_csv("~{output_file}", index=False)
         print("saved final outputs to ~{output_file}")
@@ -160,7 +163,7 @@ task run_noise_prompting {
         zones: "${hardware_zones}"
         gpuCount: hardware_gpu_count
         gpuType: "${hardware_gpu_type}"
-        # checkpointFile: "tmp.csv"
+        checkpointFile: "tmp.csv"
         preemptible: hardware_preemptible_tries
         maxRetries: hardware_max_retries  # can be used in case of a PAPI error code 2 failure to install GPU drivers
     }
@@ -196,6 +199,10 @@ task consolidate_outputs {
 
     command <<<
         set -e
+
+        for file in ~{sep=" " run_noise_prompting_output_csvs}; do
+            cp $file /cromwell_root/
+        done
 
         python <<CODE
         import pandas as pd
