@@ -1,5 +1,6 @@
 # Start from nvidia-docker image with drivers pre-installed to use a GPU
-FROM nvcr.io/nvidia/cuda:12.4.1-base-ubuntu20.04
+# pykeops requires nvcc which is only available in the beefy devel images
+FROM nvcr.io/nvidia/cuda:12.3.2-devel-ubuntu20.04
 
 # Specify a certain commit via branch, tag, or sha
 ARG GIT_SHA
