@@ -146,25 +146,6 @@ class CellariumModule(pl.LightningModule):
             self.log("train_loss", loss, sync_dist=True)
         return loss
 
-    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
-        """
-        Forward pass for validation step.
-
-        Args:
-            batch: A dictionary containing the batch data.
-            batch_idx: The index of the batch.
-
-        Returns:
-            ``None``
-        """
-        if self.pipeline is None:
-            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
-
-        batch["pl_module"] = self
-        batch["trainer"] = self.trainer
-        batch["batch_idx"] = batch_idx
-        self.pipeline.validate(batch)
-
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Forward pass for inference step.
@@ -179,6 +160,27 @@ class CellariumModule(pl.LightningModule):
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
         return self.pipeline.predict(batch)
+
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
+        """
+        Forward pass for validation step.
+
+        Args:
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
+
+        Returns:
+            None
+        """
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        batch["pl_module"] = self
+        batch["trainer"] = self.trainer
+        batch["batch_idx"] = batch_idx
+        self.pipeline.validate(batch)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
         """Configure optimizers for the model."""
