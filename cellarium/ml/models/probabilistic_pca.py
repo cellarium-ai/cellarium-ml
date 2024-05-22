@@ -95,7 +95,8 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        rng = torch.Generator()
+        rng_device = self.W_kg.device.type if self.W_kg.device.type != "meta" else "cpu"
+        rng = torch.Generator(device=rng_device)
         rng.manual_seed(self.seed)
         if isinstance(self.mean_g, torch.nn.Parameter):
             self.mean_g.data.zero_()

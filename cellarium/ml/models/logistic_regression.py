@@ -72,7 +72,8 @@ class LogisticRegression(CellariumModel):
         self.log_metrics = log_metrics
 
     def reset_parameters(self) -> None:
-        rng = torch.Generator()
+        rng_device = self.W_gc.device.type if self.W_gc.device.type != "meta" else "cpu"
+        rng = torch.Generator(device=rng_device)
         rng.manual_seed(self.seed)
         self.W_prior_scale.fill_(self._W_prior_scale)
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
