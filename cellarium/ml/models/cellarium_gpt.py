@@ -316,9 +316,12 @@ class Transformer(nn.Module):
         mask_embedding_d = self.Em(torch.tensor(0, device=device))
         value_embedding_ncd[:, prefix_len:] = mask_embedding_d
 
+        # self.hidden_states = []
         hidden_state_ncd = (token_embedding_ncd + value_embedding_ncd) * self.input_mult
+        # self.hidden_states.append(hidden_state_ncd)
         for block in self.blocks:
             hidden_state_ncd = block(hidden_state_ncd, prefix_len)
+            # self.hidden_states.append(hidden_state_ncd)
 
         return hidden_state_ncd
 
@@ -512,7 +515,9 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         token_id_nc, value_nc = self.tokenize(x_ng, total_mrna_umis_n, shuffle=True, context_len=context_len)
 
         hidden_state_ncd = self.transformer(token_id_nc, value_nc, prefix_len)
-        logits_ncg = self.head(hidden_state_ncd) * self.output_mult
+        probs_ncg = nn.functional.linear(hidden_state_ncd.softmax(dim=-1), self.head.weight.softmax(dim=0), None)
+        logits_ncg = probs_ncg.log()
+        # logits_ncg = self.head(hidden_state_ncd) * self.output_mult
 
         label_mask_c = torch.arange(context_len, device=device) >= prefix_len
         label_mask_nc = label_mask_c & (value_nc < self.max_value + 1)
@@ -573,7 +578,8 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
                 logits = []
                 for token_id, value in zip(torch.split(token_id_nc, 25), torch.split(value_nc, 25)):
                     hidden_state = self.transformer(token_id, value, prefix_len)
-                    logits.append(self.head(hidden_state) * self.output_mult)
+                    probs = nn.functional.linear(hidden_state.softmax(dim=-1), self.head.weight.softmax(dim=0), None)
+                    logits.append(probs.log())
                 logits_ncg = torch.cat(logits, dim=0)
 
                 label_mask_c = torch.arange(context_len, device=device) >= prefix_len
@@ -633,6 +639,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         return {
             "logits_nqp": logits_ncp[:, prefix_len:],
             "query_name_nq": query_name_nq,
+            # "hidden_states": self.transformer.hidden_states,
         }
 
     # def log_prob(self, var_names_ng: np.ndarray, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
