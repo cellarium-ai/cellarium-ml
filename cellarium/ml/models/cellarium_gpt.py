@@ -178,12 +178,33 @@ class ValueEmbedding(nn.Module):
 
     def __init__(self, d_model: int, use_bias: bool) -> None:
         super().__init__()
-        self.dense1 = nn.Linear(1, d_model, bias=use_bias)
+        self.fc1 = nn.Linear(1, d_model, bias=use_bias)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(d_model, d_model, bias=use_bias)
+        self.fc2 = nn.Linear(d_model, d_model, bias=use_bias)
 
     def forward(self, value_nc: torch.Tensor) -> torch.Tensor:
-        return self.dense2(self.relu(self.dense1(value_nc.unsqueeze(-1))))  # _ncd
+        return self.fc2(self.relu(self.fc1(value_nc.unsqueeze(-1))))  # _ncd
+
+
+class MaskEmbedding(nn.Module):
+    """
+    Continuous value embedding.
+
+    Args:
+        d_model:
+            Dimensionality of the embeddings and hidden states.
+        use_bias:
+            Whether to use bias in the linear transformations.
+    """
+
+    def __init__(self, d_ffn: int, d_model: int, use_bias: bool) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(d_model, d_ffn, bias=use_bias)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(d_ffn, d_model, bias=use_bias)
+
+    def forward(self, hidden_state_ncd: torch.Tensor) -> torch.Tensor:
+        return self.fc2(self.relu(self.fc1(hidden_state_ncd)))  # _ncd
 
 
 class NormAdd(nn.Module):
@@ -292,7 +313,8 @@ class Transformer(nn.Module):
         # continuous value embedding
         self.Ev = ValueEmbedding(d_model, use_bias=use_bias)
         # mask embedding for target values
-        self.Em = nn.Embedding(1, d_model)
+        # self.Em = nn.Embedding(1, d_model)
+        self.Em = MaskEmbedding(d_ffn, d_model, use_bias)
 
         self.n_blocks = n_blocks
         self.blocks = nn.ModuleList(
@@ -309,15 +331,19 @@ class Transformer(nn.Module):
         value_nc: torch.Tensor,
         prefix_len: int,
     ) -> torch.Tensor:
-        device = token_id_nc.device
+        # device = token_id_nc.device
 
-        token_embedding_ncd = self.Et(token_id_nc)
-        value_embedding_ncd = self.Ev(torch.log1p(value_nc))
-        mask_embedding_d = self.Em(torch.tensor(0, device=device))
-        value_embedding_ncd[:, prefix_len:] = mask_embedding_d
+        prefix_token_embedding_npd = self.Et(token_id_nc[:, :prefix_len])
+        prefix_value_embedding_npd = self.Ev(torch.log1p(value_nc[:, :prefix_len]))
+        prefix_embedding_npd = prefix_token_embedding_npd + prefix_value_embedding_npd
+        # mask_embedding_d = self.Em(torch.tensor(0, device=device))
+        suffix_token_embedding_nsd = self.Et(token_id_nc[:, prefix_len:])
+        suffix_embedding_nsd = self.Em(suffix_token_embedding_nsd)
+        # value_embedding_ncd[:, prefix_len:] = mask_embedding_d
 
         # self.hidden_states = []
-        hidden_state_ncd = (token_embedding_ncd + value_embedding_ncd) * self.input_mult
+        # hidden_state_ncd = (token_embedding_ncd + value_embedding_ncd) * self.input_mult
+        hidden_state_ncd = torch.cat([prefix_embedding_npd, suffix_embedding_nsd], dim=1) * self.input_mult
         # self.hidden_states.append(hidden_state_ncd)
         for block in self.blocks:
             hidden_state_ncd = block(hidden_state_ncd, prefix_len)
@@ -515,9 +541,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         token_id_nc, value_nc = self.tokenize(x_ng, total_mrna_umis_n, shuffle=True, context_len=context_len)
 
         hidden_state_ncd = self.transformer(token_id_nc, value_nc, prefix_len)
-        probs_ncg = nn.functional.linear(hidden_state_ncd.softmax(dim=-1), self.head.weight.softmax(dim=0), None)
-        logits_ncg = probs_ncg.log()
-        # logits_ncg = self.head(hidden_state_ncd) * self.output_mult
+        logits_ncg = self.head(hidden_state_ncd) * self.output_mult
 
         label_mask_c = torch.arange(context_len, device=device) >= prefix_len
         label_mask_nc = label_mask_c & (value_nc < self.max_value + 1)
@@ -578,8 +602,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
                 logits = []
                 for token_id, value in zip(torch.split(token_id_nc, 25), torch.split(value_nc, 25)):
                     hidden_state = self.transformer(token_id, value, prefix_len)
-                    probs = nn.functional.linear(hidden_state.softmax(dim=-1), self.head.weight.softmax(dim=0), None)
-                    logits.append(probs.log())
+                    logits.append(self.head(hidden_state) * self.output_mult)
                 logits_ncg = torch.cat(logits, dim=0)
 
                 label_mask_c = torch.arange(context_len, device=device) >= prefix_len
