@@ -63,9 +63,11 @@ class CellariumModule(pl.LightningModule):
 
     def configure_model(self) -> None:
         """
-        This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
-        implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
-        calls to it should be a no-op.
+        .. note::
+
+            This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
+            implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
+            calls to it should be a no-op.
 
         Steps involved in configuring the model:
 
@@ -81,7 +83,7 @@ class CellariumModule(pl.LightningModule):
 
         1. The checkpoint stores modules on the meta device.
         2. Loading from a checkpoint skips a wasteful step of initializing module parameters
-           before loading the state_dict.
+           before loading the ``state_dict``.
         3. The module parameters are directly initialized on the host gpu device instead of being initialized
            on the cpu and then moved to the gpu device (given that modules were instantiated under
            the ``torch.device("meta")`` context).
