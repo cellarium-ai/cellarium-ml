@@ -288,11 +288,12 @@ class Transformer(nn.Module):
     ) -> None:
         super().__init__()
         # +1 token for total_mrna_umis
-        self.Et = nn.Embedding(n_vars + 1, d_model)
+        self.Et = nn.Embedding(n_vars, d_model)
         # continuous value embedding
         self.Ev = ValueEmbedding(d_model, use_bias=use_bias)
         # mask embedding for target values
         self.Em = nn.Embedding(1, d_model)
+        self.Wtmu = nn.Linear(d_model, d_model, bias=use_bias)
 
         self.n_blocks = n_blocks
         self.blocks = nn.ModuleList(
@@ -307,6 +308,7 @@ class Transformer(nn.Module):
         self,
         token_id_nc: torch.Tensor,
         value_nc: torch.Tensor,
+        total_mrna_umis_n: torch.Tensor,
         prefix_len: int,
     ) -> torch.Tensor:
         device = token_id_nc.device
@@ -315,8 +317,11 @@ class Transformer(nn.Module):
         value_embedding_ncd = self.Ev(torch.log1p(value_nc))
         mask_embedding_d = self.Em(torch.tensor(0, device=device))
         value_embedding_ncd[:, prefix_len:] = mask_embedding_d
+        total_mrna_umis_embedding_nd = self.Wtmu(self.Ev(torch.log1p(total_mrna_umis_n)))
 
-        hidden_state_ncd = (token_embedding_ncd + value_embedding_ncd) * self.input_mult
+        hidden_state_ncd = (
+            token_embedding_ncd + value_embedding_ncd + total_mrna_umis_embedding_nd[:, None, :]
+        ) * self.input_mult
         for block in self.blocks:
             hidden_state_ncd = block(hidden_state_ncd, prefix_len)
 
@@ -386,20 +391,20 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         if (suffix_len is None) == (context_len is None):
             raise ValueError("Either `suffix_len` or `context_len` must be specified, but not both.")
         if context_len is not None:
-            if context_len > self.n_vars + 1:
+            if context_len > self.n_vars:
                 raise ValueError(
-                    "`context_len` must be less than or equal to the number of genes + 1. "
-                    f"Got {context_len} > {self.n_vars + 1}."
+                    "`context_len` must be less than or equal to the number of genes. "
+                    f"Got {context_len} > {self.n_vars}."
                 )
             if max_prefix_len >= context_len:
                 raise ValueError(
                     "`max_prefix_len` must be less than `context_len`. Got {max_prefix_len} >= {context_len}."
                 )
         if suffix_len is not None:
-            if max_prefix_len + suffix_len > self.n_vars + 1:
+            if max_prefix_len + suffix_len > self.n_vars:
                 raise ValueError(
-                    "`max_prefix_len + suffix_len` must be less than or equal to the number of genes + 1. "
-                    f"Got {max_prefix_len + suffix_len} > {self.n_vars + 1}."
+                    "`max_prefix_len + suffix_len` must be less than or equal to the number of genes. "
+                    f"Got {max_prefix_len + suffix_len} > {self.n_vars}."
                 )
         self.max_prefix_len = max_prefix_len
         self.suffix_len = suffix_len
@@ -458,28 +463,26 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
     @cached_property
     def token_to_id(self) -> dict[str, int]:
-        return {var_name: i + 1 for i, var_name in enumerate(self.var_names_g)}
+        return {var_name: i for i, var_name in enumerate(self.var_names_g)}
 
     @cached_property
     def vectorized_token_to_id(self):
         return np.vectorize(lambda x: self.token_to_id[x])
 
-    def tokenize(
-        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor, shuffle: bool, context_len: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def tokenize(self, x_ng: torch.Tensor, shuffle: bool, context_len: int) -> tuple[torch.Tensor, torch.Tensor]:
         n = x_ng.shape[0]
         device = x_ng.device
         ndx = torch.arange(n, device=device)
 
         if shuffle:
             index_ng = torch.argsort(torch.rand_like(x_ng))
-            index_nc = index_ng[:, : context_len - 1]
+            index_nc = index_ng[:, :context_len]
         else:
-            index_nc = torch.arange(context_len - 1, device=device).expand(n, -1)
+            index_nc = torch.arange(context_len, device=device).expand(n, -1)
 
         # add total_mrna_umis to the prefix
-        token_id_nc = torch.cat([torch.zeros((n, 1), dtype=torch.long, device=device), index_nc + 1], dim=1)
-        value_nc = torch.cat([total_mrna_umis_n[:, None], x_ng[ndx[:, None], index_nc]], dim=1).long()
+        token_id_nc = index_nc
+        value_nc = x_ng[ndx[:, None], index_nc].long()
         return token_id_nc, value_nc
 
     def forward(
@@ -500,18 +503,18 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
             rng.manual_seed(batch_idx)
             # prefix includes the total_mrna_umis and a random subset of genes
             # the length of the prefix is sampled uniformly from 1 to context_len - 1 (inclusive)
-            prefix_len = int(torch.randint(1, self.max_prefix_len + 1, (), generator=rng, device=device))
+            prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), generator=rng, device=device))
         else:
-            prefix_len = int(torch.randint(1, self.max_prefix_len + 1, (), device=device))
+            prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), device=device))
         if self.context_len is not None:
             # use the fixed context length
             context_len = self.context_len
         elif self.suffix_len is not None:
             # compute the context length dynamically based on the prefix length
             context_len = prefix_len + self.suffix_len
-        token_id_nc, value_nc = self.tokenize(x_ng, total_mrna_umis_n, shuffle=True, context_len=context_len)
+        token_id_nc, value_nc = self.tokenize(x_ng, shuffle=True, context_len=context_len)
 
-        hidden_state_ncd = self.transformer(token_id_nc, value_nc, prefix_len)
+        hidden_state_ncd = self.transformer(token_id_nc, value_nc, total_mrna_umis_n, prefix_len)
         logits_ncg = self.head(hidden_state_ncd) * self.output_mult
 
         label_mask_c = torch.arange(context_len, device=device) >= prefix_len
@@ -545,7 +548,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         losses: dict[int, dict[int, torch.Tensor]] = defaultdict(dict)
         suffix_len = 100
         n_seeds = 3
-        prefix_lens = [1, 50, 500, 1000, 2000, 4000, 8000]
+        prefix_lens = [0, 49, 499, 999, 1999, 3999, 7999]
         for i in range(n_seeds):
             rng_n = [torch.Generator(device=device) for _ in range(x_ng.shape[0])]
             [rng.manual_seed(int(obs_name) + i) for rng, obs_name in zip(rng_n, obs_names_n)]
@@ -555,24 +558,24 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
                 context_len = prefix_len + suffix_len
                 token_id_nc = torch.cat(
                     [
-                        torch.zeros((n, 1), dtype=torch.long, device=device),
-                        index_ng[:, : prefix_len - 1] + 1,
-                        index_ng[:, -suffix_len:] + 1,
+                        index_ng[:, :prefix_len],
+                        index_ng[:, -suffix_len:],
                     ],
                     dim=1,
                 )
                 value_nc = torch.cat(
                     [
-                        total_mrna_umis_n[:, None],
-                        x_ng[ndx[:, None], index_ng[:, : prefix_len - 1]],
+                        x_ng[ndx[:, None], index_ng[:, :prefix_len]],
                         x_ng[ndx[:, None], index_ng[:, -suffix_len:]],
                     ],
                     dim=1,
                 )
 
                 logits = []
-                for token_id, value in zip(torch.split(token_id_nc, 25), torch.split(value_nc, 25)):
-                    hidden_state = self.transformer(token_id, value, prefix_len)
+                for token_id, value, total_mrna_umis in zip(
+                    torch.split(token_id_nc, 25), torch.split(value_nc, 25), torch.split(total_mrna_umis_n, 25)
+                ):
+                    hidden_state = self.transformer(token_id, value, total_mrna_umis, prefix_len)
                     logits.append(self.head(hidden_state) * self.output_mult)
                 logits_ncg = torch.cat(logits, dim=0)
 
@@ -599,7 +602,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         loss_dict = {}
         for prefix_len in prefix_lens:
             loss = torch.mean(torch.stack([losses[prefix_len][i] for i in range(n_seeds)], dim=0))
-            loss_dict[f"val_loss_prefix_{prefix_len}"] = loss
+            loss_dict[f"val_loss_prefix_{prefix_len+1}"] = loss
         pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
 
     @torch.inference_mode()

@@ -26,7 +26,7 @@ dependencies = [
   "braceexpand",
   "crick>=0.0.4",
   "google-cloud-storage",
-  "jsonargparse[signatures]",
+  "jsonargparse[signatures]==4.27.7",
   "lightning>=2.2.0",
   "pyro-ppl",
   "pytest",
