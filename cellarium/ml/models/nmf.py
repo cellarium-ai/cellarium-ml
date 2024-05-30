@@ -18,7 +18,7 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-def anls_solve(loss: callable[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+def anls_solve(loss) -> torch.Tensor:
     """
     The ANLS solver for the dictionary update step in the online NMF algorithm.
 
@@ -40,21 +40,23 @@ class NonNegativeMatrixFactorization(CellariumModel):
 
     Args:
         var_names_g: The variable names schema for the input data validation.
+        k: The number of gene expression programs to infer.
+        algorithm: The algorithm to use for the online NMF. Currently only "mairal" is supported.
     """
 
-    def __init__(self, var_names_g: Sequence[str], algorithm: Literal["mairal"] = "mairal") -> None:
+    def __init__(self, var_names_g: Sequence[str], k: int, algorithm: Literal["mairal"] = "mairal") -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
-        n_vars = len(self.var_names_g)
-        self.n_vars = n_vars
+        g = len(self.var_names_g)
+        self.n_vars = g
         self.algorithm = algorithm
 
         self.A_kk: torch.Tensor
         self.B_kg: torch.Tensor
         self.D_kg: torch.Tensor
-        self.register_buffer("A_kk", torch.empty(n_vars))
-        self.register_buffer("B_kg", torch.empty(n_vars))
-        self.register_buffer("D_kg", torch.empty(n_vars))
+        self.register_buffer("A_kk", torch.empty(k, k))
+        self.register_buffer("B_kg", torch.empty(k, g))
+        self.register_buffer("D_kg", torch.empty(k, g))
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self.reset_parameters()
 
@@ -74,13 +76,16 @@ class NonNegativeMatrixFactorization(CellariumModel):
         # def loss(a_nk: torch.Tensor) -> torch.Tensor:
         #     return torch.linalg.matrix_norm(x_ng - torch.matmul(a_nk, factors_kg), ord='fro')
         
-        alpha_nk = torch.linalg.lstsq(A=self.D_kg, B=x_ng)
+        fit = torch.linalg.lstsq(factors_kg.T, x_ng.T)
+        alpha_nk = fit.solution.T
+        residual_loss = fit.residuals.mean()
+
         n = x_ng.shape[0]  # division by n is shown in Mairal section 3.4.3
         self.A_kk = self.A_kk + torch.matmul(alpha_nk.T, alpha_nk) / n
         # TODO: see if this is faster than the matmul above: torch.einsum("ik,jk->ij", t, t)
         self.B_kg = self.B_kg + torch.matmul(alpha_nk.T, x_ng) / n
         updated_factors_kg = self.dictionary_update(factors_kg)
-        return updated_factors_kg
+        return updated_factors_kg, residual_loss
     
     def dictionary_update(self, factors_kg: torch.Tensor, n_iterations: int = 1) -> torch.Tensor:
         """
@@ -90,7 +95,7 @@ class NonNegativeMatrixFactorization(CellariumModel):
             factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
             n_iterations: The number of iterations to perform.
         """
-        updated_factors_kg = factors_kg.copy()
+        updated_factors_kg = factors_kg.clone()
 
         for _ in range(n_iterations):
             for k in range(factors_kg.shape[0]):
@@ -122,7 +127,8 @@ class NonNegativeMatrixFactorization(CellariumModel):
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         if self.algorithm == "mairal":
-            self.D_kg = self.online_dictionary_learning(x_ng=x_ng, factors_kg=self.D_kg)
+            self.D_kg, loss = self.online_dictionary_learning(x_ng=x_ng, factors_kg=self.D_kg)
+            print(loss)
         else:
             raise ValueError(f"Unknown algorithm: {self.algorithm}")
         return {}
