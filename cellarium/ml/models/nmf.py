@@ -17,6 +17,7 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
+
 def anls_solve(loss: callable[torch.Tensor, torch.Tensor]) -> torch.Tensor:
     """
     The ANLS solver for the dictionary update step in the online NMF algorithm.
@@ -70,10 +71,10 @@ class NonNegativeMatrixFactorization(CellariumModel):
         Args:
             factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
         """
-        def loss(a_nk: torch.Tensor) -> torch.Tensor:
-            return torch.linalg.matrix_norm(x_ng - torch.matmul(a_nk, factors_kg), ord='fro')
+        # def loss(a_nk: torch.Tensor) -> torch.Tensor:
+        #     return torch.linalg.matrix_norm(x_ng - torch.matmul(a_nk, factors_kg), ord='fro')
         
-        alpha_nk = anls_solve(loss)  # to be implemented
+        alpha_nk = torch.linalg.lstsq(A=self.D_kg, B=x_ng)
         n = x_ng.shape[0]  # division by n is shown in Mairal section 3.4.3
         self.A_kk = self.A_kk + torch.matmul(alpha_nk.T, alpha_nk) / n
         # TODO: see if this is faster than the matmul above: torch.einsum("ik,jk->ij", t, t)
