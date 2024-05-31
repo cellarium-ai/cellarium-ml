@@ -33,7 +33,7 @@ class Dropout(nn.Module):
         self.p_dropout_max = p_dropout_max
         self.p_apply = p_apply
 
-    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng: Gene counts.
