@@ -95,6 +95,5 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
             A dictionary with the embedding matrix.
         """
         with torch.no_grad():
-            x_ng = torch.chunk(x_ng, 2)[0]
             z = F.normalize(self.layers(x_ng))
         return {"x_ng": z}

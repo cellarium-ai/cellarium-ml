@@ -12,8 +12,16 @@ class Duplicate(nn.Module):
     used for contrastive augmentations.
     """
 
-    def __init__(self):
+    def __init__(self, enabled=True):
+        """
+        Args:
+            enabled:
+                If True, performs duplication; otherwise does nothing.
+                Set False when performing model inference so the
+                transformation pipeline remains consistent with training.
+        """
         super().__init__()
+        self.enabled = enabled
 
     def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
         """
@@ -23,4 +31,6 @@ class Duplicate(nn.Module):
         Returns:
             Duplicated counts.
         """
-        return {"x_ng": x_ng.repeat((2, 1))}
+        if self.enabled:
+            x_ng = x_ng.repeat((2, 1))
+        return {"x_ng": x_ng}
