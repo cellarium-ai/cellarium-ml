@@ -293,7 +293,7 @@ class Transformer(nn.Module):
         self.Ev = ValueEmbedding(d_model, use_bias=use_bias)
         # mask embedding for target values
         self.Em = nn.Embedding(1, d_model)
-        self.Wtmu = nn.Linear(d_model, d_model, bias=use_bias)
+        # self.Wtmu = nn.Linear(d_model, d_model, bias=use_bias)
 
         self.n_blocks = n_blocks
         self.blocks = nn.ModuleList(
@@ -317,7 +317,8 @@ class Transformer(nn.Module):
         value_embedding_ncd = self.Ev(torch.log1p(value_nc))
         mask_embedding_d = self.Em(torch.tensor(0, device=device))
         value_embedding_ncd[:, prefix_len:] = mask_embedding_d
-        total_mrna_umis_embedding_nd = self.Wtmu(self.Ev(torch.log1p(total_mrna_umis_n)))
+        # total_mrna_umis_embedding_nd = self.Wtmu(self.Ev(torch.log1p(total_mrna_umis_n)))
+        total_mrna_umis_embedding_nd = self.Ev(torch.log1p(total_mrna_umis_n))
 
         hidden_state_ncd = (
             token_embedding_ncd + value_embedding_ncd + total_mrna_umis_embedding_nd[:, None, :]
