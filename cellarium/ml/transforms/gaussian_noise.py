@@ -33,7 +33,7 @@ class GaussianNoise(nn.Module):
         self.sigma_max = sigma_max
         self.p_apply = p_apply
 
-    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng: Gene counts.

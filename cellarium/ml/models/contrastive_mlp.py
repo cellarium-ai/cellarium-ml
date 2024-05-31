@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, List
 
 import torch
 import torch.nn.functional as F
@@ -39,7 +39,7 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
     ):
         super(ContrastiveMLP, self).__init__()
 
-        layer_list = []
+        layer_list: List[nn.Module] = []
         layer_list.append(nn.Linear(g_genes, hidden_size[0]))
         layer_list.append(nn.BatchNorm1d(hidden_size[0]))
         layer_list.append(nn.ReLU())

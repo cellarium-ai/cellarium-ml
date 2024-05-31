@@ -23,7 +23,7 @@ class Duplicate(nn.Module):
         super().__init__()
         self.enabled = enabled
 
-    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng: Gene counts.

@@ -49,7 +49,7 @@ class NT_Xent(nn.Module):
             rank:
                 The rank of the specified device.
         """
-        negative_mask_full = ~torch.eye(size, dtype=bool).repeat((1, 2))
+        negative_mask_full = ~torch.eye(size).bool().repeat((1, 2))
         mask = torch.chunk(negative_mask_full, self.world_size, dim=0)[rank]
         return mask
 
