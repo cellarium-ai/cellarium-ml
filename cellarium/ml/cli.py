@@ -419,6 +419,42 @@ def logistic_regression(args: ArgsType = None) -> None:
 
 
 @register_model
+def nmf(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.NonNegativeMatrixFactorization` model.
+
+    Example run::
+
+        cellarium-ml logistic_regression fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
+            --data.batch_keys.var_names_g.attr var_names \
+            --data.batch_keys.y_n.attr obs \
+            --data.batch_keys.y_n.key cell_type \
+            --data.batch_keys.y_n.convert_fn cellarium.ml.utilities.data.categories_to_codes \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.max_steps 1000
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.NonNegativeMatrixFactorization",
+        link_arguments=[
+            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
 def onepass_mean_var_std(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.OnePassMeanVarStd` model.
