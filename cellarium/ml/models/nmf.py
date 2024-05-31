@@ -78,6 +78,10 @@ class NonNegativeMatrixFactorization(CellariumModel):
         
         fit = torch.linalg.lstsq(factors_kg.T, x_ng.T)
         alpha_nk = fit.solution.T
+
+        # an added non-negativity constraint, quite possibly wrong
+        alpha_nk = torch.clamp(alpha_nk, min=0.0)
+
         residual_loss = fit.residuals.mean()
 
         n = x_ng.shape[0]  # division by n is shown in Mairal section 3.4.3
@@ -95,19 +99,23 @@ class NonNegativeMatrixFactorization(CellariumModel):
             factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
             n_iterations: The number of iterations to perform.
         """
+        k_dimension = factors_kg.shape[0]
         updated_factors_kg = factors_kg.clone()
 
         for _ in range(n_iterations):
-            for k in range(factors_kg.shape[0]):
+            for k in range(k_dimension):
 
                 scalar = self.A_kk[k, k]
                 a_1k = self.A_kk[k, :]
                 b_1g = self.B_kg[k, :]
-                b_1g = torch.clamp(b_1g, min=0.0)  # the non-negativity constraint
 
-                # Algorithm 2 line 3
-                u_1g = updated_factors_kg[k, :] + (b_1g - torch.matmul(a_1k, updated_factors_kg)) / scalar
-                updated_factors_kg[k, :] = u_1g / torch.clamp(torch.linalg.norm(u_1g), min=1.0)
+                # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
+                u_1g = torch.clamp(
+                    updated_factors_kg[k, :] + (b_1g - torch.matmul(a_1k, updated_factors_kg)) / scalar,
+                    min=0.0,
+                )
+                updated_factors_1g = u_1g / torch.clamp(torch.linalg.norm(u_1g), min=1.0)
+                updated_factors_kg[k, :] = updated_factors_1g
 
         return updated_factors_kg
 
@@ -128,7 +136,8 @@ class NonNegativeMatrixFactorization(CellariumModel):
 
         if self.algorithm == "mairal":
             self.D_kg, loss = self.online_dictionary_learning(x_ng=x_ng, factors_kg=self.D_kg)
-            print(loss)
+            print('loss', loss)
+            assert (self.D_kg < 0.0).sum() == 0, 'there are negative elements in the dictionary matrix'
         else:
             raise ValueError(f"Unknown algorithm: {self.algorithm}")
         return {}
