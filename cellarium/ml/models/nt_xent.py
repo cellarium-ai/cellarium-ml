@@ -7,17 +7,16 @@ from torch import nn
 from cellarium.ml.distributed.gather import GatherLayer
 from cellarium.ml.utilities.data import get_rank_and_num_replicas
 
-import pdb
-
-import logging
-
-# logging.basicConfig(level=logging.DEBUG)
-# logger = logging.getLogger()
-
 
 class NT_Xent(nn.Module):
     """
     Normalized Temperature-scaled cross-entropy loss.
+
+    **References:**
+
+    1. `A simple framework for contrastive learning of visual representations
+       (Chen, T., Kornblith, S., Norouzi, M., & Hinton, G.)
+       <https://arxiv.org/abs/2002.05709>`_.
 
     Args:
         batch_size:
@@ -50,11 +49,10 @@ class NT_Xent(nn.Module):
             rank:
                 The rank of the specified device.
         """
-
         negative_mask_full = ~torch.eye(size, dtype=bool).repeat((1, 2))
         mask = torch.chunk(negative_mask_full, self.world_size, dim=0)[rank]
         return mask
-    
+
     @staticmethod
     def _similarity_fn(z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
         """
@@ -66,22 +64,19 @@ class NT_Xent(nn.Module):
     def forward(self, z_i: torch.Tensor, z_j: torch.Tensor) -> torch.Tensor:
         """
         Gathers all inputs, then computes NT-Xent loss averaged over all
-        2n augmented samples. Each sample's corresponding pair is used as
-        its positive class, while the remaining (2n - 2) samples are its
-        negative classes.
+        2n augmented samples.
         """
-
-        # gather embeddings from distributed processing
+        # gather embeddings from distributed forward pass
         if self.world_size > 1:
             z_i_full = torch.cat(GatherLayer.apply(z_i), dim=0)
             z_j_full = torch.cat(GatherLayer.apply(z_j), dim=0)
         else:
             z_i_full = z_i
             z_j_full = z_j
-        
-        # pdb.set_trace()
-        
-        assert len(z_i_full) % self.world_size == 0, f'Expected batch to evenly divide across devices (set drop_last to True).'
+
+        assert (
+            len(z_i_full) % self.world_size == 0
+        ), "Expected batch to evenly divide across devices (set drop_last to True)."
 
         batch_size = len(z_i_full) // self.world_size
         rank, _ = get_rank_and_num_replicas()
@@ -89,6 +84,7 @@ class NT_Xent(nn.Module):
 
         z_both_full = torch.cat((z_i_full, z_j_full), dim=0)
 
+        # normalized similarity logits between device minibatch and full batch embeddings
         sim_i = NT_Xent._similarity_fn(z_i, z_both_full) / self.temperature
         sim_j = NT_Xent._similarity_fn(z_j, z_both_full) / self.temperature
 
@@ -96,9 +92,9 @@ class NT_Xent(nn.Module):
         pos_j = torch.diag(sim_j, rank * batch_size)
 
         positive_samples = torch.cat((pos_i, pos_j))
-        negative_samples = torch.cat([
-            sim_i[negative_mask].reshape(batch_size, -1),
-            sim_j[negative_mask].reshape(batch_size, -1)])
+        negative_samples = torch.cat(
+            [sim_i[negative_mask].reshape(batch_size, -1), sim_j[negative_mask].reshape(batch_size, -1)]
+        )
 
         labels = torch.zeros_like(positive_samples).long()
         logits = torch.cat((positive_samples.unsqueeze(1), negative_samples), dim=1)

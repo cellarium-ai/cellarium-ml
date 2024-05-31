@@ -11,10 +11,24 @@ from torch import nn
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.models.nt_xent import NT_Xent
 
-import pdb
-
 
 class ContrastiveMLP(CellariumModel, PredictMixin):
+    """
+    Multilayer perceptron trained with contrastive learning.
+
+    Args:
+        g_genes:
+            Number of genes in each entry (network input size).
+        hidden_size:
+            Dimensionality of the fully-connected hidden layers.
+        embed_dim:
+            Size of embedding (network output size).
+        world_size:
+            Number of devices used in training.
+        temperature:
+            Parameter governing Normalized Temperature-scaled cross-entropy (NT-Xent) loss.
+    """
+
     def __init__(
         self,
         g_genes: int,
@@ -43,30 +57,44 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
 
         self.reset_parameters()
 
-    
+    def reset_parameters(self) -> None:
+        for layer in self.layers:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_uniform_(layer.weight, mode="fan_in", nonlinearity="relu")
+                nn.init.constant_(layer.bias, 0.0)
+            elif isinstance(layer, nn.BatchNorm1d):
+                nn.init.constant_(layer.weight, 1.0)
+                nn.init.constant_(layer.bias, 0.0)
+
     def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
+        """
+        Args:
+            x_ng:
+                Gene counts matrix.
+        Returns:
+            A dictionary with the loss value.
+        """
         # compute deep embeddings
         z = F.normalize(self.layers(x_ng))
 
-        # pdb.set_trace()
-        
         # split input into augmented halves
         z1, z2 = torch.chunk(z, 2)
 
         # SimCLR loss
         loss = self.Xent_loss(z1, z2)
-        return {'loss': loss}
+        return {"loss": loss}
 
     def predict(self, x_ng: torch.Tensor, **kwargs: Any):
-        with torch.no_grad():
-            z = F.normalize(self.layers(x_ng))
-        return torch.chunk(z, 2)[0]
+        """
+        Send (transformed) data through the model and return outputs.
 
-    def reset_parameters(self) -> None:
-        for layer in self.layers:
-            if isinstance(layer, nn.Linear):
-                nn.init.kaiming_uniform_(layer.weight, mode='fan_in', nonlinearity='relu')
-                nn.init.constant_(layer.bias, 0.0)
-            elif isinstance(layer, nn.BatchNorm1d):
-                nn.init.constant_(layer.weight, 1.0)
-                nn.init.constant_(layer.bias, 0.0)
+        Args:
+            x_ng:
+                Gene counts matrix.
+        Returns:
+            A dictionary with the embedding matrix.
+        """
+        with torch.no_grad():
+            x_ng = torch.chunk(x_ng, 2)[0]
+            z = F.normalize(self.layers(x_ng))
+        return {"x_ng": z}

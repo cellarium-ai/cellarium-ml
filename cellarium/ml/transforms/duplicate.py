@@ -23,4 +23,4 @@ class Duplicate(nn.Module):
         Returns:
             Duplicated counts.
         """
-        return {'x_ng': x_ng.repeat((2, 1))}
+        return {"x_ng": x_ng.repeat((2, 1))}
