@@ -46,6 +46,6 @@ class Dropout(nn.Module):
 
         x_aug = torch.clone(x_ng)
         x_aug[Bernoulli(probs=p_dropout_ng).sample().bool()] = 0
-        
+
         x_ng = torch.where(p_apply_n.unsqueeze(1), x_ng, x_aug)
-        return {'x_ng': x_ng}
+        return {"x_ng": x_ng}

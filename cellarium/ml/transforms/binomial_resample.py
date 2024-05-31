@@ -45,6 +45,6 @@ class BinomialResample(nn.Module):
         p_apply_n = Bernoulli(probs=self.p_apply).sample(x_ng.shape[:1]).type_as(x_ng).bool()
 
         x_aug = Binomial(total_count=x_ng, probs=p_binom_ng).sample()
-        
+
         x_ng = torch.where(p_apply_n.unsqueeze(1), x_ng, x_aug)
-        return {'x_ng': x_ng}
+        return {"x_ng": x_ng}
