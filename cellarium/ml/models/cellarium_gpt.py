@@ -3,21 +3,18 @@
 
 import math
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from functools import cached_property
 from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import torch
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.utilities.testing import (
-    assert_arrays_equal,
-    assert_columns_and_array_lengths_equal,
-)
+from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 
 
 def prefix_diagonal_mask(context_len: int, prefix_len: int, device: torch.device) -> torch.Tensor:
@@ -178,12 +175,38 @@ class ValueEmbedding(nn.Module):
 
     def __init__(self, d_model: int, use_bias: bool) -> None:
         super().__init__()
-        self.dense1 = nn.Linear(1, d_model, bias=use_bias)
+        self.fc1 = nn.Linear(1, d_model, bias=use_bias)
         self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(d_model, d_model, bias=use_bias)
+        self.fc2 = nn.Linear(d_model, d_model, bias=use_bias)
 
     def forward(self, value_nc: torch.Tensor) -> torch.Tensor:
-        return self.dense2(self.relu(self.dense1(value_nc.unsqueeze(-1))))  # _ncd
+        return self.fc2(self.relu(self.fc1(value_nc.unsqueeze(-1))))  # _ncd
+
+
+class GeneEmbedding(nn.Module):
+    def __init__(self, n_genes: int, d_model: int, use_bias: bool) -> None:
+        super().__init__()
+        # gene ID embedding
+        self.Ei = nn.Embedding(n_genes, d_model)
+        # gene value embedding
+        self.Ev = ValueEmbedding(d_model, use_bias=use_bias)
+        # linear transformation for gene embeddings
+        self.Wg = nn.Linear(3 * d_model, d_model, bias=use_bias)
+
+    def forward(
+        self, gene_id_nc: torch.Tensor, gene_value_nc: torch.Tensor, total_mrna_umis_n: torch.Tensor
+    ) -> torch.Tensor:
+        gene_id_embedding_ncd = self.Ei(gene_id_nc)
+        gene_value_embedding_ncd = self.Ev(torch.log1p(gene_value_nc))
+        total_mrna_umis_embedding_ncd = self.Ev(torch.log1p(total_mrna_umis_n[:, None])).expand(
+            gene_id_embedding_ncd.shape
+        )
+
+        gene_embedding_ncd = self.Wg(
+            torch.cat([gene_id_embedding_ncd, gene_value_embedding_ncd, total_mrna_umis_embedding_ncd], dim=-1)
+        )
+
+        return gene_embedding_ncd
 
 
 class NormAdd(nn.Module):
@@ -267,15 +290,12 @@ class Transformer(nn.Module):
             Whether to use bias in the linear transformations.
         attn_mult:
             Multiplier for the attention scores.
-        input_mult:
-            Multiplier for the input embeddings.
         attn_backend:
             Backend for the attention computation.
     """
 
     def __init__(
         self,
-        n_vars: int,
         d_model: int,
         d_ffn: int,
         n_heads: int,
@@ -283,17 +303,9 @@ class Transformer(nn.Module):
         dropout_p: float,
         use_bias: bool,
         attn_mult: float,
-        input_mult: float,
         attn_backend: Literal["math", "flash", "mem_efficient"],
     ) -> None:
         super().__init__()
-        # +1 token for total_mrna_umis
-        self.Et = nn.Embedding(n_vars + 1, d_model)
-        # continuous value embedding
-        self.Ev = ValueEmbedding(d_model, use_bias=use_bias)
-        # mask embedding for target values
-        self.Em = nn.Embedding(1, d_model)
-
         self.n_blocks = n_blocks
         self.blocks = nn.ModuleList(
             [
@@ -301,35 +313,21 @@ class Transformer(nn.Module):
                 for _ in range(n_blocks)
             ]
         )
-        self.input_mult = input_mult
 
-    def forward(
-        self,
-        token_id_nc: torch.Tensor,
-        value_nc: torch.Tensor,
-        prefix_len: int,
-    ) -> torch.Tensor:
-        device = token_id_nc.device
-
-        token_embedding_ncd = self.Et(token_id_nc)
-        value_embedding_ncd = self.Ev(torch.log1p(value_nc))
-        mask_embedding_d = self.Em(torch.tensor(0, device=device))
-        value_embedding_ncd[:, prefix_len:] = mask_embedding_d
-
-        hidden_state_ncd = (token_embedding_ncd + value_embedding_ncd) * self.input_mult
+    def forward(self, hidden_state_ncd: torch.Tensor, prefix_len: int) -> torch.Tensor:
         for block in self.blocks:
             hidden_state_ncd = block(hidden_state_ncd, prefix_len)
 
         return hidden_state_ncd
 
 
-class CellariumGPT(CellariumModel):
+class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
     """
     Cellarium GPT model.
 
     Args:
-        var_names_g:
-            The variable names schema for the input data validation.
+        gene_categories:
+            Gene ID categories.
         d_model:
             Dimensionality of the embeddings and hidden states.
         d_ffn:
@@ -362,7 +360,7 @@ class CellariumGPT(CellariumModel):
 
     def __init__(
         self,
-        var_names_g: Sequence[str],
+        gene_categories: pd.Index,
         d_model: int = 256,
         d_ffn: int = 512,
         n_heads: int = 8,
@@ -380,34 +378,35 @@ class CellariumGPT(CellariumModel):
         attn_backend: Literal["math", "flash", "mem_efficient"] = "mem_efficient",
     ) -> None:
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
-        self.n_vars = len(var_names_g)
+        self.gene_categories = gene_categories
+        self.n_genes = len(gene_categories)
         self.max_value = max_value
         if (suffix_len is None) == (context_len is None):
             raise ValueError("Either `suffix_len` or `context_len` must be specified, but not both.")
         if context_len is not None:
-            if context_len > self.n_vars + 1:
+            if context_len > self.n_genes:
                 raise ValueError(
-                    "`context_len` must be less than or equal to the number of genes + 1. "
-                    f"Got {context_len} > {self.n_vars + 1}."
+                    "`context_len` must be less than or equal to the number of genes. "
+                    f"Got {context_len} > {self.n_genes}."
                 )
             if max_prefix_len >= context_len:
                 raise ValueError(
                     "`max_prefix_len` must be less than `context_len`. Got {max_prefix_len} >= {context_len}."
                 )
         if suffix_len is not None:
-            if max_prefix_len + suffix_len > self.n_vars + 1:
+            if max_prefix_len + suffix_len > self.n_genes:
                 raise ValueError(
-                    "`max_prefix_len + suffix_len` must be less than or equal to the number of genes + 1. "
-                    f"Got {max_prefix_len + suffix_len} > {self.n_vars + 1}."
+                    "`max_prefix_len + suffix_len` must be less than or equal to the number of genes. "
+                    f"Got {max_prefix_len + suffix_len} > {self.n_genes}."
                 )
         self.max_prefix_len = max_prefix_len
         self.suffix_len = suffix_len
         self.context_len = context_len
+        self.input_mult = input_mult
         self.output_mult = output_mult
 
+        self.gene_embedding = GeneEmbedding(self.n_genes, d_model, use_bias)
         self.transformer = Transformer(
-            self.n_vars,
             d_model,
             d_ffn,
             n_heads,
@@ -415,14 +414,11 @@ class CellariumGPT(CellariumModel):
             dropout_p,
             use_bias,
             attn_mult,
-            input_mult,
             attn_backend,
         )
         self.head = nn.Linear(d_model, self.max_value + 1, use_bias)
         self.initializer_range = initializer_range
         self.reset_parameters()
-
-        # self.log_metrics = log_metrics
 
     def reset_parameters(self) -> None:
         self.apply(self._init_weights)
@@ -458,67 +454,69 @@ class CellariumGPT(CellariumModel):
 
     @cached_property
     def token_to_id(self) -> dict[str, int]:
-        return {var_name: i + 1 for i, var_name in enumerate(self.var_names_g)}
+        return {var_name: i for i, var_name in enumerate(self.gene_categories)}
 
     @cached_property
     def vectorized_token_to_id(self):
         return np.vectorize(lambda x: self.token_to_id[x])
 
-    def tokenize(
-        self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor, shuffle: bool, context_len: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        n = x_ng.shape[0]
-        device = x_ng.device
-        ndx = torch.arange(n, device=device)
-
-        if shuffle:
-            index_ng = torch.argsort(torch.rand_like(x_ng))
-            index_nc = index_ng[:, : context_len - 1]
-        else:
-            index_nc = torch.arange(context_len - 1, device=device).expand(n, -1)
-
-        # add total_mrna_umis to the prefix
-        token_id_nc = torch.cat([torch.zeros((n, 1), dtype=torch.long, device=device), index_nc + 1], dim=1)
-        value_nc = torch.cat([total_mrna_umis_n[:, None], x_ng[ndx[:, None], index_nc]], dim=1).long()
-        return token_id_nc, value_nc
-
     def forward(
         self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
+        gene_value_ng: torch.Tensor,
+        gene_id_g: torch.Tensor,
+        gene_categories: pd.Index,
         total_mrna_umis_n: torch.Tensor,
-        batch_idx: int,
+        batch_idx: int | None = None,
     ) -> dict[str, torch.Tensor]:
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+        assert gene_categories.equals(self.gene_categories)
 
-        device = x_ng.device
+        device = gene_id_g.device
+        gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
 
-        # use the same prefix_len for all samples in the mini-batch across all devices
-        rng = torch.Generator(device=device)
-        rng.manual_seed(batch_idx)
-        # prefix includes the total_mrna_umis and a random subset of genes
-        # the length of the prefix is sampled uniformly from 1 to context_len - 1 (inclusive)
-        prefix_len = int(torch.randint(1, self.max_prefix_len + 1, (), generator=rng, device=device))
+        # sample the prefix length
+        if batch_idx is not None:
+            rng = torch.Generator(device=device)
+            rng.manual_seed(batch_idx)
+            prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), generator=rng, device=device))
+        else:
+            prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), device=device))
+
+        # compute the context length and suffix length
         if self.context_len is not None:
             # use the fixed context length
             context_len = self.context_len
+            suffix_len = context_len - prefix_len
         elif self.suffix_len is not None:
             # compute the context length dynamically based on the prefix length
-            context_len = prefix_len + self.suffix_len
-        token_id_nc, value_nc = self.tokenize(x_ng, total_mrna_umis_n, shuffle=True, context_len=context_len)
+            suffix_len = self.suffix_len
+            context_len = prefix_len + suffix_len
 
-        hidden_state_ncd = self.transformer(token_id_nc, value_nc, prefix_len)
-        logits_ncg = self.head(hidden_state_ncd) * self.output_mult
+        # shuffle the genes
+        shuffle_idx_ng = torch.argsort(torch.rand_like(gene_value_ng), dim=-1)
+        shuffle_idx_nc = shuffle_idx_ng[:, :context_len]
+        gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+        gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
 
-        label_mask_c = torch.arange(context_len, device=device) >= prefix_len
-        label_mask_nc = label_mask_c & (value_nc < self.max_value + 1)
-        sample_weight_nc = 1 / label_mask_nc.sum(dim=1, keepdim=True).expand(-1, context_len)
+        # compute the target and mask target values
+        label_ns = gene_value_nc[:, -suffix_len:].long()
+        gene_value_nc[:, -suffix_len:] = -1
+
+        # embed the gene IDs, values, and total mRNA UMIs
+        gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_n)
+
+        # compute logits
+        hidden_state_ncd = gene_embedding_ncd * self.input_mult
+        hidden_state_ncd = self.transformer(hidden_state_ncd, prefix_len)
+        logits_nsm = self.head(hidden_state_ncd[:, -suffix_len:]) * self.output_mult
+
+        # compute the loss
         loss_fn = nn.CrossEntropyLoss(reduction="none")
-        sample_weights = sample_weight_nc[label_mask_nc]
-        loss = (
-            loss_fn(logits_ncg[label_mask_nc], value_nc[label_mask_nc]) * sample_weights
-        ).sum() / sample_weights.sum()
+        label_mask_ns = label_ns < self.max_value + 1
+        label_weight_ns = 1 / label_mask_ns.sum(dim=-1, keepdim=True).expand(-1, suffix_len)
+        label_weights = label_weight_ns[label_mask_ns]
+        logits = logits_nsm[label_mask_ns]
+        labels = label_ns[label_mask_ns]
+        loss = (loss_fn(logits, labels) * label_weights).sum() / label_weights.sum()
 
         return {"loss": loss}
 
@@ -526,69 +524,66 @@ class CellariumGPT(CellariumModel):
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        x_ng: torch.Tensor,
-        obs_names_n: np.ndarray,
-        var_names_g: np.ndarray,
+        gene_id_g: torch.Tensor,
+        gene_categories: pd.Series,
+        gene_value_ng: torch.Tensor,
         total_mrna_umis_n: torch.Tensor,
+        obs_names_n: np.ndarray,
         batch_idx: int,
     ) -> None:
-        device = x_ng.device
-        n = x_ng.shape[0]
-        ndx = torch.arange(n, device=device)
+        device = gene_id_g.device
+        gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
+        n, g = gene_id_ng.shape
 
-        loss = self.forward(x_ng, var_names_g, total_mrna_umis_n, batch_idx=batch_idx)["loss"]
+        loss = self.forward(gene_value_ng, gene_id_g, gene_categories, total_mrna_umis_n, batch_idx=batch_idx)["loss"]
         pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
 
         losses: dict[int, dict[int, torch.Tensor]] = defaultdict(dict)
         suffix_len = 100
         n_seeds = 3
-        prefix_lens = [1, 50, 500, 1000, 2000, 4000, 8000]
+        prefix_lens = [0, 49, 499, 999, 1999, 3999, 7999]
         for i in range(n_seeds):
-            rng_n = [torch.Generator(device=device) for _ in range(x_ng.shape[0])]
+            rng_n = [torch.Generator(device=device) for _ in range(n)]
             [rng.manual_seed(int(obs_name) + i) for rng, obs_name in zip(rng_n, obs_names_n)]
-            index_ng = torch.stack([torch.randperm(x_ng.shape[1], generator=rng, device=device) for rng in rng_n])
+            shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
 
             for prefix_len in prefix_lens:
-                context_len = prefix_len + suffix_len
-                token_id_nc = torch.cat(
+                shuffle_idx_nc = torch.cat(
                     [
-                        torch.zeros((n, 1), dtype=torch.long, device=device),
-                        index_ng[:, : prefix_len - 1] + 1,
-                        index_ng[:, -suffix_len:] + 1,
+                        shuffle_idx_ng[:, :prefix_len],
+                        shuffle_idx_ng[:, -suffix_len:],
                     ],
                     dim=1,
                 )
-                value_nc = torch.cat(
-                    [
-                        total_mrna_umis_n[:, None],
-                        x_ng[ndx[:, None], index_ng[:, : prefix_len - 1]],
-                        x_ng[ndx[:, None], index_ng[:, -suffix_len:]],
-                    ],
-                    dim=1,
-                )
+                gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+                gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
+                label_ns = gene_value_nc[:, -suffix_len:].long()
+                gene_value_nc[:, -suffix_len:] = -1
 
                 logits = []
-                for token_id, value in zip(torch.split(token_id_nc, 25), torch.split(value_nc, 25)):
-                    hidden_state = self.transformer(token_id, value, prefix_len)
-                    logits.append(self.head(hidden_state) * self.output_mult)
-                logits_ncg = torch.cat(logits, dim=0)
+                for gene_id, gene_value, total_mrna_umis in zip(
+                    torch.split(gene_id_nc, 25), torch.split(gene_value_nc, 25), torch.split(total_mrna_umis_n, 25)
+                ):
+                    gene_embedding = self.gene_embedding(gene_id, gene_value, total_mrna_umis)
+                    hidden_state = gene_embedding * self.input_mult
+                    hidden_state = self.transformer(hidden_state, prefix_len)
+                    logits.append(self.head(hidden_state[:, -suffix_len:]) * self.output_mult)
+                logits_nsm = torch.cat(logits, dim=0)
 
-                label_mask_c = torch.arange(context_len, device=device) >= prefix_len
-                label_mask_nc = label_mask_c & (value_nc < self.max_value + 1)
-                sample_weight_nc = 1 / label_mask_nc.sum(dim=1, keepdim=True).expand(-1, context_len)
+                label_mask_ns = label_ns < self.max_value + 1
+                label_weight_ns = 1 / label_mask_ns.sum(dim=1, keepdim=True).expand(-1, suffix_len)
                 loss_fn = nn.CrossEntropyLoss(reduction="none")
-                sample_weights = sample_weight_nc[label_mask_nc]
-                value_nc = value_nc.long()
+                label_weights = label_weight_ns[label_mask_ns]
                 loss = (
-                    loss_fn(logits_ncg[label_mask_nc], value_nc[label_mask_nc]) * sample_weights
-                ).sum() / sample_weights.sum()
+                    loss_fn(logits_nsm[label_mask_ns], label_ns[label_mask_ns]) * label_weights
+                ).sum() / label_weights.sum()
                 losses[prefix_len][i] = loss
 
                 if trainer.global_rank == batch_idx == i == 0:
                     self._log_plots(
                         trainer,
-                        value_nc[:, prefix_len:],
-                        logits_ncg[:, prefix_len:],
+                        label_ns,
+                        logits_nsm,
                         total_mrna_umis_n,
                         prefix_len,
                     )
@@ -596,7 +591,7 @@ class CellariumGPT(CellariumModel):
         loss_dict = {}
         for prefix_len in prefix_lens:
             loss = torch.mean(torch.stack([losses[prefix_len][i] for i in range(n_seeds)], dim=0))
-            loss_dict[f"val_loss_prefix_{prefix_len}"] = loss
+            loss_dict[f"val_loss_prefix_{prefix_len + 1}"] = loss
         pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
 
     @torch.inference_mode()
@@ -725,7 +720,7 @@ class CellariumGPT(CellariumModel):
         for logger in trainer.loggers:
             if isinstance(logger, pl.loggers.TensorBoardLogger):
                 logger.experiment.add_figure(
-                    f"val_pred_prefix_{prefix_len}",
+                    f"val_pred_prefix_{prefix_len + 1}",
                     fig,
                     global_step=trainer.global_step,
                 )

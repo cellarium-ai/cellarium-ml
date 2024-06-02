@@ -51,31 +51,23 @@ class AnnDataField:
             The key of the attribute to access. If ``None``, the entire attribute is returned.
         convert_fn:
             A function to apply to the attribute before returning it.
-            If ``None``, :func:`np.asarray` is used.
     """
 
     attr: str
     key: str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
-    def __call__(self, adata: AnnData | AnnCollection, idx: int | list[int] | slice) -> np.ndarray:
+    def __call__(
+        self, adata: AnnData | AnnCollection, idx: int | list[int] | slice
+    ) -> np.ndarray | pd.DataFrame | pd.Index | pd.Series:
         value = getattr(adata[idx], self.attr)
         if self.key is not None:
             value = value[self.key]
 
         if self.convert_fn is not None:
             value = self.convert_fn(value)
-        else:
-            value = np.asarray(value)
 
         return value
-
-    @property
-    def obs_column(self) -> str | None:
-        result = None
-        if self.attr == "obs":
-            result = self.key
-        return result
 
 
 def get_rank_and_num_replicas() -> tuple[int, int]:
@@ -148,7 +140,7 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
     for key in keys:
         if key == "obs_names_n":
             collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
-        elif key == "var_names_g":
+        elif key == "var_names_g" or key.endswith("_categories"):
             # Check that all var_names_g are the same
             if len(batch) > 1:
                 if not all(np.array_equal(batch[0][key], data[key]) for data in batch[1:]):
@@ -185,3 +177,7 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
         Numpy array.
     """
     return np.asarray(x.cat.codes)
+
+
+def var_names_to_ids(var_names: pd.Index) -> np.ndarray:
+    return np.arange(len(var_names))

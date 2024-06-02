@@ -15,6 +15,7 @@ from operator import attrgetter
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
@@ -306,9 +307,7 @@ def cellarium_gpt(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.CellariumGPT",
-        link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
-        ],
+        link_arguments=[LinkArguments("data.dadc.var_names", "model.model.init_args.gene_categories")],
     )
     cli(args=args)
 
