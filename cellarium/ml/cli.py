@@ -15,7 +15,6 @@ from operator import attrgetter
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
