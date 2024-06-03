@@ -175,18 +175,17 @@ class ValueEmbedding(nn.Module):
 
     def __init__(self, d_model: int, use_bias: bool) -> None:
         super().__init__()
-        self.fc1 = nn.Linear(1, d_model, bias=use_bias)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(d_model, d_model, bias=use_bias)
+        self.dense = nn.Linear(1, d_model, bias=use_bias)
         self.Em = nn.Embedding(1, d_model)
 
     def forward(self, value_nc: torch.Tensor) -> torch.Tensor:
         device = value_nc.device
-        # value_nc[value_nc == float("-inf")] = -1
-        # return self.fc2(self.relu(self.fc1(value_nc.unsqueeze(-1))))  # _ncd
-        value_embedding_ncd = self.fc2(self.relu(self.fc1(value_nc.unsqueeze(-1))))  # _ncd
-        mask_embedding_d = self.Em(torch.tensor(0, device=device))
-        value_embedding_ncd[value_nc == float("-inf")] = mask_embedding_d
+        mask_nc = value_nc < 0
+        value_nc = torch.log1p(value_nc.abs())
+        value_embedding_ncd = self.dense(value_nc.unsqueeze(-1))  # _ncd
+        if mask_nc.any():
+            mask_embedding_d = self.Em(torch.tensor(0, device=device))
+            value_embedding_ncd[mask_nc] = mask_embedding_d
         return value_embedding_ncd
 
 
@@ -204,10 +203,8 @@ class GeneEmbedding(nn.Module):
         self, gene_id_nc: torch.Tensor, gene_value_nc: torch.Tensor, total_mrna_umis_n: torch.Tensor
     ) -> torch.Tensor:
         gene_id_embedding_ncd = self.Ei(gene_id_nc)
-        gene_value_embedding_ncd = self.Ev(torch.log1p(gene_value_nc))
-        total_mrna_umis_embedding_ncd = self.Ev(torch.log1p(total_mrna_umis_n[:, None])).expand(
-            gene_id_embedding_ncd.shape
-        )
+        gene_value_embedding_ncd = self.Ev(gene_value_nc)
+        total_mrna_umis_embedding_ncd = self.Ev(total_mrna_umis_n[:, None]).expand(gene_id_embedding_ncd.shape)
 
         gene_embedding_ncd = self.Wg(
             torch.cat([gene_id_embedding_ncd, gene_value_embedding_ncd, total_mrna_umis_embedding_ncd], dim=-1)
