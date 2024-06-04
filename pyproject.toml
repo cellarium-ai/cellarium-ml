@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Machine learning library for single-cell data analysis"
 readme = "README.rst"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = {file = "LICENSE.md"}
 classifiers = [
   "Intended Audience :: Developers",

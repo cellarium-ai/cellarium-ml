@@ -41,7 +41,7 @@ class LogisticRegression(CellariumModel):
     def __init__(
         self,
         n_obs: int,
-        var_names_g: Sequence[str],
+        var_names_g,
         n_categories: int,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
@@ -79,7 +79,7 @@ class LogisticRegression(CellariumModel):
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
         self.b_c.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor) -> dict[str, torch.Tensor | None]:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor):
         """
         Args:
             x_ng:

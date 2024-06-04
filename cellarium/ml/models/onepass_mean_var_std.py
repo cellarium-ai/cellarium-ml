@@ -32,7 +32,7 @@ class OnePassMeanVarStd(CellariumModel):
         var_names_g: The variable names schema for the input data validation.
     """
 
-    def __init__(self, var_names_g: Sequence[str], algorithm: Literal["naive", "shifted_data"] = "naive") -> None:
+    def __init__(self, var_names_g, algorithm="naive"):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         n_vars = len(self.var_names_g)
@@ -61,7 +61,7 @@ class OnePassMeanVarStd(CellariumModel):
             self.x_shift.zero_()
         self._dummy_param.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
         """
         Args:
             x_ng:

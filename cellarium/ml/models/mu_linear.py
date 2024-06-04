@@ -45,7 +45,7 @@ class abcdParameter:
             The base width :math:`n_0`.
     """
 
-    data: torch.Tensor | None = None
+    data=None
     width: int = 1
     a: float = 0.0
     b: float = 0.0
@@ -127,8 +127,8 @@ class MuLinear(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool,
-        layer: Literal["input", "hidden", "output"],
-        optimizer: Literal["sgd", "adam", "adamw"],
+        layer,
+        optimizer,
         weight_init_std: float = 1.0,
         bias_init_std: float = 0.0,
         lr_scale: float = 1.0,
@@ -229,7 +229,7 @@ class MuLinear(nn.Module):
             self.bias = abcdParameter(None)  # type: ignore[assignment]
 
     @staticmethod
-    def scale_grad(base_width: int, width: int, d: float) -> Callable[[torch.Tensor], torch.Tensor]:
+    def scale_grad(base_width: int, width: int, d: float):
         def hook(grad: torch.Tensor) -> torch.Tensor:
             if d == 0:
                 return grad
@@ -258,7 +258,7 @@ class MuLinear(nn.Module):
         self.weight_unscaled.register_hook(self.scale_grad(value.base_width, value.width, value.d))
 
     @property
-    def bias(self) -> torch.Tensor | None:
+    def bias(self):
         """
         The bias of the module of shape ``(out_features)``. If :attr:`bias` is ``True``,
         the bias-specific learning rate and the initialization standard deviation are scaled with the width of the

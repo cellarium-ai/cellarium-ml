@@ -34,7 +34,7 @@ class AnnDataSchema:
 
     attrs = ["obs", "obsm", "var", "varm", "varp", "var_names", "layers"]
 
-    def __init__(self, adata: AnnData, obs_columns_to_validate: Sequence[str] | None = None) -> None:
+    def __init__(self, adata: AnnData, obs_columns_to_validate=None) -> None:
         self.attr_values = {}
         for attr in self.attrs:
             # FIXME: some of the attributes have a reference to the anndata object itself.

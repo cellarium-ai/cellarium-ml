@@ -44,7 +44,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        var_names_g: Sequence[str],
+        var_names_g,
         n_components: int,
         svd_lowrank_niter: int = 2,
         perform_mean_correction: bool = False,
@@ -74,7 +74,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.x_size.zero_()
         self._dummy_param.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
         """
         Incrementally update partial SVD with new data.
 
@@ -244,7 +244,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 

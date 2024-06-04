@@ -49,13 +49,13 @@ class CellariumModule(pl.LightningModule):
 
     def __init__(
         self,
-        transforms: Iterable[torch.nn.Module] | None = None,
-        model: CellariumModel | None = None,
-        optim_fn: type[torch.optim.Optimizer] | None = None,
-        optim_kwargs: dict[str, Any] | None = None,
-        scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | None = None,
-        scheduler_kwargs: dict[str, Any] | None = None,
-        is_initialized: bool = False,
+        transforms=None,
+        model=None,
+        optim_fn=None,
+        optim_kwargs=None,
+        scheduler_fn=None,
+        scheduler_kwargs=None,
+        is_initialized=False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -121,8 +121,8 @@ class CellariumModule(pl.LightningModule):
         return self.pipeline[:-1]
 
     def training_step(  # type: ignore[override]
-        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
-    ) -> torch.Tensor | None:
+        self, batch, batch_idx: int
+    ):
         """
         Forward pass for training step.
 
@@ -145,7 +145,7 @@ class CellariumModule(pl.LightningModule):
             self.log("train_loss", loss)
         return loss
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
+    def forward(self, batch: dict) -> dict:
         """
         Forward pass for inference step.
 
@@ -160,7 +160,7 @@ class CellariumModule(pl.LightningModule):
 
         return self.pipeline.predict(batch)
 
-    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
+    def validation_step(self, batch, batch_idx: int) -> None:
         """
         Forward pass for validation step.
 
@@ -178,7 +178,7 @@ class CellariumModule(pl.LightningModule):
 
         self.pipeline.validate(batch)
 
-    def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         """Configure optimizers for the model."""
         optim_fn = self.hparams["optim_fn"]
         optim_kwargs = self.hparams["optim_kwargs"] or {}

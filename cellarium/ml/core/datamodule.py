@@ -85,19 +85,19 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        dadc: DistributedAnnDataCollection | AnnData,
+        dadc,
         # IterableDistributedAnnDataCollectionDataset args
-        batch_keys: dict[str, AnnDataField] | None = None,
-        batch_size: int = 1,
-        iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
-        shuffle: bool = False,
-        seed: int = 0,
-        drop_last: bool = False,
-        train_size: float | int | None = None,
-        val_size: float | int | None = None,
-        test_mode: bool = False,
+        batch_keys=None,
+        batch_size=1,
+        iteration_strategy="cache_efficient",
+        shuffle=False,
+        seed=0,
+        drop_last=False,
+        train_size=None,
+        val_size=None,
+        test_mode=False,
         # DataLoader args
-        num_workers: int = 0,
+        num_workers=0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -117,7 +117,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         # DataLoader args
         self.num_workers = num_workers
 
-    def setup(self, stage: str | None = None) -> None:
+    def setup(self, stage) -> None:
         """
         .. note::
            setup is called from every process across all the nodes. Setting state here is recommended.

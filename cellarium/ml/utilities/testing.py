@@ -50,9 +50,9 @@ def assert_nonnegative(name: str, number: float):
 
 def assert_columns_and_array_lengths_equal(
     matrix_name: str,
-    matrix: np.ndarray | torch.Tensor,
+    matrix,
     array_name: str,
-    array: np.ndarray | torch.Tensor,
+    array,
 ):
     """
     Assert that the number of columns in a matrix matches the length of an array.
@@ -127,8 +127,8 @@ def l1_norm(x: torch.Tensor) -> float:
 
 
 def record_out_coords(
-    records: list[dict], width: int, name: str, t: int
-) -> Callable[[torch.nn.Module, torch.Tensor, torch.Tensor], None]:
+    records, width: int, name: str, t: int
+):
     """
     Returns a hook to record layer output coordinate size.
 
@@ -154,10 +154,10 @@ def record_out_coords(
 
 
 def get_coord_data(
-    models: dict[int, Callable[[], torch.nn.Module]],
+    models,
     train_loader: torch.utils.data.DataLoader,
-    loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    optim_fn: type[torch.optim.Optimizer],
+    loss_fn,
+    optim_fn,
     lr: float,
     nsteps: int,
     nseeds: int,

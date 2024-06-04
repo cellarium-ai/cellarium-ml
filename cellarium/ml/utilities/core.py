@@ -13,7 +13,7 @@ from cellarium.ml.utilities.testing import assert_nonnegative, assert_positive
 
 def copy_module(
     module: torch.nn.Module, self_device: torch.device, copy_device: torch.device
-) -> tuple[torch.nn.Module, torch.nn.Module]:
+):
     """
     Return an original module on ``self_device`` and its copy on ``copy_device``.
     If the module is on meta device then it is moved to ``self_device`` efficiently using ``to_empty`` method.
@@ -41,7 +41,7 @@ def copy_module(
     return module, module_copy
 
 
-def train_val_split(n_samples: int, train_size: float | int | None, val_size: float | int | None) -> tuple[int, int]:
+def train_val_split(n_samples: int, train_size, val_size):
     """
     Validate the train and validation sizes and return the number of samples for each.
 
@@ -108,7 +108,7 @@ def train_val_split(n_samples: int, train_size: float | int | None, val_size: fl
 
 def call_func_with_batch(
     func: Callable,
-    batch: dict[str, Any],
+    batch,
 ) -> Any:
     """
     Call a function with a batch dictionary. If the function is a method of a :class:`CellariumModule`, the function

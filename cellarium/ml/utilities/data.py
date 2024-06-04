@@ -10,6 +10,7 @@ This module contains helper functions for data loading and processing.
 
 import warnings
 from collections.abc import Callable
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,10 +56,10 @@ class AnnDataField:
     """
 
     attr: str
-    key: str | None = None
-    convert_fn: Callable[[Any], np.ndarray] | None = None
+    key: str = None
+    convert_fn: Callable = None
 
-    def __call__(self, adata: AnnData | AnnCollection, idx: int | list[int] | slice) -> np.ndarray:
+    def __call__(self, adata, idx) -> np.ndarray:
         value = getattr(adata[idx], self.attr)
         if self.key is not None:
             value = value[self.key]
@@ -71,14 +72,14 @@ class AnnDataField:
         return value
 
     @property
-    def obs_column(self) -> str | None:
+    def obs_column(self):
         result = None
         if self.attr == "obs":
             result = self.key
         return result
 
 
-def get_rank_and_num_replicas() -> tuple[int, int]:
+def get_rank_and_num_replicas():
     """
     This helper function returns the rank of the current process and
     the number of processes in the default process group. If distributed
@@ -108,7 +109,7 @@ def get_rank_and_num_replicas() -> tuple[int, int]:
     return rank, num_replicas
 
 
-def get_worker_info() -> tuple[int, int]:
+def get_worker_info():
     """
     This helper function returns ``worker_id`` and ``num_workers``. If it is running
     in the main process then it returns ``worker_id=0`` and ``num_workers=1``.
@@ -126,7 +127,7 @@ def get_worker_info() -> tuple[int, int]:
     return worker_id, num_workers
 
 
-def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | torch.Tensor]:
+def collate_fn(batch):
     """
     Collate function for the ``DataLoader``. This function assumes that the batch is a list of
     dictionaries, where each dictionary has the same keys. The values of each key are converted

@@ -34,13 +34,13 @@ class CellariumPipeline(torch.nn.ModuleList):
             Modules to be executed sequentially.
     """
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
+    def forward(self, batch):
         for module in self:
             batch |= call_func_with_batch(module.forward, batch)
 
         return batch
 
-    def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, batch):
         for module in self[:-1]:
             batch |= call_func_with_batch(module.forward, batch)
 
@@ -51,7 +51,7 @@ class CellariumPipeline(torch.nn.ModuleList):
 
         return batch
 
-    def validate(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+    def validate(self, batch) -> None:
         for module in self[:-1]:
             batch |= call_func_with_batch(module.forward, batch)
 

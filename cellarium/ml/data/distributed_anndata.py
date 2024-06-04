@@ -158,18 +158,18 @@ class DistributedAnnDataCollection(AnnCollection):
 
     def __init__(
         self,
-        filenames: Sequence[str] | str,
-        limits: Iterable[int] | None = None,
-        shard_size: int | None = None,
-        last_shard_size: int | None = None,
-        max_cache_size: int = 1,
-        cache_size_strictly_enforced: bool = True,
-        label: str | None = None,
-        keys: Sequence[str] | None = None,
-        index_unique: str | None = None,
-        convert: ConvertType | None = None,
-        indices_strict: bool = True,
-        obs_columns_to_validate: Sequence[str] | None = None,
+        filenames,
+        limits=None,
+        shard_size=None,
+        last_shard_size=None,
+        max_cache_size: int =1,
+        cache_size_strictly_enforced=True,
+        label=None,
+        keys=None,
+        index_unique=None,
+        convert=None,
+        indices_strict=True,
+        obs_columns_to_validate=None,
     ):
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
@@ -241,7 +241,7 @@ class DistributedAnnDataCollection(AnnCollection):
         adata.obs = adata.obs.astype(self.schema.attr_values["obs"].dtypes)
         return adata
 
-    def materialize(self, adatas_oidx: list[np.ndarray | None], vidx: Index1D) -> list[AnnData]:
+    def materialize(self, adatas_oidx, vidx: Index1D):
         """
         Buffer and return anndata files at given indices from the list of lazy anndatas.
 
@@ -339,9 +339,9 @@ class LazyAnnData:
     def __init__(
         self,
         filename: str,
-        limits: tuple[int, int],
+        limits,
         schema: AnnDataSchema,
-        cache: LRU | None = None,
+        cache=None,
     ):
         self.filename = filename
         self.limits = limits
@@ -361,7 +361,7 @@ class LazyAnnData:
         return len(self.schema.attr_values["var_names"])
 
     @property
-    def shape(self) -> tuple[int, int]:
+    def shape(self):
         """Shape of the data matrix."""
         return self.n_obs, self.n_vars
 

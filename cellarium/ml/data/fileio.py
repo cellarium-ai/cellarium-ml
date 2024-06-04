@@ -12,7 +12,7 @@ from google.cloud.storage import Client
 url_schemes = ("http:", "https:", "ftp:")
 
 
-def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnData:
+def read_h5ad_gcs(filename: str, storage_client=None) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
 

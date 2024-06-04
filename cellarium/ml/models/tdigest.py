@@ -33,7 +33,7 @@ class TDigest(CellariumModel):
         var_names_g: The variable names schema for the input data validation.
     """
 
-    def __init__(self, var_names_g: Sequence[str]) -> None:
+    def __init__(self, var_names_g) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         n_vars = len(self.var_names_g)
@@ -45,7 +45,7 @@ class TDigest(CellariumModel):
     def reset_parameters(self) -> None:
         self._dummy_param.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
         """
         Args:
             x_ng:
@@ -96,7 +96,7 @@ class TDigest(CellariumModel):
         return torch.as_tensor([tdigest.quantile(0.5) for tdigest in self.tdigests])
 
     @staticmethod
-    def _resolve_ckpt_dir(trainer: pl.Trainer) -> Path | str:
+    def _resolve_ckpt_dir(trainer: pl.Trainer):
         if len(trainer.loggers) > 0:
             if trainer.loggers[0].save_dir is not None:
                 save_dir = trainer.loggers[0].save_dir
@@ -114,8 +114,8 @@ class TDigest(CellariumModel):
 
         return ckpt_path
 
-    def get_extra_state(self) -> dict[str, Any]:
+    def get_extra_state(self):
         return {"tdigests": self.tdigests}
 
-    def set_extra_state(self, state: dict[str, Any]) -> None:
+    def set_extra_state(self, state) -> None:
         self.tdigests = state["tdigests"]

@@ -21,7 +21,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
         super(torch.nn.Module, self).__setattr__("_pyro_params", OrderedDict())
         super().__init__()
 
-    __call__: Callable[..., torch.Tensor | None]
+    # __call__: Callable[..., torch.Tensor | None]
 
     @abstractmethod
     def reset_parameters(self) -> None:
@@ -44,7 +44,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
 
         return super().__getattr__(name)
 
-    def __setattr__(self, name: str, value: torch.Tensor | torch.nn.Module | PyroParam) -> None:
+    def __setattr__(self, name: str, value) -> None:
         if isinstance(value, PyroParam):
             # Create a new PyroParam, overwriting any old value.
             try:
@@ -73,7 +73,7 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, *args: Any, **kwargs: Any) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, *args: Any, **kwargs: Any):
         """
         Perform prediction.
         """
