@@ -618,12 +618,41 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
         measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
 
-        # compute the target and mask target values
-        label_ns = gene_value_nc[:, -suffix_len:].long()
-        gene_value_nc[:, -suffix_len:] = -1
+        # downsample
+        downsample_weights = torch.tensor([0.2, 0.4, 0.6, 0.8, 1.0], device=device)
+        idx = torch.randint(0, len(downsample_weights), (), device=device)
+        downsample_p = downsample_weights[idx]
 
-        # compute the total mRNA UMIs
-        total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, context_len)
+        downsampled_gene_value_nc = torch.binomial(gene_value_nc, downsample_p)
+        downsampled_total_mrna_umis_n = torch.round(total_mrna_umis_n * downsample_p)
+
+        if torch.rand(()) > 0.5:
+            # compute the target and mask target values
+            label_ns = downsampled_gene_value_nc[:, -suffix_len:].long()
+
+            # compute the total mRNA UMIs
+            total_mrna_umis_nc = torch.cat(
+                [
+                    total_mrna_umis_n[:, None].expand(-1, prefix_len),
+                    downsampled_total_mrna_umis_n[:, None].expand(-1, suffix_len),
+                ],
+                dim=-1,
+            )
+        else:
+            # compute the target and mask target values
+            label_ns = gene_value_nc[:, -suffix_len:].long()
+            gene_value_nc[:, :prefix_len] = downsampled_gene_value_nc[:, :prefix_len]
+
+            # compute the total mRNA UMIs
+            # total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, context_len)
+            total_mrna_umis_nc = torch.cat(
+                [
+                    downsampled_total_mrna_umis_n[:, None].expand(-1, prefix_len),
+                    total_mrna_umis_n[:, None].expand(-1, suffix_len),
+                ],
+                dim=-1,
+            )
+        gene_value_nc[:, -suffix_len:] = -1
 
         # embed the gene IDs, values, and total mRNA UMIs
         gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
