@@ -108,9 +108,28 @@ class MultiHeadAttention(nn.Module):
         query_ncd: torch.Tensor,
         key_ncd: torch.Tensor,
         value_ncd: torch.Tensor,
-        prefix_len: int,
+        attn_mask_cc: torch.Tensor,
+        measured_genes_mask_nc: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """
+        Args:
+            query_ncd:
+                Query tensor of shape ``(n, c, d)``.
+            key_ncd:
+                Key tensor of shape ``(n, c, d)``.
+            value_ncd:
+                Value tensor of shape ``(n, c, d)``.
+            attn_mask_cc:
+                Attention mask tensor of shape ``(c, c)``.
+            measured_genes_mask_nc:
+                Mask tensor for measured genes of shape ``(n, c)``. Unmeasured genes (``False``) do not contribute to
+                the attention scores.
+
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
         device = query_ncd.device
+        n = query_ncd.shape[0]
         c = query_ncd.shape[1]
 
         n_heads = self.n_heads
@@ -122,9 +141,17 @@ class MultiHeadAttention(nn.Module):
         key_nhck = self.split_heads(key_ncd, n_heads)
         value_nhck = self.split_heads(value_ncd, n_heads)
 
-        attn_mask_cc = prefix_diagonal_mask(c, prefix_len, device)
         k = query_nhck.shape[3]
         scale_factor = self.attn_mult / k
+
+        if measured_genes_mask_nc is not None:
+            one_pad_nhc1 = torch.ones((n, n_heads, c, 1), device=device)
+            query_nhck = torch.cat([query_nhck, one_pad_nhc1], dim=-1)
+            measured_genes_pad_nc = torch.zeros((n, c), device=device)
+            measured_genes_pad_nc.masked_fill_(~measured_genes_mask_nc, float("-inf"))
+            measured_genes_pad_nhc1 = measured_genes_pad_nc[:, None, :, None].expand(n, n_heads, c, 1)
+            key_nhck = torch.cat([key_nhck, measured_genes_pad_nhc1], dim=-1)
+
         with sdpa_kernel(self.backend_map[self.attn_backend]):
             output_nhck = nn.functional.scaled_dot_product_attention(
                 query_nhck,
@@ -159,6 +186,13 @@ class PositionWiseFFN(nn.Module):
         self.dense2 = nn.Linear(d_ffn, d_model, bias=use_bias)
 
     def forward(self, hidden_state_ncd: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hidden_state_ncd: Hidden state tensor of shape ``(n, c, d)``.
+
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
         return self.dense2(self.relu(self.dense1(hidden_state_ncd)))  # _ncd
 
 
@@ -179,6 +213,13 @@ class ValueEmbedding(nn.Module):
         self.Em = nn.Embedding(1, d_model)
 
     def forward(self, value_nc: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            value_nc: Value tensor of shape ``(n, c)``.
+
+        Returns:
+            The value embedding tensor of shape ``(n, c, d)``.
+        """
         device = value_nc.device
         mask_nc = value_nc < 0
         value_nc = torch.log1p(value_nc.abs())
@@ -190,6 +231,19 @@ class ValueEmbedding(nn.Module):
 
 
 class GeneEmbedding(nn.Module):
+    """
+    Gene embedding. The gene ID and value embeddings are concatenated with the total mRNA UMIs.
+    The concatenated embeddings are then linearly transformed to the embedding dimensionality.
+
+    Args:
+        n_genes:
+            Number of genes.
+        d_model:
+            Dimensionality of the embeddings and hidden states.
+        use_bias:
+            Whether to use bias in the linear transformations.
+    """
+
     def __init__(self, n_genes: int, d_model: int, use_bias: bool) -> None:
         super().__init__()
         # gene ID embedding
@@ -200,11 +254,26 @@ class GeneEmbedding(nn.Module):
         self.Wg = nn.Linear(3 * d_model, d_model, bias=use_bias)
 
     def forward(
-        self, gene_id_nc: torch.Tensor, gene_value_nc: torch.Tensor, total_mrna_umis_n: torch.Tensor
+        self,
+        gene_id_nc: torch.Tensor,
+        gene_value_nc: torch.Tensor,
+        total_mrna_umis_nc: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Args:
+            gene_id_nc:
+                Gene ID tensor of shape ``(n, c)``.
+            gene_value_nc:
+                Gene value tensor of shape ``(n, c)``.
+            total_mrna_umis_nc:
+                Total mRNA UMIs tensor of shape ``(n, c)``.
+
+        Returns:
+            The gene embedding tensor of shape ``(n, c, d)``.
+        """
         gene_id_embedding_ncd = self.Ei(gene_id_nc)
         gene_value_embedding_ncd = self.Ev(gene_value_nc)
-        total_mrna_umis_embedding_ncd = self.Ev(total_mrna_umis_n[:, None]).expand(gene_id_embedding_ncd.shape)
+        total_mrna_umis_embedding_ncd = self.Ev(total_mrna_umis_nc)
 
         gene_embedding_ncd = self.Wg(
             torch.cat([gene_id_embedding_ncd, gene_value_embedding_ncd, total_mrna_umis_embedding_ncd], dim=-1)
@@ -229,7 +298,21 @@ class NormAdd(nn.Module):
         self.dropout = nn.Dropout(dropout_p)
         self.ln = nn.LayerNorm(norm_shape)
 
-    def forward(self, hidden_state_ncd: torch.Tensor, sublayer: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_state_ncd: torch.Tensor,
+        sublayer: Callable[[torch.Tensor], torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_state_ncd:
+                Hidden state tensor of shape ``(n, c, d)``.
+            sublayer:
+                Sublayer function.
+
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
         return hidden_state_ncd + self.dropout(sublayer(self.ln(hidden_state_ncd)))  # _ncd
 
 
@@ -270,8 +353,28 @@ class TransformerBlock(nn.Module):
         self.ffn = PositionWiseFFN(d_ffn, d_model, use_bias)
         self.normadd2 = NormAdd(d_model, dropout_p)
 
-    def forward(self, hidden_state_ncd: torch.Tensor, prefix_len: int) -> torch.Tensor:
-        hidden_state_ncd = self.normadd1(hidden_state_ncd, lambda X: self.attention(X, X, X, prefix_len))
+    def forward(
+        self,
+        hidden_state_ncd: torch.Tensor,
+        attn_mask_cc: torch.Tensor,
+        measured_genes_mask_nc: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_state_ncd:
+                Hidden state tensor of shape ``(n, c, d)``.
+            attn_mask_cc:
+                Attention mask tensor of shape ``(c, c)``.
+            measured_genes_mask_nc:
+                Mask tensor for measured genes of shape ``(n, c)``. Unmeasured genes (``False``) do not contribute to
+                the attention scores.
+
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
+        hidden_state_ncd = self.normadd1(
+            hidden_state_ncd, lambda X: self.attention(X, X, X, attn_mask_cc, measured_genes_mask_nc)
+        )
         return self.normadd2(hidden_state_ncd, lambda Y: self.ffn(Y))  # _ncd
 
 
@@ -318,9 +421,27 @@ class Transformer(nn.Module):
             ]
         )
 
-    def forward(self, hidden_state_ncd: torch.Tensor, prefix_len: int) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_state_ncd: torch.Tensor,
+        attn_mask_cc: torch.Tensor,
+        measured_genes_mask_nc: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_state_ncd:
+                Hidden state tensor of shape ``(n, c, d)``.
+            attn_mask_cc:
+                Attention mask tensor of shape ``(c, c)``.
+            measured_genes_mask_nc:
+                Mask tensor for measured genes of shape ``(n, c)``. Unmeasured genes (``False``) do not contribute to
+                the attention scores.
+
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
         for block in self.blocks:
-            hidden_state_ncd = block(hidden_state_ncd, prefix_len)
+            hidden_state_ncd = block(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
 
         return hidden_state_ncd
 
@@ -358,7 +479,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
             Multiplier for the output embeddings.
         initializer_range:
             The standard deviation of the truncated normal initializer.
-        backend:
+        attn_backend:
             Backend for the attention computation.
     """
 
@@ -470,7 +591,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         gene_id_g: torch.Tensor,
         gene_categories: pd.Index,
         total_mrna_umis_n: torch.Tensor,
-        batch_idx: int | None = None,
+        measured_genes_mask_ng: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         assert gene_categories.equals(self.gene_categories)
 
@@ -478,12 +599,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
 
         # sample the prefix length
-        if batch_idx is not None:
-            rng = torch.Generator(device=device)
-            rng.manual_seed(batch_idx)
-            prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), generator=rng, device=device))
-        else:
-            prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), device=device))
+        prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), device=device))
 
         # compute the context length and suffix length
         if self.context_len is not None:
@@ -500,22 +616,28 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         shuffle_idx_nc = shuffle_idx_ng[:, :context_len]
         gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
         gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
+        measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
 
         # compute the target and mask target values
         label_ns = gene_value_nc[:, -suffix_len:].long()
         gene_value_nc[:, -suffix_len:] = -1
 
+        # compute the total mRNA UMIs
+        total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, context_len)
+
         # embed the gene IDs, values, and total mRNA UMIs
-        gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_n)
+        gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
 
         # compute logits
+        attn_mask_cc = prefix_diagonal_mask(context_len, prefix_len, device)
         hidden_state_ncd = gene_embedding_ncd * self.input_mult
-        hidden_state_ncd = self.transformer(hidden_state_ncd, prefix_len)
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
         logits_nsm = self.head(hidden_state_ncd[:, -suffix_len:]) * self.output_mult
 
         # compute the loss
         loss_fn = nn.CrossEntropyLoss(reduction="none")
-        label_mask_ns = label_ns < self.max_value + 1
+        measured_genes_mask_ns = measured_genes_mask_nc[:, -suffix_len:]
+        label_mask_ns = (label_ns < self.max_value + 1) & measured_genes_mask_ns
         label_weight_ns = 1 / label_mask_ns.sum(dim=-1, keepdim=True).expand(-1, suffix_len)
         label_weights = label_weight_ns[label_mask_ns]
         logits = logits_nsm[label_mask_ns]
@@ -532,6 +654,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         gene_categories: pd.Series,
         gene_value_ng: torch.Tensor,
         total_mrna_umis_n: torch.Tensor,
+        measured_genes_mask_ng: torch.Tensor,
         obs_names_n: np.ndarray,
         batch_idx: int,
     ) -> None:
@@ -539,7 +662,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
         n, g = gene_id_ng.shape
 
-        loss = self.forward(gene_value_ng, gene_id_g, gene_categories, total_mrna_umis_n, batch_idx=batch_idx)["loss"]
+        loss = self(gene_value_ng, gene_id_g, gene_categories, total_mrna_umis_n, measured_genes_mask_ng)["loss"]
         pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
 
         losses: dict[int, dict[int, torch.Tensor]] = defaultdict(dict)
@@ -552,6 +675,9 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
             shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
 
             for prefix_len in prefix_lens:
+                context_len = prefix_len + suffix_len
+                attn_mask_cc = prefix_diagonal_mask(context_len, prefix_len, device)
+
                 shuffle_idx_nc = torch.cat(
                     [
                         shuffle_idx_ng[:, :prefix_len],
@@ -561,16 +687,21 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
                 )
                 gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
                 gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
+                total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(gene_id_nc.shape)
+                measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
                 label_ns = gene_value_nc[:, -suffix_len:].long()
                 gene_value_nc[:, -suffix_len:] = -1
 
                 logits = []
-                for gene_id, gene_value, total_mrna_umis in zip(
-                    torch.split(gene_id_nc, 25), torch.split(gene_value_nc, 25), torch.split(total_mrna_umis_n, 25)
+                for gene_id, gene_value, total_mrna_umis, measured_genes_mask in zip(
+                    torch.split(gene_id_nc, 25),
+                    torch.split(gene_value_nc, 25),
+                    torch.split(total_mrna_umis_nc, 25),
+                    torch.split(measured_genes_mask_nc, 25),
                 ):
                     gene_embedding = self.gene_embedding(gene_id, gene_value, total_mrna_umis)
                     hidden_state = gene_embedding * self.input_mult
-                    hidden_state = self.transformer(hidden_state, prefix_len)
+                    hidden_state = self.transformer(hidden_state, attn_mask_cc, measured_genes_mask)
                     logits.append(self.head(hidden_state[:, -suffix_len:]) * self.output_mult)
                 logits_nsm = torch.cat(logits, dim=0)
 
@@ -603,31 +734,33 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         self,
         prompt_name_ns: np.ndarray | None,
         prompt_value_ns: torch.Tensor | None,
+        prompt_total_mrna_umis_n: torch.Tensor | None,
         query_name_nq: np.ndarray,
-        total_mrna_umis_n: torch.Tensor,
+        query_total_mrna_umis_n: torch.Tensor,
     ) -> dict[str, np.ndarray | torch.Tensor]:
-        device = total_mrna_umis_n.device
-        n = len(total_mrna_umis_n)
+        device = query_total_mrna_umis_n.device
 
-        values_nc = total_mrna_umis_n[:, None]
-        ids_nc = torch.zeros((n, 1), dtype=torch.long, device=device)
+        gene_id_nc = torch.tensor(self.vectorized_token_to_id(query_name_nq), dtype=torch.long, device=device)
+        gene_value_nc = -torch.ones_like(gene_id_nc)
+        total_mrna_umis_nc = query_total_mrna_umis_n[:, None].expand(gene_id_nc.shape)
 
         if prompt_name_ns is not None and prompt_value_ns is not None:
             prompt_id_ns = torch.tensor(self.vectorized_token_to_id(prompt_name_ns), dtype=torch.long, device=device)
-            values_nc = torch.cat([values_nc, prompt_value_ns], dim=1)
-            ids_nc = torch.cat([ids_nc, prompt_id_ns], dim=1)
+            gene_id_nc = torch.cat([prompt_id_ns, gene_id_nc], dim=1)
+            gene_value_nc = torch.cat([prompt_value_ns, gene_value_nc], dim=1)
+            prompt_total_mrna_umis_ns = prompt_total_mrna_umis_n[:, None].expand(prompt_id_ns.shape)
+            total_mrna_umis_nc = torch.cat([prompt_total_mrna_umis_ns, total_mrna_umis_nc], dim=1)
+            prefix_len = prompt_id_ns.shape[1]
+        else:
+            prefix_len = 0
 
-        prefix_len = values_nc.shape[1]
-
-        query_id_nq = torch.tensor(self.vectorized_token_to_id(query_name_nq), dtype=torch.long, device=device)
-        values_nc = torch.cat([values_nc, torch.zeros_like(query_id_nq)], dim=1)
-        ids_nc = torch.cat([ids_nc, query_id_nq], dim=1)
-
-        hidden_state_ncd = self.transformer(ids_nc, values_nc, prefix_len)
-        logits_ncp = self.head(hidden_state_ncd) * self.output_mult
+        gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
+        hidden_state_ncd = gene_embedding_ncd * self.input_mult
+        hidden_state_ncd = self.transformer(hidden_state_ncd, prefix_len)
+        logits_nqm = self.head(hidden_state_ncd[:, prefix_len:]) * self.output_mult
 
         return {
-            "logits_nqp": logits_ncp[:, prefix_len:],
+            "logits_nqm": logits_nqm,
             "query_name_nq": query_name_nq,
         }
 
