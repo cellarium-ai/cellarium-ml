@@ -148,7 +148,7 @@ class MultiHeadAttention(nn.Module):
             one_pad_nhc1 = torch.ones((n, n_heads, c, 1), device=device)
             query_nhck = torch.cat([query_nhck, one_pad_nhc1], dim=-1)
             measured_genes_pad_nc = torch.zeros((n, c), device=device)
-            measured_genes_pad_nc.masked_fill_(~measured_genes_mask_nc, float("-inf"))
+            measured_genes_pad_nc.masked_fill_(~measured_genes_mask_nc, -1e9)
             measured_genes_pad_nhc1 = measured_genes_pad_nc[:, None, :, None].expand(n, n_heads, c, 1)
             key_nhck = torch.cat([key_nhck, measured_genes_pad_nhc1], dim=-1)
 
