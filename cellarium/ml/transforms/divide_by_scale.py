@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
 
 import numpy as np
 import torch
@@ -31,11 +30,11 @@ class DivideByScale(nn.Module):
             A value added to the denominator for numerical stability.
     """
 
-    def __init__(self, scale_g: torch.Tensor, var_names_g: Sequence[str], eps: float = 1e-6) -> None:
+    def __init__(self, scale_g: torch.Tensor, var_names_g: np.ndarray, eps: float = 1e-6) -> None:
         super().__init__()
         self.scale_g: torch.Tensor
         self.register_buffer("scale_g", scale_g)
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         assert_nonnegative("eps", eps)
         self.eps = eps
 

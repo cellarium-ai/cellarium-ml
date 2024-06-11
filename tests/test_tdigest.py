@@ -119,13 +119,13 @@ def test_load_from_checkpoint_multi_device():
     # so we need to use a fixed shared directory
     tmp_path = Path("/tmp/test_load_from_checkpoint_multi_device")
     n, g = 4, 3
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array(var_names_g),
+            var_names_g,
         ),
         collate_fn=collate_fn,
     )
