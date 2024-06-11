@@ -12,12 +12,14 @@ import sys
 import umap
 import numpy as np
 config_file = "../example_configs/scvi_pbmc_config.yaml"
-#subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file])
+subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file])
 
-#checkpoint_file = 'lightning_logs/version_36/checkpoints/epoch=49-step=3150.ckpt' #pmbc counts
-checkpoint_file = 'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt' #extra
+exit()
+foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_36/checkpoints/epoch=49-step=3150.ckpt'],
+                    1:["cas_50m_homo_sapiens_no_cancer_extract_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt'],
+                    2 : ["tucker_human_heart_atlas.h5ad",""]}
 
-foldername = "cas_50m_homo_sapiens_no_cancer_extract_extract_0"
+foldername,checkpoint_file = foldername_dict[0]
 filename_suffix = "_test"
 NF.folders(foldername,"figures",overwrite=False)
 NF.folders(foldername,"tmp_data",overwrite=False)
@@ -47,12 +49,15 @@ dataset = NF.get_dataset_from_anndata(
     drop_last=False,
 )
 
+
+
 filepath = f"tmp_data/{foldername}/adata_embedded{filename_suffix}.h5ad"
 if not os.path.exists(filepath) or overwrite:
     adata = NF.embed(dataset, pipeline,device= device,filepath=filepath)
 else:
     print("Reading file : {}".format(filepath))
     adata = sc.read(filepath)
+
 
 # Reconstruct de-noised/de-batched data
 filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed{filename_suffix}.h5ad"
@@ -123,10 +128,10 @@ list(map(gene_set.extend, list(gene_set_dict.values())))
 
 adata.var['genes_of_interest'] = adata.var_names.isin(gene_set) #23 glycogenes found only adata[:,adata.var_names.isin(gene_set)]
 
+
 adata_tmp = adata[:,adata.var_names.isin(gene_set)]
 
-print(adata_tmp.var_names)
-exit()
+
 #aggregate umi-count expression values
 adata.var['expr'] = np.array(adata.layers['raw'].sum(axis=0)).squeeze()
 high_gene_set = adata.var.sort_values(by='expr').index[-50:]
@@ -148,11 +153,12 @@ else:
 
 #adata_normalized= sc.pp.normalize_total(adata, target_sum=1, inplace=False, exclude_highly_expressed=False)
 
-NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,"RAW")
-NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,"RECONSTRUCTED_0")
+# NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,"RAW")
+# NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,"RECONSTRUCTED_0")
 
-#sc.pl.embedding(adata, basis='scvi_reconstructed_0_umap', color=['final_annotation', 'batch'], ncols=1, show=False,save=".pdf") #what is this?
+NF.plot_neighbour_clusters(adata,gene_set)
 
+exit()
 
 if config_dict['model']['model']['init_args']['batch_embedded']:
     # show batch embeddings as an image

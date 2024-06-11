@@ -23,7 +23,7 @@ import yaml
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import Normalize
 from matplotlib.colorbar import Colorbar
-
+from matplotlib.pyplot import rc_context
 
 
 
@@ -585,12 +585,10 @@ def plot_avg_expression(adata,basis,gene_set_dict,filename):
             genes_list.append(gene_key)
             adata = settings_plot["adata"]
 
-
-
     nrows,ncols,nrows_idx,ncols_idx,width_ratios = calculate_dimensions_plot(genes_list)
 
-
-    sc.pl.embedding(adata, basis=basis,
+    sc.pl.embedding(adata,
+                    basis=basis,
                     color=['final_annotation', 'batch'] + genes_list,
                     projection="2d",
                     cmap = "magma_r",
@@ -599,6 +597,54 @@ def plot_avg_expression(adata,basis,gene_set_dict,filename):
                     show=False,
                     save=".pdf")
 
+def plot_neighbour_clusters(adata,gene_set):
+    """
+
+    NOTES:
+        https://scanpy.readthedocs.io/en/stable/tutorials/plotting/core.html
+        https://chethanpatel.medium.com/community-detection-with-the-louvain-algorithm-a-beginners-guide-02df85f8da65
+
+    """
+    print("Computing neighbour clusters using Lediden hierarchical clustering")
+    # compute clusters using the leiden method and store the results with the name `clusters`
+    sc.tl.leiden(
+        adata,
+        key_added="clusters",
+        resolution=2, #higher values more clusters
+        n_iterations=20,
+        flavor="igraph",
+        directed=False,
+    )
+
+
+    #cluster_assignments = adata.obs["clusters"].array
+
+
+    with rc_context({"figure.figsize": (15, 15)}):
+        sc.pl.umap(
+            adata,
+            color=['final_annotation',"clusters"],
+            add_outline=True,
+            legend_loc="on data",
+            legend_fontsize=12,
+            legend_fontoutline=2,
+            frameon=False,
+            title="clustering of cells",
+            palette="Set1",
+            show=False,
+            save = "-leiden-clusters.pdf"
+        )
+    gene_set =  adata.var_names[adata.var['genes_of_interest']]
+    sc.pl.dotplot(adata, gene_set, "clusters", dendrogram=True, show=False,save="clusters-glyco")
+
+    # with rc_context({"figure.figsize": (4.5, 3)}):
+    #     sc.pl.violin(adata, gene_set, groupby="clusters",ncols=5,save="violin-glyco",show=False)
+
+    ax = sc.pl.stacked_violin(
+        adata, {"Glyco":gene_set}, groupby="clusters", swap_axes=False, dendrogram=True,save="violin-glyco",show=False
+    )
+
+    return adata
 
 
 
