@@ -450,7 +450,7 @@ def test_checkpoint_loader(tmp_path: Path) -> None:
               !CheckpointLoader
               file_path: {ckpt_path}
               attr: model.var_names_g
-              convert_fn: numpy.ndarray.tolist
+              convert_fn: null
       model: cellarium.ml.models.LogisticRegression
       optim_fn: torch.optim.Adam
     data:

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
@@ -56,7 +55,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
     def __init__(
         self,
         n_obs: int,
-        var_names_g: Sequence[str],
+        var_names_g: np.ndarray,
         n_components: int,
         ppca_flavor: Literal["marginalized", "linear_vae"],
         mean_g: torch.Tensor | None = None,
@@ -67,7 +66,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         super().__init__()
 
         self.n_obs = n_obs
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.n_components = n_components

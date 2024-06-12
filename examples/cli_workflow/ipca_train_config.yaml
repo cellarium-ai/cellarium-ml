@@ -78,7 +78,7 @@ model:
           !CheckpointLoader
           file_path: /tmp/test_examples/onepass/lightning_logs/version_0/checkpoints/epoch=0-step=2.ckpt
           attr: model.var_names_g
-          convert_fn: numpy.ndarray.tolist
+          convert_fn: null
   model:
     class_path: cellarium.ml.models.IncrementalPCA
     init_args:

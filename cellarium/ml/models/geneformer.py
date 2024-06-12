@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
-
 import numpy as np
 import torch
 from transformers import BertConfig, BertForMaskedLM
@@ -62,7 +60,7 @@ class Geneformer(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        var_names_g: Sequence[str],
+        var_names_g: np.ndarray,
         hidden_size: int = 256,
         num_hidden_layers: int = 6,
         num_attention_heads: int = 4,
@@ -78,7 +76,7 @@ class Geneformer(CellariumModel, PredictMixin):
         mlm_probability: float = 0.15,
     ) -> None:
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         # model configuration
         config = {
             "vocab_size": len(self.var_names_g) + 2,  # number of genes + 2 for <mask> and <pad> tokens

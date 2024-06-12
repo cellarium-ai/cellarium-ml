@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from collections.abc import Sequence
-
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -41,7 +39,7 @@ class LogisticRegression(CellariumModel):
     def __init__(
         self,
         n_obs: int,
-        var_names_g: Sequence[str],
+        var_names_g: np.ndarray,
         n_categories: int,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
@@ -52,7 +50,7 @@ class LogisticRegression(CellariumModel):
 
         # data
         self.n_obs = n_obs
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
         self.n_categories = n_categories
 
