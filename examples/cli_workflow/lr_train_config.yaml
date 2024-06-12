@@ -2,7 +2,7 @@
 seed_everything: true
 trainer:
   accelerator: auto
-  strategy: ddp_find_unused_parameters_true
+  strategy: auto
   devices: 2
   num_nodes: 1
   precision: null
@@ -95,6 +95,7 @@ data:
       key: assay
       convert_fn: cellarium.ml.utilities.data.get_categories
   batch_size: 100
+  iteration_strategy: cache_efficient
   shuffle: false
   seed: 0
   drop_last: false

@@ -117,6 +117,7 @@ data:
       attr: obs
       key: total_mrna_umis
   batch_size: 100
+  iteration_strategy: cache_efficient
   shuffle: false
   seed: 0
   drop_last: false

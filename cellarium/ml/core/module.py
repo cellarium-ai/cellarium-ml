@@ -62,30 +62,43 @@ class CellariumModule(pl.LightningModule):
         self.pipeline: CellariumPipeline | None = None
 
     def configure_model(self) -> None:
-        # This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
-        # implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
-        # calls to it should be a no-op.
+        """
+        .. note::
+
+            This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
+            implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
+            calls to it should be a no-op.
+
+        Steps involved in configuring the model:
+
+        1. Freeze the transforms if they are instances of :class:`~cellarium.ml.core.CellariumModule`.
+        2. Make a copy of modules on the meta device and assign to hparams.
+        3. Send the original modules to the host device and add to self.pipeline.
+        4. Reset the model parameters if it has not been initialized before.
+
+        For more context, see discussions in
+        https://dev-discuss.pytorch.org/t/state-of-model-creation-initialization-seralization-in-pytorch-core/1240
+
+        Benefits of this approach:
+
+        1. The checkpoint stores modules on the meta device.
+        2. Loading from a checkpoint skips a wasteful step of initializing module parameters
+           before loading the ``state_dict``.
+        3. The module parameters are directly initialized on the host gpu device instead of being initialized
+           on the cpu and then moved to the gpu device (given that modules were instantiated under
+           the ``torch.device("meta")`` context).
+        """
         if self.pipeline is not None:
             return
 
-        # Steps involved in configuring the model:
-        # 1. Make a copy of modules on the meta device and assign to hparams.
-        # 2. Send the original modules to the host device and add to self.pipeline.
-        # 3. Reset the model parameters if it has not been initialized before.
-        # For more context, see discussions in
-        # https://dev-discuss.pytorch.org/t/state-of-model-creation-initialization-seralization-in-pytorch-core/1240
-        #
-        # Benefits of this approach:
-        # 1. The checkpoint stores modules on the meta device.
-        # 2. Loading from a checkpoint skips a wasteful step of initializing module parameters
-        #    before loading the state_dict.
-        # 3. The module parameters are directly initialized on the host gpu device instead of being initialized
-        #    on the cpu and then moved to the gpu device (given that modules were instantiated under
-        #    the ``torch.device("meta")`` context).
         model, self.hparams["model"] = copy_module(
             self.hparams["model"], self_device=self.device, copy_device=torch.device("meta")
         )
         if self.hparams["transforms"]:
+            for transform in self.hparams["transforms"]:
+                if isinstance(transform, CellariumModule):
+                    transform.freeze()
+
             transforms, self.hparams["transforms"] = zip(
                 *(
                     copy_module(transform, self_device=self.device, copy_device=torch.device("meta"))

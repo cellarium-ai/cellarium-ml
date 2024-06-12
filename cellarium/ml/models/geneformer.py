@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-
 import numpy as np
 import torch
 from transformers import BertConfig, BertForMaskedLM
