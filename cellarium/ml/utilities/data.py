@@ -39,10 +39,10 @@ class AnnDataField:
         ...     max_cache_size=2)
 
         >>> field_X = AnnDataField(attr="X", convert_fn=densify)
-        >>> X = field_X(dadc)[:100]  # densify(dadc[:100].X)
+        >>> X = field_X(dadc, idx)  # densify(dadc[idx].X)
 
         >>> field_cell_type = AnnDataField(attr="obs", key="cell_type")
-        >>> cell_type = field_cell_type(dadc)[:100]  # np.asarray(dadc[:100].obs["cell_type"])
+        >>> cell_type = field_cell_type(dadc, idx)  # np.asarray(dadc[idx].obs["cell_type"])
 
     Args:
         attr:

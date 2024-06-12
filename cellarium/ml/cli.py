@@ -197,11 +197,8 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     Returns:
         The categories in the target variable.
     """
-    field = data.batch_keys["y_n"]
-    value = getattr(data.dadc[0], field.attr)
-    if field.key is not None:
-        value = value[field.key]
-    return np.asarray(value.cat.categories)
+    field = data.batch_keys["y_categories"]
+    return field(data.dadc, 0)
 
 
 def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDataDataModule) -> np.ndarray:
