@@ -306,7 +306,17 @@ def cellarium_gpt(args: ArgsType = None) -> None:
     """
     cli = lightning_cli_factory(
         "cellarium.ml.models.CellariumGPT",
-        link_arguments=[LinkArguments("data.dadc.var_names", "model.model.init_args.gene_categories")],
+        link_arguments=[
+            LinkArguments("data.dadc", "model.model.init_args.gene_categories", lambda x: x.var_names.values),
+            LinkArguments(
+                "data.dadc", "model.model.init_args.assay_categories", lambda x: x[0].obs["assay"].cat.categories.values
+            ),
+            LinkArguments(
+                "data.dadc",
+                "model.model.init_args.suspension_type_categories",
+                lambda x: x[0].obs["suspension_type"].cat.categories.values,
+            ),
+        ],
     )
     cli(args=args)
 

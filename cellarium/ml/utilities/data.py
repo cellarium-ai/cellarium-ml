@@ -51,21 +51,22 @@ class AnnDataField:
             The key of the attribute to access. If ``None``, the entire attribute is returned.
         convert_fn:
             A function to apply to the attribute before returning it.
+            If ``None``, :func:`np.asarray` is used.
     """
 
     attr: str
     key: str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
-    def __call__(
-        self, adata: AnnData | AnnCollection, idx: int | list[int] | slice
-    ) -> np.ndarray | pd.DataFrame | pd.Index | pd.Series:
+    def __call__(self, adata: AnnData | AnnCollection, idx: int | list[int] | slice) -> np.ndarray:
         value = getattr(adata[idx], self.attr)
         if self.key is not None:
             value = value[self.key]
 
         if self.convert_fn is not None:
             value = self.convert_fn(value)
+        else:
+            value = np.asarray(value)
 
         return value
 
