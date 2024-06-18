@@ -737,7 +737,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         prompt_name_ns: np.ndarray | None,
         prompt_value_ns: torch.Tensor | None,
         prompt_total_mrna_umis_n: torch.Tensor | None,
-        prompt_measured_genes_mask_ns: torch.Tensor,
+        prompt_measured_genes_mask_ns: torch.Tensor | None,
         query_name_nq: np.ndarray | None,
         query_total_mrna_umis_n: torch.Tensor | None,
     ) -> dict[str, np.ndarray | torch.Tensor]:
