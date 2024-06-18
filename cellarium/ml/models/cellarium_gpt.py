@@ -737,9 +737,9 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         prompt_name_ns: np.ndarray | None,
         prompt_value_ns: torch.Tensor | None,
         prompt_total_mrna_umis_n: torch.Tensor | None,
+        prompt_measured_genes_mask_ns: torch.Tensor,
         query_name_nq: np.ndarray | None,
         query_total_mrna_umis_n: torch.Tensor | None,
-        measured_genes_mask_nc: torch.Tensor,
     ) -> dict[str, np.ndarray | torch.Tensor]:
         if prompt_name_ns is not None and query_name_nq is not None:
             n, q = query_name_nq.shape
@@ -753,14 +753,25 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
                 ],
                 dim=-1,
             )
+            measured_genes_mask_nc = torch.cat(
+                [
+                    prompt_measured_genes_mask_ns,
+                    torch.ones((n, q), dtype=torch.bool, device=device),
+                ],
+                dim=1,
+            )
         elif prompt_name_ns is not None:
             gene_name_nc = prompt_name_ns
             gene_value_nc = prompt_value_ns
             total_mrna_umis_nc = prompt_total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
+            measured_genes_mask_nc = prompt_measured_genes_mask_ns
         else:
+            n, q = query_name_nq.shape
+            device = query_total_mrna_umis_n.device
             gene_name_nc = query_name_nq
-            gene_value_nc = -torch.ones_like(query_name_nq)
+            gene_value_nc = -torch.ones((n, q), device=device)
             total_mrna_umis_nc = query_total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
+            measured_genes_mask_nc = torch.ones((n, q), dtype=torch.bool, device=device)
 
         device = gene_value_nc.device
         gene_id_nc = torch.tensor(self.vectorized_token_to_id(gene_name_nc), dtype=torch.long, device=device)
