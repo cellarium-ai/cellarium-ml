@@ -1,28 +1,50 @@
 import matplotlib.pyplot as plt
-
-import notebooks_functions as NF
 import torch
 import os
 import yaml
 import subprocess
-from cellarium.ml.core import CellariumPipeline, CellariumModule
 import os
 import scanpy as sc
 import sys
 import umap
 import numpy as np
-config_file = "../example_configs/scvi_pbmc_config.yaml"
-subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file])
+import inspect
+local_repository= True
+if local_repository:
+    module_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) #/opt/project/cellarium-ml/
+    sys.path.insert(1,module_dir)
+    # Set the PYTHONPATH environment variable for subprocess to inherit
+    env = os.environ.copy()
+    env['PYTHONPATH'] = module_dir
+else:
+    # Set the PYTHONPATH environment variable
+    env = os.environ.copy()
+
+from cellarium.ml.core import CellariumPipeline, CellariumModule
+import notebooks_functions as NF
+
+foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_36/checkpoints/epoch=49-step=3150.ckpt',"../example_configs/scvi_config_pbmc.yaml","../data/pbmc_count.h5ad"],
+                    1:  ["cas_50m_homo_sapiens_no_cancer_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt',"../example_configs/scvi_config_cas_50m_homo_sapiens_no_cancer.yaml","../data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad"],
+                    2 : ["tucker_human_heart_atlas","lightning_logs/version_38/checkpoints/epoch=49-step=27050.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad"],
+                    3 : ["human_heart_atlas.h5ad","","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad"]}
+
+
+
+foldername,checkpoint_file, config_file, adata_file = foldername_dict[3]
+
+#NF.scanpy_scvi(adata_file) #too slow to handle
+
+
+subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env)
 
 exit()
-foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_36/checkpoints/epoch=49-step=3150.ckpt'],
-                    1:["cas_50m_homo_sapiens_no_cancer_extract_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt'],
-                    2 : ["tucker_human_heart_atlas.h5ad",""]}
 
-foldername,checkpoint_file = foldername_dict[0]
+
 filename_suffix = "_test"
+
 NF.folders(foldername,"figures",overwrite=False)
 NF.folders(foldername,"tmp_data",overwrite=False)
+
 
 # load the trained model
 scvi_model = CellariumModule.load_from_checkpoint(checkpoint_file).model

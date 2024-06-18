@@ -177,7 +177,7 @@ class CellariumModule(pl.LightningModule):
         optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
         if scheduler_fn is not None:
             scheduler = scheduler_fn(optim_config["optimizer"], **scheduler_kwargs)
-            optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
+            optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step", "monitor":"train_loss"}
         return optim_config
 
     def on_train_epoch_start(self) -> None:

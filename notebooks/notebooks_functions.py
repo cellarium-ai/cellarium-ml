@@ -20,6 +20,7 @@ import matplotlib
 import tempfile
 import os,shutil
 import yaml
+import scvi
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import Normalize
 from matplotlib.colorbar import Colorbar
@@ -603,6 +604,8 @@ def plot_neighbour_clusters(adata,gene_set):
     NOTES:
         https://scanpy.readthedocs.io/en/stable/tutorials/plotting/core.html
         https://chethanpatel.medium.com/community-detection-with-the-louvain-algorithm-a-beginners-guide-02df85f8da65
+        https://i11www.iti.kit.edu/_media/teaching/theses/ba-nguyen-21.pdf
+        https://www.ultipa.com/document/ultipa-graph-analytics-algorithms/leiden/v4.3
 
     """
     print("Computing neighbour clusters using Lediden hierarchical clustering")
@@ -610,7 +613,7 @@ def plot_neighbour_clusters(adata,gene_set):
     sc.tl.leiden(
         adata,
         key_added="clusters",
-        resolution=2, #higher values more clusters
+        resolution=2, #higher values more clusters, control the coarseness of the clustering.
         n_iterations=20,
         flavor="igraph",
         directed=False,
@@ -645,6 +648,30 @@ def plot_neighbour_clusters(adata,gene_set):
     )
 
     return adata
+
+
+def scanpy_scvi(adata_file):
+
+    adata = sc.read_h5ad(adata_file)
+    #print(adata)
+
+    scvi.settings.seed = 0
+    scvi.settings.dl_num_workers = 4
+    scvi.settings.batch_size = 1000 #128
+    #scvi.settings.num_threads = 2
+
+    # scvi.dataloaders.num_workers=4
+    # scvi.dataloaders.pin_memory = True
+    model_cls = scvi.model.SCVI
+    model_cls.device = "cuda"
+
+
+    model_cls.setup_anndata(adata, batch_key="batch_key",labels_key="cell_type")  # unlabeled_category="Unknown"
+    model = model_cls(adata, n_layers=2, n_latent=30, gene_likelihood="nb")
+    model.train(max_epochs=50)
+    latent = model.get_latent_representation()
+    adata.obsm["og_scvi_latent"] = latent
+
 
 
 

@@ -198,8 +198,8 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
     if x is not None:
         return np.asarray(x.cat.codes)
     else:
-        warnings.warn("Batch information not specified, setting number of categories to 2")
-        return np.asarray([2])
+        warnings.warn("Batch information not specified, setting number of batches/categories to 2")
+        return np.asarray([3])
 
 
 # def ncategories(x: pd.Series) -> int:

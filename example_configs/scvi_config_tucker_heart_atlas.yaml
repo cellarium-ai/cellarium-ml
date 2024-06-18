@@ -60,12 +60,8 @@ model:
   model:
     class_path: cellarium.ml.models.SingleCellVariationalInference
     init_args:
-
-      # these are pulled from data, leave null
-      var_names_g: null
-      n_batch: null
-
-      # these can be changed
+      var_names_g: null # these are pulled from data, leave null
+      n_batch: null # these can be changed
       batch_embedded: true
       batch_representation_sampled: true
       n_latent_batch: null
@@ -97,9 +93,7 @@ model:
           init_args:
             batch_to_bias_hidden_layers: []
         final_additive_bias: true
-      n_latent: 10
-
-      # probably leave these alone
+      n_latent: 10 # probably leave these alone
       n_continuous_cov: 0
       n_cats_per_cov: null
       dropout_rate: 0.1
@@ -118,9 +112,11 @@ model:
       batch_embedding_kwargs: null
   optim_fn: torch.optim.AdamW
   optim_kwargs: 
-    lr: 1e-3
-  scheduler_fn: null
-  scheduler_kwargs: null
+    lr: 1e-3 # 6e-4
+  # scheduler_fn: torch.optim.lr_scheduler.StepLR
+  # scheduler_kwargs: {"step_size": 25, "gamma": 0.8} # null
+  scheduler_fn: torch.optim.lr_scheduler.ReduceLROnPlateau
+  scheduler_kwargs: {"mode":"min","patience":20} # , "min_lr"=0.00005
   is_initialized: False
 data:
   dadc:
@@ -129,11 +125,11 @@ data:
       #filenames: gs://yx-data/pbmc_count.h5ad
       #filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
       #filenames: /opt/project/cellarium-ml/data/pbmc_count.h5ad #use with cli.py
-      #filenames: ../data/pbmc_count.h5ad # use with scvi_demo.py #31774 limits cells
-      filenames: ../data/tucker_human_heart_atlas.h5ad # use with scvi_demo.py #31774 limits cells
+      #filenames: ../data/pbmc_count.h5ad # use with scvi_demo.py # use for the limits and shard_size 31774
+      filenames: ../data/tucker_human_heart_atlas.h5ad # use with scvi_demo.py #276940 limits cells
       #filenames: /opt/project/cellarium-ml/data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad #remember to set the limits to 10000 when using this file
-      limits: [31774]
-      shard_size: 31774
+      limits: [276940]
+      shard_size: 276940
       last_shard_size: null
       max_cache_size: 1
       cache_size_strictly_enforced: true
@@ -158,5 +154,5 @@ data:
   seed: 0
   drop_last: false
   test_mode: false
-  num_workers: 0 #changed from 4 to 0 to avoid emmory complaints
+  num_workers: 5 #4 works, 0 too but slow
 ckpt_path: null

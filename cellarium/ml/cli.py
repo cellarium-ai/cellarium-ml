@@ -277,8 +277,8 @@ def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDat
     batch = {key: field(data.dadc, 0) for key, field in data.batch_keys.items()}
 
     if batch["batch_index_n"] is None:
-        warnings.warn("batch has not been specified, setting it to np.array([2],dtype=np.int8)")
-        batch["batch_index_n"] = np.array([2],dtype=np.int8)
+        warnings.warn("Batch information has not been specified, setting it to np.array([3],dtype=np.int8)")
+        batch["batch_index_n"] = np.array([3],dtype=np.int8)
 
 
     pipeline = CellariumPipeline(transforms)
@@ -621,8 +621,8 @@ def scvi(args: ArgsType = None) -> None:
         ],
     )
 
-
     cli(args=args)
+
 
 
 
