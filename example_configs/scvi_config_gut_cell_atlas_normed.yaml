@@ -126,10 +126,10 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: ../data/human_heart_atlas.h5ad # use with scvi_demo.py #665234 limits cells
+      filenames: ../data/gut_cell_atlas_normed.h5ad # use with scvi_demo.py #665234 limits cells
       #filenames: /opt/project/cellarium-ml/data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad #remember to set the limits to 10000 when using this file
-      limits: [665234]
-      shard_size: 665234
+      limits: [428469]
+      shard_size: 428469
       last_shard_size: null
       max_cache_size: 1
       cache_size_strictly_enforced: true

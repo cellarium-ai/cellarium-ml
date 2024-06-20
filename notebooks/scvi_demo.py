@@ -23,24 +23,37 @@ else:
 from cellarium.ml.core import CellariumPipeline, CellariumModule
 import notebooks_functions as NF
 
-foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_36/checkpoints/epoch=49-step=3150.ckpt',"../example_configs/scvi_config_pbmc.yaml","../data/pbmc_count.h5ad"],
-                    1:  ["cas_50m_homo_sapiens_no_cancer_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt',"../example_configs/scvi_config_cas_50m_homo_sapiens_no_cancer.yaml","../data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad"],
-                    2 : ["tucker_human_heart_atlas","lightning_logs/version_38/checkpoints/epoch=49-step=27050.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad"],
-                    3 : ["human_heart_atlas.h5ad","","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad"]}
+
+"""Glyco genes per dataset
+{"pmbc_results": ['B4GALT5', 'CHPF', 'B3GALT4', 'UGCG', 'CSGALNACT2', 'POFUT2', 'MGAT4A', 'GALNT3', 'GALNT10', 'LFNG', 'EXTL3', 'GALNT12', 'GXYLT1', 'TMTC2', 'CHSY1', 'XYLT2', 'GALNT1', 'GCNT4', 'CSGALNACT1', 'GALNT2', 'MGAT1', 'C1GALT1', 'OGT'],
+"tucker_human_heart_atlas": ['MGAT2', 'EXTL1', 'ALG10B', 'RFNG', 'B3GNT6', 'UGGT2', 'STT3A'],
+"human_heart_atlas": ['MGAT2', 'EXTL1', 'ALG10B', 'RFNG', 'B3GNT6', 'UGGT2', 'STT3A'],
+
+"""
+
+"""
+pbmc_count:  31774 × 4000
+tucker_human_heart_atlas: 276940 × 2889
+human_heart_atlas: 665234 × 2889
+gut_cell_atlas_normed: 428469 × 30535
+
+"""
 
 
+foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_36/checkpoints/epoch=49-step=3150.ckpt',"../example_configs/scvi_config_pbmc.yaml","../data/pbmc_count.h5ad",['final_annotation', 'batch']],
+                    1:  ["cas_50m_homo_sapiens_no_cancer_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt',"../example_configs/scvi_config_cas_50m_homo_sapiens_no_cancer.yaml","../data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad",['final_annotation', 'batch'] ],
+                    2 : ["tucker_human_heart_atlas","lightning_logs/version_44/checkpoints/epoch=29-step=16230.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad",["Cluster","batch"]],
+                    3 : ["human_heart_atlas","lightning_logs/version_45/checkpoints/epoch=39-step=26640.ckpt","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad",[]], #10 GB
+                    4 : ["gut_cell_atlas_normed","","../example_configs/scvi_config_gut_cell_atlas_normed.yaml","../data/gut_cell_atlas_normed.h5ad",[]]
+                    }
 
-foldername,checkpoint_file, config_file, adata_file = foldername_dict[3]
+
+foldername,checkpoint_file, config_file, adata_file, color_keys = foldername_dict[4]
 
 #NF.scanpy_scvi(adata_file) #too slow to handle
-
-
 subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env)
 
 exit()
-
-
-filename_suffix = "_test"
 
 NF.folders(foldername,"figures",overwrite=False)
 NF.folders(foldername,"tmp_data",overwrite=False)
@@ -54,7 +67,7 @@ scvi_model.to(device)
 scvi_model.eval()
 # construct the pipeline
 pipeline = CellariumPipeline([scvi_model])
-overwrite = False
+
 # get the location of the dataset
 with open(config_file, "r") as file:
     config_dict = yaml.safe_load(file)
@@ -71,7 +84,9 @@ dataset = NF.get_dataset_from_anndata(
     drop_last=False,
 )
 
-
+filename_suffix = "_test"
+figpath = f"figures/{foldername}"
+overwrite = False
 
 filepath = f"tmp_data/{foldername}/adata_embedded{filename_suffix}.h5ad"
 if not os.path.exists(filepath) or overwrite:
@@ -79,7 +94,6 @@ if not os.path.exists(filepath) or overwrite:
 else:
     print("Reading file : {}".format(filepath))
     adata = sc.read(filepath)
-
 
 # Reconstruct de-noised/de-batched data
 filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed{filename_suffix}.h5ad"
@@ -100,15 +114,18 @@ else:
     print("Reading file : {}".format(filepath))
     adata = sc.read(filepath)
 
+
 filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_raw_umap{filename_suffix}.h5ad"
 if not os.path.exists(filepath) or overwrite:
-    adata = NF.plot_raw_data(adata,filepath)
+    adata = NF.plot_raw_data(adata,filepath,figpath,color_keys)
 else:
     print("Reading file : {}".format(filepath))
     adata = sc.read(filepath)
+
+
 filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_raw_scvi_umaps{filename_suffix}.h5ad"
 if not os.path.exists(filepath) or overwrite:
-    NF.plot_latent_representation(adata,filepath)
+    NF.plot_latent_representation(adata,filepath, figpath,color_keys)
 else:
     print("Reading file : {}".format(filepath))
     adata = sc.read(filepath)
@@ -148,10 +165,34 @@ gene_set_dict = {
 gene_set = []
 list(map(gene_set.extend, list(gene_set_dict.values())))
 
-adata.var['genes_of_interest'] = adata.var_names.isin(gene_set) #23 glycogenes found only adata[:,adata.var_names.isin(gene_set)]
+print(adata)
+
+exit()
+
+if foldername in ["pmbc_results"]:
+    adata.var['genes_of_interest'] = adata.var_names.isin(gene_set) #23 glycogenes found only adata[:,adata.var_names.isin(gene_set)]
+    adata_tmp = adata[:, adata.var_names.isin(gene_set)] #only used for counting
+    print(adata_tmp.var_names.tolist())
+elif foldername in ["tucker_heart_atlas"]:
+    adata.var["genes_of_interest"] = adata.var["gene_names"].isin(gene_set)
+    adata_tmp = adata[:, adata.var["gene_names"].isin(gene_set)]
+    print(adata_tmp.var["gene_names"].tolist())
+elif foldername in ["gut_cell_atlas_normed"]:
+    adata.var["genes_of_interest"] = adata.var["gene_ids"].isin(gene_set)
+    adata_tmp = adata[:, adata.var["gene_ids"].isin(gene_set)]
+    print(adata_tmp.var["gene_ids"].tolist())
+
+else:
+    adata.var["genes_of_interest"] = adata.var["gene_name-new"].isin(gene_set)
+    adata_tmp = adata[:, adata.var["gene_name-new"].isin(gene_set)]
+    print(adata_tmp.var["gene_name-new"].tolist())
 
 
-adata_tmp = adata[:,adata.var_names.isin(gene_set)]
+exit()
+
+
+
+
 
 
 #aggregate umi-count expression values
@@ -175,10 +216,12 @@ else:
 
 #adata_normalized= sc.pp.normalize_total(adata, target_sum=1, inplace=False, exclude_highly_expressed=False)
 
-# NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,"RAW")
-# NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,"RECONSTRUCTED_0")
+#figname = "glyco_expression_umap.pdf"
+# NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,figpath,figname)
+#figname = "glyco_expression_reconstructed.pdf"
+# NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,figpath,figname)
 
-NF.plot_neighbour_clusters(adata,gene_set)
+NF.plot_neighbour_clusters(adata,gene_set,figpath)
 
 exit()
 

@@ -225,8 +225,7 @@ def reconstruct_debatched(
 
     return adata
 
-def plot_raw_data(adata: anndata.AnnData,filepath: str):
-
+def plot_raw_data(adata: anndata.AnnData,filepath: str,figpath: str,color_keys = ['final_annotation', 'batch'] ):
 
     #sc.set_figure_params(fontsize=14, vector_friendly=True)
     sc.set_figure_params(fontsize=14, vector_friendly=True)
@@ -240,24 +239,27 @@ def plot_raw_data(adata: anndata.AnnData,filepath: str):
     #sc.rapids_singlecell.tl.umap(adata)
     adata.obsm['X_raw_umap'] = adata.obsm['X_umap'].copy()
 
+
     try:
-        sc.pl.embedding(adata, basis='raw_umap', color=['final_annotation', 'batch'],
-                               ncols=1,show=False,save=".pdf")
-        plt.clf()
+        sc.pl.embedding(adata, basis='raw_umap', color=color_keys,
+                               ncols=1,show=False)
+        plt.savefig(f"{figpath}/umap-raw.pdf", bbox_inches="tight")
         plt.close()
+        plt.clf()
     except:
         pass
 
     adata.write(filepath)
     return adata
 
-def plot_latent_representation(adata: anndata.AnnData,filepath: str):
+def plot_latent_representation(adata: anndata.AnnData,filepath: str,figpath:str,color_keys = ['final_annotation', 'batch']):
     sc.set_figure_params(fontsize=14, vector_friendly=True)
     sc.pp.neighbors(adata, use_rep='X_scvi', n_neighbors=15, metric='euclidean', method='umap')
     sc.tl.umap(adata)
     adata.obsm['X_scvi_umap'] = adata.obsm['X_umap'].copy()
     try:
-        sc.pl.embedding(adata, basis='scvi_umap',color=['final_annotation', 'batch'], ncols=1,show=False,save=".pdf")
+        sc.pl.embedding(adata, basis='scvi_umap',color=color_keys, ncols=1,show=False) #,save=".pdf")
+        plt.savefig(f"{figpath}/scvi-latent-umap.pdf", bbox_inches="tight")
         plt.clf()
         plt.close()
     except:
@@ -576,7 +578,7 @@ def plot_avg_expression_old(adata,adata_proj,gene_set_dict,filename):
     else:
         print("Genes not found. Cannot make the plot")
 
-def plot_avg_expression(adata,basis,gene_set_dict,filename):
+def plot_avg_expression(adata,basis,gene_set_dict,figpath,figkey,figname):
 
     genes_list = []
     for gene_key, gene_set in gene_set_dict.items():
@@ -595,10 +597,11 @@ def plot_avg_expression(adata,basis,gene_set_dict,filename):
                     cmap = "magma_r",
                     ncols=nrows,
                     wspace=0.7,
-                    show=False,
-                    save=".pdf")
+                    show=False)
+                    #save=".pdf")
+    plt.savefig(f"{figpath}/{figname}", bbox_inches="tight")
 
-def plot_neighbour_clusters(adata,gene_set):
+def plot_neighbour_clusters(adata,gene_set,figpath):
     """
 
     NOTES:
@@ -619,9 +622,7 @@ def plot_neighbour_clusters(adata,gene_set):
         directed=False,
     )
 
-
     #cluster_assignments = adata.obs["clusters"].array
-
 
     with rc_context({"figure.figsize": (15, 15)}):
         sc.pl.umap(
@@ -635,17 +636,25 @@ def plot_neighbour_clusters(adata,gene_set):
             title="clustering of cells",
             palette="Set1",
             show=False,
-            save = "-leiden-clusters.pdf"
+            #save = "-leiden-clusters.pdf"
         )
+        plt.savefig(f"{figpath}/leiden-clusters.pdf", bbox_inches="tight")
+        plt.close()
+        plt.clf()
     gene_set =  adata.var_names[adata.var['genes_of_interest']]
-    sc.pl.dotplot(adata, gene_set, "clusters", dendrogram=True, show=False,save="clusters-glyco")
-
+    sc.pl.dotplot(adata, gene_set, "clusters", dendrogram=True, show=False)#,save="clusters-glyco")
+    plt.savefig(f"{figpath}/dotplot-leiden-clusters.pdf", bbox_inches="tight")
+    plt.close()
+    plt.clf()
     # with rc_context({"figure.figsize": (4.5, 3)}):
     #     sc.pl.violin(adata, gene_set, groupby="clusters",ncols=5,save="violin-glyco",show=False)
 
     ax = sc.pl.stacked_violin(
-        adata, {"Glyco":gene_set}, groupby="clusters", swap_axes=False, dendrogram=True,save="violin-glyco",show=False
+        adata, {"Glyco":gene_set}, groupby="clusters", swap_axes=False, dendrogram=True,show=False
     )
+    plt.savefig(f"{figpath}/stacked-violin-leiden-clusters.pdf", bbox_inches="tight")
+    plt.close()
+    plt.clf()
 
     return adata
 

@@ -19,7 +19,7 @@ trainer:
   #     patience: 45
   #     mode: min
   fast_dev_run: false
-  max_epochs: 50
+  max_epochs: 30
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -115,8 +115,10 @@ model:
     lr: 1e-3 # 6e-4
   # scheduler_fn: torch.optim.lr_scheduler.StepLR
   # scheduler_kwargs: {"step_size": 25, "gamma": 0.8} # null
-  scheduler_fn: torch.optim.lr_scheduler.ReduceLROnPlateau
-  scheduler_kwargs: {"mode":"min","patience":20} # , "min_lr"=0.00005
+#  scheduler_fn: torch.optim.lr_scheduler.ReduceLROnPlateau
+#  scheduler_kwargs: {"mode":"min","patience":20} # , "min_lr"=0.00005
+  scheduler_fn: null
+  scheduler_kwargs: null
   is_initialized: False
 data:
   dadc:
@@ -154,5 +156,5 @@ data:
   seed: 0
   drop_last: false
   test_mode: false
-  num_workers: 5 #4 works, 0 too but slow
+  num_workers: 1 #4 works, 0 too but slow
 ckpt_path: null
