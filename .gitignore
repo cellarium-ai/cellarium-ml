@@ -13,3 +13,5 @@ lightning_logs/
 build/
 notebooks/.ipynb_checkpoints/
 output/
+*.csv
+*.h5ad

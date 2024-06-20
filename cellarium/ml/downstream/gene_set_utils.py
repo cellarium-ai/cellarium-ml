@@ -92,7 +92,7 @@ def gsea(
     value_key: str = 'gene_power',
     n_perm: int = 10_000,
     seed: int = 0,
-):
+) -> dict[str, float]:
     """
     Use GSEA to come up with a normalized enrichment score and a p-value
 

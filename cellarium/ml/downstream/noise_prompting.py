@@ -1,6 +1,7 @@
 """Noise prompting using the CellariumGPT model"""
 
 from cellarium.ml.core import CellariumPipeline
+from cellarium.ml.models.cellarium_gpt import NegativeBinomial
 
 import torch
 import numpy as np
@@ -18,6 +19,7 @@ from operator import truediv
 import warnings
 from contextlib import redirect_stdout
 import tempfile
+import asyncio
 
 from .cellarium_utils import get_datamodule
 from .gene_set_utils import GeneSetRecords, append_random_control_collection, gsea
@@ -25,12 +27,12 @@ from .gene_set_utils import GeneSetRecords, append_random_control_collection, gs
 
 @torch.no_grad()
 def gpt_predict(
-    adata, 
+    adata: anndata.AnnData, 
     pipeline: CellariumPipeline, 
     gene_inds: torch.LongTensor,
     layer: str,
     key_added: str,
-):
+) -> anndata.AnnData:
     """
     Use the pipeline to predict the expression of a subset of genes in a single cell.
 
@@ -64,6 +66,63 @@ def gpt_predict(
     adata_out.layers[key_added] = adata_out.X.copy()
     
     return adata_out
+
+
+# @torch.no_grad()
+# def create_randomly_perturbed_dataset_from_manifold(
+#     adata, 
+#     n_perturbations: int, 
+#     scale_per_gene_g: np.ndarray,
+#     manifold_mu_obsm_key: str = 'measured_gpt',
+#     manifold_theta_obsm_key: str = 'measured_gpt_disp',
+#     perturbation_scale: float = 0.1,
+#     square_epsilon: bool = False,
+#     genes_to_perturb: list[int] | np.ndarray = [],
+#     seed: int = 0,
+# ):
+#     """
+#     Create a dataset with perturbed expression.
+
+#     Args:
+#         adata: AnnData object with a single cell
+#         n_perturbations: number of perturbations to create
+#         scale_per_gene_g: scale for each gene
+#         perturbation_scale: scale of the perturbation
+#         square_epsilon: whether to square the perturbation
+#         genes_to_perturb: indices of genes to perturb
+#         cell_perturbations_coherent: whether to perturb all genes in a cell in the same direction
+#             and by the same amount
+#         seed: random seed
+
+#     Returns:
+#         AnnData object of size n_perturbations with perturbed expression in adata.layers["perturbed"]
+#     """
+    
+#     assert len(adata) == 1, "Only one cell allowed in adata for create_perturbed_dataset"
+
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#     adata_perturbed = anndata.concat([adata for _ in range(n_perturbations)], 
+#                                      axis=0, merge="same", index_unique="-pert", uns_merge="first")
+#     adata_perturbed.layers["measured"] = adata_perturbed.X.copy()
+#     if sp.issparse(adata_perturbed.X):
+#         counts_ng = adata_perturbed.X.toarray()
+#     else:
+#         counts_ng = adata_perturbed.X
+#     counts_ng = torch.from_numpy(counts_ng).to(device)
+#     torch.manual_seed(seed)
+
+#     # re-sample counts
+#     NegativeBinomial(mu=adata.obsm[manifold_mu_obsm_key], theta=adata.obsm[manifold_theta_obsm_key]).sample()
+
+#     # restrict the perturbation to genes specified
+
+
+#     adata_perturbed.X = sp.csr_matrix(perturbed_counts_ng.cpu().numpy())
+#     assert adata_perturbed.X.min() >= 0, "Negative counts in the perturbed dataset"
+#     adata_perturbed.layers["perturbed"] = adata_perturbed.X.copy()
+
+#     return adata_perturbed
 
 
 @torch.no_grad()
@@ -546,10 +605,10 @@ def noise_prompt_random(
     perturbation_scale: float = 1.0,
     var_key_include_genes: str = 'gpt_include',
     var_key_gene_scale: str = 'mean',
-    gene_scale_eps: float = 1.0,
+    gene_scale_eps: float = 1e-5,
     seed: int = 0,
     **analyze_kwargs,
-):
+) -> anndata.AnnData:
     """
     Perform random noise prompting on all genes.
 
@@ -606,6 +665,72 @@ def noise_prompt_random(
         )
 
     return adata_perturbed_out
+
+
+def background(f):
+    def wrapped(*args, **kwargs):
+        return asyncio.get_event_loop().run_in_executor(None, f, *args, **kwargs)
+
+    return wrapped
+
+
+# @background
+def compute_pc_set_enrichment(
+    adata: anndata.AnnData, 
+    genes_perturbed: list[str],
+    genes_not_perturbed: list[str],
+    pc_number: int, 
+    gsea_n_perm: int = 1000,
+    seed: int = 0,
+    rank_statistic: str = 'gene_loading',
+    gene_name_key: str = 'gene_name',
+) -> pd.DataFrame:
+
+    df = get_pc_loadings(adata, pc_number=pc_number)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+
+        # compute a p-value for the perturbed genes in the set
+        gsea_perturbed_stats = silent(gsea)(
+            df=df, 
+            gene_group=genes_perturbed, 
+            gene_name_key=gene_name_key, 
+            value_key=rank_statistic,
+            n_perm=gsea_n_perm,
+            seed=seed,
+        )
+
+        # compute a p-value for the unperturbed genes in the set
+        gsea_not_perturbed_stats = silent(gsea)(
+            df=df, 
+            gene_group=genes_not_perturbed, 
+            gene_name_key=gene_name_key, 
+            value_key=rank_statistic,
+            n_perm=gsea_n_perm,
+            seed=seed,
+        )
+
+    # add to list of dataframes
+    data = {
+        'pval_perturbed': gsea_perturbed_stats['pval'],
+        'es_perturbed': gsea_perturbed_stats['es'],
+        'pval_unperturbed': gsea_not_perturbed_stats['pval'],
+        'es_unperturbed': gsea_not_perturbed_stats['es'],
+        'pc': pc_number,
+        'genes_perturbed': [genes_perturbed],
+        'genes_not_perturbed': [genes_not_perturbed],
+    }
+    
+    return pd.DataFrame(data=data)
+
+
+@background
+def atomic_write(dfs: list[pd.DataFrame], path: str):
+    with tempfile.TemporaryDirectory() as d:
+        tmpfile = os.path.join(d, "tmp.csv")
+        pd.concat(dfs, axis=0).to_csv(tmpfile, index=False)
+        os.replace(tmpfile, path)
 
 
 def noise_prompt_gene_set_collection(
@@ -749,54 +874,24 @@ def noise_prompt_gene_set_collection(
 
                 # get the loadings of genes on different PCs and compute set enrichment
                 for pc_number in range(n_pcs_in_output):
-                    df = get_pc_loadings(out['adata'], pc_number=pc_number)
-
-                    rank_statistic = 'gene_loading'
-
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-
-                        # compute a p-value for the perturbed genes in the set
-                        gsea_perturbed_stats = silent(gsea)(
-                            df=df, 
-                            gene_group=out['genes_perturbed'], 
-                            gene_name_key='gene_name', 
-                            value_key=rank_statistic,
-                            n_perm=gsea_n_perm,
-                            seed=seed,
-                        )
-
-                        # compute a p-value for the unperturbed genes in the set
-                        gsea_not_perturbed_stats = silent(gsea)(
-                            df=df, 
-                            gene_group=out['genes_not_perturbed'], 
-                            gene_name_key='gene_name', 
-                            value_key=rank_statistic,
-                            n_perm=gsea_n_perm,
-                            seed=seed,
-                        )
-
-                    # add to list of dataframes
-                    data = {
-                        'gene_set_name': gene_set_name,
-                        'pval_perturbed': gsea_perturbed_stats['pval'],
-                        'es_perturbed': gsea_perturbed_stats['es'],
-                        'pval_unperturbed': gsea_not_perturbed_stats['pval'],
-                        'es_unperturbed': gsea_not_perturbed_stats['es'],
-                        'pc': pc_number,
-                        'pc_frac_variance_explained': pc_var_ratios[pc_number],
-                        'genes_perturbed': [out['genes_perturbed']],
-                        'genes_not_perturbed': [out['genes_not_perturbed']],
-                    }
-                    dfs.append(pd.DataFrame(data=data))
+                    df_tmp = compute_pc_set_enrichment(
+                        adata=out['adata'],
+                        genes_perturbed=out['genes_perturbed'],
+                        genes_not_perturbed=out['genes_not_perturbed'],
+                        pc_number=pc_number,
+                        rank_statistic='gene_power',
+                        gene_name_key=var_gene_names,
+                        gsea_n_perm=gsea_n_perm,
+                        seed=i,
+                    )
+                    df_tmp['pc_frac_variance_explained'] = pc_var_ratios[pc_number]
+                    df_tmp['gene_set_name'] = gene_set_name
+                    dfs.append(df_tmp)
 
             # once all splits and PCs are done (i.e. set is complete), save if called for
             if save_intermediates_to_tmp_file is not None:
                 # atomic write
-                with tempfile.TemporaryDirectory() as d:
-                    tmpfile = os.path.join(d, "tmp.csv")
-                    pd.concat(dfs, axis=0).to_csv(tmpfile, index=False)
-                    os.replace(tmpfile, save_intermediates_to_tmp_file)
+                atomic_write(dfs, save_intermediates_to_tmp_file)
 
     except KeyboardInterrupt:
         pass
