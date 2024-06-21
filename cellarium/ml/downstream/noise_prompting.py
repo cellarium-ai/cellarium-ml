@@ -618,7 +618,8 @@ def noise_prompt_random(
         n_perturbations: number of perturbations to perform
         perturbation_scale: scale of the perturbation
         var_key_include_genes: key in adata.var to use for gene inclusion
-        var_key_gene_scale: key in adata.var with gene scales
+        var_key_gene_scale: key in adata.var with gene scales. If 'measured_gpt', this 
+            will use the output of cellariumgpt on the raw data as the noise scale.
         gene_scale_eps: epsilon to add to gene scales
         seed: random seed
         **analyze_kwargs: keyword arguments for analyze_lfc, such as n_pcs and n_ics
@@ -629,8 +630,11 @@ def noise_prompt_random(
     assert len(adata) == 1, 'only give one cell to noise_prompt_random'
     assert var_key_include_genes in adata.var.keys(), \
         f'var_key_include_genes "{var_key_include_genes}" must be in adata.var.keys()'
-    assert var_key_gene_scale in adata.var.keys(), \
-        f'var_key_gene_scale "{var_key_gene_scale}" must be in adata.var.keys()'
+    if var_key_gene_scale not in adata.var.keys():
+        if not var_key_gene_scale.startswith('measured_gpt'):
+            raise ValueError(f'var_key_gene_scale "{var_key_gene_scale}" must be in adata.var.keys() or '
+                             'start with "measured_gpt" optionally followed by "_0.5" or some other value '
+                             'indicating how much weight to put on the gpt output')
     assert gene_scale_eps > 0, 'gene_scale_eps must be positive'
 
     # limit gene set to genes going through gpt
@@ -643,6 +647,16 @@ def noise_prompt_random(
             pipeline=pipeline, 
             highly_expressed_gene_inds=highly_expressed_gene_inds,
         )
+    if var_key_gene_scale.startswith('measured_gpt'):
+        adata.var[var_key_gene_scale] = 0.
+        if var_key_gene_scale == 'measured_gpt':
+            adata.var.loc[adata.var_names[highly_expressed_gene_inds.numpy()], var_key_gene_scale] = np.array(adata.uns['measured_gpt'].A).squeeze()
+        else:
+            w = float(var_key_gene_scale.split('_')[-1])
+            if not ((w > 0) and (w < 1)):
+                raise ValueError(f'var_key_gene_scale "{var_key_gene_scale}" must end with _ and a float between 0 and 1 like "measured_gpt_0.5')
+            weighted_avg = w * np.array(adata.uns['measured_gpt'].A).squeeze() + (1 - w) * np.array(adata.X.A).squeeze()[highly_expressed_gene_inds.numpy()]
+            adata.var.loc[adata.var_names[highly_expressed_gene_inds.numpy()], var_key_gene_scale] = weighted_avg
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
