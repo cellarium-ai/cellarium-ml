@@ -14,11 +14,19 @@ Table of Contents
    cli
    core
    data
+   distributed
+   distributions
    lr_schedulers
    models
    transforms
    preprocessing
    utilities
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Examples
+
+   examples/cli_workflow
 
 .. toctree::
    :maxdepth: 1

@@ -2,189 +2,47 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-import random
-from collections.abc import Callable, Sequence
-from numbers import Number
-from typing import Any, Literal
+from collections import defaultdict
+from collections.abc import Callable
+from functools import cached_property
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import torch
-import torch.distributions as dist
-from pykeops.torch import LazyTensor
 from torch import nn
-from torch.backends.cuda import sdp_kernel
-from torch.distributions import constraints
-from torch.distributions.utils import broadcast_all
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin
-from cellarium.ml.utilities.testing import (
-    assert_arrays_equal,
-    assert_columns_and_array_lengths_equal,
-)
+from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 
 
-class NegativeBinomial(dist.Distribution):
-    """Negative binomial distribution.
+def prefix_diagonal_mask(context_len: int, prefix_len: int, device: torch.device) -> torch.Tensor:
+    """
+    Generate a prefix diagonal mask for self-attention.
 
     Args:
-        mu:
-            Mean of the distribution.
-        theta:
-            Inverse dispersion.
+        context_len:
+            The length of the context.
+        prefix_len:
+            The length of the prefix.
+        device:
+            The device to create the mask on.
+
+    Returns:
+        torch.Tensor: The prefix diagonal mask.
+
+    Example:
+        For context_len = 5, and prefix_len = 2, the mask is:
+        [[1, 1, 0, 0, 0],
+         [1, 1, 0, 0, 0],
+         [1, 1, 1, 0, 0],
+         [1, 1, 0, 1, 0],
+         [1, 1, 0, 0, 1]]
     """
-
-    arg_constraints = {"mu": constraints.greater_than_eq(0), "theta": constraints.greater_than_eq(0)}
-    support = constraints.nonnegative_integer
-
-    def __init__(self, mu: torch.Tensor, theta: torch.Tensor, eps: float = 1e-8, validate_args: bool = False) -> None:
-        self.mu, self.theta = broadcast_all(mu, theta)
-        if isinstance(mu, Number) and isinstance(theta, Number):
-            batch_shape = torch.Size()
-        else:
-            batch_shape = self.mu.size()
-        self.eps = eps
-        super().__init__(batch_shape, validate_args=validate_args)
-
-    @property
-    def mean(self) -> torch.Tensor:
-        return self.mu
-
-    @property
-    def variance(self) -> torch.Tensor:
-        return self.mu + (self.mu**2) / self.theta
-
-    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        if self._validate_args:
-            self._validate_sample(value)
-
-        # Original implementation from scVI:
-        #
-        #   log_theta_mu_eps = torch.log(self.theta + self.mu + self.eps)
-        #   return (
-        #       self.theta * (torch.log(self.theta + self.eps) - log_theta_mu_eps)
-        #       + value * (torch.log(self.mu + self.eps) - log_theta_mu_eps)
-        #       + torch.lgamma(value + self.theta)
-        #       - torch.lgamma(self.theta)
-        #       - torch.lgamma(value + 1)
-        #   )
-        delta = torch.where(
-            (value / self.theta < 1e-2) & (self.theta > 1e2),
-            (value + self.theta - 0.5) * torch.log1p(value / self.theta) - value,
-            (value + self.theta).lgamma() - self.theta.lgamma() - torch.xlogy(value, self.theta),
-        )
-        return (
-            delta
-            - (value + self.theta) * torch.log1p(self.mu / self.theta)
-            - (value + 1).lgamma()
-            + torch.xlogy(value, self.mu)
-        )
-
-
-backend_map = {
-    "math": {"enable_math": True, "enable_flash": False, "enable_mem_efficient": False},
-    "flash": {"enable_math": False, "enable_flash": True, "enable_mem_efficient": False},
-    "mem_efficient": {"enable_math": False, "enable_flash": False, "enable_mem_efficient": True},
-}
-
-
-class ScaledDotProductAttention(nn.Module):
-    """
-    Scaled dot product attention.
-
-    Args:
-        dropout:
-            Dropout probability.
-        attn_mult:
-            Multiplier for the attention scores.
-        backend:
-            Backend for the attention computation.
-    """
-
-    def __init__(
-        self,
-        dropout: float,
-        attn_mult: float,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
-    ) -> None:
-        super().__init__()
-        self.dropout = nn.Dropout(dropout)
-        self.attn_mult = attn_mult
-        self.backend = backend
-
-    def forward(
-        self,
-        queries_nqd: torch.Tensor,
-        keys_nsd: torch.Tensor,
-        values_nsv: torch.Tensor,
-        prefix_len_n: torch.Tensor | None,
-        attention_type: Literal["block", "block_diagonal", "full"],
-    ) -> torch.Tensor:
-        n, q, d = queries_nqd.shape
-        s = keys_nsd.shape[1]
-        scale_factor = self.attn_mult / d
-        device = queries_nqd.device
-        if self.backend == "keops":
-            if self.dropout.p > 0:
-                raise NotImplementedError("Dropout is not supported with PyKeOps.")
-
-            if attention_type == "block":
-                assert prefix_len_n is not None
-                prefix_len_n = LazyTensor(prefix_len_n[:, None, None, None].expand([n, q, 1, 1]).float())
-                s_range = LazyTensor(torch.arange(s, device=device)[:, None].float(), axis=1)
-                block_mask_nqs = 1 - (s_range < prefix_len_n)
-                attention_mask_nqs = block_mask_nqs
-            elif attention_type == "block_diagonal":
-                assert prefix_len_n is not None
-                prefix_len_n = LazyTensor(prefix_len_n[:, None, None, None].expand([n, q, 1, 1]).float())
-                q_range = LazyTensor(torch.arange(q, device=device)[:, None].float(), axis=0)
-                s_range = LazyTensor(torch.arange(s, device=device)[:, None].float(), axis=1)
-                block_mask_nqs = 1 - (s_range < prefix_len_n)
-                diag_mask_qs = 1 - (q_range == s_range)
-                attention_mask_nqs = block_mask_nqs * diag_mask_qs
-            elif attention_type == "full":
-                attention_mask_nqs = 0
-            else:
-                raise ValueError(f"Unsupported attention type: {attention_type}")
-
-            scores_nqs = (
-                LazyTensor(queries_nqd[:, :, None, :].contiguous()) * LazyTensor(keys_nsd[:, None, :, :].contiguous())
-            ).sum(-1) * scale_factor
-            scores_nqs = scores_nqs - 1e9 * attention_mask_nqs
-            return scores_nqs.sumsoftmaxweight(LazyTensor(values_nsv.unsqueeze(1).contiguous()), dim=2)
-        else:
-            if attention_type == "block":
-                assert prefix_len_n is not None
-                block_mask_nqs = torch.arange(s, device=device).expand([q, s]) < prefix_len_n[:, None, None]
-                attention_mask_nqs = block_mask_nqs
-            elif attention_type == "block_diagonal":
-                assert prefix_len_n is not None
-                block_mask_nqs = torch.arange(s, device=device).expand([q, s]) < prefix_len_n[:, None, None]
-                diag_mask_qs = torch.arange(q, device=device)[:, None] == torch.arange(s, device=device)
-                attention_mask_nqs = block_mask_nqs | diag_mask_qs
-            elif attention_type == "full":
-                attention_mask_nqs = None
-            else:
-                raise ValueError(f"Unsupported attention type: {attention_type}")
-
-            if self.backend in ["math", "flash", "mem_efficient"]:
-                with sdp_kernel(**backend_map[self.backend]):
-                    return nn.functional.scaled_dot_product_attention(
-                        queries_nqd.unsqueeze(0),
-                        keys_nsd.unsqueeze(0),
-                        values_nsv.unsqueeze(0),
-                        attention_mask_nqs,
-                        dropout_p=self.dropout.p,
-                        scale=scale_factor,
-                    ).squeeze(0)
-            elif self.backend == "torch":
-                scores_nqs = queries_nqd @ keys_nsd.transpose(1, 2) * scale_factor
-                if attention_mask_nqs is not None:
-                    scores_nqs[~attention_mask_nqs] = float("-inf")
-                self.attention_probs_nqs = scores_nqs.softmax(dim=-1)
-                return self.dropout(self.attention_probs_nqs) @ values_nsv  # _nqv
-            else:
-                raise ValueError(f"Unknown backend: {self.backend}")
+    mask_cc = torch.eye(context_len, dtype=torch.bool, device=device)
+    mask_cc[:, :prefix_len] = True
+    return mask_cc
 
 
 class MultiHeadAttention(nn.Module):
@@ -194,76 +52,118 @@ class MultiHeadAttention(nn.Module):
     Args:
         d_model:
             Dimensionality of the embeddings and hidden states.
+        use_bias:
+            Whether to use bias in the linear transformations.
         n_heads:
             Number of attention heads.
-        dropout:
+        dropout_p:
             Dropout probability.
         attn_mult:
             Multiplier for the attention scores.
-        use_bias:
-            Whether to use bias in the linear transformations.
-        backend:
+        attn_backend:
             Backend for the attention computation.
     """
+
+    backend_map = {
+        "math": SDPBackend.MATH,
+        "flash": SDPBackend.FLASH_ATTENTION,
+        "mem_efficient": SDPBackend.EFFICIENT_ATTENTION,
+    }
 
     def __init__(
         self,
         d_model: int,
-        n_heads: int,
-        dropout: float,
-        attn_mult: float,
         use_bias: bool,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
+        n_heads: int,
+        dropout_p: float,
+        attn_mult: float,
+        attn_backend: Literal["math", "flash", "mem_efficient"],
     ) -> None:
         super().__init__()
-        self.n_heads = n_heads
-        self.attention = ScaledDotProductAttention(dropout, attn_mult, backend=backend)
         self.Wq = nn.Linear(d_model, d_model, bias=use_bias)
         self.Wk = nn.Linear(d_model, d_model, bias=use_bias)
         self.Wv = nn.Linear(d_model, d_model, bias=use_bias)
         self.Wo = nn.Linear(d_model, d_model, bias=use_bias)
+        self.n_heads = n_heads
+        self.dropout_p = dropout_p
+        self.attn_mult = attn_mult
+        self.attn_backend = attn_backend
 
     @staticmethod
     def split_heads(X_nqd: torch.Tensor, n_heads: int) -> torch.Tensor:
         """Transposition for parallel computation of multiple attention heads."""
-        # m = n * h
-        # k = d / h
         X_nqhk = X_nqd.reshape(X_nqd.shape[0], X_nqd.shape[1], n_heads, -1)
         X_nhqk = X_nqhk.permute(0, 2, 1, 3)
-        return X_nhqk.reshape(-1, X_nhqk.shape[2], X_nhqk.shape[3])  # _mqk
+        return X_nhqk
 
     @staticmethod
-    def merge_heads(X_mqk: torch.Tensor, n_heads: int) -> torch.Tensor:
+    def merge_heads(X_nhqk: torch.Tensor) -> torch.Tensor:
         """Reverse of split_heads."""
-        X_nhqk = X_mqk.reshape(-1, n_heads, X_mqk.shape[1], X_mqk.shape[2])
         X_nqhk = X_nhqk.permute(0, 2, 1, 3)
-        return X_nqhk.reshape(X_nqhk.shape[0], X_nqhk.shape[1], -1)  # _nqd
+        X_nqd = X_nqhk.reshape(X_nqhk.shape[0], X_nqhk.shape[1], -1)
+        return X_nqd
 
     def forward(
         self,
-        queries_nqd: torch.Tensor,
-        keys_nsd: torch.Tensor,
-        values_nsd: torch.Tensor,
-        prefix_len_n: torch.Tensor | None,
-        attention_type: Literal["block", "block_diag", "full"],
+        query_ncd: torch.Tensor,
+        key_ncd: torch.Tensor,
+        value_ncd: torch.Tensor,
+        attn_mask_cc: torch.Tensor,
+        measured_genes_mask_nc: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        n_heads = self.n_heads
-        queries_nqd = self.Wq(queries_nqd)
-        keys_nsd = self.Wk(keys_nsd)
-        values_nsd = self.Wv(values_nsd)
-        # m = n * h
-        # k = d / h
-        queries_mqk = self.split_heads(queries_nqd, n_heads)
-        keys_msk = self.split_heads(keys_nsd, n_heads)
-        values_msk = self.split_heads(values_nsd, n_heads)
-        if prefix_len_n is not None:
-            prefix_len_m = prefix_len_n.repeat_interleave(n_heads)
-        else:
-            prefix_len_m = None
+        """
+        Args:
+            query_ncd:
+                Query tensor of shape ``(n, c, d)``.
+            key_ncd:
+                Key tensor of shape ``(n, c, d)``.
+            value_ncd:
+                Value tensor of shape ``(n, c, d)``.
+            attn_mask_cc:
+                Attention mask tensor of shape ``(c, c)``.
+            measured_genes_mask_nc:
+                Mask tensor for measured genes of shape ``(n, c)``. Unmeasured genes (``False``) do not contribute to
+                the attention scores.
 
-        output_mqk = self.attention(queries_mqk, keys_msk, values_msk, prefix_len_m, attention_type)
-        output_nqd = self.merge_heads(output_mqk, n_heads)
-        return self.Wo(output_nqd)  # _nqd
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
+        device = query_ncd.device
+        n = query_ncd.shape[0]
+        c = query_ncd.shape[1]
+
+        n_heads = self.n_heads
+        query_ncd = self.Wq(query_ncd)
+        key_ncd = self.Wk(key_ncd)
+        value_ncd = self.Wv(value_ncd)
+        # d = k * h
+        query_nhck = self.split_heads(query_ncd, n_heads)
+        key_nhck = self.split_heads(key_ncd, n_heads)
+        value_nhck = self.split_heads(value_ncd, n_heads)
+
+        k = query_nhck.shape[3]
+        scale_factor = self.attn_mult / k
+
+        if measured_genes_mask_nc is not None:
+            one_pad_nhc1 = torch.ones((n, n_heads, c, 1), device=device)
+            query_nhck = torch.cat([query_nhck, one_pad_nhc1], dim=-1)
+            measured_genes_pad_nc = torch.zeros((n, c), device=device)
+            measured_genes_pad_nc.masked_fill_(~measured_genes_mask_nc, -1e9)
+            measured_genes_pad_nhc1 = measured_genes_pad_nc[:, None, :, None].expand(n, n_heads, c, 1)
+            key_nhck = torch.cat([key_nhck, measured_genes_pad_nhc1], dim=-1)
+
+        with sdpa_kernel(self.backend_map[self.attn_backend]):
+            output_nhck = nn.functional.scaled_dot_product_attention(
+                query_nhck,
+                key_nhck,
+                value_nhck,
+                attn_mask=attn_mask_cc,
+                dropout_p=self.dropout_p,
+                scale=scale_factor,
+            )
+
+        output_ncd = self.merge_heads(output_nhck)
+        return self.Wo(output_ncd)  # _ncd
 
 
 class PositionWiseFFN(nn.Module):
@@ -285,8 +185,15 @@ class PositionWiseFFN(nn.Module):
         self.relu = nn.ReLU()
         self.dense2 = nn.Linear(d_ffn, d_model, bias=use_bias)
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
-        return self.dense2(self.relu(self.dense1(X)))
+    def forward(self, hidden_state_ncd: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hidden_state_ncd: Hidden state tensor of shape ``(n, c, d)``.
+
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
+        return self.dense2(self.relu(self.dense1(hidden_state_ncd)))  # _ncd
 
 
 class ValueEmbedding(nn.Module):
@@ -302,12 +209,77 @@ class ValueEmbedding(nn.Module):
 
     def __init__(self, d_model: int, use_bias: bool) -> None:
         super().__init__()
-        self.dense1 = nn.Linear(1, d_model, bias=use_bias)
-        self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(d_model, d_model, bias=use_bias)
+        self.dense = nn.Linear(1, d_model, bias=use_bias)
+        self.Em = nn.Embedding(1, d_model)
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
-        return self.dense2(self.relu(self.dense1(X)))
+    def forward(self, value_nc: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            value_nc: Value tensor of shape ``(n, c)``.
+
+        Returns:
+            The value embedding tensor of shape ``(n, c, d)``.
+        """
+        device = value_nc.device
+        mask_nc = value_nc < 0
+        value_nc = torch.log1p(value_nc.abs())
+        value_embedding_ncd = self.dense(value_nc.unsqueeze(-1))  # _ncd
+        if mask_nc.any():
+            mask_embedding_d = self.Em(torch.tensor(0, device=device))
+            value_embedding_ncd[mask_nc] = mask_embedding_d
+        return value_embedding_ncd
+
+
+class GeneEmbedding(nn.Module):
+    """
+    Gene embedding. The gene ID and value embeddings are concatenated with the total mRNA UMIs.
+    The concatenated embeddings are then linearly transformed to the embedding dimensionality.
+
+    Args:
+        n_genes:
+            Number of genes.
+        d_model:
+            Dimensionality of the embeddings and hidden states.
+        use_bias:
+            Whether to use bias in the linear transformations.
+    """
+
+    def __init__(self, n_genes: int, d_model: int, use_bias: bool) -> None:
+        super().__init__()
+        # gene ID embedding
+        self.Ei = nn.Embedding(n_genes, d_model)
+        # gene value embedding
+        self.Ev = ValueEmbedding(d_model, use_bias=use_bias)
+        # linear transformation for gene embeddings
+        self.Wg = nn.Linear(3 * d_model, d_model, bias=use_bias)
+
+    def forward(
+        self,
+        gene_id_nc: torch.Tensor,
+        gene_value_nc: torch.Tensor,
+        total_mrna_umis_nc: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            gene_id_nc:
+                Gene ID tensor of shape ``(n, c)``.
+            gene_value_nc:
+                Gene value tensor of shape ``(n, c)``.
+            total_mrna_umis_nc:
+                Total mRNA UMIs tensor of shape ``(n, c)``.
+
+        Returns:
+            The gene embedding tensor of shape ``(n, c, d)``.
+        """
+        gene_id_embedding_ncd = self.Ei(gene_id_nc)
+        gene_value_embedding_ncd = self.Ev(gene_value_nc)
+        total_mrna_umis_embedding_ncd = self.Ev(total_mrna_umis_nc)
+
+        gene_embedding_ncd = self.Wg(
+            torch.cat([gene_id_embedding_ncd, gene_value_embedding_ncd, total_mrna_umis_embedding_ncd], dim=-1)
+        )
+
+        return gene_embedding_ncd
 
 
 class NormAdd(nn.Module):
@@ -317,17 +289,31 @@ class NormAdd(nn.Module):
     Args:
         norm_shape:
             The shape of the layer normalization.
-        dropout:
+        dropout_p:
             Dropout probability.
     """
 
-    def __init__(self, norm_shape: int, dropout: float) -> None:
+    def __init__(self, norm_shape: int, dropout_p: float) -> None:
         super().__init__()
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout_p)
         self.ln = nn.LayerNorm(norm_shape)
 
-    def forward(self, X: torch.Tensor, sublayer: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
-        return X + self.dropout(sublayer(self.ln(X)))
+    def forward(
+        self,
+        hidden_state_ncd: torch.Tensor,
+        sublayer: Callable[[torch.Tensor], torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_state_ncd:
+                Hidden state tensor of shape ``(n, c, d)``.
+            sublayer:
+                Sublayer function.
+
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
+        return hidden_state_ncd + self.dropout(sublayer(self.ln(hidden_state_ncd)))  # _ncd
 
 
 class TransformerBlock(nn.Module):
@@ -341,13 +327,13 @@ class TransformerBlock(nn.Module):
             Dimensionality of the inner feed-forward layers.
         n_heads:
             Number of attention heads.
-        dropout:
+        dropout_p:
             Dropout probability.
         attn_mult:
             Multiplier for the attention scores.
         use_bias:
             Whether to use bias in the linear transformations.
-        backend:
+        attn_backend:
             Backend for the attention computation.
     """
 
@@ -356,25 +342,45 @@ class TransformerBlock(nn.Module):
         d_model: int,
         d_ffn: int,
         n_heads: int,
-        dropout: float,
+        dropout_p: float,
         attn_mult: float,
         use_bias: bool,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"],
+        attn_backend: Literal["math", "flash", "mem_efficient"],
     ) -> None:
         super().__init__()
-        self.attention = MultiHeadAttention(d_model, n_heads, dropout, attn_mult, use_bias, backend)
-        self.normadd1 = NormAdd(d_model, dropout)
+        self.attention = MultiHeadAttention(d_model, use_bias, n_heads, dropout_p, attn_mult, attn_backend)
+        self.normadd1 = NormAdd(d_model, dropout_p)
         self.ffn = PositionWiseFFN(d_ffn, d_model, use_bias)
-        self.normadd2 = NormAdd(d_model, dropout)
+        self.normadd2 = NormAdd(d_model, dropout_p)
 
-    def forward(self, X: torch.Tensor, prefix_len_n: torch.Tensor | None, attention_type) -> torch.Tensor:
-        Y = self.normadd1(X, lambda X: self.attention(X, X, X, prefix_len_n, attention_type))
-        return self.normadd2(Y, lambda Y: self.ffn(Y))
+    def forward(
+        self,
+        hidden_state_ncd: torch.Tensor,
+        attn_mask_cc: torch.Tensor,
+        measured_genes_mask_nc: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_state_ncd:
+                Hidden state tensor of shape ``(n, c, d)``.
+            attn_mask_cc:
+                Attention mask tensor of shape ``(c, c)``.
+            measured_genes_mask_nc:
+                Mask tensor for measured genes of shape ``(n, c)``. Unmeasured genes (``False``) do not contribute to
+                the attention scores.
+
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
+        hidden_state_ncd = self.normadd1(
+            hidden_state_ncd, lambda X: self.attention(X, X, X, attn_mask_cc, measured_genes_mask_nc)
+        )
+        return self.normadd2(hidden_state_ncd, lambda Y: self.ffn(Y))  # _ncd
 
 
-class GPTModel(nn.Module):
+class Transformer(nn.Module):
     """
-    GPT model.
+    Transformer model.
 
     Args:
         d_model:
@@ -385,104 +391,70 @@ class GPTModel(nn.Module):
             Number of attention heads.
         n_blocks:
             Number of transformer blocks.
-        dropout:
+        dropout_p:
             Dropout probability.
         use_bias:
             Whether to use bias in the linear transformations.
         attn_mult:
             Multiplier for the attention scores.
-        input_mult:
-            Multiplier for the input embeddings.
-        backend:
+        attn_backend:
             Backend for the attention computation.
     """
 
     def __init__(
         self,
-        n_vars: int,
-        d_model: int = 128,
-        d_ffn: int = 256,
-        n_heads: int = 4,
-        n_blocks: int = 6,
-        dropout: float = 0.02,
-        use_bias: bool = False,
-        attn_mult: float = 1.0,
-        input_mult: float = 1.0,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
+        d_model: int,
+        d_ffn: int,
+        n_heads: int,
+        n_blocks: int,
+        dropout_p: float,
+        use_bias: bool,
+        attn_mult: float,
+        attn_backend: Literal["math", "flash", "mem_efficient"],
     ) -> None:
         super().__init__()
-        # +1 token for total_mrna_umis
-        self.id_embedding = nn.Embedding(n_vars + 1, d_model)
-        # continuous value embedding
-        self.value_embedding = ValueEmbedding(d_model, use_bias=use_bias)
-        # mask token for target values
-        self.mask_embedding = nn.Embedding(1, d_model)
-
         self.n_blocks = n_blocks
         self.blocks = nn.ModuleList(
-            [TransformerBlock(d_model, d_ffn, n_heads, dropout, attn_mult, use_bias, backend) for _ in range(n_blocks)]
+            [
+                TransformerBlock(d_model, d_ffn, n_heads, dropout_p, attn_mult, use_bias, attn_backend)
+                for _ in range(n_blocks)
+            ]
         )
-
-        self.input_mult = input_mult
 
     def forward(
         self,
-        ids_nc: torch.Tensor,
-        values_nc: torch.Tensor,
-        labels_mask_nc: torch.Tensor,
-        prefix_len_n: torch.Tensor,
-        attention_type: Literal["block", "block_diagonal", "full"],
+        hidden_state_ncd: torch.Tensor,
+        attn_mask_cc: torch.Tensor,
+        measured_genes_mask_nc: torch.Tensor,
     ) -> torch.Tensor:
-        device = ids_nc.device
+        """
+        Args:
+            hidden_state_ncd:
+                Hidden state tensor of shape ``(n, c, d)``.
+            attn_mask_cc:
+                Attention mask tensor of shape ``(c, c)``.
+            measured_genes_mask_nc:
+                Mask tensor for measured genes of shape ``(n, c)``. Unmeasured genes (``False``) do not contribute to
+                the attention scores.
 
-        id_tokens_ncd = self.id_embedding(ids_nc)
-        value_tokens_ncd = self.value_embedding(torch.log1p(values_nc.float()).unsqueeze(-1))
-        mask_token = self.mask_embedding(torch.tensor(0, device=device))
-        value_tokens_ncd[labels_mask_nc] = mask_token
-
-        hidden_state_ncd = (id_tokens_ncd + value_tokens_ncd) * self.input_mult
-        for block in self.blocks:
-            hidden_state_ncd = block(
-                hidden_state_ncd,
-                prefix_len_n=prefix_len_n,
-                attention_type=attention_type,
-            )
+        Returns:
+            The output hidden state tensor of shape ``(n, c, d)``.
+        """
+        for i, block in enumerate(self.blocks):
+            if i == self.n_blocks - 1:
+                self.hidden_state_ncd = hidden_state_ncd
+            hidden_state_ncd = block(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
 
         return hidden_state_ncd
 
 
-class NegativeBinomialHead(nn.Module):
-    """
-    Negative binomial head.
-
-    Args:
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        use_bias:
-            Whether to use bias in the linear transformations.
-        output_mult:
-            Multiplier for the output embeddings.
-    """
-
-    def __init__(self, d_model: int, use_bias: bool, output_mult: float) -> None:
-        super().__init__()
-        self.dense = nn.Linear(d_model, 2, bias=use_bias)
-        self.output_mult = output_mult
-
-    def forward(self, hidden_state_ncd) -> tuple[torch.Tensor, torch.Tensor]:
-        output = self.dense(hidden_state_ncd) * self.output_mult
-        mu_nc = output[..., 0].exp()
-        theta_nc = output[..., 1].exp()
-        return mu_nc, theta_nc
-
-
-class CellariumGPT(CellariumModel, PredictMixin):
+class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
     """
     Cellarium GPT model.
 
     Args:
-        var_names_g:
-            The variable names schema for the input data validation.
+        gene_categories:
+            Gene ID categories.
         d_model:
             Dimensionality of the embeddings and hidden states.
         d_ffn:
@@ -491,12 +463,16 @@ class CellariumGPT(CellariumModel, PredictMixin):
             Number of attention heads.
         n_blocks:
             Number of transformer blocks.
-        dropout:
+        dropout_p:
             Dropout probability.
         use_bias:
             Whether to use bias in the linear transformations.
-        n_context:
-            Number of context variables.
+        max_prefix_len:
+            Maximum length of the prefix. Must be greater than or equal to 1.
+        min_suffix_len:
+            Minimum length of the suffix. Must be greater than or equal to 1.
+        max_value:
+            Maximum count value (inclusive).
         attn_mult:
             Multiplier for the attention scores.
         input_mult:
@@ -505,55 +481,71 @@ class CellariumGPT(CellariumModel, PredictMixin):
             Multiplier for the output embeddings.
         initializer_range:
             The standard deviation of the truncated normal initializer.
-        backend:
+        attn_backend:
             Backend for the attention computation.
-        log_metrics:
-            Whether to log the zero and nonzero losses and predictions.
     """
 
     def __init__(
         self,
-        var_names_g: Sequence[str],
-        d_model: int = 128,
-        d_ffn: int = 256,
-        n_heads: int = 4,
-        n_blocks: int = 6,
-        dropout: float = 0.0,
+        gene_categories: pd.Index,
+        d_model: int = 256,
+        d_ffn: int = 512,
+        n_heads: int = 8,
+        n_blocks: int = 4,
+        dropout_p: float = 0.0,
         use_bias: bool = False,
-        n_context: int = 2048,
-        attn_mult: float = 1.0,
+        max_prefix_len: int = 1000,
+        suffix_len: int | None = None,
+        context_len: int | None = None,
+        max_value: int = 1000,
+        attn_mult: float = 6.0,
         input_mult: float = 1.0,
         output_mult: float = 1.0,
         initializer_range: float = 0.02,
-        backend: Literal["keops", "torch", "math", "flash", "mem_efficient"] = "keops",
-        log_metrics: bool = True,
-        log_plots: bool = False,
-        log_plots_every_n_steps_multiplier: int = 10,
+        attn_backend: Literal["math", "flash", "mem_efficient"] = "mem_efficient",
     ) -> None:
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
-        self.n_vars = len(var_names_g)
-        self.gpt_model = GPTModel(
-            self.n_vars,
+        self.gene_categories = gene_categories
+        self.n_genes = len(gene_categories)
+        self.max_value = max_value
+        if (suffix_len is None) == (context_len is None):
+            raise ValueError("Either `suffix_len` or `context_len` must be specified, but not both.")
+        if context_len is not None:
+            if context_len > self.n_genes:
+                raise ValueError(
+                    "`context_len` must be less than or equal to the number of genes. "
+                    f"Got {context_len} > {self.n_genes}."
+                )
+            if max_prefix_len >= context_len:
+                raise ValueError(
+                    "`max_prefix_len` must be less than `context_len`. Got {max_prefix_len} >= {context_len}."
+                )
+        if suffix_len is not None:
+            if max_prefix_len + suffix_len > self.n_genes:
+                raise ValueError(
+                    "`max_prefix_len + suffix_len` must be less than or equal to the number of genes. "
+                    f"Got {max_prefix_len + suffix_len} > {self.n_genes}."
+                )
+        self.max_prefix_len = max_prefix_len
+        self.suffix_len = suffix_len
+        self.context_len = context_len
+        self.input_mult = input_mult
+        self.output_mult = output_mult
+
+        self.gene_embedding = GeneEmbedding(self.n_genes, d_model, use_bias)
+        self.transformer = Transformer(
             d_model,
             d_ffn,
             n_heads,
             n_blocks,
-            dropout,
+            dropout_p,
             use_bias,
             attn_mult,
-            input_mult,
-            backend,
+            attn_backend,
         )
-        self.nb_head = NegativeBinomialHead(d_model, use_bias, output_mult)
-        assert n_context <= self.n_vars + 1, "n_context must be less than or equal to the number of genes + 1"
-        self.n_context = n_context
+        self.head = nn.Linear(d_model, self.max_value + 1, use_bias)
         self.initializer_range = initializer_range
         self.reset_parameters()
-
-        self.log_metrics = log_metrics
-        self.log_plots = log_plots
-        self.log_plots_every_n_steps_multiplier = log_plots_every_n_steps_multiplier
 
     def reset_parameters(self) -> None:
         self.apply(self._init_weights)
@@ -585,257 +577,316 @@ class CellariumGPT(CellariumModel, PredictMixin):
         for name, p in module.named_parameters():
             if name == "dense2.weight" or name == "Wo.weight":
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.gpt_model.n_blocks)))
+                p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.transformer.n_blocks)))
 
-    def tokenize(
-        self,
-        x_ng: torch.Tensor,
-        total_mrna_umis_n: torch.Tensor | None,
-        context_size: int | None = None,
-        shuffle: bool = False,
-        context_inds_c: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert (
-            sum([(context_size is not None), (context_inds_c is not None)]) == 1
-        ), "Exactly one of [context_size, context_inds_c] must be provided."
-        n = x_ng.shape[0]
-        device = x_ng.device
-        ndx = torch.arange(n, device=device)
+    @cached_property
+    def token_to_id(self) -> dict[str, int]:
+        return {var_name: i for i, var_name in enumerate(self.gene_categories)}
 
-        if context_inds_c is not None:
-            indices_nc = context_inds_c.expand(n, -1)
-        else:
-            if context_size is None:
-                context_size = self.n_context  # for mypy, but should never be reached
-            genes_context_size = context_size if total_mrna_umis_n is None else context_size - 1
-            if shuffle:
-                indices_ng = torch.argsort(torch.rand_like(x_ng))
-                indices_nc = indices_ng[:, :genes_context_size]
-            else:
-                indices_nc = torch.arange(genes_context_size, device=device).expand(n, -1)
-        values_nc = x_ng[ndx[:, None], indices_nc]
-        if total_mrna_umis_n is not None:
-            # concatenate total_mrna_umis to the random subset of genes
-            values_nc = torch.cat([total_mrna_umis_n[:, None], values_nc], dim=1)
-            ids_nc = torch.cat([torch.zeros((n, 1), dtype=torch.long, device=device), indices_nc + 1], dim=1)
-        else:
-            ids_nc = indices_nc + 1
-        return ids_nc, values_nc
+    @cached_property
+    def vectorized_token_to_id(self):
+        return np.vectorize(lambda x: self.token_to_id[x])
 
     def forward(
-        self, x_ng: torch.Tensor, var_names_g: np.ndarray, total_mrna_umis_n: torch.Tensor
-    ) -> dict[str, torch.Tensor]:
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
-
-        n = x_ng.shape[0]
-        device = x_ng.device
-
-        # prefix includes the total_mrna_umis and a random subset of genes
-        # the length of the prefix is sampled uniformly from 1 to n_context - 1 (inclusive)
-        prefix_len_n = torch.randint(1, self.n_context, (n,), device=device)
-        labels_mask_nc = torch.arange(self.n_context, device=device)[None, :] >= prefix_len_n[:, None]
-
-        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, self.n_context, shuffle=True)
-        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
-        mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
-
-        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, self.n_context)
-        nb_dist = NegativeBinomial(mu=mu_nc[labels_mask_nc], theta=theta_nc[labels_mask_nc])
-        log_prob = nb_dist.log_prob(values_nc[labels_mask_nc])
-        sample_weights = sample_weights_nc[labels_mask_nc]
-        loss = -(log_prob * sample_weights).sum() / sample_weights.sum()
-
-        return {
-            "loss": loss,
-            "values_nc": values_nc,
-            "total_mrna_umis_n": total_mrna_umis_n,
-            "prefix_len_n": prefix_len_n,
-            "labels_mask_nc": labels_mask_nc,
-            "sample_weights_nc": sample_weights_nc,
-            "mu_nc": mu_nc,
-            "theta_nc": theta_nc,
-        }
-
-    def predict(
         self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
+        gene_value_ng: torch.Tensor,
+        gene_id_g: torch.Tensor,
+        gene_categories: pd.Index,
         total_mrna_umis_n: torch.Tensor,
-        context_inds_c: torch.Tensor,
-    ) -> dict[str, torch.Tensor | np.ndarray]:
-        """
-        Predict gene embeddings and negative binomial parameters.
+        measured_genes_mask_ng: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        assert gene_categories.equals(self.gene_categories)
 
-        Args:
-            x_ng:
-                The input gene expression data.
-            var_names_g:
-                The variable names schema for the input data validation.
-            total_mrna_umis_n:
-                The total mRNA UMIs.
-            context_inds_c:
-                The indices of genes (total of c context size) to include in the computation.
+        device = gene_id_g.device
+        gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
 
-        Returns:
-            A dictionary with the following keys and values:
-                - hidden_state_ncd: The final hidden state of the GPT model, i.e. the embeddings.
-                    First is the total mRNA UMIs.
-                - values_nc: The input gene expression data with the total mRNA UMIs and all input genes.
-                    First is the total mRNA UMIs.
-                - total_mrna_umis_n: The total mRNA UMIs.
-                - prefix_len_n: The length of the prefix.
-                - labels_mask_nc: The mask for the labels.
-                - sample_weights_nc: The sample weights.
-                - mu_nc: The mean of the negative binomial distribution.
-                - theta_nc: The inverse dispersion of the negative binomial distribution.
-        """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+        # sample the prefix length
+        prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), device=device))
 
-        n = x_ng.shape[0]
-        device = x_ng.device
+        # compute the context length and suffix length
+        if self.context_len is not None:
+            # use the fixed context length
+            context_len = self.context_len
+            suffix_len = context_len - prefix_len
+        elif self.suffix_len is not None:
+            # compute the context length dynamically based on the prefix length
+            suffix_len = self.suffix_len
+            context_len = prefix_len + suffix_len
 
-        # prefix includes the total_mrna_umis and a subset of genes
-        # the length of the prefix is given by context_size
-        context_length = len(context_inds_c) + 1
-        prefix_len_n = torch.ones(n, device=device) * context_length
-        labels_mask_nc = torch.arange(context_length, device=device)[None, :] >= prefix_len_n[:, None]
+        # shuffle the genes
+        shuffle_idx_ng = torch.argsort(torch.rand_like(gene_value_ng), dim=-1)
+        shuffle_idx_nc = shuffle_idx_ng[:, :context_len]
+        gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+        gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
+        measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
 
-        ids_nc, values_nc = self.tokenize(x_ng, total_mrna_umis_n, context_inds_c=context_inds_c, shuffle=False)
-        hidden_state_ncd = self.gpt_model(ids_nc, values_nc, labels_mask_nc, prefix_len_n, "block_diagonal")
-        mu_nc, theta_nc = self.nb_head(hidden_state_ncd)
+        # compute the target and mask target values
+        label_ns = gene_value_nc[:, -suffix_len:].long()
+        gene_value_nc[:, -suffix_len:] = -1
 
-        sample_weights_nc = 1 / labels_mask_nc.sum(dim=1, keepdim=True).expand(-1, context_length)
+        # compute the total mRNA UMIs
+        total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, context_len)
 
-        return {
-            "hidden_state_ncd": hidden_state_ncd,
-            "values_nc": values_nc,
-            "total_mrna_umis_n": total_mrna_umis_n,
-            "prefix_len_n": prefix_len_n,
-            "labels_mask_nc": labels_mask_nc,
-            "sample_weights_nc": sample_weights_nc,
-            "mu_nc": mu_nc,
-            "theta_nc": theta_nc,
-        }
+        # embed the gene IDs, values, and total mRNA UMIs
+        gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
 
-    @torch.no_grad()
-    def on_batch_end(
+        # compute logits
+        attn_mask_cc = prefix_diagonal_mask(context_len, prefix_len, device)
+        hidden_state_ncd = gene_embedding_ncd * self.input_mult
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
+        logits_nsm = self.head(hidden_state_ncd[:, -suffix_len:]) * self.output_mult
+
+        # compute the loss
+        loss_fn = nn.CrossEntropyLoss(reduction="none")
+        measured_genes_mask_ns = measured_genes_mask_nc[:, -suffix_len:]
+        label_mask_ns = (label_ns < self.max_value + 1) & measured_genes_mask_ns
+        label_weight_ns = 1 / label_mask_ns.sum(dim=-1, keepdim=True).expand(-1, suffix_len)
+        label_weights = label_weight_ns[label_mask_ns]
+        logits = logits_nsm[label_mask_ns]
+        labels = label_ns[label_mask_ns]
+        loss = (loss_fn(logits, labels) * label_weights).sum() / label_weights.sum()
+
+        return {"loss": loss}
+
+    def validate(
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        outputs: dict[str, torch.Tensor],
-        batch: Any,
+        gene_id_g: torch.Tensor,
+        gene_categories: pd.Series,
+        gene_value_ng: torch.Tensor,
+        total_mrna_umis_n: torch.Tensor,
+        measured_genes_mask_ng: torch.Tensor,
+        obs_names_n: np.ndarray,
         batch_idx: int,
     ) -> None:
-        if not self.log_metrics:
-            return
+        device = gene_id_g.device
+        gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
+        n, g = gene_id_ng.shape
 
-        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
-            return
+        loss = self(gene_value_ng, gene_id_g, gene_categories, total_mrna_umis_n, measured_genes_mask_ng)["loss"]
+        pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
 
-        self._log_metrics(pl_module, outputs)
+        losses: dict[int, dict[int, torch.Tensor]] = defaultdict(dict)
+        suffix_len = 100
+        n_seeds = 3
+        prefix_lens = [0, 49, 499, 999, 1999, 3999, 7999]
+        for i in range(n_seeds):
+            rng_n = [torch.Generator(device=device) for _ in range(n)]
+            [rng.manual_seed(int(obs_name) + i) for rng, obs_name in zip(rng_n, obs_names_n)]
+            shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
 
-        if not self.log_plots:
-            return
+            for prefix_len in prefix_lens:
+                context_len = prefix_len + suffix_len
+                attn_mask_cc = prefix_diagonal_mask(context_len, prefix_len, device)
 
-        if trainer.global_rank != 0:
-            return
+                shuffle_idx_nc = torch.cat(
+                    [
+                        shuffle_idx_ng[:, :prefix_len],
+                        shuffle_idx_ng[:, -suffix_len:],
+                    ],
+                    dim=1,
+                )
+                gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+                gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
+                total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(gene_id_nc.shape)
+                measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
+                label_ns = gene_value_nc[:, -suffix_len:].long()
+                gene_value_nc[:, -suffix_len:] = -1
 
-        if (trainer.global_step + 1) % (trainer.log_every_n_steps * self.log_plots_every_n_steps_multiplier) != 0:  # type: ignore[attr-defined]
-            return
+                logits = []
+                for gene_id, gene_value, total_mrna_umis, measured_genes_mask in zip(
+                    torch.split(gene_id_nc, 25),
+                    torch.split(gene_value_nc, 25),
+                    torch.split(total_mrna_umis_nc, 25),
+                    torch.split(measured_genes_mask_nc, 25),
+                ):
+                    gene_embedding = self.gene_embedding(gene_id, gene_value, total_mrna_umis)
+                    hidden_state = gene_embedding * self.input_mult
+                    hidden_state = self.transformer(hidden_state, attn_mask_cc, measured_genes_mask)
+                    logits.append(self.head(hidden_state[:, -suffix_len:]) * self.output_mult)
+                logits_nsm = torch.cat(logits, dim=0)
 
-        self._log_plots(trainer, outputs)
+                label_mask_ns = label_ns < self.max_value + 1
+                label_weight_ns = 1 / label_mask_ns.sum(dim=1, keepdim=True).expand(-1, suffix_len)
+                loss_fn = nn.CrossEntropyLoss(reduction="none")
+                label_weights = label_weight_ns[label_mask_ns]
+                loss = (
+                    loss_fn(logits_nsm[label_mask_ns], label_ns[label_mask_ns]) * label_weights
+                ).sum() / label_weights.sum()
+                losses[prefix_len][i] = loss
 
-    def _log_metrics(self, pl_module: pl.LightningModule, outputs: dict[str, torch.Tensor]) -> None:
-        values_nc = outputs["values_nc"]
-        labels_mask_nc = outputs["labels_mask_nc"]
-        sample_weights_nc = outputs["sample_weights_nc"]
-        mu_nc = outputs["mu_nc"]
-        theta_nc = outputs["theta_nc"]
-        nonzero_mask = (values_nc > 0) & labels_mask_nc
-        zero_mask = (values_nc == 0) & labels_mask_nc
+                if trainer.global_rank == batch_idx == i == 0:
+                    self._log_plots(
+                        trainer,
+                        label_ns,
+                        logits_nsm,
+                        total_mrna_umis_n,
+                        prefix_len,
+                    )
 
-        nonzero_log_prob = NegativeBinomial(mu=mu_nc[nonzero_mask], theta=theta_nc[nonzero_mask]).log_prob(
-            values_nc[nonzero_mask]
-        )
-        nonzero_sample_weights = sample_weights_nc[nonzero_mask]
-        nonzero_loss = -(nonzero_log_prob * nonzero_sample_weights).sum() / nonzero_sample_weights.sum()
+        loss_dict = {}
+        for prefix_len in prefix_lens:
+            loss = torch.mean(torch.stack([losses[prefix_len][i] for i in range(n_seeds)], dim=0))
+            loss_dict[f"val_loss_prefix_{prefix_len + 1}"] = loss
+        pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
 
-        zero_log_prob = NegativeBinomial(mu=mu_nc[zero_mask], theta=theta_nc[zero_mask]).log_prob(values_nc[zero_mask])
-        zero_sample_weights = sample_weights_nc[zero_mask]
-        zero_loss = -(zero_log_prob * zero_sample_weights).sum() / zero_sample_weights.sum()
+    @torch.inference_mode()
+    def predict(
+        self,
+        prompt_name_ns: np.ndarray | None,
+        prompt_value_ns: torch.Tensor | None,
+        prompt_total_mrna_umis_n: torch.Tensor | None,
+        prompt_measured_genes_mask_ns: torch.Tensor | None,
+        query_name_nq: np.ndarray | None,
+        query_total_mrna_umis_n: torch.Tensor | None,
+    ) -> dict[str, np.ndarray | torch.Tensor]:
+        if prompt_name_ns is not None and query_name_nq is not None:
+            n, q = query_name_nq.shape
+            device = query_total_mrna_umis_n.device
+            gene_name_nc = np.concatenate([prompt_name_ns, query_name_nq], axis=1)
+            gene_value_nc = torch.cat([prompt_value_ns, -torch.ones((n, q), device=device)], dim=1)
+            total_mrna_umis_nc = torch.cat(
+                [
+                    prompt_total_mrna_umis_n[:, None].expand(prompt_name_ns.shape),
+                    query_total_mrna_umis_n[:, None].expand(query_name_nq.shape),
+                ],
+                dim=-1,
+            )
+            measured_genes_mask_nc = torch.cat(
+                [
+                    prompt_measured_genes_mask_ns,
+                    torch.ones((n, q), dtype=torch.bool, device=device),
+                ],
+                dim=1,
+            )
+        elif prompt_name_ns is not None:
+            gene_name_nc = prompt_name_ns
+            gene_value_nc = prompt_value_ns
+            total_mrna_umis_nc = prompt_total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
+            measured_genes_mask_nc = prompt_measured_genes_mask_ns
+        else:
+            n, q = query_name_nq.shape
+            device = query_total_mrna_umis_n.device
+            gene_name_nc = query_name_nq
+            gene_value_nc = -torch.ones((n, q), device=device)
+            total_mrna_umis_nc = query_total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
+            measured_genes_mask_nc = torch.ones((n, q), dtype=torch.bool, device=device)
 
-        pl_module.log("zero_loss", zero_loss, sync_dist=True)
-        pl_module.log("nonzero_loss", nonzero_loss, sync_dist=True)
+        device = gene_value_nc.device
+        gene_id_nc = torch.tensor(self.vectorized_token_to_id(gene_name_nc), dtype=torch.long, device=device)
 
-    def _log_plots(self, trainer: pl.Trainer, outputs: dict[str, torch.Tensor]):
+        if prompt_name_ns is not None and prompt_value_ns is not None:
+            prefix_len = prompt_value_ns.shape[1]
+        else:
+            prefix_len = 0
+
+        attn_mask_cc = prefix_diagonal_mask(gene_id_nc.shape[1], prefix_len, device)
+        gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
+        hidden_state_ncd = gene_embedding_ncd * self.input_mult
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
+        logits_nqm = self.head(hidden_state_ncd[:, prefix_len:]) * self.output_mult
+
+        return {
+            "logits_nqm": logits_nqm,
+            "query_name_nq": query_name_nq,
+            "hidden_state_ncd": self.transformer.hidden_state_ncd,
+        }
+
+    # def log_prob(self, var_names_ng: np.ndarray, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
+    #     prompt_value_ns = None
+    #     log_probs = []
+    #     ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
+
+    #     for i in tqdm.tqdm(range(var_names_ng.shape[1])):
+    #         if prompt_value_ns is None:
+    #             prompt_name_ns = None
+    #         else:
+    #             prompt_name_ns = var_names_ng[:, :i]
+
+    #         logits_n1p: torch.Tensor = self.predict(
+    #             prompt_name_ns, prompt_value_ns, var_names_ng[:, i : i + 1], total_mrna_umis_n
+    #         )["logits_nqp"]
+    #         logits_n1p = logits_n1p - logits_n1p.logsumexp(dim=-1, keepdim=True)
+    #         value_n1 = x_ng[:, i : i + 1]
+    #         log_prob_n1 = logits_n1p[ndx[:, None], 0, value_n1.long()]
+    #         log_probs.append(log_prob_n1)
+    #         if prompt_value_ns is None:
+    #             prompt_value_ns = value_n1
+    #         else:
+    #             prompt_value_ns = torch.cat([prompt_value_ns, value_n1], dim=1)
+
+    #     return torch.cat(log_probs, dim=1)
+
+    # @torch.inference_mode()
+    # def sample(
+    #     self, var_names_ng: np.ndarray, total_mrna_umis_n: torch.Tensor, prompt_value_ns: torch.Tensor | None
+    # ) -> dict[str, torch.Tensor]:
+    #     if prompt_value_ns is None:
+    #         prompt_len = 0
+    #     else:
+    #         prompt_len = prompt_value_ns.shape[1]
+    #     total_len = var_names_ng.shape[1]
+
+    #     for i in tqdm.tqdm(range(prompt_len, total_len)):
+    #         if prompt_value_ns is None:
+    #             prompt_name_ns = None
+    #         else:
+    #             prompt_name_ns = var_names_ng[:, :i]
+
+    #         logits_n1p = self.predict(prompt_name_ns, prompt_value_ns, var_names_ng[:, i : i + 1], total_mrna_umis_n)[
+    #             "logits_nqp"
+    #         ]
+    #         probs_np = logits_n1p[:, 0].softmax(dim=-1)
+    #         value_n1 = torch.multinomial(probs_np, 1)
+    #         if prompt_value_ns is None:
+    #             prompt_value_ns = value_n1
+    #         else:
+    #             prompt_value_ns = torch.cat([prompt_value_ns, value_n1], dim=1)
+    #     return prompt_value_ns
+
+    def _log_plots(
+        self,
+        trainer: pl.Trainer,
+        value_nq: torch.Tensor,
+        logits_nqg: torch.Tensor,
+        total_mrna_umis_n: torch.Tensor,
+        prefix_len: int,
+    ) -> None:
         import matplotlib.pyplot as plt
 
-        values_nc = outputs["values_nc"]
-        total_mrna_umis_n = outputs["total_mrna_umis_n"]
-        prefix_len_n = outputs["prefix_len_n"]
-        labels_mask_nc = outputs["labels_mask_nc"]
-        mu_nc = outputs["mu_nc"]
-        theta_nc = outputs["theta_nc"]
-        nonzero_mask = (values_nc > 0) & labels_mask_nc
-        zero_mask = (values_nc == 0) & labels_mask_nc
+        nonzero_mask_nq = (value_nq > 0) & (value_nq < self.max_value + 1)
+        zero_mask_nq = value_nq == 0
+        q = value_nq.shape[1]
 
-        prefix_len_nc = prefix_len_n[:, None].expand(-1, self.n_context)
-        total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, self.n_context)
+        total_mrna_umis_nq = total_mrna_umis_n[:, None].expand(-1, q)
 
-        fig = plt.figure(figsize=(12, 15))
-        nonzero_indices = random.sample(range(int(nonzero_mask.sum().item())), 24)
+        fig = plt.figure(figsize=(12, 8))
 
-        for idx, i in enumerate(nonzero_indices):
-            plt.subplot(8, 4, idx + 1)
-            prefix = prefix_len_nc[nonzero_mask][i].item()
-            label = values_nc[nonzero_mask][i].item()
-            mu = mu_nc[nonzero_mask][i].cpu()
-            theta = theta_nc[nonzero_mask][i].cpu()
-            n_umis = total_mrna_umis_nc[nonzero_mask][i].item()
+        for i in range(12):
+            plt.subplot(3, 4, i + 1)
+            if i < 8:
+                label = value_nq[nonzero_mask_nq][i].item()
+                logits = logits_nqg[nonzero_mask_nq][i].cpu()
+                total_mrna_umis = total_mrna_umis_nq[nonzero_mask_nq][i].item()
+            else:
+                label = value_nq[zero_mask_nq][i].item()
+                logits = logits_nqg[zero_mask_nq][i].cpu()
+                total_mrna_umis = total_mrna_umis_nq[zero_mask_nq][i].item()
 
-            nb_dist = NegativeBinomial(mu=mu, theta=theta)
-            x = torch.arange(0, label * 3 + 5)
-            y = nb_dist.log_prob(x).exp()
+            x = torch.arange(0, min(label * 3 + 5, self.max_value + 1))
+            y = logits.softmax(dim=-1)[: len(x)]
             plt.plot(x, y, "o")
-            plt.vlines(label, 0, nb_dist.log_prob(torch.tensor(label)).exp(), color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
+            assert isinstance(label, int)
+            plt.vlines(label, 0, y[label], color="r")
+            plt.title(f"total UMIs={total_mrna_umis}, x={label}")
 
         plt.tight_layout()
 
         for logger in trainer.loggers:
             if isinstance(logger, pl.loggers.TensorBoardLogger):
                 logger.experiment.add_figure(
-                    "nonzero predictions",
+                    f"val_pred_prefix_{prefix_len + 1}",
                     fig,
-                    global_step=trainer.global_step,
-                )
-
-        zero_fig = plt.figure(figsize=(12, 15))
-        zero_indices = random.sample(range(int(zero_mask.sum().item())), 24)
-
-        for idx, i in enumerate(zero_indices):
-            plt.subplot(8, 4, idx + 1)
-            prefix = prefix_len_nc[zero_mask][i].item()
-            label = values_nc[zero_mask][i].item()
-            mu = mu_nc[zero_mask][i].cpu()
-            theta = theta_nc[zero_mask][i].cpu()
-            n_umis = total_mrna_umis_nc[zero_mask][i].item()
-
-            nb_dist = NegativeBinomial(mu=mu, theta=theta)
-            x = torch.arange(0, label * 3 + 5)
-            y = nb_dist.log_prob(x).exp()
-            plt.plot(x, y, "o")
-            plt.vlines(label, 0, nb_dist.log_prob(torch.tensor(label)).exp(), color="r")
-            plt.title(f"umis={n_umis}, prfx={prefix}, lbl={label}")
-
-        plt.tight_layout()
-
-        for logger in trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                logger.experiment.add_figure(
-                    "zero predictions",
-                    zero_fig,
                     global_step=trainer.global_step,
                 )

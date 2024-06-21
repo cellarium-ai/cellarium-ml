@@ -4,7 +4,8 @@
 import numpy as np
 import torch
 
-from cellarium.ml.models import CellariumModel, GatherLayer
+from cellarium.ml.distributed import GatherLayer
+from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.data import get_rank_and_num_replicas
 
 
@@ -41,7 +42,11 @@ class BoringModel(CellariumModel):
     def __init__(self) -> None:
         super().__init__()
         self.iter_data: list = []
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+        self._dummy_param = torch.nn.Parameter(torch.empty(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self._dummy_param.data.zero_()
 
     def forward(self, **kwargs: torch.Tensor) -> dict:
         _, num_replicas = get_rank_and_num_replicas()

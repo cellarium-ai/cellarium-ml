@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -33,13 +32,17 @@ class TDigest(CellariumModel):
         var_names_g: The variable names schema for the input data validation.
     """
 
-    def __init__(self, var_names_g: Sequence[str]) -> None:
+    def __init__(self, var_names_g: np.ndarray) -> None:
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.tdigests = [crick.tdigest.TDigest() for _ in range(self.n_vars)]
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+        self._dummy_param = torch.nn.Parameter(torch.empty(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """

@@ -1,30 +1,27 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import warnings
 from collections.abc import Iterable
 from typing import Any
-from unittest.mock import patch
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from jsonargparse import Namespace
-from lightning.fabric.utilities.types import _MAP_LOCATION_TYPE, _PATH
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
 
 from cellarium.ml.core.pipeline import CellariumPipeline
-from cellarium.ml.core.saving import _load_state
 from cellarium.ml.models import CellariumModel
+from cellarium.ml.utilities.core import copy_module
 
 
 class CellariumModule(pl.LightningModule):
     """
     ``CellariumModule`` organizes code into following sections:
 
+        * :attr:`transforms`: A list of transforms to apply to the input data before passing it to the model.
         * :attr:`model`: A :class:`cellarium.ml.models.CellariumModel` to train with
           :meth:`training_step` method and epoch end hooks.
-        * :attr:`transforms`: A :class:`cellarium.ml.core.pipeline.CellariumPipeline` of transforms to apply to the
-          input data before passing it to the model.
         * :attr:`optim_fn` and :attr:`optim_kwargs`: A Pytorch optimizer class and its keyword arguments.
         * :attr:`scheduler_fn` and :attr:`scheduler_kwargs`: A Pytorch lr scheduler class and its
           keyword arguments.
@@ -37,18 +34,17 @@ class CellariumModule(pl.LightningModule):
             A :class:`cellarium.ml.models.CellariumModel` to train.
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
-            defaults to :class:`torch.optim.Adam`.
+            no optimizer is used.
         optim_kwargs:
-            Keyword arguments for optimiser. If ``None``, defaults to ``default_lr``.
+            Keyword arguments for optimiser.
         scheduler_fn:
             A Pytorch lr scheduler class, e.g., :class:`~torch.optim.lr_scheduler.CosineAnnealingLR`.
         scheduler_kwargs:
             Keyword arguments for lr scheduler.
-        default_lr:
-            Default learning rate to use if ``optim_kwargs`` does not contain ``lr``.
-        config:
-            A dictionary or :class:`jsonargparse.Namespace` containing the initialization hyperparameters.
-            If not ``None``, the configuration will be saved as ``"hyper_parameters"`` in the checkpoint.
+        is_initialized:
+            Whether the model has been initialized. This is set to ``False`` by default under the assumption that
+            ``torch.device("meta")`` context was used and is set to ``True`` after
+            the first call to :meth:`configure_model`.
     """
 
     def __init__(
@@ -59,136 +55,87 @@ class CellariumModule(pl.LightningModule):
         optim_kwargs: dict[str, Any] | None = None,
         scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | None = None,
         scheduler_kwargs: dict[str, Any] | None = None,
-        default_lr: float = 1e-3,
-        config: dict[str, Any] | Namespace | None = None,
+        is_initialized: bool = False,
     ) -> None:
         super().__init__()
+        self.save_hyperparameters(logger=False)
+        self.pipeline: CellariumPipeline | None = None
+
+    def configure_model(self) -> None:
+        """
+        .. note::
+
+            This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
+            implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
+            calls to it should be a no-op.
+
+        Steps involved in configuring the model:
+
+        1. Freeze the transforms if they are instances of :class:`~cellarium.ml.core.CellariumModule`.
+        2. Make a copy of modules on the meta device and assign to hparams.
+        3. Send the original modules to the host device and add to self.pipeline.
+        4. Reset the model parameters if it has not been initialized before.
+
+        For more context, see discussions in
+        https://dev-discuss.pytorch.org/t/state-of-model-creation-initialization-seralization-in-pytorch-core/1240
+
+        Benefits of this approach:
+
+        1. The checkpoint stores modules on the meta device.
+        2. Loading from a checkpoint skips a wasteful step of initializing module parameters
+           before loading the ``state_dict``.
+        3. The module parameters are directly initialized on the host gpu device instead of being initialized
+           on the cpu and then moved to the gpu device (given that modules were instantiated under
+           the ``torch.device("meta")`` context).
+        """
+        if self.pipeline is not None:
+            return
+
+        model, self.hparams["model"] = copy_module(
+            self.hparams["model"], self_device=self.device, copy_device=torch.device("meta")
+        )
+        if self.hparams["transforms"]:
+            for transform in self.hparams["transforms"]:
+                if isinstance(transform, CellariumModule):
+                    transform.freeze()
+
+            transforms, self.hparams["transforms"] = zip(
+                *(
+                    copy_module(transform, self_device=self.device, copy_device=torch.device("meta"))
+                    for transform in self.hparams["transforms"]
+                )
+            )
+        else:
+            transforms = None
+
         self.pipeline = CellariumPipeline(transforms)
         if model is None:
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
         self.pipeline.append(model)
 
-        # set up optimizer and scheduler
-        self.optim_fn: type[torch.optim.Optimizer]
-        if optim_fn is None:
-            self.optim_fn = torch.optim.Adam
-        else:
-            self.optim_fn = optim_fn
-
-        self.scheduler_fn = scheduler_fn
-
-        optim_kwargs = {} if optim_kwargs is None else optim_kwargs
-        if "lr" not in optim_kwargs:
-            optim_kwargs["lr"] = default_lr
-        self.optim_kwargs = optim_kwargs
-        self.scheduler_fn = scheduler_fn
-        self.scheduler_kwargs = scheduler_kwargs
-
-        if config is not None:
-            self._set_hparams(config)
+        if not self.hparams["is_initialized"]:
+            model.reset_parameters()
+            self.hparams["is_initialized"] = True
 
     @property
     def model(self) -> CellariumModel:
         """The model"""
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
         return self.pipeline[-1]
 
     @property
     def transforms(self) -> CellariumPipeline:
         """The transforms pipeline"""
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
         return self.pipeline[:-1]
 
-    @classmethod
-    @patch("lightning.pytorch.core.saving._load_state", new=_load_state)
-    def load_from_checkpoint(
-        cls,
-        checkpoint_path: _PATH,
-        map_location: _MAP_LOCATION_TYPE = None,
-        hparams_file: _PATH | None = None,
-        strict: bool = True,
-        **kwargs: Any,
-    ) -> "CellariumModule":
-        r"""
-        Primary way of loading a model from a checkpoint. When Cellarium ML saves a checkpoint it stores the config
-        argument passed to ``__init__``  in the checkpoint under ``"hyper_parameters"``.
-
-        Any arguments specified through ``**kwargs`` will override args stored in ``"hyper_parameters"``.
-
-        Args:
-            checkpoint_path:
-                Path to checkpoint. This can also be a URL, or file-like object
-            map_location:
-                If your checkpoint saved a GPU model and you now load on CPUs
-                or a different number of GPUs, use this to map to the new setup.
-                The behaviour is the same as in :func:`torch.load`.
-            hparams_file:
-                Optional path to a ``.yaml`` or ``.csv`` file with hierarchical structure as in this example:
-
-                .. code-block:: yaml
-
-                    model:
-                      model:
-                        class_path: cellarium.ml.models.OnePassMeanVarStd
-                        init_args:
-                          n_vars: 36350
-                          target_count: 10000
-                      optim_fn: null
-                      optim_kwargs: null
-                      scheduler_fn: null
-                      scheduler_kwargs: null
-                      default_lr: 0.001
-
-                If you train a model using :mod:`cellarium.ml.cli` module you most likely won't need this
-                since Cellarium ML CLI will always save the hyperparameters to the checkpoint.
-
-                However, if your checkpoint weights don't have the hyperparameters saved,
-                use this method to pass in a ``.yaml`` file with the hparams you'd like to use.
-                These will be converted into a :class:`dict` and passed into your
-                :class:`CellariumModule` for use.
-            strict:
-                Whether to strictly enforce that the keys in :attr:`checkpoint_path` match the keys
-                returned by this module's state dict.
-            \**kwargs: Any extra keyword args needed to init the model. Can also be used to override saved
-                hyperparameter values.
-
-        Return:
-            :class:`CellariumModule` instance with loaded weights and hyperparameters.
-
-        Example::
-
-            # load weights without mapping ...
-            module = CellariumModule.load_from_checkpoint("path/to/checkpoint.ckpt")
-
-            # or load weights mapping all weights from GPU 1 to GPU 0 ...
-            map_location = {"cuda:1": "cuda:0"}
-            module = CellariumModule.load_from_checkpoint(
-                "path/to/checkpoint.ckpt",
-                map_location=map_location
-            )
-
-            # or load weights and hyperparameters from separate files.
-            module = CellariumModule.load_from_checkpoint(
-                "path/to/checkpoint.ckpt",
-                hparams_file="/path/to/config.yaml"
-            )
-
-            # override some of the params with new values
-            module = CellariumModule.load_from_checkpoint(
-                "path/to/checkpoint.ckpt",
-                optim_fn=torch.optim.AdamW,
-                default_lr=0.0001,
-            )
-        """
-        return super().load_from_checkpoint(
-            checkpoint_path=checkpoint_path,
-            map_location=map_location,
-            hparams_file=hparams_file,
-            strict=strict,
-            **kwargs,
-        )
-
     def training_step(  # type: ignore[override]
-        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
-    ) -> dict[str, np.ndarray | torch.Tensor] | None:
+        self, batch: dict[str, np.ndarray | torch.Tensor | int], batch_idx: int
+    ) -> torch.Tensor | None:
         """
         Forward pass for training step.
 
@@ -199,15 +146,17 @@ class CellariumModule(pl.LightningModule):
                 The index of the batch.
 
         Returns:
-            Output dictionary containing the loss value or ``None`` if no loss is returned.
+            Loss tensor or ``None`` if no loss.
         """
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
         output = self.pipeline(batch)
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
             self.log("train_loss", loss, sync_dist=True)
-            return output
-        return None
+        return loss
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         """
@@ -219,16 +168,49 @@ class CellariumModule(pl.LightningModule):
         Returns:
             A dictionary containing the batch data and inference outputs.
         """
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
         return self.pipeline.predict(batch)
 
-    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
+        """
+        Forward pass for validation step.
+
+        Args:
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
+
+        Returns:
+            None
+        """
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        batch["pl_module"] = self
+        batch["trainer"] = self.trainer
+        batch["batch_idx"] = batch_idx
+        self.pipeline.validate(batch)
+
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
         """Configure optimizers for the model."""
-        optim_config: OptimizerLRSchedulerConfig = {
-            "optimizer": self.optim_fn(self.model.parameters(), **self.optim_kwargs)
-        }
-        if self.scheduler_fn is not None:
-            assert self.scheduler_kwargs is not None
-            scheduler = self.scheduler_fn(optim_config["optimizer"], **self.scheduler_kwargs)
+        optim_fn = self.hparams["optim_fn"]
+        optim_kwargs = self.hparams["optim_kwargs"] or {}
+        scheduler_fn = self.hparams["scheduler_fn"]
+        scheduler_kwargs = self.hparams["scheduler_kwargs"] or {}
+
+        if optim_fn is None:
+            if optim_kwargs:
+                warnings.warn("Optimizer kwargs are provided but no optimizer is defined.", UserWarning)
+            if scheduler_fn is not None:
+                warnings.warn("Scheduler is defined but no optimizer is defined.", UserWarning)
+            return None
+
+        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
+        if scheduler_fn is not None:
+            scheduler = scheduler_fn(optim_config["optimizer"], **scheduler_kwargs)
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
         return optim_config
 
@@ -278,4 +260,4 @@ class CellariumModule(pl.LightningModule):
         """
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
-            on_batch_end(self.trainer, self, outputs, batch, batch_idx)
+            on_batch_end(self.trainer)

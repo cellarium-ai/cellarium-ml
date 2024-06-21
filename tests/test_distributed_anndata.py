@@ -146,7 +146,7 @@ def test_indexing(
     oidx, n_adatas = row_select
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
+        with pytest.raises(ValueError, match="Expected the number of anndata files"):
             dat_view = dat[oidx, vidx]
     else:
         adt_view = adt[oidx, vidx]
@@ -164,7 +164,7 @@ def test_indexing(
 def test_pickle(dat: DistributedAnnDataCollection):
     new_dat: DistributedAnnDataCollection = pickle.loads(pickle.dumps(dat))
 
-    assert len(new_dat.cache) == 0
+    assert len(new_dat.cache) == 1
 
     new_dat_view, dat_view = new_dat[:2], dat[:2]
 
@@ -201,7 +201,7 @@ def test_indexing_dataset(
     )
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
+        with pytest.raises(ValueError, match="Expected the number of anndata files"):
             dataset_X = dataset[oidx]["x_ng"]
     else:
         adt_X = adt[oidx].X
@@ -223,7 +223,7 @@ def test_pickle_dataset(dat: DistributedAnnDataCollection):
     )
     new_dataset = pickle.loads(pickle.dumps(dataset))
 
-    assert len(new_dataset.dadc.cache) == 0
+    assert len(new_dataset.dadc.cache) == 1
 
     np.testing.assert_array_equal(new_dataset[:2]["x_ng"], dataset[:2]["x_ng"])
     np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])
@@ -268,6 +268,6 @@ def test_anndata_field(
         expected = convert_fn(expected)
 
     field = AnnDataField(attr, key, convert_fn)
-    actual = field(dadc)[idx]
+    actual = field(dadc, idx)
 
     np.testing.assert_array_equal(expected, actual)

@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
 
 import numpy as np
 import torch
@@ -35,17 +34,17 @@ class ZScore(nn.Module):
 
     def __init__(
         self,
-        mean_g: torch.Tensor | float,
-        std_g: torch.Tensor | float,
-        var_names_g: Sequence[str],
+        mean_g: torch.Tensor,
+        std_g: torch.Tensor,
+        var_names_g: np.ndarray,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.mean_g: torch.Tensor
         self.std_g: torch.Tensor
-        self.register_buffer("mean_g", torch.as_tensor(mean_g))
-        self.register_buffer("std_g", torch.as_tensor(std_g))
-        self.var_names_g = np.array(var_names_g)
+        self.register_buffer("mean_g", mean_g)
+        self.register_buffer("std_g", std_g)
+        self.var_names_g = var_names_g
         assert_nonnegative("eps", eps)
         self.eps = eps
 

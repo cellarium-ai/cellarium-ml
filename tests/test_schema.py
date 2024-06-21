@@ -158,7 +158,7 @@ def test_validate_obs_columns(
         )
 
     if subset_obs_columns:
-        schema = AnnDataSchema(ref_adata, obs_columns=["A", "B"])
+        schema = AnnDataSchema(ref_adata, obs_columns_to_validate=["A", "B"])
     else:
         schema = AnnDataSchema(ref_adata)
 

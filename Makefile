@@ -8,7 +8,7 @@ uninstall: FORCE
 
 lint: FORCE
 	ruff check .
-	black --check .
+	ruff format --check .
 
 docs: FORCE
 	cd docs && make html
@@ -18,7 +18,7 @@ license: FORCE
 
 format: license FORCE
 	ruff check --fix .
-	black .
+	ruff format .
 
 typecheck: FORCE
 	mypy cellarium tests
@@ -30,5 +30,10 @@ else
 	# default
 	pytest -v
 endif
+
+test-examples: FORCE
+	cellarium-ml onepass_mean_var_std fit --config examples/cli_workflow/onepass_train_config.yaml
+	cellarium-ml incremental_pca fit --config examples/cli_workflow/ipca_train_config.yaml
+	cellarium-ml logistic_regression fit --config examples/cli_workflow/lr_train_config.yaml
 
 FORCE:
