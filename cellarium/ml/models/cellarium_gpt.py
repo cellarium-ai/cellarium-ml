@@ -440,7 +440,9 @@ class Transformer(nn.Module):
         Returns:
             The output hidden state tensor of shape ``(n, c, d)``.
         """
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
+            if i == self.n_blocks - 1:
+                self.hidden_state_ncd = hidden_state_ncd
             hidden_state_ncd = block(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
 
         return hidden_state_ncd
@@ -764,33 +766,60 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         prompt_name_ns: np.ndarray | None,
         prompt_value_ns: torch.Tensor | None,
         prompt_total_mrna_umis_n: torch.Tensor | None,
-        query_name_nq: np.ndarray,
-        query_total_mrna_umis_n: torch.Tensor,
+        prompt_measured_genes_mask_ns: torch.Tensor | None,
+        query_name_nq: np.ndarray | None,
+        query_total_mrna_umis_n: torch.Tensor | None,
     ) -> dict[str, np.ndarray | torch.Tensor]:
-        device = query_total_mrna_umis_n.device
+        if prompt_name_ns is not None and query_name_nq is not None:
+            n, q = query_name_nq.shape
+            device = query_total_mrna_umis_n.device
+            gene_name_nc = np.concatenate([prompt_name_ns, query_name_nq], axis=1)
+            gene_value_nc = torch.cat([prompt_value_ns, -torch.ones((n, q), device=device)], dim=1)
+            total_mrna_umis_nc = torch.cat(
+                [
+                    prompt_total_mrna_umis_n[:, None].expand(prompt_name_ns.shape),
+                    query_total_mrna_umis_n[:, None].expand(query_name_nq.shape),
+                ],
+                dim=-1,
+            )
+            measured_genes_mask_nc = torch.cat(
+                [
+                    prompt_measured_genes_mask_ns,
+                    torch.ones((n, q), dtype=torch.bool, device=device),
+                ],
+                dim=1,
+            )
+        elif prompt_name_ns is not None:
+            gene_name_nc = prompt_name_ns
+            gene_value_nc = prompt_value_ns
+            total_mrna_umis_nc = prompt_total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
+            measured_genes_mask_nc = prompt_measured_genes_mask_ns
+        else:
+            n, q = query_name_nq.shape
+            device = query_total_mrna_umis_n.device
+            gene_name_nc = query_name_nq
+            gene_value_nc = -torch.ones((n, q), device=device)
+            total_mrna_umis_nc = query_total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
+            measured_genes_mask_nc = torch.ones((n, q), dtype=torch.bool, device=device)
 
-        gene_id_nc = torch.tensor(self.vectorized_token_to_id(query_name_nq), dtype=torch.long, device=device)
-        gene_value_nc = -torch.ones_like(gene_id_nc)
-        total_mrna_umis_nc = query_total_mrna_umis_n[:, None].expand(gene_id_nc.shape)
+        device = gene_value_nc.device
+        gene_id_nc = torch.tensor(self.vectorized_token_to_id(gene_name_nc), dtype=torch.long, device=device)
 
         if prompt_name_ns is not None and prompt_value_ns is not None:
-            prompt_id_ns = torch.tensor(self.vectorized_token_to_id(prompt_name_ns), dtype=torch.long, device=device)
-            gene_id_nc = torch.cat([prompt_id_ns, gene_id_nc], dim=1)
-            gene_value_nc = torch.cat([prompt_value_ns, gene_value_nc], dim=1)
-            prompt_total_mrna_umis_ns = prompt_total_mrna_umis_n[:, None].expand(prompt_id_ns.shape)
-            total_mrna_umis_nc = torch.cat([prompt_total_mrna_umis_ns, total_mrna_umis_nc], dim=1)
-            prefix_len = prompt_id_ns.shape[1]
+            prefix_len = prompt_value_ns.shape[1]
         else:
             prefix_len = 0
 
+        attn_mask_cc = prefix_diagonal_mask(gene_id_nc.shape[1], prefix_len, device)
         gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
         hidden_state_ncd = gene_embedding_ncd * self.input_mult
-        hidden_state_ncd = self.transformer(hidden_state_ncd, prefix_len)
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
         logits_nqm = self.head(hidden_state_ncd[:, prefix_len:]) * self.output_mult
 
         return {
             "logits_nqm": logits_nqm,
             "query_name_nq": query_name_nq,
+            "hidden_state_ncd": self.transformer.hidden_state_ncd,
         }
 
     # def log_prob(self, var_names_ng: np.ndarray, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:

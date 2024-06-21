@@ -18,13 +18,13 @@ from tests.common import BoringDataset
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 4, 3
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.arange(n * g).reshape(n, g),
-            var_names=np.array(var_names_g),
+            var_names=var_names_g,
         ),
         collate_fn=collate_fn,
     )
@@ -63,7 +63,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
 
 @pytest.mark.parametrize("perturb", ["activation", "deletion", "map", "none"])
 def test_tokenize_with_perturbations(perturb: str):
-    var_names_g = ["a", "b", "c", "d"]
+    var_names_g = np.array(["a", "b", "c", "d"])
     geneformer = Geneformer(var_names_g=var_names_g)
     x_ng = torch.tensor([[4, 3, 2, 1]])  # sort order will be [a,b,c,d] and tokens will be [2,3,4,5]
 

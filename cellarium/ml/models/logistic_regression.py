@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from collections.abc import Sequence
-
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -41,7 +39,7 @@ class LogisticRegression(CellariumModel):
     def __init__(
         self,
         n_obs: int,
-        var_names_g: Sequence[str],
+        var_names_g: np.ndarray,
         n_categories: int,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
@@ -52,7 +50,7 @@ class LogisticRegression(CellariumModel):
 
         # data
         self.n_obs = n_obs
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
         self.n_categories = n_categories
 
@@ -100,11 +98,11 @@ class LogisticRegression(CellariumModel):
     def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
-            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),  # type: ignore[attr-defined]
+            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)  # type: ignore[attr-defined]
+            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
