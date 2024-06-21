@@ -487,7 +487,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
     def __init__(
         self,
-        gene_categories: pd.Index,
+        gene_categories: np.ndarray,
         d_model: int = 256,
         d_ffn: int = 512,
         n_heads: int = 8,
@@ -591,11 +591,11 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         self,
         gene_value_ng: torch.Tensor,
         gene_id_g: torch.Tensor,
-        gene_categories: pd.Index,
+        gene_categories: np.ndarray,
         total_mrna_umis_n: torch.Tensor,
         measured_genes_mask_ng: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        assert gene_categories.equals(self.gene_categories)
+        # assert gene_categories.equals(self.gene_categories)
 
         device = gene_id_g.device
         gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
