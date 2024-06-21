@@ -621,9 +621,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
 
         # downsample
-        downsample_weights = torch.tensor([0.2, 0.4, 0.6, 0.8, 1.0], device=device)
-        idx = torch.randint(0, len(downsample_weights), (), device=device)
-        downsample_p = downsample_weights[idx]
+        downsample_p = torch.rand((), device=device)
 
         downsampled_gene_value_nc = torch.binomial(gene_value_nc, downsample_p)
         downsampled_total_mrna_umis_n = torch.round(total_mrna_umis_n * downsample_p)
