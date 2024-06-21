@@ -12,12 +12,12 @@ trainer:
     init_args:
       logging_interval: step
       log_momentum: false
-  # - class_path: lightning.pytorch.callbacks.EarlyStopping
-  #   init_args:
-  #     monitor: train_loss
-  #     min_delta: 0.0
-  #     patience: 45
-  #     mode: min
+  - class_path: lightning.pytorch.callbacks.EarlyStopping
+    init_args:
+      monitor: train_loss
+      min_delta: 0.1
+      patience: 50
+      mode: min
   fast_dev_run: false
   max_epochs: 50
   min_epochs: null
@@ -44,7 +44,7 @@ trainer:
   inference_mode: false
   use_distributed_sampler: true
   profiler: null
-  detect_anomaly: true
+  detect_anomaly: false
   barebones: false
   plugins: null
   sync_batchnorm: false
@@ -121,6 +121,7 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
+      # filenames: /home/sfleming/cellarium-ml/data/gutcellatlas.h5ad
       filenames: gs://dsp-cellarium-cas-public/data/gutcellatlas.h5ad
       limits: [428469]
       shard_size: 428469
@@ -148,5 +149,5 @@ data:
   seed: 0
   drop_last: false
   test_mode: false
-  num_workers: 4
+  num_workers: 8
 ckpt_path: null
