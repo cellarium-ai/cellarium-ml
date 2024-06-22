@@ -61,6 +61,12 @@ class CellariumModule(pl.LightningModule):
         self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
 
+        if optim_fn is None:
+            # Starting from PyTorch Lightning 2.3, automatic optimization doesn't allow to return None
+            # from the training_step during distributed training. https://github.com/Lightning-AI/pytorch-lightning/pull/19918
+            # Thus, we need to use manual optimization for the No Optimizer case.
+            self.automatic_optimization = False
+
     def configure_model(self) -> None:
         """
         .. note::
@@ -156,6 +162,14 @@ class CellariumModule(pl.LightningModule):
         if loss is not None:
             # Logging to TensorBoard by default
             self.log("train_loss", loss)
+
+        if not self.automatic_optimization:
+            # Note, that running .step() is necessary for incrementing the global step even though no backpropagation
+            # is performed.
+            no_optimizer = self.optimizers()
+            assert isinstance(no_optimizer, pl.core.optimizer.LightningOptimizer)
+            no_optimizer.step()
+
         return loss
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
