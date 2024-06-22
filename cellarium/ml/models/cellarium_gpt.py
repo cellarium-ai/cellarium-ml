@@ -675,6 +675,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
         return {"loss": loss}
 
+    @torch.inference_mode()
     def validate(
         self,
         trainer: pl.Trainer,
