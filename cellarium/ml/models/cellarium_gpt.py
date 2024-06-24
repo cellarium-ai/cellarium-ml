@@ -731,6 +731,39 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
             loss_dict[f"val_loss_prefix_{prefix_len + 1}"] = loss
         pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
 
+    # @torch.inference_mode()
+    # def predict(
+    #     self,
+    #     gene_name_nc: np.ndarray,
+    #     gene_value_nc: torch.Tensor,
+    #     total_mrna_umis_n: torch.Tensor,
+    #     summarize: dict[str, callable] = {'mode': torch.argmax},
+    # ) -> dict[str, np.ndarray | torch.Tensor]:
+    #     """
+    #     Snap a prompt to the data manifold.
+    #     """
+    #     total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
+    #     measured_genes_mask_nc = torch.ones_like(gene_name_nc, dtype=torch.bool)
+    #     device = gene_value_nc.device
+    #     gene_id_nc = torch.tensor(self.vectorized_token_to_id(gene_name_nc), dtype=torch.long, device=device)
+    #     prefix_len = gene_name_nc.shape[1]
+    #     attn_mask_cc = prefix_diagonal_mask(gene_id_nc.shape[1], prefix_len, device)
+    #     gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
+    #     hidden_state_ncd = gene_embedding_ncd * self.input_mult
+    #     hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
+    #     logits_ncm = self.head(hidden_state_ncd) * self.output_mult
+
+    #     out = {
+    #         "logits_ncm": logits_ncm,
+    #         "gene_name_nc": gene_name_nc,
+    #         "hidden_state_ncd": self.transformer.hidden_state_ncd,
+    #     }
+
+    #     for key, fun in summarize.items():
+    #         out |= {f"{key}_nc": fun(logits_ncm)}
+
+    #     return out
+
     @torch.inference_mode()
     def predict(
         self,
@@ -741,6 +774,9 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         query_name_nq: np.ndarray | None,
         query_total_mrna_umis_n: torch.Tensor | None,
     ) -> dict[str, np.ndarray | torch.Tensor]:
+        """
+        Obtain the results of a prompted query.
+        """
         if prompt_name_ns is not None and query_name_nq is not None:
             n, q = query_name_nq.shape
             device = query_total_mrna_umis_n.device

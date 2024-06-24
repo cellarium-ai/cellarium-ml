@@ -14,8 +14,11 @@ import tempfile
 from google.cloud import storage
 
 
+default_model = "gs://cellarium-ml/curriculum/human_10x_gt_8000/models/cellarium_gpt/benchmark/measured_context/bs_200_context_4500_max_prefix_4000/lightning_logs/version_0/checkpoints/epoch=4-step=159600.ckpt"
+
+
 def get_pretrained_model_as_pipeline(
-    trained_model: str = "gs://dsp-cell-annotation-service/cellarium/trained_models/cerebras/lightning_logs/version_0/checkpoints/epoch=2-step=83250.ckpt", 
+    trained_model: str = default_model, 
     transforms: list[torch.nn.Module] = [],
     device: str = "cuda",
 ) -> CellariumPipeline:
@@ -59,24 +62,24 @@ def get_datamodule(
         CellariumAnnDataDataModule with methods train_dataloader() and predict_dataloader()
     """
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        anndata_filename = os.path.join(tmpdir, "tmp.h5ad")
-        adata.write(anndata_filename)
-        dm = CellariumAnnDataDataModule(
-            anndata_filename,
-            shard_size=len(adata),
-            max_cache_size=1,
-            batch_keys={
-                "x_ng": AnnDataField(attr="X", convert_fn=densify),
-                "var_names_g": AnnDataField(attr="var_names"),
-            },
-            batch_size=batch_size,
-            shuffle=shuffle,
-            seed=seed,
-            drop_last=drop_last,
-            num_workers=num_workers,
-        )
-    dm.setup()
+    # with tempfile.TemporaryDirectory() as tmpdir:
+    #     anndata_filename = os.path.join(tmpdir, "tmp.h5ad")
+    #     adata.write(anndata_filename)
+    dm = CellariumAnnDataDataModule(
+        adata,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=densify),
+            "var_names_g": AnnDataField(attr="var_names"),
+        },
+        batch_size=batch_size,
+        # train_size=None,
+        # val_size=0.99,
+        shuffle=shuffle,
+        seed=seed,
+        drop_last=drop_last,
+        num_workers=num_workers,
+    )
+    dm.setup(stage="predict")
     return dm
 
 
@@ -100,7 +103,7 @@ def harmonize_anndata_with_model(adata: anndata.AnnData, pipeline: CellariumPipe
     obs_names = adata.obs_names.copy()
     adata = sanitize(
         adata=adata,
-        cas_feature_schema_list=pipeline[-1].var_names_g,
+        cas_feature_schema_list=pipeline[-1].gene_categories,
         count_matrix_input="X",
         feature_ids_column_name="ensembl_id",
     )

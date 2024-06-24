@@ -1,7 +1,7 @@
 """Noise prompting using the CellariumGPT model"""
 
 from cellarium.ml.core import CellariumPipeline
-from cellarium.ml.models.cellarium_gpt import NegativeBinomial
+# from cellarium.ml.models.cellarium_gpt import NegativeBinomial
 
 import torch
 import numpy as np
@@ -32,6 +32,7 @@ def gpt_predict(
     gene_inds: torch.LongTensor,
     layer: str,
     key_added: str,
+    summarize: str = 'mean',
 ) -> anndata.AnnData:
     """
     Use the pipeline to predict the expression of a subset of genes in a single cell.
@@ -42,25 +43,42 @@ def gpt_predict(
         gene_inds: indices of genes to predict
         layer: layer in adata.layers to use
         key_added: key to add to adata.layers
+        summarize: how to summarize the probability density predicted by CellariumGPT
 
     Returns:
         AnnData object with predicted expression in adata.layers[key_added]
     """
     adata.X = adata.layers[layer].copy()
-    dm = get_datamodule(adata)
-
-    device = pipeline[-1].gpt_model.parameters().__next__().device
+    device = pipeline[-1].transformer.parameters().__next__().device
     gene_inds = torch.unique(gene_inds).sort().values.long().to(device)
     adata_out = adata[:, gene_inds.cpu().numpy()].copy()
+    dm = get_datamodule(adata_out)
 
     # predict
     i = 0
     for batch in dm.predict_dataloader():
-        batch["x_ng"] = batch["x_ng"].to(device)
-        batch["total_mrna_umis_n"] = batch["x_ng"].sum(-1)
-        batch["context_inds_c"] = gene_inds
+        batch["prompt_name_ns"] = np.broadcast_to(batch["var_names_g"].values[None, :], batch["x_ng"].shape)
+        batch["prompt_value_ns"] = batch["x_ng"].to(device)
+        batch["prompt_total_mrna_umis_n"] = batch["x_ng"].sum(-1).to(device)
+        batch["prompt_measured_genes_mask_ns"] = torch.ones_like(batch["prompt_value_ns"], dtype=bool)
+        batch["query_name_nq"] = batch["prompt_name_ns"]
+        batch["query_total_mrna_umis_n"] = batch["prompt_total_mrna_umis_n"]
+
         out = pipeline.predict(batch)
-        adata_out.X[i:i + batch["x_ng"].shape[0]] = out["mu_nc"][:, 1:].cpu().numpy()
+        logits_ngm = out["logits_nqm"]
+
+        # case switch statement
+        match summarize:
+            case 'mean':
+                mat_ng = (logits_ngm.sigmoid() * torch.arange(start=0, end=logits_ngm.shape[-1], device=device, dtype=torch.float32)[None, None, :]).sum(dim=-1)
+            case 'median':
+                mat_ng = (logits_ngm.sigmoid().cumsum(dim=-1) <= 0.5).sum(dim=-1)
+            case 'mode':
+                mat_ng = logits_ngm.argmax(dim=-1)
+            case _:
+                raise ValueError(f"summarize must be 'mean', 'median', or 'mode'")
+
+        adata_out.X[i:(i + batch["x_ng"].shape[0]), :] = mat_ng.detach().cpu().numpy()
         i += batch["x_ng"].shape[0]
 
     adata_out.layers[key_added] = adata_out.X.copy()
@@ -473,7 +491,7 @@ def snap_noised_data_to_manifold_and_analyze(
         )"""
 
     # put the perturbed dataset through the pipeline
-    adata_perturbed_set_out = silent(gpt_predict)(
+    adata_perturbed_set_out = gpt_predict(
         adata_perturbed, 
         pipeline=pipeline, 
         gene_inds=highly_expressed_gene_inds,
@@ -512,7 +530,7 @@ def snap_measured_data_to_manifold(
     assert 'measured' in adata.layers.keys(), '"measured" must be in adata.layers'
 
     # put the measured dataset through the pipeline
-    adata_out = silent(gpt_predict)(
+    adata_out = gpt_predict(
         adata,
         pipeline=pipeline, 
         gene_inds=highly_expressed_gene_inds,
