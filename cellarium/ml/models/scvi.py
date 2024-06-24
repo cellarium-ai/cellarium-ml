@@ -226,6 +226,7 @@ class DecoderSCVI(torch.nn.Module):
         final_additive_bias: If True, the final layer will have a batch-specific bias added after the activation.
             If final_layer is a LinearWithBatch layer and final_additive_bias is True, the last layer of the decoder 
             will act as a batch-specific affine transformation.
+        eps: Numerical stability factor added to mean and inverse overdispersion of negative binomial
     """
 
     def __init__(
@@ -238,8 +239,10 @@ class DecoderSCVI(torch.nn.Module):
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
         scale_activation: Literal["softmax", "softplus"] = "softmax",
         final_additive_bias: bool = False,
+        eps: float = 1e-10,
     ):
         super().__init__()
+        self.eps = eps
         if gene_likelihood == "zinb":
             raise NotImplementedError("Zero-inflated negative binomial not yet implemented")
         self.gene_likelihood = gene_likelihood
@@ -305,9 +308,9 @@ class DecoderSCVI(torch.nn.Module):
         # construct the count distribution
         match self.gene_likelihood:
             case "nb":
-                dist = NegativeBinomial(count_mean_ng + 1e-10, inverse_overdispersion)
+                dist = NegativeBinomial(count_mean_ng + self.eps, inverse_overdispersion + self.eps)
             case "poisson":
-                dist = Poisson(count_mean_ng)
+                dist = Poisson(count_mean_ng + self.eps)
             case "zinb":
                 raise NotImplementedError("ZINB is not currently implemented")
                 # dist = ZeroInflatedNegativeBinomial(count_mean_ng, inverse_overdispersion, self.dropout_decoder(q_nh))
