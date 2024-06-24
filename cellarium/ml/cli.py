@@ -23,6 +23,7 @@ from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 
+import cellarium.ml.strategies  # noqa: F401
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.utilities.data import collate_fn
 
@@ -274,6 +275,9 @@ def lightning_cli_factory(
                 trainer_defaults=trainer_defaults,
                 args=args,
             )
+
+        def _add_instantiators(self):
+            pass
 
         def instantiate_classes(self) -> None:
             with torch.device("meta"):

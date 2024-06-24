@@ -2,23 +2,7 @@
 seed_everything: true
 trainer:
   accelerator: auto
-  strategy:
-    class_path: lightning.pytorch.strategies.DDPStrategy
-    init_args:
-      accelerator: null
-      parallel_devices: null
-      cluster_environment: null
-      checkpoint_io: null
-      precision_plugin: null
-      ddp_comm_state: null
-      ddp_comm_hook: null
-      ddp_comm_wrapper: null
-      model_averaging_period: null
-      process_group_backend: null
-      timeout: 0:30:00
-      start_method: popen
-    dict_kwargs:
-      broadcast_buffers: false
+  strategy: ddp_no_sync
   devices: 2
   num_nodes: 1
   precision: null
