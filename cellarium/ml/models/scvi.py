@@ -305,7 +305,7 @@ class DecoderSCVI(torch.nn.Module):
         # construct the count distribution
         match self.gene_likelihood:
             case "nb":
-                dist = NegativeBinomial(count_mean_ng, inverse_overdispersion)
+                dist = NegativeBinomial(count_mean_ng + 1e-10, inverse_overdispersion)
             case "poisson":
                 dist = Poisson(count_mean_ng)
             case "zinb":

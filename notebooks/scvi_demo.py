@@ -1,3 +1,4 @@
+import gc
 import matplotlib.pyplot as plt
 import torch
 import os
@@ -44,16 +45,16 @@ foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_36/checkpoints/ep
                     1:  ["cas_50m_homo_sapiens_no_cancer_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt',"../example_configs/scvi_config_cas_50m_homo_sapiens_no_cancer.yaml","../data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad",['final_annotation', 'batch'] ],
                     2 : ["tucker_human_heart_atlas","lightning_logs/version_44/checkpoints/epoch=29-step=16230.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad",["Cluster","batch"]],
                     3 : ["human_heart_atlas","lightning_logs/version_45/checkpoints/epoch=39-step=26640.ckpt","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad",[]], #10 GB
-                    4 : ["gut_cell_atlas_normed","","../example_configs/scvi_config_gut_cell_atlas_normed.yaml","../data/gut_cell_atlas_normed.h5ad",[]]
+                    4 : ["gut_cell_atlas_normed","","../example_configs/scvi_config_gut_cell_atlas_normed.yaml","../data/gut_cell_atlas_normed.h5ad",["category"]],
+                    5 : ["gut_cell_atlas_raw","lightning_logs/version_48/checkpoints/epoch=39-step=17160.ckpt","../example_configs/scvi_config_gut_cell_atlas_raw.yaml","../data/gut_cell_atlas_raw.h5ad",["category"]]
                     }
 
 
-foldername,checkpoint_file, config_file, adata_file, color_keys = foldername_dict[4]
+foldername,checkpoint_file, config_file, adata_file, color_keys = foldername_dict[5]
 
 #NF.scanpy_scvi(adata_file) #too slow to handle
-subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env)
+#subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env)
 
-exit()
 
 NF.folders(foldername,"figures",overwrite=False)
 NF.folders(foldername,"tmp_data",overwrite=False)
@@ -92,8 +93,9 @@ filepath = f"tmp_data/{foldername}/adata_embedded{filename_suffix}.h5ad"
 if not os.path.exists(filepath) or overwrite:
     adata = NF.embed(dataset, pipeline,device= device,filepath=filepath)
 else:
-    print("Reading file : {}".format(filepath))
-    adata = sc.read(filepath)
+    pass
+    # print("Reading file : {}".format(filepath))
+    # adata = sc.read(filepath)
 
 # Reconstruct de-noised/de-batched data
 filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed{filename_suffix}.h5ad"
@@ -111,26 +113,36 @@ if not os.path.exists(filepath) or overwrite:
         break
     adata.write(filepath)
 else:
-    print("Reading file : {}".format(filepath))
-    adata = sc.read(filepath)
+    pass
+    # del adata
+    # gc.collect()
+    # print("Reading file : {}".format(filepath))
+    # adata = sc.read(filepath)
 
 
 filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_raw_umap{filename_suffix}.h5ad"
 if not os.path.exists(filepath) or overwrite:
     adata = NF.plot_raw_data(adata,filepath,figpath,color_keys)
 else:
-    print("Reading file : {}".format(filepath))
-    adata = sc.read(filepath)
+    pass
+    # del adata
+    # gc.collect()
+    # print("Reading file : {}".format(filepath))
+    # adata = sc.read(filepath)
+
 
 
 filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_raw_scvi_umaps{filename_suffix}.h5ad"
 if not os.path.exists(filepath) or overwrite:
     NF.plot_latent_representation(adata,filepath, figpath,color_keys)
 else:
-    print("Reading file : {}".format(filepath))
-    adata = sc.read(filepath)
+    pass
+    # del adata
+    # gc.collect()
+    #print("Reading file : {}".format(filepath))
+    #adata = sc.read(filepath)
 
-adata.layers['raw'] = adata.X.copy()
+
 
 gene_set_dict = {
 'dpy19l':['DPY19L1', 'DPY19L2', 'DPY19L3', 'DPY19L4'],
@@ -165,47 +177,41 @@ gene_set_dict = {
 gene_set = []
 list(map(gene_set.extend, list(gene_set_dict.values())))
 
-print(adata)
+# if foldername in ["pmbc_results"]:
+#     adata.var['genes_of_interest'] = adata.var_names.isin(gene_set) #23 glycogenes found only adata[:,adata.var_names.isin(gene_set)]
+#     adata_tmp = adata[:, adata.var_names.isin(gene_set)] #only used for counting
+#     print(adata_tmp.var_names.tolist())
+# elif foldername in ["tucker_heart_atlas"]:
+#     adata.var["genes_of_interest"] = adata.var["gene_names"].isin(gene_set)
+#     adata_tmp = adata[:, adata.var["gene_names"].isin(gene_set)]
+#     print(adata_tmp.var["gene_names"].tolist())
+# elif foldername in ["gut_cell_atlas_normed","gut_cell_atlas_raw"]:
+#     adata.var["genes_of_interest"] = adata.var["gene_ids"].isin(gene_set)
+#     adata_tmp = adata[:, adata.var["gene_ids"].isin(gene_set)]
+#     print(adata_tmp.var["gene_ids"].tolist())
+#
+# else:
+#     adata.var["genes_of_interest"] = adata.var["gene_name-new"].isin(gene_set)
+#     adata_tmp = adata[:, adata.var["gene_name-new"].isin(gene_set)]
+#     print(adata_tmp.var["gene_name-new"].tolist())
+#
+# #aggregate umi-count expression values
+# adata.var['expr'] = np.array(adata.layers['raw'].sum(axis=0)).squeeze()
+# high_gene_set = adata.var.sort_values(by='expr').index[-50:]
+# low_gene_set = adata.var.sort_values(by='expr').index[:500]
+# adata.var['low_exp_genes_of_interest'] = adata.var_names.isin(low_gene_set)
+# adata.var['high_exp_genes_of_interest'] = adata.var_names.isin(high_gene_set)
+#
+# high_gene_set = adata.var.sort_values(by='expr').index[-50:]
+# low_gene_set = adata.var.sort_values(by='expr').index[:500]
 
-exit()
 
-if foldername in ["pmbc_results"]:
-    adata.var['genes_of_interest'] = adata.var_names.isin(gene_set) #23 glycogenes found only adata[:,adata.var_names.isin(gene_set)]
-    adata_tmp = adata[:, adata.var_names.isin(gene_set)] #only used for counting
-    print(adata_tmp.var_names.tolist())
-elif foldername in ["tucker_heart_atlas"]:
-    adata.var["genes_of_interest"] = adata.var["gene_names"].isin(gene_set)
-    adata_tmp = adata[:, adata.var["gene_names"].isin(gene_set)]
-    print(adata_tmp.var["gene_names"].tolist())
-elif foldername in ["gut_cell_atlas_normed"]:
-    adata.var["genes_of_interest"] = adata.var["gene_ids"].isin(gene_set)
-    adata_tmp = adata[:, adata.var["gene_ids"].isin(gene_set)]
-    print(adata_tmp.var["gene_ids"].tolist())
-
+filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_gene_expression_groups{filename_suffix}.h5ad"
+if not os.path.exists(filepath) or overwrite:
+    adata = NF.define_gene_expressions(adata,gene_set,foldername,filepath)
 else:
-    adata.var["genes_of_interest"] = adata.var["gene_name-new"].isin(gene_set)
-    adata_tmp = adata[:, adata.var["gene_name-new"].isin(gene_set)]
-    print(adata_tmp.var["gene_name-new"].tolist())
-
-
-exit()
-
-
-
-
-
-
-#aggregate umi-count expression values
-adata.var['expr'] = np.array(adata.layers['raw'].sum(axis=0)).squeeze()
-high_gene_set = adata.var.sort_values(by='expr').index[-50:]
-low_gene_set = adata.var.sort_values(by='expr').index[:500]
-adata.var['low_exp_genes_of_interest'] = adata.var_names.isin(low_gene_set)
-adata.var['high_exp_genes_of_interest'] = adata.var_names.isin(high_gene_set)
-
-high_gene_set = adata.var.sort_values(by='expr').index[-50:]
-low_gene_set = adata.var.sort_values(by='expr').index[:500]
-
-#adata = adata[:1000]
+    print("Reading file : {}".format(filepath))
+    adata = sc.read(filepath)
 
 filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_raw_scvi_umaps_layers{filename_suffix}.h5ad"
 if not os.path.exists(filepath) or overwrite:
@@ -213,15 +219,17 @@ if not os.path.exists(filepath) or overwrite:
 else:
     adata = sc.read(filepath)
 
-
 #adata_normalized= sc.pp.normalize_total(adata, target_sum=1, inplace=False, exclude_highly_expressed=False)
 
 #figname = "glyco_expression_umap.pdf"
 # NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,figpath,figname)
 #figname = "glyco_expression_reconstructed.pdf"
 # NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,figpath,figname)
+adata = adata[:1000]
+print(adata)
+print("The current shape is : {}".format(adata.shape))
 
-NF.plot_neighbour_clusters(adata,gene_set,figpath)
+NF.plot_neighbour_clusters(adata,gene_set,figpath,color_keys)
 
 exit()
 

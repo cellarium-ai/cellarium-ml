@@ -226,7 +226,7 @@ def reconstruct_debatched(
     return adata
 
 def plot_raw_data(adata: anndata.AnnData,filepath: str,figpath: str,color_keys = ['final_annotation', 'batch'] ):
-
+    print("UMAp of raw data ...")
     #sc.set_figure_params(fontsize=14, vector_friendly=True)
     sc.set_figure_params(fontsize=14, vector_friendly=True)
     sc.pp.normalize_total(adata)
@@ -253,6 +253,7 @@ def plot_raw_data(adata: anndata.AnnData,filepath: str,figpath: str,color_keys =
     return adata
 
 def plot_latent_representation(adata: anndata.AnnData,filepath: str,figpath:str,color_keys = ['final_annotation', 'batch']):
+    print("UMAp of latent representation ...")
     sc.set_figure_params(fontsize=14, vector_friendly=True)
     sc.pp.neighbors(adata, use_rep='X_scvi', n_neighbors=15, metric='euclidean', method='umap')
     sc.tl.umap(adata)
@@ -264,6 +265,7 @@ def plot_latent_representation(adata: anndata.AnnData,filepath: str,figpath:str,
         plt.close()
     except:
         pass
+    adata.layers['raw'] = adata.X.copy()
     adata.write(filepath)
     return adata
 
@@ -320,7 +322,41 @@ def reconstruct_debatched(
     return adata
 
 
+def define_gene_expressions(adata,gene_set,foldername,filepath):
+    if foldername in ["pmbc_results"]:
+        adata.var['genes_of_interest'] = adata.var_names.isin(
+            gene_set)  # 23 glycogenes found only adata[:,adata.var_names.isin(gene_set)]
+        adata_tmp = adata[:, adata.var_names.isin(gene_set)]  # only used for counting
+        print(adata_tmp.var_names.tolist())
+    elif foldername in ["tucker_heart_atlas"]:
+        adata.var["genes_of_interest"] = adata.var["gene_names"].isin(gene_set)
+        adata_tmp = adata[:, adata.var["gene_names"].isin(gene_set)]
+        print(adata_tmp.var["gene_names"].tolist())
+    elif foldername in ["gut_cell_atlas_normed", "gut_cell_atlas_raw"]:
+        adata.var["genes_of_interest"] = adata.var["gene_ids"].isin(gene_set)
+        adata_tmp = adata[:, adata.var["gene_ids"].isin(gene_set)]
+        print(adata_tmp.var["gene_ids"].tolist())
+
+    else:
+        adata.var["genes_of_interest"] = adata.var["gene_name-new"].isin(gene_set)
+        adata_tmp = adata[:, adata.var["gene_name-new"].isin(gene_set)]
+        print(adata_tmp.var["gene_name-new"].tolist())
+
+    # aggregate umi-count expression values
+    adata.var['expr'] = np.array(adata.layers['raw'].sum(axis=0)).squeeze()
+    high_gene_set = adata.var.sort_values(by='expr').index[-50:]
+    low_gene_set = adata.var.sort_values(by='expr').index[:500]
+    adata.var['low_exp_genes_of_interest'] = adata.var_names.isin(low_gene_set)
+    adata.var['high_exp_genes_of_interest'] = adata.var_names.isin(high_gene_set)
+
+    high_gene_set = adata.var.sort_values(by='expr').index[-50:]
+    low_gene_set = adata.var.sort_values(by='expr').index[:500]
+
+    adata.write(filepath)
+    return adata
+
 def umap_group_genes(adata: anndata.AnnData,filepath: str):
+    print("UMAP per reconstructed layer")
     # Before SCVI
     for layer in adata.layers.keys():
         if not layer.startswith('scvi_reconstructed'):
@@ -601,7 +637,7 @@ def plot_avg_expression(adata,basis,gene_set_dict,figpath,figkey,figname):
                     #save=".pdf")
     plt.savefig(f"{figpath}/{figname}", bbox_inches="tight")
 
-def plot_neighbour_clusters(adata,gene_set,figpath):
+def plot_neighbour_clusters(adata,gene_set,figpath,color_keys):
     """
 
     NOTES:
@@ -609,6 +645,8 @@ def plot_neighbour_clusters(adata,gene_set,figpath):
         https://chethanpatel.medium.com/community-detection-with-the-louvain-algorithm-a-beginners-guide-02df85f8da65
         https://i11www.iti.kit.edu/_media/teaching/theses/ba-nguyen-21.pdf
         https://www.ultipa.com/document/ultipa-graph-analytics-algorithms/leiden/v4.3
+        Resolution profile: https://leidenalg.readthedocs.io/en/stable/advanced.html
+        Benchmarking atlas-level integration single cell data: https://github.com/theislab/scib
 
     """
     print("Computing neighbour clusters using Lediden hierarchical clustering")
@@ -616,7 +654,7 @@ def plot_neighbour_clusters(adata,gene_set,figpath):
     sc.tl.leiden(
         adata,
         key_added="clusters",
-        resolution=2, #higher values more clusters, control the coarseness of the clustering.
+        resolution=0.5, #higher values more clusters, control the coarseness of the clustering.
         n_iterations=20,
         flavor="igraph",
         directed=False,
@@ -627,7 +665,7 @@ def plot_neighbour_clusters(adata,gene_set,figpath):
     with rc_context({"figure.figsize": (15, 15)}):
         sc.pl.umap(
             adata,
-            color=['final_annotation',"clusters"],
+            color=[color_keys[0],"clusters"],
             add_outline=True,
             legend_loc="on data",
             legend_fontsize=12,
