@@ -70,6 +70,11 @@ def get_datamodule(
         batch_keys={
             "x_ng": AnnDataField(attr="X", convert_fn=densify),
             "var_names_g": AnnDataField(attr="var_names"),
+            "total_mrna_umis_n": AnnDataField(
+                attr="obs", 
+                key="total_mrna_umis",
+                convert_fn=np.asarray,
+            ),
         },
         batch_size=batch_size,
         # train_size=None,
@@ -205,3 +210,40 @@ def sanitize(
         obsm=adata.obsm,
         var=var_df,
     )
+
+
+def batch_from_adata(
+    adata: anndata.AnnData,
+    pipeline: CellariumPipeline,
+    gene_inds: torch.LongTensor,
+    layer: str,
+):
+    """
+    Return a generator that yields batches from an AnnData object, ready for use in 
+    the forward and predict methods of a Cellarium model.
+
+    Args:
+        adata: AnnData object
+        pipeline: CellariumPipeline object
+        gene_inds: LongTensor of gene indices to use
+        layer: layer of the adata object to use
+
+    Returns:
+        Generator that yields batches
+    """
+    adata.X = adata.layers[layer].copy()
+    device = pipeline[-1].transformer.parameters().__next__().device
+    gene_inds = torch.unique(gene_inds).sort().values.long().to(device)
+    adata_out = adata[:, gene_inds.cpu().numpy()].copy()
+    dm = get_datamodule(adata_out)
+
+    # prep tensors
+    for batch in dm.predict_dataloader():
+        batch["prompt_name_ns"] = np.broadcast_to(batch["var_names_g"].values[None, :], batch["x_ng"].shape)
+        batch["prompt_value_ns"] = batch["x_ng"].to(device)
+        # batch["prompt_total_mrna_umis_n"] = batch["x_ng"].sum(-1).to(device)
+        batch["prompt_total_mrna_umis_n"] = batch["total_mrna_umis_n"].to(device)
+        batch["prompt_measured_genes_mask_ns"] = torch.ones_like(batch["prompt_value_ns"], dtype=bool)
+        batch["query_name_nq"] = batch["prompt_name_ns"]
+        batch["query_total_mrna_umis_n"] = batch["prompt_total_mrna_umis_n"]
+        yield batch

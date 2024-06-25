@@ -20,8 +20,9 @@ import warnings
 from contextlib import redirect_stdout
 import tempfile
 import asyncio
+from functools import partial
 
-from .cellarium_utils import get_datamodule
+from .cellarium_utils import get_datamodule, batch_from_adata
 from .gene_set_utils import GeneSetRecords, append_random_control_collection, gsea
 
 
@@ -70,9 +71,9 @@ def gpt_predict(
         # case switch statement
         match summarize:
             case 'mean':
-                mat_ng = (logits_ngm.sigmoid() * torch.arange(start=0, end=logits_ngm.shape[-1], device=device, dtype=torch.float32)[None, None, :]).sum(dim=-1)
+                mat_ng = (logits_ngm.softmax(dim=-1) * torch.arange(start=0, end=logits_ngm.shape[-1], device=device, dtype=torch.float32)[None, None, :]).sum(dim=-1)
             case 'median':
-                mat_ng = (logits_ngm.sigmoid().cumsum(dim=-1) <= 0.5).sum(dim=-1)
+                mat_ng = (logits_ngm.softmax(dim=-1).cumsum(dim=-1) <= 0.5).sum(dim=-1)
             case 'mode':
                 mat_ng = logits_ngm.argmax(dim=-1)
             case _:
@@ -197,7 +198,7 @@ def create_perturbed_dataset(
     if square_epsilon:
         epsilon_ng = epsilon_ng.square()
 
-    scale_per_gene_g = torch.from_numpy(scale_per_gene_g).to(device).squeeze()
+    scale_per_gene_g = torch.from_numpy(scale_per_gene_g).to(device).squeeze().float()
 
     # define the perturbation
     assert (scale_per_gene_g > 0).all(), "automatically-compute gene scales are negative: do you have raw counts in adata.X ?"
@@ -931,3 +932,96 @@ def noise_prompt_gene_set_collection(
     # package results in a big dataframe
     df = pd.concat(dfs, axis=0)
     return df
+
+
+def gpt_predict_and_summarize(
+    prompt_value_ns: torch.Tensor, 
+    batch: dict,
+    pipeline: CellariumPipeline, 
+    summarize: str = 'mean',
+) -> torch.Tensor:
+    """
+    Use the pipeline to predict the expression of a subset of genes in a single cell.
+
+    Args:
+        prompt_value_ns: float tensor with count input
+        batch: batch dictionary with all the extra information for predict
+        pipeline: CellariumPipeline object
+        gene_inds: indices of genes to predict
+        layer: layer in adata.layers to use
+        key_added: key to add to adata.layers
+        summarize: how to summarize the probability density predicted by CellariumGPT
+
+    Returns:
+        AnnData object with predicted expression in adata.layers[key_added]
+    """
+    device = pipeline[-1].transformer.parameters().__next__().device
+
+    batch.pop("prompt_value_ns", None)
+    batch |= {"prompt_value_ns": prompt_value_ns}
+    out = pipeline.predict(batch)
+    logits_ngm = out["logits_nqm"]
+
+    # case switch statement
+    match summarize:
+        case 'mean':
+            mat_ng = (logits_ngm.softmax(dim=-1) * torch.arange(start=0, end=logits_ngm.shape[-1], device=device, dtype=torch.float32)[None, None, :]).sum(dim=-1)
+        case 'median':
+            mat_ng = (logits_ngm.softmax(dim=-1).cumsum(dim=-1) <= 0.5).sum(dim=-1)
+        case 'mode':
+            mat_ng = logits_ngm.argmax(dim=-1)
+        case _:
+            raise ValueError(f"summarize must be 'mean', 'median', or 'mode'")
+    
+    return mat_ng
+
+
+def compute_jacobian(
+    adata: anndata.AnnData,
+    pipeline: CellariumPipeline,
+    var_key_include_genes: str = 'gpt_include',
+    summarize: str = 'mean',
+    layer: str = 'count',
+    var_key_gene_name: str = 'gene_name',
+) -> pd.DataFrame:
+    """
+    Compute the jacobian of the CellariumGPT model with respect to the input count data.
+
+    Args:
+        adata: AnnData object with a single cell
+        pipeline: CellariumPipeline object
+        var_key_include_genes: key in adata.var to use for gene inclusion
+        summarize: how to summarize the probability density predicted by CellariumGPT
+        layer: layer in adata.layers to use
+        var_key_gene_name: key in adata.var with gene names
+
+    Returns:
+        DataFrame containing the jacobian: rows are outputs, columns are inputs
+    """
+    
+    # get a batch of data
+    batch = next(batch_from_adata(
+        adata, 
+        pipeline=pipeline, 
+        gene_inds=torch.as_tensor(np.where(adata.var[var_key_include_genes].values)[0]), 
+        layer=layer,
+    ))
+
+    # wrap the function so that it takes a tensor and returns a tensor
+    wrapper_gpt_predict = partial(gpt_predict_and_summarize, batch=batch, pipeline=pipeline, summarize=summarize)
+
+    # run autograd's jacobian computation
+    jacobian = torch.autograd.functional.jacobian(
+        func=wrapper_gpt_predict, 
+        inputs=batch["prompt_value_ns"],
+        create_graph=False,
+        vectorize=False,
+    ).squeeze()
+
+    # wrap results in a dataframe
+    jacobian_df = pd.DataFrame(
+        data=jacobian.detach().cpu().numpy(), 
+        index=adata.var[var_key_gene_name][adata.var[var_key_include_genes]], 
+        columns=adata.var[var_key_gene_name][adata.var[var_key_include_genes]],
+    )
+    return jacobian_df

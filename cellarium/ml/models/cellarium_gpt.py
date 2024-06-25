@@ -764,7 +764,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
     #     return out
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def predict(
         self,
         prompt_name_ns: np.ndarray | None,
