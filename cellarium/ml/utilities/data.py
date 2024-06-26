@@ -57,6 +57,7 @@ class AnnDataField:
     attr: str
     key: str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
+    convert_fn_kwargs: dict[str, Any] | None = None
 
     def __call__(self, adata: AnnData | AnnCollection, idx: int | list[int] | slice) -> np.ndarray:
         value = getattr(adata[idx], self.attr)
@@ -64,7 +65,12 @@ class AnnDataField:
             value = value[self.key]
 
         if self.convert_fn is not None:
-            value = self.convert_fn(value)
+            if (self.convert_fn_kwargs is not None) and ('var_name_key' in self.convert_fn_kwargs):
+                gene_logic = adata[idx].var[self.convert_fn_kwargs['var_name_key']].isin(self.convert_fn_kwargs['gene_names'])
+                kwargs = {'gene_logic': gene_logic}
+            else:
+                kwargs = {}
+            value = self.convert_fn(value, **kwargs)
         else:
             value = np.asarray(value)
 
@@ -171,6 +177,23 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
         Dense matrix.
     """
     return x.toarray()
+
+
+def subset_genes_and_densify(x: scipy.sparse.csr_matrix, gene_logic: np.ndarray) -> np.ndarray:
+    """
+    Convert a sparse matrix to a dense matrix, using only a subset of genes.
+
+    Args:
+        x: Sparse matrix.
+        gene_logic: logical array denoting which genes to include.
+
+    Returns:
+        Dense matrix.
+    """
+    if scipy.sparse.issparse(x):
+        return x[:, np.asarray(gene_logic)].toarray()
+    else:
+        return x[np.asarray(gene_logic)]
 
 
 def categories_to_codes(x: pd.Series) -> np.ndarray:
