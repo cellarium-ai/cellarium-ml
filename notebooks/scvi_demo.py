@@ -1,4 +1,6 @@
 import gc
+import re
+
 import matplotlib.pyplot as plt
 import torch
 import os
@@ -12,7 +14,7 @@ import numpy as np
 import inspect
 local_repository= True
 if local_repository:
-    module_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) #/opt/project/cellarium-ml/
+    module_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # /opt/project/cellarium-ml/ or /home/lys/Dropbox/PostDoc_Glycomics/cellarium-ml
     sys.path.insert(1,module_dir)
     # Set the PYTHONPATH environment variable for subprocess to inherit
     env = os.environ.copy()
@@ -23,6 +25,10 @@ else:
 
 from cellarium.ml.core import CellariumPipeline, CellariumModule
 import notebooks_functions as NF
+
+
+
+#TODO: https://support.parsebiosciences.com/hc/en-us/articles/7704577188500-How-to-analyze-a-1-million-cell-data-set-using-Scanpy-and-Harmony
 
 
 """Glyco genes per dataset
@@ -46,14 +52,14 @@ foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_36/checkpoints/ep
                     2 : ["tucker_human_heart_atlas","lightning_logs/version_44/checkpoints/epoch=29-step=16230.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad",["Cluster","batch"]],
                     3 : ["human_heart_atlas","lightning_logs/version_45/checkpoints/epoch=39-step=26640.ckpt","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad",[]], #10 GB
                     4 : ["gut_cell_atlas_normed","","../example_configs/scvi_config_gut_cell_atlas_normed.yaml","../data/gut_cell_atlas_normed.h5ad",["category"]],
-                    5 : ["gut_cell_atlas_raw","lightning_logs/version_48/checkpoints/epoch=39-step=17160.ckpt","../example_configs/scvi_config_gut_cell_atlas_raw.yaml","../data/gut_cell_atlas_raw.h5ad",["category"]]
+                    5 : ["gut_cell_atlas_raw","lightning_logs/version_51/checkpoints/epoch=39-step=17160.ckpt","../example_configs/scvi_config_gut_cell_atlas_raw.yaml","../data/gut_cell_atlas_raw.h5ad",["category"]]
                     }
 
 
 foldername,checkpoint_file, config_file, adata_file, color_keys = foldername_dict[5]
 
 #NF.scanpy_scvi(adata_file) #too slow to handle
-#subprocess.call(["/opt/conda/bin/python","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env)
+#subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
 
 
 NF.folders(foldername,"figures",overwrite=False)
@@ -69,73 +75,97 @@ scvi_model.eval()
 # construct the pipeline
 pipeline = CellariumPipeline([scvi_model])
 
-# get the location of the dataset
-with open(config_file, "r") as file:
-    config_dict = yaml.safe_load(file)
-data_path = config_dict['data']['dadc']['init_args']['filenames']
-print(f'Data is coming from {data_path}')
-
-# get a dataset object
-dataset = NF.get_dataset_from_anndata(
-    data_path,
-    batch_size=128,
-    shard_size = None,
-    shuffle=False,
-    seed=0,
-    drop_last=False,
-)
+# # get the location of the dataset
+# with open(config_file, "r") as file:
+#     config_dict = yaml.safe_load(file)
+# data_path = config_dict['data']['dadc']['init_args']['filenames']
+# print(f'Data is coming from {data_path}')
+#
+# # get a dataset object
+# dataset = NF.get_dataset_from_anndata(
+#     data_path,
+#     batch_size=128,
+#     shard_size = None,
+#     shuffle=False,
+#     seed=0,
+#     drop_last=False,
+# )
 
 filename_suffix = "_test"
 figpath = f"figures/{foldername}"
+datapath = f"tmp_data/{foldername}"
 overwrite = False
 
-filepath = f"tmp_data/{foldername}/adata_embedded{filename_suffix}.h5ad"
-if not os.path.exists(filepath) or overwrite:
+filename = f"adata_embedded{filename_suffix}"
+def matching_file(datapath,filename):
+    pattern = re.compile(filename)
+    matched = [ file if pattern.match(file) else None for file in os.listdir(datapath)]
+    matched = [i for i in matched if i is not None]
+    filepath = os.path.join(datapath, matched[0]) if len(matched) > 0 else ""
+    return matched,filepath
+
+matched,filepath = matching_file(datapath,filename)
+if not matched or overwrite:
+    filepath = os.path.join(datapath, f"{filename}.h5ad")
+    # get the location of the dataset
+    with open(config_file, "r") as file:
+        config_dict = yaml.safe_load(file)
+    data_path = config_dict['data']['dadc']['init_args']['filenames']
+    print(f'Data is coming from {data_path}')
+    # get a dataset object
+    dataset = NF.get_dataset_from_anndata(
+        data_path,
+        batch_size=128,
+        shard_size=None,
+        shuffle=False,
+        seed=0,
+        drop_last=False,
+    )
     adata = NF.embed(dataset, pipeline,device= device,filepath=filepath)
 else:
+    print(f"File found : {filename}")
     pass
-    # print("Reading file : {}".format(filepath))
+    #print("Reading file : {}".format(filepath))
     # adata = sc.read(filepath)
 
 # Reconstruct de-noised/de-batched data
-filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed{filename_suffix}.h5ad"
-if not os.path.exists(filepath) or overwrite:
-    #adata = None
-    #added = False
+filename = f"adata_scvi_reconstructed{filename_suffix}"
+matched,filepath = matching_file(datapath,filename)
+if not matched or overwrite:
+    filepath = os.path.join(datapath, f"{filename}.h5ad") #overwrite the other filepath
     for label in range(pipeline[-1].n_batch):
         print("Label: {}".format(label))
         adata_tmp = NF.reconstruct_debatched(dataset, pipeline, transform_to_batch_label=label,layer_key_added=f'scvi_reconstructed_{label}', device=device)
-        #if adata is None:
-            #adata = NF.reconstruct_debatched(dataset, pipeline, transform_to_batch_label=label,layer_key_added=f'scvi_reconstructed_{label}', device=device)
-        #else:
-            # reconstruct_debatched(dataset, pipeline, transform_to_batch_label=label, layer_key_added=f'scvi_reconstructed_{label}')
         adata.layers[f'scvi_reconstructed_{label}'] = adata_tmp.layers[f'scvi_reconstructed_{label}']
         break
     adata.write(filepath)
 else:
+    print(f"File found : {filename}")
     pass
     # del adata
     # gc.collect()
     # print("Reading file : {}".format(filepath))
     # adata = sc.read(filepath)
 
-
-filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_raw_umap{filename_suffix}.h5ad"
+filename = f"adata_scvi_reconstructed_raw_umap{filename_suffix}"
+matched,filepath = matching_file(datapath,filename)
 if not os.path.exists(filepath) or overwrite:
     adata = NF.plot_raw_data(adata,filepath,figpath,color_keys)
 else:
+    print(f"File found : {filename}")
     pass
     # del adata
     # gc.collect()
     # print("Reading file : {}".format(filepath))
     # adata = sc.read(filepath)
 
-
-
-filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_raw_scvi_umaps{filename_suffix}.h5ad"
-if not os.path.exists(filepath) or overwrite:
-    NF.plot_latent_representation(adata,filepath, figpath,color_keys)
+filename = f"adata_scvi_reconstructed_raw_scvi_umaps{filename_suffix}"
+matched,filepath = matching_file(datapath,filename)
+if not matched or overwrite:
+    filepath = os.path.join(datapath, f"{filename}.h5ad")
+    adata = NF.plot_latent_representation(adata,filepath, figpath,color_keys)
 else:
+    print(f"File found : {filename}")
     pass
     # del adata
     # gc.collect()
@@ -177,58 +207,35 @@ gene_set_dict = {
 gene_set = []
 list(map(gene_set.extend, list(gene_set_dict.values())))
 
-# if foldername in ["pmbc_results"]:
-#     adata.var['genes_of_interest'] = adata.var_names.isin(gene_set) #23 glycogenes found only adata[:,adata.var_names.isin(gene_set)]
-#     adata_tmp = adata[:, adata.var_names.isin(gene_set)] #only used for counting
-#     print(adata_tmp.var_names.tolist())
-# elif foldername in ["tucker_heart_atlas"]:
-#     adata.var["genes_of_interest"] = adata.var["gene_names"].isin(gene_set)
-#     adata_tmp = adata[:, adata.var["gene_names"].isin(gene_set)]
-#     print(adata_tmp.var["gene_names"].tolist())
-# elif foldername in ["gut_cell_atlas_normed","gut_cell_atlas_raw"]:
-#     adata.var["genes_of_interest"] = adata.var["gene_ids"].isin(gene_set)
-#     adata_tmp = adata[:, adata.var["gene_ids"].isin(gene_set)]
-#     print(adata_tmp.var["gene_ids"].tolist())
-#
-# else:
-#     adata.var["genes_of_interest"] = adata.var["gene_name-new"].isin(gene_set)
-#     adata_tmp = adata[:, adata.var["gene_name-new"].isin(gene_set)]
-#     print(adata_tmp.var["gene_name-new"].tolist())
-#
-# #aggregate umi-count expression values
-# adata.var['expr'] = np.array(adata.layers['raw'].sum(axis=0)).squeeze()
-# high_gene_set = adata.var.sort_values(by='expr').index[-50:]
-# low_gene_set = adata.var.sort_values(by='expr').index[:500]
-# adata.var['low_exp_genes_of_interest'] = adata.var_names.isin(low_gene_set)
-# adata.var['high_exp_genes_of_interest'] = adata.var_names.isin(high_gene_set)
-#
-# high_gene_set = adata.var.sort_values(by='expr').index[-50:]
-# low_gene_set = adata.var.sort_values(by='expr').index[:500]
 
-
-filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_gene_expression_groups{filename_suffix}.h5ad"
-if not os.path.exists(filepath) or overwrite:
+filename = f"adata_scvi_reconstructed_gene_expression_groups{filename_suffix}"
+matched,filepath = matching_file(datapath,filename)
+if not matched or overwrite:
+    filepath = os.path.join(datapath, f"{filename}.h5ad")
     adata = NF.define_gene_expressions(adata,gene_set,foldername,filepath)
+else:
+    print(f"File found : {filename}")
+    pass
+    #adata = sc.read(filepath)
+
+filename = f"adata_scvi_reconstructed_raw_scvi_umaps_layers{filename_suffix}"
+matched,filepath = matching_file(datapath,filename)
+if not matched or overwrite:
+    filepath = os.path.join(datapath, f"{filename}.h5ad")
+    adata = NF.umap_group_genes(adata,filepath)
 else:
     print("Reading file : {}".format(filepath))
     adata = sc.read(filepath)
 
-filepath = f"tmp_data/{foldername}/adata_scvi_reconstructed_raw_scvi_umaps_layers{filename_suffix}.h5ad"
-if not os.path.exists(filepath) or overwrite:
-    adata = NF.umap_group_genes(adata,filepath)
-else:
-    adata = sc.read(filepath)
-
 #adata_normalized= sc.pp.normalize_total(adata, target_sum=1, inplace=False, exclude_highly_expressed=False)
+adata = adata[:30000]
+# figname = "glyco_expression_RAW"
+# NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,figpath,figname,color_keys)
+#
+# figname = "glyco_expression_RECONSTRUCTED"
+# NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,figpath,figname,color_keys)
 
-#figname = "glyco_expression_umap.pdf"
-# NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,figpath,figname)
-#figname = "glyco_expression_reconstructed.pdf"
-# NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,figpath,figname)
-adata = adata[:1000]
-print(adata)
-print("The current shape is : {}".format(adata.shape))
-
+#adata = adata[:30000]
 NF.plot_neighbour_clusters(adata,gene_set,figpath,color_keys)
 
 exit()

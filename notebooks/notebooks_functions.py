@@ -333,9 +333,11 @@ def define_gene_expressions(adata,gene_set,foldername,filepath):
         adata_tmp = adata[:, adata.var["gene_names"].isin(gene_set)]
         print(adata_tmp.var["gene_names"].tolist())
     elif foldername in ["gut_cell_atlas_normed", "gut_cell_atlas_raw"]:
-        adata.var["genes_of_interest"] = adata.var["gene_ids"].isin(gene_set)
-        adata_tmp = adata[:, adata.var["gene_ids"].isin(gene_set)]
+        adata.var["genes_of_interest"] = adata.var["gene_ids"].index.isin(gene_set)
+        #adata_tmp = adata[:, adata.var["gene_ids"].isin(gene_set)]
+        adata_tmp = adata[:, adata.var["genes_of_interest"] ]
         print(adata_tmp.var["gene_ids"].tolist())
+
 
     else:
         adata.var["genes_of_interest"] = adata.var["gene_name-new"].isin(gene_set)
@@ -544,11 +546,11 @@ def calculate_dimensions_plot(g_plots_list):
     ncols = 2 * ncols
     width_ratios = [6] * ncols  # we duplicate the number of columns to fit the color bars
     width_ratios[1::2] = [0.3] * int(ncols / 2)
-    print(width_ratios)
+    #print(width_ratios)
     nrows_idx = np.repeat(list(range(nrows)),ncols)
     ncols_idx = np.tile(list(range(ncols)),nrows)
-    print(nrows_idx)
-    print(ncols_idx)
+    # print(nrows_idx)
+    # print(ncols_idx)
     if nrows * ncols > nelements * 2 and nrows * (ncols - 1) >= nelements * 2:
         print("Dropping 1 row")
         nrows = nrows - 1
@@ -614,8 +616,9 @@ def plot_avg_expression_old(adata,adata_proj,gene_set_dict,filename):
     else:
         print("Genes not found. Cannot make the plot")
 
-def plot_avg_expression(adata,basis,gene_set_dict,figpath,figkey,figname):
-
+def plot_avg_expression(adata,basis,gene_set_dict,figpath,figname,color_keys):
+    """Plots the average glyco expression per glyco pathway (averages the expression of all the genes involved in that pathway)"""
+    print("Plotting average glyco expression per glyco pathway")
     genes_list = []
     for gene_key, gene_set in gene_set_dict.items():
         gene_key = gene_key.lower()
@@ -628,14 +631,14 @@ def plot_avg_expression(adata,basis,gene_set_dict,figpath,figkey,figname):
 
     sc.pl.embedding(adata,
                     basis=basis,
-                    color=['final_annotation', 'batch'] + genes_list,
+                    color=[color_keys[0]] + genes_list,
                     projection="2d",
                     cmap = "magma_r",
                     ncols=nrows,
                     wspace=0.7,
                     show=False)
                     #save=".pdf")
-    plt.savefig(f"{figpath}/{figname}", bbox_inches="tight")
+    plt.savefig(f"{figpath}/{figname}.jpg", bbox_inches="tight")
 
 def plot_neighbour_clusters(adata,gene_set,figpath,color_keys):
     """
@@ -648,14 +651,18 @@ def plot_neighbour_clusters(adata,gene_set,figpath,color_keys):
         Resolution profile: https://leidenalg.readthedocs.io/en/stable/advanced.html
         Benchmarking atlas-level integration single cell data: https://github.com/theislab/scib
 
+    TODO:
+        -Silhouette score: https://github.com/scverse/scanpy/issues/222
+
     """
     print("Computing neighbour clusters using Lediden hierarchical clustering")
     # compute clusters using the leiden method and store the results with the name `clusters`
     sc.tl.leiden(
         adata,
         key_added="clusters",
-        resolution=0.5, #higher values more clusters, control the coarseness of the clustering.
-        n_iterations=20,
+        resolution=0.5, #higher values more clusters, increases the weight of the , control the coarseness of the clustering.
+        #restrict_to=["categories"],
+        n_iterations=2,
         flavor="igraph",
         directed=False,
     )
@@ -674,13 +681,33 @@ def plot_neighbour_clusters(adata,gene_set,figpath,color_keys):
             title="clustering of cells",
             palette="Set1",
             show=False,
-            #save = "-leiden-clusters.pdf"
         )
-        plt.savefig(f"{figpath}/leiden-clusters.pdf", bbox_inches="tight")
+        plt.savefig(f"{figpath}/leiden-clusters.jpg", bbox_inches="tight")
         plt.close()
         plt.clf()
+
+
+    # print(adata)
+
+    # TODO: dotplot cannot handle many clusters, if there are too many, the gridspec will complain, perhaps with a larger figsize
+    #adata= adata[(adata.obs["clusters"] == "0") | (adata.obs["clusters"] == "1")]
+
+    adata = adata[adata.obs["clusters"].isin(adata.obs["clusters"].value_counts().keys()[:20])] #pick only the top 20 clusters with more members
+
+    # print(adata)
+    # print(adata.obs["clusters"].value_counts())
+    #
+    # exit()
     gene_set =  adata.var_names[adata.var['genes_of_interest']]
-    sc.pl.dotplot(adata, gene_set, "clusters", dendrogram=True, show=False)#,save="clusters-glyco")
+    #print(adata.var['genes_of_interest'])
+
+    sc.pl.dotplot(adata,
+                  gene_set,
+                  groupby="clusters",
+                  figsize=(20,20),
+                  dendrogram=True,
+                  show=False,
+                  dot_max=1)#,save="clusters-glyco")
     plt.savefig(f"{figpath}/dotplot-leiden-clusters.pdf", bbox_inches="tight")
     plt.close()
     plt.clf()
@@ -695,7 +722,6 @@ def plot_neighbour_clusters(adata,gene_set,figpath,color_keys):
     plt.clf()
 
     return adata
-
 
 def scanpy_scvi(adata_file):
 
