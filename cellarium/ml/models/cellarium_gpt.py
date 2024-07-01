@@ -440,9 +440,7 @@ class Transformer(nn.Module):
         Returns:
             The output hidden state tensor of shape ``(n, c, d)``.
         """
-        for i, block in enumerate(self.blocks):
-            if i == self.n_blocks - 1:
-                self.hidden_state_ncd = hidden_state_ncd
+        for block in self.blocks:
             hidden_state_ncd = block(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
 
         return hidden_state_ncd
@@ -817,8 +815,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
         return {
             "logits_nqm": logits_nqm,
-            "query_name_nq": query_name_nq,
-            "hidden_state_ncd": self.transformer.hidden_state_ncd,
+            # "query_name_nq": query_name_nq,
         }
 
     # def log_prob(self, var_names_ng: np.ndarray, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:

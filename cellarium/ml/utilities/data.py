@@ -122,9 +122,11 @@ def get_worker_info() -> tuple[int, int]:
 def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | torch.Tensor]:
     """
     Collate function for the ``DataLoader``. This function assumes that the batch is a list of
-    dictionaries, where each dictionary has the same keys. The values of each key are converted
-    to a :class:`torch.Tensor` and concatenated along the first dimension. If the key is ``obs_names``,
-    the values are concatenated along the first dimension without converting to a :class:`torch.Tensor`.
+    dictionaries, where each dictionary has the same keys. If the key ends with ``_g`` or
+    ``_categories``, the value of that key is checked to be the same across all dictionaries in the
+    batch and then taken from the first dictionary. Otherwise, the value of that key is concatenated
+    along the first dimension.  Then the values which are not strings are converted to
+    a :class:`torch.Tensor` and returned in a dictionary.
 
     Args:
         batch: List of dictionaries.
@@ -134,22 +136,25 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
         the batch dimension.
     """
     keys = batch[0].keys()
-    collated_batch = {}
+    collated_batch: dict[str, np.ndarray | torch.Tensor] = {}
     if len(batch) > 1:
         if not all(keys == data.keys() for data in batch[1:]):
             raise ValueError("All dictionaries in the batch must have the same keys.")
     for key in keys:
-        if key == "obs_names_n":
-            collated_batch[key] = np.concatenate([data[key] for data in batch], axis=0)
-        elif key == "var_names_g" or key.endswith("_categories"):
-            # Check that all var_names_g are the same
+        if key.endswith("_g") or key.endswith("_categories"):
+            # Check that all values are the same
             if len(batch) > 1:
                 if not all(np.array_equal(batch[0][key], data[key]) for data in batch[1:]):
-                    raise ValueError("All dictionaries in the batch must have the same `var_names_g`.")
+                    raise ValueError(f"All dictionaries in the batch must have the same {key}.")
             # If so, just take the first one
-            collated_batch[key] = batch[0][key]
+            value = batch[0][key]
         else:
-            collated_batch[key] = torch.cat([torch.from_numpy(data[key]) for data in batch], dim=0)
+            value = np.concatenate([data[key] for data in batch], axis=0)
+
+        if not np.issubdtype(value.dtype, np.str_) and not np.issubdtype(value.dtype, np.object_):
+            collated_batch[key] = torch.tensor(value, device="cpu")
+        else:
+            collated_batch[key] = value
     return collated_batch
 
 
