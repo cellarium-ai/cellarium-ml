@@ -662,14 +662,16 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         logits_nsm = self.head(hidden_state_ncd[:, -suffix_len:]) * self.output_mult
 
         # compute the loss
-        loss_fn = nn.CrossEntropyLoss(reduction="none")
         measured_genes_mask_ns = measured_genes_mask_nc[:, -suffix_len:]
         label_mask_ns = (label_ns < self.max_value + 1) & measured_genes_mask_ns
         label_weight_ns = 1 / label_mask_ns.sum(dim=-1, keepdim=True).expand(-1, suffix_len)
         label_weights = label_weight_ns[label_mask_ns]
-        logits = logits_nsm[label_mask_ns]
+        pred_logits = logits_nsm[label_mask_ns]
+        q_cdf = pred_logits.softmax(dim=-1).cumsum(dim=-1)
         labels = label_ns[label_mask_ns]
-        loss = (loss_fn(logits, labels) * label_weights).sum() / label_weights.sum()
+        p_cdf = torch.nn.functional.one_hot(labels, num_classes=self.max_value + 1).to(torch.float32).cumsum(dim=-1)
+        loss = (torch.abs(p_cdf - q_cdf).sum(dim=-1) * label_weights).sum() / label_weights.sum()
+        # loss = (loss_fn(logits, labels) * label_weights).sum() / label_weights.sum()
 
         return {"loss": loss}
 
