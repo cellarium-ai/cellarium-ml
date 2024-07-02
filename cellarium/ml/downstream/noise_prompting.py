@@ -63,7 +63,7 @@ def gpt_predict(
         batch["prompt_total_mrna_umis_n"] = batch["x_ng"].sum(-1).to(device)
         batch["prompt_measured_genes_mask_ns"] = torch.ones_like(batch["prompt_value_ns"], dtype=bool)
         batch["query_name_nq"] = batch["prompt_name_ns"]
-        batch["query_total_mrna_umis_n"] = batch["prompt_total_mrna_umis_n"]
+        batch["query_total_mrna_umis_n"] = torch.ones_like(batch["prompt_total_mrna_umis_n"]) * 10_000
 
         out = pipeline.predict(batch)
         logits_ngm = out["logits_nqm"]
@@ -71,7 +71,8 @@ def gpt_predict(
         # case switch statement
         match summarize:
             case 'mean':
-                mat_ng = (logits_ngm.softmax(dim=-1) * torch.arange(start=0, end=logits_ngm.shape[-1], device=device, dtype=torch.float32)[None, None, :]).sum(dim=-1)
+                counts_m = torch.arange(start=0, end=logits_ngm.shape[-1], device=device, dtype=torch.float32)
+                mat_ng = (logits_ngm.softmax(dim=-1) * counts_m[None, None, :]).sum(dim=-1)
             case 'median':
                 mat_ng = (logits_ngm.softmax(dim=-1).cumsum(dim=-1) <= 0.5).sum(dim=-1)
             case 'mode':
@@ -153,6 +154,7 @@ def create_perturbed_dataset(
     square_epsilon: bool = False,
     genes_to_perturb: list[int] | np.ndarray = [],
     cell_perturbations_coherent: bool = False,
+    perturbations_poisson: bool = True,
     seed: int = 0,
 ):
     """
@@ -167,6 +169,7 @@ def create_perturbed_dataset(
         genes_to_perturb: indices of genes to perturb
         cell_perturbations_coherent: whether to perturb all genes in a cell in the same direction
             and by the same amount
+        perturbations_poisson: whether to use a Poisson so perturbations are integer counts
         seed: random seed
 
     Returns:
@@ -174,6 +177,8 @@ def create_perturbed_dataset(
     """
     
     assert len(adata) == 1, "Only one cell allowed in adata for create_perturbed_dataset"
+    if not (scale_per_gene_g > 0).all():
+        raise ValueError("gene scales are not all > 0, but they must be")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -201,10 +206,12 @@ def create_perturbed_dataset(
     scale_per_gene_g = torch.from_numpy(scale_per_gene_g).to(device).squeeze().float()
 
     # define the perturbation
-    assert (scale_per_gene_g > 0).all(), "automatically-compute gene scales are negative: do you have raw counts in adata.X ?"
-    perturbation_ng = epsilon_ng_sign * torch.distributions.Poisson(
-        perturbation_scale * (epsilon_ng.abs() + 1e-10) * scale_per_gene_g.unsqueeze(0)
-    ).sample()
+    if perturbations_poisson:
+        perturbation_ng = epsilon_ng_sign * torch.distributions.Poisson(
+            perturbation_scale * (epsilon_ng.abs() + 1e-10) * scale_per_gene_g.unsqueeze(0)
+        ).sample()
+    else:
+        perturbation_ng = perturbation_scale * epsilon_ng * scale_per_gene_g.unsqueeze(0)
 
     # restrict the perturbation to genes specified
     if len(genes_to_perturb) > 0:
@@ -625,6 +632,7 @@ def noise_prompt_random(
     var_key_include_genes: str = 'gpt_include',
     var_key_gene_scale: str = 'mean',
     gene_scale_eps: float = 1e-5,
+    perturbations_poisson: bool = True,
     seed: int = 0,
     **analyze_kwargs,
 ) -> anndata.AnnData:
@@ -640,6 +648,7 @@ def noise_prompt_random(
         var_key_gene_scale: key in adata.var with gene scales. If 'measured_gpt', this 
             will use the output of cellariumgpt on the raw data as the noise scale.
         gene_scale_eps: epsilon to add to gene scales
+        perturbations_poisson: whether to use a Poisson so perturbations are integer counts
         seed: random seed
         **analyze_kwargs: keyword arguments for analyze_lfc, such as n_pcs and n_ics
 
@@ -672,8 +681,8 @@ def noise_prompt_random(
             adata.var.loc[adata.var_names[highly_expressed_gene_inds.numpy()], var_key_gene_scale] = np.array(adata.uns['measured_gpt'].A).squeeze()
         else:
             w = float(var_key_gene_scale.split('_')[-1])
-            if not ((w > 0) and (w < 1)):
-                raise ValueError(f'var_key_gene_scale "{var_key_gene_scale}" must end with _ and a float between 0 and 1 like "measured_gpt_0.5')
+            if not ((w >= 0) and (w <= 1)):
+                raise ValueError(f'var_key_gene_scale "{var_key_gene_scale}" must end with _ and a float between 0 and 1 like "measured_gpt_0.5". 1 is gpt')
             weighted_avg = w * np.array(adata.uns['measured_gpt'].A).squeeze() + (1 - w) * np.array(adata.X.A).squeeze()[highly_expressed_gene_inds.numpy()]
             adata.var.loc[adata.var_names[highly_expressed_gene_inds.numpy()], var_key_gene_scale] = weighted_avg
 
@@ -686,6 +695,7 @@ def noise_prompt_random(
             n_perturbations=n_perturbations,
             scale_per_gene_g=adata.var[var_key_gene_scale].values + gene_scale_eps,
             perturbation_scale=perturbation_scale,
+            perturbations_poisson=perturbations_poisson,
             seed=seed,
         )
 

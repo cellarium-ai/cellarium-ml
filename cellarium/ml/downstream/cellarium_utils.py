@@ -14,7 +14,9 @@ import tempfile
 from google.cloud import storage
 
 
-default_model = "gs://cellarium-ml/curriculum/human_10x_gt_8000/models/cellarium_gpt/benchmark/measured_context/bs_200_context_4500_max_prefix_4000/lightning_logs/version_0/checkpoints/epoch=4-step=159600.ckpt"
+categorical_model = "gs://cellarium-ml/curriculum/human_10x_gt_8000/models/cellarium_gpt/benchmark/measured_context/bs_200_context_4500_max_prefix_4000/lightning_logs/version_0/checkpoints/epoch=4-step=159600.ckpt"
+categorical_model_with_downsampling = "gs://cellarium-ml/curriculum/homo_sap_no_cancer/models/cellarium_gpt/downsample/bs_200_max_prefix_4000_context_4500/lightning_logs/version_0/checkpoints/epoch=0-step=152100.ckpt"
+default_model = categorical_model_with_downsampling
 
 
 def get_pretrained_model_as_pipeline(
@@ -65,17 +67,22 @@ def get_datamodule(
     # with tempfile.TemporaryDirectory() as tmpdir:
     #     anndata_filename = os.path.join(tmpdir, "tmp.h5ad")
     #     adata.write(anndata_filename)
-    dm = CellariumAnnDataDataModule(
-        adata,
-        batch_keys={
-            "x_ng": AnnDataField(attr="X", convert_fn=densify),
-            "var_names_g": AnnDataField(attr="var_names"),
+    batch_keys={
+        "x_ng": AnnDataField(attr="X", convert_fn=densify),
+        "var_names_g": AnnDataField(attr="var_names"),
+    }
+    if "total_mrna_umis_n" in adata.obs.columns:
+        batch_keys |= {
             "total_mrna_umis_n": AnnDataField(
                 attr="obs", 
                 key="total_mrna_umis",
                 convert_fn=np.asarray,
             ),
-        },
+        }
+    
+    dm = CellariumAnnDataDataModule(
+        adata,
+        batch_keys=batch_keys,
         batch_size=batch_size,
         # train_size=None,
         # val_size=0.99,
@@ -177,6 +184,8 @@ def sanitize(
     col_trans = np.zeros(n_features, dtype=int)
     for i, k in enumerate(feature_id_intersection_cas_indices):
         col_trans[i] = k
+    if not sp.issparse(input_matrix):
+        input_matrix = sp.csr_matrix(input_matrix)
     vals = input_matrix.tocsc()[:, feature_id_intersection_adata_indices]
     vals = vals.tocoo()
     new_col = col_trans[vals.col]
@@ -217,6 +226,7 @@ def batch_from_adata(
     pipeline: CellariumPipeline,
     gene_inds: torch.LongTensor,
     layer: str,
+    query_umis: int = 10000,
 ):
     """
     Return a generator that yields batches from an AnnData object, ready for use in 
@@ -227,6 +237,7 @@ def batch_from_adata(
         pipeline: CellariumPipeline object
         gene_inds: LongTensor of gene indices to use
         layer: layer of the adata object to use
+        query_umis: number of total UMIs to use for the query
 
     Returns:
         Generator that yields batches
@@ -241,9 +252,8 @@ def batch_from_adata(
     for batch in dm.predict_dataloader():
         batch["prompt_name_ns"] = np.broadcast_to(batch["var_names_g"].values[None, :], batch["x_ng"].shape)
         batch["prompt_value_ns"] = batch["x_ng"].to(device)
-        # batch["prompt_total_mrna_umis_n"] = batch["x_ng"].sum(-1).to(device)
-        batch["prompt_total_mrna_umis_n"] = batch["total_mrna_umis_n"].to(device)
+        batch["prompt_total_mrna_umis_n"] = batch.get("total_mrna_umis_n", batch["x_ng"].sum(-1)).to(device)
         batch["prompt_measured_genes_mask_ns"] = torch.ones_like(batch["prompt_value_ns"], dtype=bool)
         batch["query_name_nq"] = batch["prompt_name_ns"]
-        batch["query_total_mrna_umis_n"] = batch["prompt_total_mrna_umis_n"]
+        batch["query_total_mrna_umis_n"] = torch.ones_like(batch["prompt_total_mrna_umis_n"]) * query_umis
         yield batch
