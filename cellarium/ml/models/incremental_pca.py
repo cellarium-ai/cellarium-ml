@@ -7,10 +7,9 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn as nn
-from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.strategies import DDPNoParametersStrategy
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -63,7 +62,6 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.register_buffer("S_k", torch.empty(n_components))
         self.register_buffer("x_mean_g", torch.empty(n_vars))
         self.register_buffer("x_size", torch.empty(()))
-        self._dummy_param = nn.Parameter(torch.empty(()))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -71,7 +69,6 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.S_k.zero_()
         self.x_mean_g.zero_()
         self.x_size.zero_()
-        self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -131,12 +128,10 @@ class IncrementalPCA(CellariumModel, PredictMixin):
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
-            assert isinstance(trainer.strategy, DDPStrategy), (
-                "Distributed and Incremental PCA requires that " "the trainer uses the DDP strategy."
-            )
-            assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is False, (
-                "Distributed and Incremental PCA requires that " "broadcast_buffers is set to False."
-            )
+            if not isinstance(trainer.strategy, DDPNoParametersStrategy):
+                raise ValueError(
+                    f"IncrementalPCA requires the DDPNoParametersStrategy. Got {type(trainer.strategy).__name__}."
+                )
 
     def on_epoch_end(self, trainer: pl.Trainer) -> None:
         """

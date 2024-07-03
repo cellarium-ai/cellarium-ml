@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 
 from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.strategies import DDPNoParametersStrategy
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -38,11 +39,10 @@ class TDigest(CellariumModel):
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.tdigests = [crick.tdigest.TDigest() for _ in range(self.n_vars)]
-        self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        self._dummy_param.data.zero_()
+        pass
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -65,25 +65,34 @@ class TDigest(CellariumModel):
                 tdigest.update(x_n[nonzero_mask])
         return {}
 
+    def on_train_start(self, trainer: pl.Trainer) -> None:
+        if trainer.world_size > 1:
+            if not isinstance(trainer.strategy, DDPNoParametersStrategy):
+                raise ValueError(
+                    f"TDigest requires the DDPNoParametersStrategy. Got {type(trainer.strategy).__name__}."
+                )
+
     def on_epoch_end(self, trainer: pl.Trainer) -> None:
         # no need to merge if only one process
         if trainer.world_size == 1:
             return
 
-        # save tdigests
-        dirpath = self._resolve_ckpt_dir(trainer)
-        filepath = os.path.join(dirpath, f"tdigests_{trainer.global_rank}.pt")
-        trainer.strategy.checkpoint_io.save_checkpoint(self.tdigests, filepath)  # type: ignore[arg-type]
-        # wait for all processes to save
-        dist.barrier()
+        tdigests_gather_list: list | None = (
+            [None for _ in range(trainer.world_size)] if trainer.global_rank == 0 else None
+        )
+        dist.gather_object(
+            self.tdigests,
+            tdigests_gather_list,
+            dst=0,
+        )
 
         if trainer.global_rank != 0:
             return
 
         # merge tdigests
-        for i in range(1, trainer.world_size):  # iterate over processes
-            filepath = os.path.join(dirpath, f"tdigests_{i}.pt")
-            new_tdigests: list = trainer.strategy.checkpoint_io.load_checkpoint(filepath)  # type: ignore[assignment]
+        assert tdigests_gather_list is not None
+        for new_tdigests in tdigests_gather_list[1:]:  # iterate over processes
+            assert new_tdigests is not None
             for j in range(len(self.tdigests)):  # iterate over genes
                 self.tdigests[j].merge(new_tdigests[j])
 

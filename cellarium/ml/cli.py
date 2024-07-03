@@ -246,10 +246,6 @@ def lightning_cli_factory(
             ],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
-                "strategy": {
-                    "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                    "dict_kwargs": {"broadcast_buffers": False},
-                },
             },
         )
 
@@ -375,10 +371,6 @@ def incremental_pca(args: ArgsType = None) -> None:
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
-            "strategy": {
-                "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                "dict_kwargs": {"broadcast_buffers": False},
-            },
         },
     )
     cli(args=args)
@@ -457,10 +449,6 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
-            "strategy": {
-                "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                "dict_kwargs": {"broadcast_buffers": False},
-            },
         },
     )
     cli(args=args)

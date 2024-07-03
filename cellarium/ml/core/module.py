@@ -61,6 +61,9 @@ class CellariumModule(pl.LightningModule):
         self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
 
+        if optim_fn is None:
+            self.automatic_optimization = False
+
     def configure_model(self) -> None:
         """
         .. note::
@@ -155,7 +158,14 @@ class CellariumModule(pl.LightningModule):
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
-            self.log("train_loss", loss)
+            self.log("train_loss", loss, sync_dist=True)
+
+        if not self.automatic_optimization:
+            # this is necessary for incrementing the global step when no optimizer is used
+            optimizer = self.optimizers()
+            assert isinstance(optimizer, pl.core.optimizer.LightningOptimizer)
+            optimizer.step()
+
         return loss
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
