@@ -273,6 +273,8 @@ def lightning_cli_factory(
             )
 
         def _add_instantiators(self):
+            # disable breaking dependency injection support change introduced in PyTorch Lightning 2.3
+            # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
             pass
 
         def instantiate_classes(self) -> None:

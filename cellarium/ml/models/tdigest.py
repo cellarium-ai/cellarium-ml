@@ -80,11 +80,7 @@ class TDigest(CellariumModel):
         tdigests_gather_list: list | None = (
             [None for _ in range(trainer.world_size)] if trainer.global_rank == 0 else None
         )
-        dist.gather_object(
-            self.tdigests,
-            tdigests_gather_list,
-            dst=0,
-        )
+        dist.gather_object(self.tdigests, tdigests_gather_list, dst=0)
 
         if trainer.global_rank != 0:
             return
