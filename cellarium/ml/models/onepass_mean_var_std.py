@@ -7,9 +7,9 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.distributed as dist
-from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.strategies import DDPNoParametersStrategy
 from cellarium.ml.utilities.data import get_rank_and_num_replicas
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -49,7 +49,6 @@ class OnePassMeanVarStd(CellariumModel):
             self.register_buffer("x_shift", torch.empty(n_vars))
         else:
             self.register_buffer("x_shift", None)
-        self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -58,7 +57,6 @@ class OnePassMeanVarStd(CellariumModel):
         self.x_size.zero_()
         if self.x_shift is not None:
             self.x_shift.zero_()
-        self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -101,12 +99,10 @@ class OnePassMeanVarStd(CellariumModel):
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
-            assert isinstance(
-                trainer.strategy, DDPStrategy
-            ), "OnePassMeanVarStd requires that the trainer uses the DDP strategy."
-            assert (
-                trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
-            ), "OnePassMeanVarStd requires that broadcast_buffers is set to False."
+            if not isinstance(trainer.strategy, DDPNoParametersStrategy):
+                raise ValueError(
+                    f"OnePassMeanVarStd requires the DDPNoParametersStrategy. Got {type(trainer.strategy).__name__}."
+                )
 
     def on_epoch_end(self, trainer: pl.Trainer) -> None:
         # no need to merge if only one process

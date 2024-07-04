@@ -31,14 +31,16 @@ Below we highlight the changes made to the default configuration file.
 trainer
 ~~~~~~~
 
-Change the number of devices and set the path for logs and weights:
+Change the number of devices, set the strategy to ``ddp_no_parameters`` for the model does not have any learnable parameters, and set the path for logs and weights:
 
 .. code-block:: diff
 
     <   devices: auto
+    <   strategy: auto
     <   default_root_dir: null
     ---
     >   devices: 2
+    >   strategy: ddp_no_parameters
     >   default_root_dir: /tmp/test_examples/onepass
 
 model
@@ -116,14 +118,16 @@ Below we highlight the changes made to the default configuration file.
 train
 ~~~~~
 
-Change the number of devices and set the path for logs and weights:
+Change the number of devices, set the strategy to ``ddp_no_parameters`` for the model does not have any learnable parameters, and set the path for logs and weights:
 
 .. code-block:: diff
 
     <   devices: auto
+    <   strategy: auto
     <   default_root_dir: null
     ---
     >   devices: 2
+    >   strategy: ddp_no_parameters
     >   default_root_dir: /tmp/test_examples/ipca
 
 model

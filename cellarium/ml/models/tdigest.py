@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 
 from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.strategies import DDPNoParametersStrategy
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -38,11 +39,10 @@ class TDigest(CellariumModel):
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.tdigests = [crick.tdigest.TDigest() for _ in range(self.n_vars)]
-        self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        self._dummy_param.data.zero_()
+        pass
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -64,6 +64,13 @@ class TDigest(CellariumModel):
             if len(nonzero_mask) > 0:
                 tdigest.update(x_n[nonzero_mask])
         return {}
+
+    def on_train_start(self, trainer: pl.Trainer) -> None:
+        if trainer.world_size > 1:
+            if not isinstance(trainer.strategy, DDPNoParametersStrategy):
+                raise ValueError(
+                    f"TDigest requires the DDPNoParametersStrategy. Got {type(trainer.strategy).__name__}."
+                )
 
     def on_epoch_end(self, trainer: pl.Trainer) -> None:
         # no need to merge if only one process

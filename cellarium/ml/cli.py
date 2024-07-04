@@ -23,6 +23,7 @@ from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 
+import cellarium.ml.strategies  # noqa: F401
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.utilities.data import collate_fn
 
@@ -245,10 +246,6 @@ def lightning_cli_factory(
             ],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
-                "strategy": {
-                    "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                    "dict_kwargs": {"broadcast_buffers": False},
-                },
             },
         )
 
@@ -376,10 +373,6 @@ def incremental_pca(args: ArgsType = None) -> None:
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
-            "strategy": {
-                "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                "dict_kwargs": {"broadcast_buffers": False},
-            },
         },
     )
     cli(args=args)
@@ -458,10 +451,6 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
-            "strategy": {
-                "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                "dict_kwargs": {"broadcast_buffers": False},
-            },
         },
     )
     cli(args=args)

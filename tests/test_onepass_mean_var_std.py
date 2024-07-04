@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 import torch
 from anndata import AnnData
-from lightning.pytorch.strategies import DDPStrategy
 
+import cellarium.ml.strategies  # noqa: F401
 from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.models import OnePassMeanVarStd
@@ -80,13 +80,13 @@ def test_onepass_mean_var_std_multi_device(
     # fit
     model = OnePassMeanVarStd(var_names_g=dadc.var_names, algorithm=algorithm)
     module = CellariumModule(transforms=transforms, model=model)
-    strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
+    strategy = "ddp_no_parameters" if devices > 1 else "auto"
     trainer = pl.Trainer(
-        barebones=True,
         accelerator="cpu",
+        strategy=strategy,
         devices=devices,
         max_epochs=1,  # one pass
-        strategy=strategy,  # type: ignore[arg-type]
+        barebones=True,
     )
     trainer.fit(module, train_dataloaders=data_loader)
 
@@ -130,10 +130,10 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     model = OnePassMeanVarStd(var_names_g=var_names_g, algorithm=algorithm)
     module = CellariumModule(model=model)
     # trainer
-    strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
+    strategy = "ddp_no_parameters" if devices > 1 else "auto"
     trainer = pl.Trainer(
         accelerator="cpu",
-        strategy=strategy,  # type: ignore[arg-type]
+        strategy=strategy,
         devices=devices,
         max_epochs=1,
         default_root_dir=tmp_path,
