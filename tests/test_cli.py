@@ -183,6 +183,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
+                "strategy": "ddp_no_parameters" if int(devices) > 1 else "auto",
                 "devices": devices,
             },
         },
@@ -230,6 +231,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
+                "strategy": "ddp_no_parameters" if int(devices) > 1 else "auto",
                 "devices": devices,
             },
         },
@@ -278,6 +280,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
+                "strategy": "ddp_no_parameters" if int(devices) > 1 else "auto",
                 "devices": devices,
                 "callbacks": {
                     "class_path": "cellarium.ml.callbacks.PredictionWriter",
@@ -375,6 +378,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
+                "strategy": "ddp_no_parameters" if int(devices) > 1 else "auto",
                 "devices": devices,
             },
         },

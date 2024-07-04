@@ -12,6 +12,7 @@ import pytest
 import torch
 from anndata import AnnData
 
+import cellarium.ml.strategies  # noqa: F401
 from cellarium.ml import CellariumModule
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
@@ -86,11 +87,13 @@ def test_tdigest_multi_device(
     # fit
     model = TDigest(var_names_g=dadc.var_names)
     module = CellariumModule(transforms=transforms, model=model)
+    strategy = "ddp_no_parameters" if devices > 1 else "auto"
     trainer = pl.Trainer(
-        barebones=True,
         accelerator="cpu",
+        strategy=strategy,
         devices=devices,
         max_epochs=1,  # one pass
+        barebones=True,
     )
     trainer.fit(module, train_dataloaders=data_loader)
 
@@ -132,9 +135,11 @@ def test_load_from_checkpoint_multi_device():
     # model
     model = TDigest(var_names_g=var_names_g)
     module = CellariumModule(model=model)
+    strategy = "ddp_no_parameters" if devices > 1 else "auto"
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",
+        strategy=strategy,
         devices=devices,
         max_epochs=1,
         default_root_dir=tmp_path,
