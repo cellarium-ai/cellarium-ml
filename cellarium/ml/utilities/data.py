@@ -19,7 +19,6 @@ import scipy
 import torch
 import torch.distributed as dist
 from anndata import AnnData
-from anndata.experimental import AnnCollection
 from torch.utils.data import get_worker_info as _get_worker_info
 
 
@@ -38,11 +37,12 @@ class AnnDataField:
         ...     shard_size=10_000,
         ...     max_cache_size=2)
 
+        >>> adata = dadc[:100]
         >>> field_X = AnnDataField(attr="X", convert_fn=densify)
-        >>> X = field_X(dadc)[:100]  # densify(dadc[:100].X)
+        >>> X = field_X(adata)  # densify(adata.X)
 
-        >>> field_cell_type = AnnDataField(attr="obs", key="cell_type")
-        >>> cell_type = field_cell_type(dadc)[:100]  # np.asarray(dadc[:100].obs["cell_type"])
+        >>> field_total_mrna_umis = AnnDataField(attr="obs", key="total_mrna_umis")
+        >>> total_mrna_umis = field_total_mrna_umis(adata)  # np.asarray(adata.obs["total_mrna_umis"])
 
     Args:
         attr:
@@ -58,8 +58,8 @@ class AnnDataField:
     key: str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
-    def __call__(self, adata: AnnData | AnnCollection, idx: int | list[int] | slice) -> np.ndarray:
-        value = getattr(adata[idx], self.attr)
+    def __call__(self, adata: AnnData) -> np.ndarray:
+        value = getattr(adata, self.attr)
         if self.key is not None:
             value = value[self.key]
 
@@ -69,13 +69,6 @@ class AnnDataField:
             value = np.asarray(value)
 
         return value
-
-    @property
-    def obs_column(self) -> str | None:
-        result = None
-        if self.attr == "obs":
-            result = self.key
-        return result
 
 
 def get_rank_and_num_replicas() -> tuple[int, int]:

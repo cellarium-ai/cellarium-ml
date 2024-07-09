@@ -145,8 +145,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
 
         data = {}
+        adata = self.dadc[idx]
         for key, field in self.batch_keys.items():
-            data[key] = field(self.dadc, idx)
+            data[key] = field(adata)
 
         # for testing purposes
         if self.test_mode:
