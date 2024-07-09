@@ -134,7 +134,7 @@ class CellariumModule(pl.LightningModule):
         return self.pipeline[:-1]
 
     def training_step(  # type: ignore[override]
-        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
+        self, batch: dict[str, np.ndarray | torch.Tensor | int], batch_idx: int
     ) -> torch.Tensor | None:
         """
         Forward pass for training step.
@@ -151,11 +151,12 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
+        batch["batch_idx"] = batch_idx
         output = self.pipeline(batch)
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
-            self.log("train_loss", loss)
+            self.log("train_loss", loss, sync_dist=True)
         return loss
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
@@ -189,6 +190,9 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
+        batch["pl_module"] = self
+        batch["trainer"] = self.trainer
+        batch["batch_idx"] = batch_idx
         self.pipeline.validate(batch)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
