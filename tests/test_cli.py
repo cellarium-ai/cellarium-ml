@@ -392,6 +392,11 @@ CONFIGS = [
                         "key": "cell_type",
                         "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
                     },
+                    "y_categories": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                        "convert_fn": "cellarium.ml.utilities.data.get_categories",
+                    },
                 },
                 "batch_size": "50",
                 "shuffle": "true",
@@ -525,6 +530,10 @@ def test_checkpoint_loader(tmp_path: Path) -> None:
           attr: obs
           key: cell_type
           convert_fn: cellarium.ml.utilities.data.categories_to_codes
+        y_categories:
+          attr: obs
+          key: cell_type
+          convert_fn: cellarium.ml.utilities.data.get_categories
         var_names_g:
           attr: var_names
         total_mrna_umis_n:
@@ -605,6 +614,10 @@ def test_compute_var_names_g(tmp_path: Path) -> None:
           attr: obs
           key: cell_type
           convert_fn: cellarium.ml.utilities.data.categories_to_codes
+        y_categories:
+          attr: obs
+          key: cell_type
+          convert_fn: cellarium.ml.utilities.data.get_categories
         var_names_g:
           attr: var_names
         total_mrna_umis_n:
