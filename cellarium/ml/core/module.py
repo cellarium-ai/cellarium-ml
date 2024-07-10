@@ -161,7 +161,7 @@ class CellariumModule(pl.LightningModule):
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
-            self.log("train_loss", loss)
+            self.log("train_loss", loss, sync_dist=True)
 
         if not self.automatic_optimization:
             # Note, that running .step() is necessary for incrementing the global step even though no backpropagation

@@ -14,7 +14,6 @@ Table of Contents
    cli
    core
    data
-   distributed
    distributions
    lr_schedulers
    models
