@@ -70,20 +70,18 @@ class TDigest(CellariumModel):
         if trainer.world_size == 1:
             return
 
-        # save tdigests
-        dirpath = self._resolve_ckpt_dir(trainer)
-        filepath = os.path.join(dirpath, f"tdigests_{trainer.global_rank}.pt")
-        trainer.strategy.checkpoint_io.save_checkpoint(self.tdigests, filepath)  # type: ignore[arg-type]
-        # wait for all processes to save
-        dist.barrier()
+        tdigests_gather_list: list | None = (
+            [None for _ in range(trainer.world_size)] if trainer.global_rank == 0 else None
+        )
+        dist.gather_object(self.tdigests, tdigests_gather_list, dst=0)
 
         if trainer.global_rank != 0:
             return
 
         # merge tdigests
-        for i in range(1, trainer.world_size):  # iterate over processes
-            filepath = os.path.join(dirpath, f"tdigests_{i}.pt")
-            new_tdigests: list = trainer.strategy.checkpoint_io.load_checkpoint(filepath)  # type: ignore[assignment]
+        assert tdigests_gather_list is not None
+        for new_tdigests in tdigests_gather_list[1:]:  # iterate over processes
+            assert new_tdigests is not None
             for j in range(len(self.tdigests)):  # iterate over genes
                 self.tdigests[j].merge(new_tdigests[j])
 
