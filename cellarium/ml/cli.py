@@ -197,8 +197,9 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     Returns:
         The categories in the target variable.
     """
+    adata = data.dadc[0]
     field = data.batch_keys["y_categories"]
-    return field(data.dadc, 0)
+    return field(adata)
 
 
 def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDataDataModule) -> np.ndarray:
@@ -214,7 +215,8 @@ def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDat
     Returns:
         The variable names.
     """
-    batch = {key: field(data.dadc, 0) for key, field in data.batch_keys.items()}
+    adata = data.dadc[0]
+    batch = {key: field(adata) for key, field in data.batch_keys.items()}
     pipeline = CellariumPipeline(transforms)
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
