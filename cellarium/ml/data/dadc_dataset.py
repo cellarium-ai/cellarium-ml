@@ -12,7 +12,8 @@ from boltons.iterutils import chunked_iter
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
-from cellarium.ml.utilities.data import AnnDataField, get_rank_and_num_replicas, get_worker_info
+from cellarium.ml.utilities.data import AnnDataField
+from cellarium.ml.utilities.distributed import get_rank_and_num_replicas, get_worker_info
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
