@@ -32,6 +32,7 @@ Table of Contents
    :caption: Tutorials
 
    tutorials/mup_mlp
+   tutorials/geneformer_demo
 
 Indices and tables
 ==================
