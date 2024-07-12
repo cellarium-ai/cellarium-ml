@@ -757,7 +757,6 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
             loss_dict[f"val_loss_prefix_{prefix_len + 1}"] = loss
         pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
 
-    @torch.inference_mode()
     def predict(
         self,
         prompt_name_ns: np.ndarray | None,
