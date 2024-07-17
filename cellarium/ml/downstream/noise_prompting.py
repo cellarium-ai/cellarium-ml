@@ -34,6 +34,7 @@ def gpt_predict(
     layer: str,
     key_added: str,
     summarize: str = 'mean',
+    query_total_umis: int = 10_000,
 ) -> anndata.AnnData:
     """
     Use the pipeline to predict the expression of a subset of genes in a single cell.
@@ -45,6 +46,7 @@ def gpt_predict(
         layer: layer in adata.layers to use
         key_added: key to add to adata.layers
         summarize: how to summarize the probability density predicted by CellariumGPT
+        query_total_umis: target UMI count for the query
 
     Returns:
         AnnData object with predicted expression in adata.layers[key_added]
@@ -63,7 +65,7 @@ def gpt_predict(
         batch["prompt_total_mrna_umis_n"] = batch["x_ng"].sum(-1).to(device)
         batch["prompt_measured_genes_mask_ns"] = torch.ones_like(batch["prompt_value_ns"], dtype=bool)
         batch["query_name_nq"] = batch["prompt_name_ns"]
-        batch["query_total_mrna_umis_n"] = torch.ones_like(batch["prompt_total_mrna_umis_n"]) * 10_000
+        batch["query_total_mrna_umis_n"] = torch.ones_like(batch["prompt_total_mrna_umis_n"]) * query_total_umis
 
         out = pipeline.predict(batch)
         logits_ngm = out["logits_nqm"]
@@ -1035,3 +1037,62 @@ def compute_jacobian(
         columns=adata.var[var_key_gene_name][adata.var[var_key_include_genes]],
     )
     return jacobian_df
+
+
+def compute_variance_explained(adata, factor_key: str, loadings_key: str, i: int, layer: str) -> tuple[float, float]:
+    """
+    Compute the variance explained by the ith factor, where the factors are 
+    defined in adata.varm[factor_key]
+
+    Args:
+        adata: Anndata object
+        factor_key: Key in adata.varm containing the factors
+        loadings_key: Key in adata.obsm containing the loadings
+        i: Index of the factor
+        layer: Layer in adata containing the data to be explained
+
+    Returns:
+        (Variance explained by the ith factor, missing variance explained when you exclude the ith factor)
+    """
+    loadings = adata.obsm[loadings_key]
+
+    # all but i
+    loadings_with_i_zeroed = loadings.copy()
+    loadings_with_i_zeroed[:, i] = 0
+    reconstructed_matrix = loadings @ adata.varm[factor_key].T
+    reconstructed_matrix_with_i_zeroed = loadings_with_i_zeroed @ adata.varm[factor_key].T
+    explained_variance = explained_variance_score(adata.layers[layer], reconstructed_matrix)
+    explained_variance_with_i_zeroed = explained_variance_score(adata.layers[layer], reconstructed_matrix_with_i_zeroed)
+    missing_variance = explained_variance - explained_variance_with_i_zeroed
+
+    # just i
+    loadings_with_all_but_i_zeroed = loadings.copy()
+    loadings_with_all_but_i_zeroed[:, [j for j in range(loadings.shape[1]) if j != i]] = 0
+    reconstructed_matrix = loadings_with_all_but_i_zeroed @ adata.varm[factor_key].T
+    explained_variance = explained_variance_score(adata.layers[layer], reconstructed_matrix)
+
+    return explained_variance, missing_variance
+
+
+def compute_fractional_variance_explained(adata, factor_key: str, loadings_key: str, layer: str) -> tuple[list[float], list[float]]:
+    """
+    Compute the fractional variance explained by each factor.
+
+    Args:
+        adata: Anndata object
+        factor_key: Key in adata.varm containing the factors
+        loadings_key: Key in adata.obsm containing the loadings
+        layer: Layer in adata containing the data to be explained
+
+    Returns:
+        (List of variance explained by each factor, list of missing variance explained when you exclude each factor)
+    
+    """
+    variance_explained_score = []
+    missing_variance_score = []
+    for i in range(adata.obsm[loadings_key].shape[1]):
+        variance_explained, missing_variance = compute_variance_explained(adata, factor_key=factor_key, loadings_key=loadings_key, i=i, layer=layer)
+        variance_explained_score.append(variance_explained)
+        missing_variance_score.append(missing_variance)
+        print('.', end='')
+    return variance_explained_score, missing_variance_score
