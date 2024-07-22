@@ -13,6 +13,7 @@ from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerC
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.core import copy_module
+from cellarium.ml.transforms import before_batch_transfer, after_batch_transfer
 
 
 class CellariumModule(pl.LightningModule):
@@ -120,6 +121,7 @@ class CellariumModule(pl.LightningModule):
 
         return self.pipeline[:-1]
 
+    @after_batch_transfer
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
@@ -138,6 +140,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
+        # `after_batch_transfer` decorator limits the transforms to those not wrapped by `before_to_device()`
         output = self.pipeline(batch)
         loss = output.get("loss")
         if loss is not None:
@@ -227,3 +230,13 @@ class CellariumModule(pl.LightningModule):
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
             on_batch_end(self.trainer)
+
+    @before_batch_transfer
+    def on_before_batch_transfer(self, batch: Any, batch_idx: int) -> None:
+        """
+        Applies transforms with `before_batch_transfer=True` to the batch before data is moved to device.
+        """
+        # `before_batch_transfer` decorator limits the pipeline to transforms wrapped by `before_to_device()`
+        # and does not apply the model
+        print('batch:', batch)
+        return self.pipeline(batch)

@@ -41,36 +41,27 @@ class CellariumPipeline(torch.nn.ModuleList):
                 # in case module is a CellariumModule, e.g. PCA checkpoint is used as a transform
                 batch |= module(batch)
             else:
-                # get the module input keys
-                ann = module.forward.__annotations__
-                input_keys = {key for key in ann if key != "return" and key in batch}
-                # allow all keys to be passed to the module
-                if "kwargs" in ann:
-                    input_keys |= batch.keys()
-                batch |= module(**{key: batch[key] for key in input_keys})
+                batch |= self._call_module_on_batch(module, batch)
 
+        return batch
+    
+    def _call_module_on_batch(self, module, batch):
+        # get the module input keys
+        ann = module.forward.__annotations__
+        input_keys = {key for key in ann if key != "return" and key in batch}
+        # allow all keys to be passed to the module
+        if "kwargs" in ann:
+            input_keys |= batch.keys()
+        return module(**{key: batch[key] for key in input_keys})
+    
+    def transform(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
+        for module in self[:-1]:
+            batch |= self._call_module_on_batch(module, batch)
         return batch
 
     def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         model = self[-1]
         if not isinstance(model, PredictMixin):
             raise TypeError(f"The last module in the pipeline must be an instance of {PredictMixin}. Got {model}")
-
-        for module in self[:-1]:
-            # get the module input keys
-            ann = module.forward.__annotations__
-            input_keys = {key for key in ann if key != "return" and key in batch}
-            # allow all keys to be passed to the module
-            if "kwargs" in ann:
-                input_keys |= batch.keys()
-            batch |= module(**{key: batch[key] for key in input_keys})
-
-        # get the model predict input keys
-        ann = model.predict.__annotations__
-        input_keys = {key for key in ann if key != "return" and key in batch}
-        # allow all keys to be passed to the predict method
-        if "kwargs" in ann:
-            input_keys |= batch.keys()
-        batch |= model.predict(**{key: batch[key] for key in input_keys})
-
+        batch |= self._call_module_on_batch(model.predict, self.transform(batch))
         return batch
