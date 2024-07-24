@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import os
-from pathlib import Path
 from typing import Any
 
 import crick
@@ -91,25 +89,6 @@ class TDigest(CellariumModel):
         Median of the data.
         """
         return torch.as_tensor([tdigest.quantile(0.5) for tdigest in self.tdigests])
-
-    @staticmethod
-    def _resolve_ckpt_dir(trainer: pl.Trainer) -> Path | str:
-        if len(trainer.loggers) > 0:
-            if trainer.loggers[0].save_dir is not None:
-                save_dir = trainer.loggers[0].save_dir
-            else:
-                save_dir = trainer.default_root_dir
-            name = trainer.loggers[0].name
-            version = trainer.loggers[0].version
-            version = version if isinstance(version, str) else f"version_{version}"
-            ckpt_path = os.path.join(save_dir, str(name), version, "checkpoints")
-        else:
-            # if no loggers, use default_root_dir
-            ckpt_path = os.path.join(trainer.default_root_dir, "checkpoints")
-
-        os.makedirs(ckpt_path, exist_ok=True)
-
-        return ckpt_path
 
     def get_extra_state(self) -> dict[str, Any]:
         return {"tdigests": self.tdigests}
