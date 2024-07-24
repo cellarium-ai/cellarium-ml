@@ -25,19 +25,22 @@ def get_pretrained_model_as_pipeline(
     device: str = "cuda",
 ) -> CellariumPipeline:
 
-    # download the trained model
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_file = os.path.join(tmpdir, 'model.ckpt')
+    if trained_model.startswith("gs://"):
+        # download the trained model
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_file = os.path.join(tmpdir, 'model.ckpt')
 
-        client = storage.Client()
-        bucket_name = trained_model.split("/")[2]
-        blob_name = "/".join(trained_model.split("/")[3:])
-        bucket = client.get_bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        blob.download_to_filename(tmp_file)
+            client = storage.Client()
+            bucket_name = trained_model.split("/")[2]
+            blob_name = "/".join(trained_model.split("/")[3:])
+            bucket = client.get_bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            blob.download_to_filename(tmp_file)
 
-        # load the model
-        model = CellariumModule.load_from_checkpoint(tmp_file).model
+            # load the model
+            model = CellariumModule.load_from_checkpoint(tmp_file).model
+    else:
+        model = CellariumModule.load_from_checkpoint(trained_model).model
 
     # insert the trained model params
     model.to(device)
