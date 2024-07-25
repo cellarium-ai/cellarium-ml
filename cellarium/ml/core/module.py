@@ -238,5 +238,4 @@ class CellariumModule(pl.LightningModule):
         """
         # `before_batch_transfer` decorator limits the pipeline to transforms wrapped by `before_to_device()`
         # and does not apply the model
-        print('batch:', batch)
         return self.pipeline(batch)
