@@ -144,7 +144,7 @@ def register_model(model: Callable[[ArgsType], None]):
     return model
 
 
-CellariumModuleLoadFromCheckpoint = class_from_function(CellariumModule.load_from_checkpoint, CellariumModule)
+CellariumModuleLoadFromCheckpoint = class_from_function(CellariumModule.load_from_checkpoint, CellariumModule)  # type: ignore[arg-type]
 
 
 @dataclass

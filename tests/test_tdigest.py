@@ -149,7 +149,7 @@ def test_load_from_checkpoint_multi_device():
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: TDigest = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model: TDigest = CellariumModule.load_from_checkpoint(ckpt_path).model  # type: ignore[operator]
     # assert
     np.testing.assert_allclose(model.median_g, loaded_model.median_g)
 

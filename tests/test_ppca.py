@@ -180,7 +180,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: ProbabilisticPCA = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model: ProbabilisticPCA = CellariumModule.load_from_checkpoint(ckpt_path).model  # type: ignore[operator]
     # assert
     np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())
     np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())  # type: ignore[attr-defined]

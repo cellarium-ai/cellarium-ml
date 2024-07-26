@@ -36,7 +36,7 @@ def test_datamodule(tmp_path: Path, batch_size: int | None) -> None:
     kwargs = {"dadc": adata}
     if batch_size is not None:
         kwargs["batch_size"] = batch_size
-    loaded_datamodule = CellariumAnnDataDataModule.load_from_checkpoint(ckpt_path, **kwargs)
+    loaded_datamodule = CellariumAnnDataDataModule.load_from_checkpoint(ckpt_path, **kwargs)  # type: ignore[operator]
 
     assert loaded_datamodule.batch_keys == datamodule.batch_keys
     assert loaded_datamodule.batch_size == batch_size or datamodule.batch_size

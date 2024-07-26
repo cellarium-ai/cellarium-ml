@@ -55,7 +55,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: Geneformer = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model: Geneformer = CellariumModule.load_from_checkpoint(ckpt_path).model  # type: ignore[operator]
     # assert
     assert np.array_equal(model.var_names_g, loaded_model.var_names_g)
     np.testing.assert_allclose(model.feature_ids, loaded_model.feature_ids)
