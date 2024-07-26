@@ -10,6 +10,7 @@ This module contains helper functions for data loading and processing.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import Any
 
 import numpy as np
@@ -56,7 +57,7 @@ class AnnDataField:
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
     def __call__(self, adata: AnnData) -> np.ndarray:
-        value = getattr(adata, self.attr)
+        value = attrgetter(self.attr)(adata)
         if self.key is not None:
             value = value[self.key]
 
