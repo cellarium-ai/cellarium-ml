@@ -87,8 +87,8 @@ def test_transform_integration(tmp_path: Path, filter_before_transfer: bool) -> 
     var_name_list = ["ENSG00000078808", "ENSG00000272106", "ENSG00000162585"]
     filter_transform = Filter(var_name_list)
     if filter_before_transfer:
-        before_transforms = [filter_transform]
-        after_transforms = [Log1p()]
+        before_transforms: list[torch.nn.Module] = [filter_transform]
+        after_transforms: list[torch.nn.Module] = [Log1p()]
     else:
         before_transforms = []
         after_transforms = [filter_transform, Log1p()]
@@ -113,7 +113,7 @@ def test_transform_integration(tmp_path: Path, filter_before_transfer: bool) -> 
     assert expected_transformed_data.shape == (batch_size, len(var_name_list))
 
     # CellariumPipeline.transform()
-    transformed_data = module.pipeline.transform({"x_ng": torch.tensor(x_ng.todense()), "var_names_g": var_names_g})[
+    transformed_data = module.pipeline.transform({"x_ng": torch.tensor(x_ng.todense()), "var_names_g": var_names_g})[  # type: ignore[union-attr]
         "x_ng"
     ]
     print(transformed_data)

@@ -454,7 +454,9 @@ CONFIGS = [
 
 
 @pytest.mark.parametrize(
-    "config", CONFIGS, ids=[config["model_name"] + "-" + config["subcommand"] for config in CONFIGS]
+    "config",
+    CONFIGS,
+    ids=[config["model_name"] + "-" + config["subcommand"] for config in CONFIGS],  # type: ignore[operator]
 )
 def test_cpu_multi_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":

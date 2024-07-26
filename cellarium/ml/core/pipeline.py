@@ -34,21 +34,16 @@ class CellariumPipeline(torch.nn.Module):
             Modules to be executed sequentially.
     """
 
-    def __init__(self, modules: dict[str, list[torch.nn.Module] | torch.nn.Module]) -> None:
-        for key in modules.keys():
-            if key not in ["before_batch_transfer_transforms", "after_batch_transfer_transforms", "model"]:
-                raise KeyError(
-                    f"Invalid key in modules: {key}. Must be in "
-                    "['before_batch_transfer_transforms', 'after_batch_transfer_transforms', 'model']"
-                )
+    def __init__(
+        self,
+        before_batch_transfer_transforms: torch.nn.ModuleList | list[torch.nn.Module] = [],
+        after_batch_transfer_transforms: torch.nn.ModuleList | list[torch.nn.Module] = [],
+        model: CellariumModel | None = None,
+    ) -> None:
         super().__init__()
-        self._before_transfer_module_list: torch.nn.ModuleList = torch.nn.ModuleList(
-            modules.get("before_batch_transfer_transforms", [])
-        )
-        self._after_transfer_module_list: torch.nn.ModuleList = torch.nn.ModuleList(
-            modules.get("after_batch_transfer_transforms", [])
-        )
-        self._model: CellariumModel | None = modules.get("model", None)
+        self._before_transfer_module_list = torch.nn.ModuleList(before_batch_transfer_transforms)
+        self._after_transfer_module_list = torch.nn.ModuleList(after_batch_transfer_transforms)
+        self._model: CellariumModel | None = model
         if (self._model is not None) and (not isinstance(self._model, CellariumModel)):
             raise TypeError(
                 f"The CellariumPipeline 'model' must be an instance of {CellariumModel} (if not None). "
@@ -66,12 +61,12 @@ class CellariumPipeline(torch.nn.Module):
         return self._after_transfer_module_list
 
     @property
-    def model(self) -> CellariumModel:
+    def model(self) -> CellariumModel | None:
         """The model"""
         return self._model
 
-    def _get_model_as_list(self) -> list[CellariumModel]:
-        return [self.model] if (self.model is not None) else []
+    def _get_model_as_module_list(self) -> torch.nn.ModuleList:
+        return torch.nn.ModuleList([self.model]) if (self.model is not None) else torch.nn.ModuleList([])
 
     def pipe(
         self,
@@ -102,7 +97,7 @@ class CellariumPipeline(torch.nn.Module):
             case "after_transfer":
                 module_list = self.after_transfer_transforms
             case "model":
-                module_list = self._get_model_as_list()
+                module_list = self._get_model_as_module_list()
             case _:
                 raise ValueError(
                     f"Invalid module_key: {module_key}. Must be in ['before_transfer', 'after_transfer', 'model']"
@@ -121,7 +116,7 @@ class CellariumPipeline(torch.nn.Module):
         """
         batch = self.transform(batch)
 
-        for module in self._get_model_as_list():
+        for module in self._get_model_as_module_list():
             batch |= call_func_with_batch(getattr(module, method), batch)
 
         return batch
@@ -136,7 +131,7 @@ class CellariumPipeline(torch.nn.Module):
             for module in module_list:
                 if hasattr(module, "device"):
                     original_device = module.device
-                    module.to(batch["x_ng"].device)
+                    module.to(batch["x_ng"].device)  # type: ignore[union-attr]
                 batch |= call_func_with_batch(module.forward, batch)
                 if hasattr(module, "device"):
                     module.to(original_device)
@@ -149,9 +144,9 @@ class CellariumPipeline(torch.nn.Module):
     def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         if not isinstance(self.model, PredictMixin):
             raise TypeError(f"The CellariumPipeline 'model' must be an instance of {PredictMixin}. Got {self.model}")
-        return self._pipeline(batch=batch, method="predict")
+        return self._pipeline(batch=batch, method="predict")  # type: ignore[unreachable]
 
     def validate(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
         if not isinstance(self.model, ValidateMixin):
             raise TypeError(f"The CellariumPipeline 'model' must be an instance of {ValidateMixin}. Got {self.model}")
-        return self._pipeline(batch=batch, method="validate")
+        return self._pipeline(batch=batch, method="validate")  # type: ignore[unreachable]
