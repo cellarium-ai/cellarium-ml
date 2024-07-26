@@ -28,11 +28,13 @@ def log_normalize(x_ng: torch.Tensor):
     std_g = y_ng.std(dim=0)
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
     transform = CellariumPipeline(
-        [
-            NormalizeTotal(target_count),
-            Log1p(),
-            ZScore(mean_g, std_g, var_names_g),
-        ]
+        {
+            "after_batch_transfer_transforms": [
+                NormalizeTotal(target_count),
+                Log1p(),
+                ZScore(mean_g, std_g, var_names_g),
+            ]
+        }
     )
     return transform
 

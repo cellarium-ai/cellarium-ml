@@ -5,9 +5,11 @@ from pathlib import Path
 
 import lightning.pytorch as pl
 import pytest
+import torch
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection
+from cellarium.ml.transforms import Filter, Log1p
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField, densify
 from tests.common import BoringModel
@@ -65,3 +67,69 @@ def test_train_val_split(
     n_train_actual, n_val_actual = train_val_split(n_samples, train_size, val_size)
     assert n_train_actual == n_train_expected
     assert n_val_actual == n_val_expected
+
+
+@pytest.mark.parametrize("filter_before_transfer", [False, True])
+def test_transform_integration(tmp_path: Path, filter_before_transfer: bool) -> None:
+    batch_size = 100
+    filename = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad"
+    datamodule = CellariumAnnDataDataModule(
+        DistributedAnnDataCollection(
+            filenames=filename,
+            shard_size=100,
+        ),
+        batch_size=batch_size,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=densify),
+            "var_names_g": AnnDataField(attr="var_names"),
+        },
+    )
+    var_name_list = ["ENSG00000078808", "ENSG00000272106", "ENSG00000162585"]
+    filter_transform = Filter(var_name_list)
+    if filter_before_transfer:
+        before_transforms = [filter_transform]
+        after_transforms = [Log1p()]
+    else:
+        before_transforms = []
+        after_transforms = [filter_transform, Log1p()]
+    module = CellariumModule(
+        before_batch_transfer_transforms=before_transforms,
+        after_batch_transfer_transforms=after_transforms,
+        model=BoringModel(),
+    )
+    module.configure_model()
+
+    # ensure the transformed data is as expected, rather manually
+    adata = datamodule.dadc.adatas[0].adata
+    print(adata)
+    x_ng = adata.X
+    var_names_g = adata.var_names
+    out = {"x_ng": torch.tensor(x_ng.todense()), "var_names_g": var_names_g}
+    for t in before_transforms + after_transforms:
+        ann = t.forward.__annotations__
+        out |= t(**{k: v for k, v in out.items() if k in ann})
+    expected_transformed_data = out["x_ng"]
+    print(expected_transformed_data)
+    assert expected_transformed_data.shape == (batch_size, len(var_name_list))
+
+    # CellariumPipeline.transform()
+    transformed_data = module.pipeline.transform({"x_ng": torch.tensor(x_ng.todense()), "var_names_g": var_names_g})[
+        "x_ng"
+    ]
+    print(transformed_data)
+    torch.testing.assert_allclose(transformed_data, expected_transformed_data)
+
+    # during training, when hooks are used to compute the transforms
+    transformed_data_during_training = module.on_after_batch_transfer(
+        batch=module.on_before_batch_transfer(
+            batch={"x_ng": torch.tensor(x_ng.todense()), "var_names_g": var_names_g},
+            batch_idx=0,
+        ),
+        batch_idx=0,
+    )["x_ng"]
+    print(transformed_data_during_training)
+    torch.testing.assert_allclose(transformed_data_during_training, expected_transformed_data)
+
+    # ensure training runs
+    trainer = pl.Trainer(accelerator="cpu", devices=1, max_steps=1, default_root_dir=tmp_path)
+    trainer.fit(module, datamodule)

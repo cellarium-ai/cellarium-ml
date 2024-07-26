@@ -85,7 +85,7 @@ def test_tdigest_multi_device(
 
     # fit
     model = TDigest(var_names_g=dadc.var_names)
-    module = CellariumModule(transforms=transforms, model=model)
+    module = CellariumModule(after_batch_transfer_transforms=transforms, model=model)
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",

@@ -148,7 +148,7 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "transforms": [
+                "after_batch_transfer_transforms": [
                     {
                         "class_path": "cellarium.ml.transforms.NormalizeTotal",
                         "init_args": {"target_count": "10_000"},
@@ -192,7 +192,7 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "transforms": [
+                "after_batch_transfer_transforms": [
                     {
                         "class_path": "cellarium.ml.transforms.NormalizeTotal",
                         "init_args": {"target_count": "10_000"},
@@ -239,7 +239,7 @@ CONFIGS = [
         "subcommand": "predict",
         "predict": {
             "model": {
-                "transforms": [
+                "after_batch_transfer_transforms": [
                     {
                         "class_path": "cellarium.ml.transforms.NormalizeTotal",
                         "init_args": {"target_count": "10_000"},
@@ -292,7 +292,73 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "transforms": [
+                "before_batch_transfer_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "model": "cellarium.ml.models.LogisticRegression",
+                "optim_fn": "torch.optim.Adam",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["cell_type"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {
+                        "attr": "var_names",
+                    },
+                    "y_n": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                    "y_categories": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                        "convert_fn": "cellarium.ml.utilities.data.get_categories",
+                    },
+                },
+                "batch_size": "50",
+                "shuffle": "true",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "4",
+            },
+        },
+    },
+    {
+        "model_name": "logistic_regression",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "after_batch_transfer_transforms": [
                     {
                         "class_path": "cellarium.ml.transforms.Filter",
                         "init_args": {
@@ -387,7 +453,9 @@ CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize("config", CONFIGS)
+@pytest.mark.parametrize(
+    "config", CONFIGS, ids=[config["model_name"] + "-" + config["subcommand"] for config in CONFIGS]
+)
 def test_cpu_multi_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
@@ -397,7 +465,7 @@ def test_cpu_multi_device(config: dict[str, Any]):
 def test_checkpoint_loader(tmp_path: Path) -> None:
     onepass_config = f"""
     model:
-      transforms:
+      after_batch_transfer_transforms:
         - class_path: cellarium.ml.transforms.NormalizeTotal
           init_args:
             target_count: 10_000
@@ -434,7 +502,7 @@ def test_checkpoint_loader(tmp_path: Path) -> None:
 
     lr_config = f"""
     model:
-      transforms:
+      after_batch_transfer_transforms:
         - class_path: cellarium.ml.transforms.NormalizeTotal
           init_args:
             target_count: 10_000
@@ -498,7 +566,7 @@ def test_checkpoint_loader(tmp_path: Path) -> None:
 def test_compute_var_names_g(tmp_path: Path) -> None:
     ipca_config = f"""
     model:
-      transforms:
+      after_batch_transfer_transforms:
         - class_path: cellarium.ml.transforms.NormalizeTotal
           init_args:
             target_count: 10_000
@@ -536,7 +604,7 @@ def test_compute_var_names_g(tmp_path: Path) -> None:
 
     lr_config = f"""
     model:
-      transforms:
+      after_batch_transfer_transforms:
         - !CheckpointLoader
           file_path: {ckpt_path}
           attr: null

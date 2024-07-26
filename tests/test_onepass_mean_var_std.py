@@ -79,7 +79,7 @@ def test_onepass_mean_var_std_multi_device(
 
     # fit
     model = OnePassMeanVarStd(var_names_g=dadc.var_names, algorithm=algorithm)
-    module = CellariumModule(transforms=transforms, model=model)
+    module = CellariumModule(after_batch_transfer_transforms=transforms, model=model)
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
         barebones=True,

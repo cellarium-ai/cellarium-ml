@@ -4,11 +4,11 @@
 import numpy as np
 import torch
 
-from cellarium.ml.models import PredictMixin, ValidateMixin
+from cellarium.ml.models import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.core import call_func_with_batch
 
 
-class CellariumPipeline(torch.nn.ModuleList):
+class CellariumPipeline(torch.nn.Module):
     """
     A pipeline of modules. Modules are expected to return a dictionary. The input dictionary is sequentially passed to
     (piped through) each module and updated with its output dictionary.
@@ -19,13 +19,13 @@ class CellariumPipeline(torch.nn.ModuleList):
     Example:
 
         >>> from cellarium.ml import CellariumPipeline
-        >>> from cellarium.ml.transforms import NormalizeTotal, Log1p
+        >>> from cellarium.ml.transforms import Filter, NormalizeTotal, Log1p
         >>> from cellarium.ml.models import IncrementalPCA
-        >>> pipeline = CellariumPipeline([
-        ...     NormalizeTotal(),
-        ...     Log1p(),
-        ...     IncrementalPCA(var_names_g=[f"gene_{i}" for i in range(20)], n_components=10),
-        ... ])
+        >>> pipeline = CellariumPipeline({
+        ...     'before_batch_transfer_transforms': [Filter(filter_list=[f"gene_{i}" for i in range(20)])],
+        ...     'after_batch_transfer_transforms': [NormalizeTotal(), Log1p()],
+        ...     'model': IncrementalPCA(var_names_g=[f"gene_{i}" for i in range(20)], n_components=10),
+        ... })
         >>> batch = {"x_ng": x_ng, "total_mrna_umis_n": total_mrna_umis_n, "var_names_g": var_names_g}
         >>> output = pipeline(batch)  # or pipeline.predict(batch)
 
@@ -34,28 +34,124 @@ class CellariumPipeline(torch.nn.ModuleList):
             Modules to be executed sequentially.
     """
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
-        for module in self:
-            batch |= call_func_with_batch(module.forward, batch)
+    def __init__(self, modules: dict[str, list[torch.nn.Module] | torch.nn.Module]) -> None:
+        for key in modules.keys():
+            if key not in ["before_batch_transfer_transforms", "after_batch_transfer_transforms", "model"]:
+                raise KeyError(
+                    f"Invalid key in modules: {key}. Must be in "
+                    "['before_batch_transfer_transforms', 'after_batch_transfer_transforms', 'model']"
+                )
+        super().__init__()
+        self._before_transfer_module_list: torch.nn.ModuleList = torch.nn.ModuleList(
+            modules.get("before_batch_transfer_transforms", [])
+        )
+        self._after_transfer_module_list: torch.nn.ModuleList = torch.nn.ModuleList(
+            modules.get("after_batch_transfer_transforms", [])
+        )
+        self._model: CellariumModel | None = modules.get("model", None)
+        if (self._model is not None) and (not isinstance(self._model, CellariumModel)):
+            raise TypeError(
+                f"The CellariumPipeline 'model' must be an instance of {CellariumModel} (if not None). "
+                f"Got {self._model}"
+            )
+
+    @property
+    def before_transfer_transforms(self) -> torch.nn.ModuleList:
+        """The transforms pipeline that happens before transfer to device"""
+        return self._before_transfer_module_list
+
+    @property
+    def after_transfer_transforms(self) -> torch.nn.ModuleList:
+        """The transforms pipeline that happens after transfer to device"""
+        return self._after_transfer_module_list
+
+    @property
+    def model(self) -> CellariumModel:
+        """The model"""
+        return self._model
+
+    def _get_model_as_list(self) -> list[CellariumModel]:
+        return [self.model] if (self.model is not None) else []
+
+    def pipe(
+        self,
+        batch: dict[str, np.ndarray | torch.Tensor],
+        module_key: str,
+        method: str = "forward",
+    ) -> dict[str, torch.Tensor | np.ndarray]:
+        """
+        Pipe a batch through (part of) the pipeline specified by module_key,
+        choosing which method to call on the modules.
+
+        Args:
+            batch:
+                The batch to pipe through the pipeline.
+            module_key:
+                The key of the module list to pipe the batch through.
+                Must be in ['before_transfer', 'after_transfer', 'model'].
+            method:
+                The method to call on the modules. Default is 'forward'.
+
+        Returns:
+            The batch after being piped through the pipeline (affected keys are updated).
+        """
+
+        match module_key:
+            case "before_transfer":
+                module_list = self.before_transfer_transforms
+            case "after_transfer":
+                module_list = self.after_transfer_transforms
+            case "model":
+                module_list = self._get_model_as_list()
+            case _:
+                raise ValueError(
+                    f"Invalid module_key: {module_key}. Must be in ['before_transfer', 'after_transfer', 'model']"
+                )
+
+        for module in module_list:
+            batch |= call_func_with_batch(getattr(module, method), batch)
 
         return batch
+
+    def _pipeline(
+        self, batch: dict[str, np.ndarray | torch.Tensor], method: str
+    ) -> dict[str, torch.Tensor | np.ndarray]:
+        """
+        Called internally by forward, predict, and validate, this method pipes the batch through the pipeline.
+        """
+        batch = self.transform(batch)
+
+        for module in self._get_model_as_list():
+            batch |= call_func_with_batch(getattr(module, method), batch)
+
+        return batch
+
+    def transform(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
+        """
+        Pipes the batch through the transforms, putting each transform on the device where the batch is located.
+        This may be necessary, since during training, the _before_transfer_module_list will often be on CPU
+        while the rest will be on GPU.
+        """
+        for module_list in [self.before_transfer_transforms, self.after_transfer_transforms]:
+            for module in module_list:
+                if hasattr(module, "device"):
+                    original_device = module.device
+                    module.to(batch["x_ng"].device)
+                batch |= call_func_with_batch(module.forward, batch)
+                if hasattr(module, "device"):
+                    module.to(original_device)
+
+        return batch
+
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
+        return self._pipeline(batch=batch, method="forward")
 
     def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
-
-        model = self[-1]
-        if not isinstance(model, PredictMixin):
-            raise TypeError(f"The last module in the pipeline must be an instance of {PredictMixin}. Got {model}")
-        batch |= call_func_with_batch(model.predict, batch)
-
-        return batch
+        if not isinstance(self.model, PredictMixin):
+            raise TypeError(f"The CellariumPipeline 'model' must be an instance of {PredictMixin}. Got {self.model}")
+        return self._pipeline(batch=batch, method="predict")
 
     def validate(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
-
-        model = self[-1]
-        if not isinstance(model, ValidateMixin):
-            raise TypeError(f"The last module in the pipeline must be an instance of {ValidateMixin}. Got {model}")
-        call_func_with_batch(model.validate, batch)
+        if not isinstance(self.model, ValidateMixin):
+            raise TypeError(f"The CellariumPipeline 'model' must be an instance of {ValidateMixin}. Got {self.model}")
+        return self._pipeline(batch=batch, method="validate")

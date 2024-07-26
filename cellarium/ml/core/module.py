@@ -19,7 +19,10 @@ class CellariumModule(pl.LightningModule):
     """
     ``CellariumModule`` organizes code into following sections:
 
-        * :attr:`transforms`: A list of transforms to apply to the input data before passing it to the model.
+        * :attr:`before_batch_transfer_transforms`: A list of transforms to apply to the input data
+          before it gets transferred to the device.
+        * :attr:`after_batch_transfer_transforms`: A list of transforms to apply to the data after
+          before_batch_transfer_transforms and applied, and before passing it to the model.
         * :attr:`model`: A :class:`cellarium.ml.models.CellariumModel` to train with
           :meth:`training_step` method and epoch end hooks.
         * :attr:`optim_fn` and :attr:`optim_kwargs`: A Pytorch optimizer class and its keyword arguments.
@@ -27,8 +30,13 @@ class CellariumModule(pl.LightningModule):
           keyword arguments.
 
     Args:
-        transforms:
+        before_batch_transfer_transforms:
             A list of transforms to apply to the input data before passing it to the model.
+            These transforms are applied before the data is moved to the device.
+            If ``None``, no transforms are applied.
+        after_batch_transfer_transforms:
+            A list of transforms to apply to the data after before_batch_transfer_transforms
+            are applied, and before passing it to the model.
             If ``None``, no transforms are applied.
         model:
             A :class:`cellarium.ml.models.CellariumModel` to train.
@@ -49,7 +57,8 @@ class CellariumModule(pl.LightningModule):
 
     def __init__(
         self,
-        transforms: Iterable[torch.nn.Module] | None = None,
+        before_batch_transfer_transforms: Iterable[torch.nn.Module] | None = None,
+        after_batch_transfer_transforms: Iterable[torch.nn.Module] | None = None,
         model: CellariumModel | None = None,
         optim_fn: type[torch.optim.Optimizer] | None = None,
         optim_kwargs: dict[str, Any] | None = None,
@@ -100,24 +109,30 @@ class CellariumModule(pl.LightningModule):
         model, self.hparams["model"] = copy_module(
             self.hparams["model"], self_device=self.device, copy_device=torch.device("meta")
         )
-        if self.hparams["transforms"]:
-            for transform in self.hparams["transforms"]:
-                if isinstance(transform, CellariumModule):
-                    transform.freeze()
 
-            transforms, self.hparams["transforms"] = zip(
-                *(
-                    copy_module(transform, self_device=self.device, copy_device=torch.device("meta"))
-                    for transform in self.hparams["transforms"]
+        pipeline_kwargs = {}
+        for transform_key in ["before_batch_transfer_transforms", "after_batch_transfer_transforms"]:
+            if self.hparams[transform_key]:
+                for transform in self.hparams[transform_key]:
+                    if isinstance(transform, CellariumModule):
+                        transform.freeze()
+
+                transforms, self.hparams[transform_key] = zip(
+                    *(
+                        copy_module(transform, self_device=self.device, copy_device=torch.device("meta"))
+                        for transform in self.hparams[transform_key]
+                    )
                 )
-            )
-        else:
-            transforms = None
+            else:
+                transforms = None
+            pipeline_kwargs[transform_key] = transforms
 
-        self.pipeline = CellariumPipeline(transforms)
         if model is None:
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
-        self.pipeline.append(model)
+        else:
+            pipeline_kwargs["model"] = model
+
+        self.pipeline = CellariumPipeline(modules=pipeline_kwargs)
 
         if not self.hparams["is_initialized"]:
             model.reset_parameters()
@@ -129,7 +144,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[-1]
+        return self.pipeline.model
 
     @property
     def transforms(self) -> CellariumPipeline:
@@ -137,7 +152,12 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[:-1]
+        return CellariumPipeline(
+            {
+                "before_batch_transfer_transforms": self.pipeline.before_transfer_transforms,
+                "after_batch_transfer_transforms": self.pipeline.after_transfer_transforms,
+            }
+        )
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
@@ -147,7 +167,8 @@ class CellariumModule(pl.LightningModule):
 
         Args:
             batch:
-                A dictionary containing the batch data.
+                A dictionary containing the batch data. Transforms have already been applied using the
+                :meth:`on_before_batch_transfer` and :meth:`on_after_batch_transfer` hooks.
             batch_idx:
                 The index of the batch.
 
@@ -157,7 +178,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        output = self.pipeline(batch)
+        output = self.pipeline.pipe(batch=batch, module_key="model", method="forward")
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
@@ -185,7 +206,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline.predict(batch)
+        return self.pipeline.pipe(batch=batch, module_key="model", method="predict")
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
         """
@@ -203,7 +224,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        self.pipeline.validate(batch)
+        return self.pipeline.pipe(batch=batch, module_key="model", method="validate")
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
         """Configure optimizers for the model."""
@@ -272,3 +293,15 @@ class CellariumModule(pl.LightningModule):
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
             on_batch_end(self.trainer)
+
+    def on_before_batch_transfer(self, batch: Any, batch_idx: int) -> None:
+        """
+        Applies transforms to the batch before data is moved to device.
+        """
+        return self.pipeline.pipe(batch=batch, module_key="before_transfer", method="forward")
+
+    def on_after_batch_transfer(self, batch: Any, batch_idx: int) -> None:
+        """
+        Applies transforms to the batch after data is moved to device, but before model.forward().
+        """
+        return self.pipeline.pipe(batch=batch, module_key="after_transfer", method="forward")
