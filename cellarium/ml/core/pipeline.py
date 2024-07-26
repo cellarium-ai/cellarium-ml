@@ -21,13 +21,13 @@ class CellariumPipeline(torch.nn.Module):
         >>> from cellarium.ml import CellariumPipeline
         >>> from cellarium.ml.transforms import Filter, NormalizeTotal, Log1p
         >>> from cellarium.ml.models import IncrementalPCA
-        >>> pipeline = CellariumPipeline({
-        ...     'before_batch_transfer_transforms': [Filter(filter_list=[f"gene_{i}" for i in range(20)])],
-        ...     'after_batch_transfer_transforms': [NormalizeTotal(), Log1p()],
-        ...     'model': IncrementalPCA(var_names_g=[f"gene_{i}" for i in range(20)], n_components=10),
-        ... })
+        >>> pipeline = CellariumPipeline(
+        ...     before_batch_transfer_transforms=[Filter(filter_list=[f"gene_{i}" for i in range(20)])],
+        ...     after_batch_transfer_transforms=[NormalizeTotal(), Log1p()],
+        ...     model=IncrementalPCA(var_names_g=[f"gene_{i}" for i in range(20)], n_components=10),
+        ... )
         >>> batch = {"x_ng": x_ng, "total_mrna_umis_n": total_mrna_umis_n, "var_names_g": var_names_g}
-        >>> output = pipeline(batch)  # or pipeline.predict(batch)
+        >>> output = pipeline.forward(batch)  # or pipeline.predict(batch)
 
     Args:
         modules:
