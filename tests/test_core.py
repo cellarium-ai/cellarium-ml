@@ -130,6 +130,14 @@ def test_transform_integration(tmp_path: Path, filter_before_transfer: bool) -> 
     print(transformed_data_during_training)
     torch.testing.assert_allclose(transformed_data_during_training, expected_transformed_data)
 
+    # CellariumModule.forward()
+    with pytest.raises(AttributeError):
+        # BoringModel() has no predict method, which is what is called by module.forward
+        module.forward({"x_ng": torch.tensor(x_ng.todense()), "var_names_g": var_names_g})
+
+    # CellariumPipeline.forward()
+    module.pipeline.forward({"x_ng": torch.tensor(x_ng.todense()), "var_names_g": var_names_g})  # type: ignore[union-attr]
+
     # ensure training runs
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_steps=1, default_root_dir=tmp_path)
     trainer.fit(module, datamodule)
