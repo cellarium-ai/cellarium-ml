@@ -39,7 +39,7 @@ class FileLoader:
     .. code-block:: yaml
 
         model:
-          transforms:
+          before_batch_transfer_transforms:
             - class_path: cellarium.ml.transforms.Filter
               init_args:
                 filter_list:

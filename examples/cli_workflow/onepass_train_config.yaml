@@ -57,7 +57,7 @@ trainer:
   reload_dataloaders_every_n_epochs: 0
   default_root_dir: /tmp/test_examples/onepass
 model:
-  transforms:
+  after_batch_transfer_transforms:
     - class_path: cellarium.ml.transforms.NormalizeTotal
       init_args:
         target_count: 10_000
