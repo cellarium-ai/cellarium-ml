@@ -20,7 +20,53 @@ from cellarium.ml.utilities.testing import (
 )
 
 import pandas as pd
-from sklearn.cluster import KMeans
+
+
+# from sklearn.cluster import KMeans
+
+class KMeans:
+    def __init__(self, n_clusters, max_iter=300, tol=1e-4):
+        self.n_clusters = n_clusters
+        self.max_iter = max_iter
+        self.tol = tol
+        self.centroids = None
+
+    def initialize_centroids(self, X):
+        # KMeans++ initialization
+        indices = [torch.randint(0, X.size(0), (1,)).item()]
+        for _ in range(1, self.n_clusters):
+            dist_sq = torch.min(torch.cdist(X, X[indices]) ** 2, dim=1)[0]
+            probs = dist_sq / torch.sum(dist_sq)
+            cumulative_probs = torch.cumsum(probs, dim=0)
+            r = torch.rand(1).item()
+            next_index = torch.searchsorted(cumulative_probs, r).item()
+            indices.append(next_index)
+        self.centroids = X[indices]
+
+    def fit(self, X):
+
+        if self.centroids is None:
+            self.initialize_centroids(X)
+
+        for i in range(self.max_iter):
+            # Assignment Step: Assign each data point to the nearest centroid
+            distances = torch.cdist(X, self.centroids)
+            labels = torch.argmin(distances, dim=1)
+
+            # Update Step: Calculate new centroids
+            new_centroids = torch.stack([X[labels == k].mean(dim=0) for k in range(self.n_clusters)])
+
+            # Check for convergence
+            if torch.all(torch.abs(new_centroids - self.centroids) < self.tol):
+                break
+
+            self.centroids = new_centroids
+
+        self.labels_ = labels
+
+    def predict(self, X):
+        distances = torch.cdist(X, self.centroids)
+        return torch.argmin(distances, dim=1)
 
 
 def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -49,11 +95,21 @@ def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=
     local_neigh_dist = L_nearest_neigh.sum(1) / L
 
     D = D[local_neigh_dist < density_threshold, :]
-    D = pd.DataFrame(D.cpu().numpy())
+    # D = pd.DataFrame(D.cpu().numpy())
 
-    kmeans = KMeans(n_clusters=k, n_init=10, random_state=1)
-    kmeans.fit(D)
-    kmeans_cluster_labels = pd.Series(kmeans.labels_ + 1, index=D.index)
+    # kmeans = KMeans(n_clusters=k, n_init=10, random_state=1)
+    # kmeans.fit(D)
+    # kmeans_cluster_labels = pd.Series(kmeans.labels_+1, index=D.index)
+
+    D_mean = D.mean(0)
+    D_norm = D - D_mean
+
+    kmeans = KMeans(n_clusters=k)
+    kmeans.fit(D_norm)
+    kmeans_cluster_labels = kmeans.predict(D_norm)
+
+    D = pd.DataFrame(D.cpu().numpy())
+    kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
 
     median_D = D.groupby(kmeans_cluster_labels).median()
     median_D = torch.Tensor(median_D.values)
