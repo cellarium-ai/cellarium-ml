@@ -18,16 +18,16 @@ pipeline = get_pretrained_model_as_pipeline(device="cuda" if torch.cuda.is_avail
 
 # run this as a pipeline
 
-# files = glob.glob("/home/sfleming/cellarium-ml/notebooks/cell_selection/random_cells/*.h5ad")
-files = glob.glob("/home/sfleming/cellarium-ml/notebooks/cell_selection/hematopoiesis_means/*.h5ad")
-files = [f for f in files if ('noise_prompt' not in f)]
+glob_path = "/home/sfleming/cellarium-ml/notebooks/cell_selection/hematopoiesis_means_10k_genes/*.h5ad"
+files = glob.glob(glob_path)
+files = [f for f in files if ('jacobian' not in f)]
 files = [f for f in files if not os.path.exists(f[:-5] + suffix)]
 
 print('working on files:')
 print(files)
 
 if len(files) == 0:
-    raise ValueError('no files found at /home/sfleming/cellarium-ml/notebooks/cell_selection/hematopoiesis_means/*.h5ad')
+    raise ValueError(f'no files found at {glob_path}')
 
 for i, file in enumerate(files):
     print(f"Working on {file} ({i + 1}/{len(files)})")
@@ -36,22 +36,20 @@ for i, file in enumerate(files):
     means_in_celltype = adata.var[['mean']].copy()
     print("... harmonizing")
     adata_cell = harmonize_anndata_with_model(adata, pipeline)
-    adata_cell.var['gpt_include'] = False
     adata_cell.var['gpt_include'] = adata.var['gpt_include'].copy().astype(bool)
-    adata_cell.var.loc[pd.isnull(adata_cell.var['gpt_include']), 'gpt_include'] = False
-    adata_cell.var['gpt_include'] = adata_cell.var['gpt_include'].astype(bool)
+    adata_cell.var['gpt_include'] = adata_cell.var['gpt_include'].fillna(False)
     print(adata_cell.var['gpt_include'].value_counts(dropna=False))
     adata_cell.layers['count'] = adata_cell.X.copy()
-    adata_cell.var['mean'] = 0
-    adata_cell.var['mean'] = means_in_celltype['mean'].copy().astype(float)
-    adata_cell.var.loc[pd.isnull(adata_cell.var['mean']), 'mean'] = 0
-    adata_cell.var['mean'] = adata_cell.var['mean'].astype(float)
+    # adata_cell.var['mean'] = 0
+    # adata_cell.var['mean'] = means_in_celltype['mean'].copy().astype(float)
+    # adata_cell.var.loc[pd.isnull(adata_cell.var['mean']), 'mean'] = 0
+    # adata_cell.var['mean'] = adata_cell.var['mean'].astype(float)
 
-    # limit to at most 2500 genes with max mean expression
-    if adata_cell.var['gpt_include'].sum() > 2500:
-        keepers = adata_cell.var['mean'][adata_cell.var['gpt_include']].sort_values(ascending=False).index[:2500]
-        adata_cell.var['gpt_include'] = False
-        adata_cell.var.loc[keepers, 'gpt_include'] = True
+    # # limit to at most 2500 genes with max mean expression
+    # if adata_cell.var['gpt_include'].sum() > 2500:
+    #     keepers = adata_cell.var['mean'][adata_cell.var['gpt_include']].sort_values(ascending=False).index[:2500]
+    #     adata_cell.var['gpt_include'] = False
+    #     adata_cell.var.loc[keepers, 'gpt_include'] = True
     
     var_inclusion_key = 'gpt_include'
     print(f"... {adata_cell.var[var_inclusion_key].sum()} genes included")
