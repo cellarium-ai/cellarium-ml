@@ -80,8 +80,8 @@ class MultiHeadAttention(nn.Module):
         attn_backend: Literal["math", "flash", "mem_efficient"],
     ) -> None:
         super().__init__()
-        self.Wq = nn.Linear(d_model, d_model, bias=use_bias)
-        self.Wk = nn.Linear(d_model, d_model, bias=use_bias)
+        self.Wq = nn.Linear(d_model, d_model - n_heads, bias=use_bias)
+        self.Wk = nn.Linear(d_model, d_model - n_heads, bias=use_bias)
         self.Wv = nn.Linear(d_model, d_model, bias=use_bias)
         self.Wo = nn.Linear(d_model, d_model, bias=use_bias)
         self.n_heads = n_heads
@@ -138,6 +138,8 @@ class MultiHeadAttention(nn.Module):
         value_ncd = self.Wv(value_ncd)
         # d = k * h
         query_nhck = self.split_heads(query_ncd, n_heads)
+        if measured_genes_mask_nc is not None:
+            key_ncd[~measured_genes_mask_nc] = 0
         key_nhck = self.split_heads(key_ncd, n_heads)
         value_nhck = self.split_heads(value_ncd, n_heads)
 
@@ -148,7 +150,7 @@ class MultiHeadAttention(nn.Module):
             one_pad_nhc1 = torch.ones((n, n_heads, c, 1), device=device)
             query_nhck = torch.cat([query_nhck, one_pad_nhc1], dim=-1)
             measured_genes_pad_nc = torch.zeros((n, c), device=device)
-            measured_genes_pad_nc.masked_fill_(~measured_genes_mask_nc, -1e9)
+            measured_genes_pad_nc.masked_fill_(~measured_genes_mask_nc, torch.finfo(key_nhck.dtype).min)
             measured_genes_pad_nhc1 = measured_genes_pad_nc[:, None, :, None].expand(n, n_heads, c, 1)
             key_nhck = torch.cat([key_nhck, measured_genes_pad_nhc1], dim=-1)
 
@@ -226,7 +228,7 @@ class ValueEmbedding(nn.Module):
         value_embedding_ncd = self.dense(value_nc.unsqueeze(-1))  # _ncd
         if mask_nc.any():
             mask_embedding_d = self.Em(torch.tensor(0, device=device))
-            value_embedding_ncd[mask_nc] = mask_embedding_d
+            value_embedding_ncd[mask_nc] = mask_embedding_d.to(value_embedding_ncd.dtype)
         return value_embedding_ncd
 
 
