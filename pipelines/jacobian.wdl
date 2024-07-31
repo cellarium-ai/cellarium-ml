@@ -53,7 +53,37 @@ task compute_jacobian {
         import glob
         import time
         import os
-        
+
+        # pretrained model
+        pipeline = get_pretrained_model_as_pipeline(
+            trained_model="~{trained_model_ckpt}",
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+        print(pipeline)
+
+        adata = anndata.read_h5ad("~{cell_h5ad}")
+        print(adata)
+        adata.X = adata.layers["count"].copy()
+        print("... harmonizing")
+        adata_cell = harmonize_anndata_with_model(adata, pipeline)
+        adata_cell.layers["count"] = adata_cell.X.copy()
+        adata_cell.var['gpt_include'] = adata.var['gpt_include'].copy().astype(bool)
+        adata_cell.var['gpt_include'] = adata_cell.var['gpt_include'].fillna(False).infer_objects(copy=False)
+
+        print("... determining genes to include in computation")
+        if ~{if (use_default_genes) then "True" else "False"}:
+            adata_cell.var["jacobian_include"] = adata_cell.var["gpt_include"].copy()
+        else:
+            included_genes = set(pd.read_csv("~{genes_csv}", header=None, squeeze=True).values)
+            adata_cell.var["jacobian_include"] = [g in included_genes for g in adata_cell.var["gene_name"]]
+
+        adata_cell.var["jacobian_include"] = adata_cell.var["jacobian_include"].fillna(False).infer_objects(copy=False)
+        var_inclusion_key = "jacobian_include"
+        print(adata_cell.var[var_inclusion_key].value_counts(dropna=False))
+        n_genes = adata_cell.var[var_inclusion_key].sum()
+        print(f"... {n_genes} genes included")
+        print(f"... projected time to completion = {(n_genes / 185)**2.6 / 60} mins")
+
         # NOTE here https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
         with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=False, enable_mem_efficient=True):
             print('torch.backends.cuda.mem_efficient_sdp_enabled()')
@@ -62,34 +92,6 @@ task compute_jacobian {
             print(torch.backends.cuda.flash_sdp_enabled())
             print('torch.backends.cuda.math_sdp_enabled()')
             print(torch.backends.cuda.math_sdp_enabled())
-
-            # pretrained model
-            pipeline = get_pretrained_model_as_pipeline(
-                trained_model="~{trained_model_ckpt}",
-                device="cuda" if torch.cuda.is_available() else "cpu",
-            )
-            print(pipeline)
-
-            adata = anndata.read_h5ad("~{cell_h5ad}")
-            print(adata)
-            adata.X = adata.layers["count"].copy()
-            print("... harmonizing")
-            adata_cell = harmonize_anndata_with_model(adata, pipeline)
-            adata_cell.layers["count"] = adata_cell.X.copy()
-
-            print("... determining genes to include in computation")
-            if ~{if (use_default_genes) then "True" else "False"}:
-                adata_cell.var["jacobian_include"] = adata.var["gpt_include"].copy()
-            else:
-                included_genes = set(pd.read_csv("~{genes_csv}", header=None, squeeze=True).values)
-                adata_cell.var["jacobian_include"] = [g in included_genes for g in adata_cell.var["gene_name"]]
-            
-            var_inclusion_key = "jacobian_include"
-            print(adata_cell.var[var_inclusion_key].value_counts(dropna=False))
-            n_genes = adata_cell.var[var_inclusion_key].sum()
-            print(f"... {n_genes} genes included")
-            print(f"... projected time to completion = {(n_genes / 185)**2.6 / 60} mins")
-
             print("... computing jacobian")
             t = time.time()
             jacobian_df = compute_jacobian(
@@ -102,8 +104,8 @@ task compute_jacobian {
             )
             print(f"... done in {(time.time() - t) / 60:.2f} mins")
 
-            jacobian_df.to_csv("~{output_file}", index=True)
-            print("Saved ~{output_file}\n")
+        jacobian_df.to_csv("~{output_file}", index=True)
+        print("Saved ~{output_file}\n")
 
         CODE
 
