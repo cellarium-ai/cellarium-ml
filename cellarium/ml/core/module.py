@@ -58,7 +58,9 @@ class CellariumModule(pl.LightningModule):
         is_initialized: bool = False,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(logger=False)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Attribute 'model' is an instance of `nn.Module`")
+            self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
 
         if optim_fn is None:
