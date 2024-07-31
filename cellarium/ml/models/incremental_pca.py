@@ -46,7 +46,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         var_names_g: np.ndarray,
         n_components: int,
         svd_lowrank_niter: int = 2,
-        perform_mean_correction: bool = False,
+        perform_mean_correction: bool = True,
     ) -> None:
         super().__init__()
         self.var_names_g = var_names_g
