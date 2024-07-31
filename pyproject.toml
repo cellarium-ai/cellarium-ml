@@ -28,6 +28,7 @@ dependencies = [
   "google-cloud-storage",
   "jsonargparse[signatures]==4.27.7",
   "lightning>=2.2.0",
+  "numpy<=1.26.4",
   "pyro-ppl>=1.9.1",
   "pytest",
   "torch>=2.2.0",
@@ -38,7 +39,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 lint = ["ruff"]
-mypy = ["mypy", "types-PyYAML"]
+mypy = ["mypy==1.10.0", "types-PyYAML"]
 test = [
   "pytest-xdist",
   "tensorboard",
