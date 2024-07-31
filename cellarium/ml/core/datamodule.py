@@ -11,6 +11,7 @@ from anndata import AnnData
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
+from cellarium.ml.core.pipeline import CellariumPipeline
 
 
 class CellariumAnnDataDataModule(pl.LightningDataModule):
@@ -126,6 +127,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             :attr:`val_dataset` is not shuffled and uses the ``same_order`` iteration strategy.
 
         """
+        self.collate_fn = collate_fn
+
         if stage == "fit":
             self.train_dataset = IterableDistributedAnnDataCollectionDataset(
                 dadc=self.dadc,
@@ -169,7 +172,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.train_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -177,7 +180,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.val_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
@@ -185,5 +188,5 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.predict_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
