@@ -182,26 +182,24 @@ def compute_n_obs(data: CellariumAnnDataDataModule) -> int:
     return data.dadc.n_obs
 
 
-def compute_n_categories(data: CellariumAnnDataDataModule) -> int:
+def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     """
-    Compute the number of categories in the target variable.
+    Compute the categories in the target variable.
 
     E.g. if the target variable is ``obs["cell_type"]`` then this function
-    returns the number of categories in ``obs["cell_type"]``::
+    returns the categories in ``obs["cell_type"]``::
 
-        >>> len(data.dadc[0].obs["cell_type"].cat.categories)
+        >>> np.asarray(data.dadc[0].obs["cell_type"].cat.categories)
 
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
 
     Returns:
-        The number of categories in the target variable.
+        The categories in the target variable.
     """
-    field = data.batch_keys["y_n"]
-    value = getattr(data.dadc[0], field.attr)
-    if field.key is not None:
-        value = value[field.key]
-    return len(value.cat.categories)
+    adata = data.dadc[0]
+    field = data.batch_keys["y_categories"]
+    return field(adata)
 
 
 def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDataDataModule) -> np.ndarray:
@@ -217,7 +215,8 @@ def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDat
     Returns:
         The variable names.
     """
-    batch = {key: field(data.dadc)[0] for key, field in data.batch_keys.items()}
+    adata = data.dadc[0]
+    batch = {key: field(adata) for key, field in data.batch_keys.items()}
     pipeline = CellariumPipeline(transforms)
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
@@ -247,7 +246,7 @@ def lightning_cli_factory(
                 "max_epochs": 1,  # one pass
                 "strategy": {
                     "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                    "init_args": {"broadcast_buffers": False},
+                    "dict_kwargs": {"broadcast_buffers": False},
                 },
             },
         )
@@ -275,45 +274,28 @@ def lightning_cli_factory(
                 args=args,
             )
 
+        def _add_instantiators(self) -> None:
+            # disable breaking dependency injection support change introduced in PyTorch Lightning 2.3
+            # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
+            pass
+
         def instantiate_classes(self) -> None:
-            super().instantiate_classes()
-
-            # impute linked arguments after instantiation
-            if link_arguments is not None:
-                for link in link_arguments:
-                    source = link.source
-                    target = link.target
-                    compute_fn = link.compute_fn
-                    if isinstance(source, str):
-                        source = (source,)
-                    source_objects = []
-                    for attr in source:
-                        # note that config_init is initialized, so source_object is an instantiated object
-                        config_init = self.config_init[self.subcommand]
-                        # e.g., attr == "model.transforms"
-                        source_object = attrgetter(attr)(config_init)
-                        source_objects.append(source_object)
-                    if compute_fn is not None:
-                        value = compute_fn(*source_objects)
-                    else:
-                        value = source_objects[0]
-
-                    # e.g., target == "model.model.init_args.var_names_g"
-                    target_keys = target.split(".")
-                    # note that config is dict-like, so assign the value to the last key
-                    config = self.config[self.subcommand]
-                    for key in target_keys[:-1]:
-                        config = config[key]
-                    config[target_keys[-1]] = value
-
-            # save the config to the :attr:`model.hparams` to be able to load the model checkpoint
-            self.model._set_hparams(self.config[self.subcommand])
+            with torch.device("meta"):
+                # skip the initialization of model parameters
+                # parameters are later initialized by the  `CellariumModule.configure_model` method
+                return super().instantiate_classes()
 
         def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
             if link_arguments is not None:
                 for link in link_arguments:
                     parser.link_arguments(link.source, link.target, link.compute_fn, link.apply_on)
-            parser.set_defaults({"model.model": model_class_path})
+            # this is helpful for generating a default config file with --print_config
+            parser.set_defaults(
+                {
+                    "model.model": model_class_path,
+                    "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
+                }
+            )
 
     return NewLightningCLI
 
@@ -395,7 +377,7 @@ def incremental_pca(args: ArgsType = None) -> None:
             "max_epochs": 1,  # one pass
             "strategy": {
                 "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                "init_args": {"broadcast_buffers": False},
+                "dict_kwargs": {"broadcast_buffers": False},
             },
         },
     )
@@ -434,7 +416,7 @@ def logistic_regression(args: ArgsType = None) -> None:
         link_arguments=[
             LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
-            LinkArguments("data", "model.model.init_args.n_categories", compute_n_categories),
+            LinkArguments("data", "model.model.init_args.y_categories", compute_y_categories),
         ],
     )
     cli(args=args)
@@ -477,7 +459,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
             "max_epochs": 1,  # one pass
             "strategy": {
                 "class_path": "lightning.pytorch.strategies.DDPStrategy",
-                "init_args": {"broadcast_buffers": False},
+                "dict_kwargs": {"broadcast_buffers": False},
             },
         },
     )
@@ -590,21 +572,24 @@ def main(args: ArgsType = None) -> None:
             or the ``model_name`` key if ``args`` is a dictionary or ``Namespace``.
     """
     if isinstance(args, (dict, Namespace)):
-        assert "model_name" in args, "'model_name' key must be specified in args"
+        if "model_name" not in args:
+            raise ValueError("'model_name' key must be specified in args")
         model_name = args.pop("model_name")
     elif isinstance(args, list):
-        assert len(args) > 0, "'model_name' must be specified as the first argument in args"
+        if len(args) == 0:
+            raise ValueError("'model_name' must be specified as the first argument in args")
         model_name = args.pop(0)
     elif args is None:
         args = sys.argv[1:].copy()
-        assert len(args) > 0, "'model_name' must be specified after cellarium-ml"
+        if len(args) == 0:
+            raise ValueError("'model_name' must be specified after cellarium-ml")
         model_name = args.pop(0)
 
-    assert (
-        model_name in REGISTERED_MODELS
-    ), f"'model_name' must be one of {list(REGISTERED_MODELS.keys())}. Got '{model_name}'"
+    if model_name not in REGISTERED_MODELS:
+        raise ValueError(f"'model_name' must be one of {list(REGISTERED_MODELS.keys())}. Got '{model_name}'")
     model_cli = REGISTERED_MODELS[model_name]
     with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Transforming to str index.")
         warnings.filterwarnings("ignore", message="LightningCLI's args parameter is intended to run from within Python")
         warnings.filterwarnings("ignore", message="Your `IterableDataset` has `__len__` defined.")
         model_cli(args)  # run the model

@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro.nn import PyroParam
+from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import constraints
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
@@ -51,46 +50,53 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             Initialization value of the `sigma` parameter.
         seed:
             Random seed used to initialize parameters.
-        elbo:
-            ELBO loss function. Should be a subclass of :class:`~pyro.infer.ELBO`.
-            If ``None``, defaults to :class:`~pyro.infer.Trace_ELBO`.
     """
 
     def __init__(
         self,
         n_obs: int,
-        var_names_g: Sequence[str],
+        var_names_g: np.ndarray,
         n_components: int,
         ppca_flavor: Literal["marginalized", "linear_vae"],
-        mean_g: float | torch.Tensor | None = None,
+        mean_g: torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
         seed: int = 0,
-        elbo: pyro.infer.ELBO | None = None,
     ):
         super().__init__()
 
         self.n_obs = n_obs
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.n_components = n_components
         self.ppca_flavor = ppca_flavor
-        self.elbo = elbo or pyro.infer.Trace_ELBO()
+        self.elbo = pyro.infer.Trace_ELBO()
 
         if isinstance(mean_g, torch.Tensor) and mean_g.dim():
             assert mean_g.shape == (n_vars,), f"Expected meang_g to have a shape ({n_vars},) but found {mean_g.shape}."
         if mean_g is None:
             # make mean_g a learnable parameter
-            self.mean_g = PyroParam(lambda: torch.zeros(n_vars))
+            self.mean_g = torch.nn.Parameter(torch.empty(n_vars))
         else:
-            self.register_buffer("mean_g", torch.as_tensor(mean_g))
+            self.register_buffer("mean_g", mean_g)
 
-        rng = torch.Generator()
-        rng.manual_seed(seed)
+        self.seed = seed
         # model parameters
-        self.W_kg = PyroParam(lambda: W_init_scale * torch.randn((n_components, n_vars), generator=rng))
-        self.sigma = PyroParam(lambda: torch.tensor(sigma_init_scale), constraint=constraints.positive)
+        self.W_init_scale = W_init_scale
+        self.sigma_init_scale = sigma_init_scale
+        self.W_kg = torch.nn.Parameter(torch.empty(n_components, n_vars))
+        self.sigma = PyroParam(torch.empty(()), constraint=constraints.positive)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        rng_device = self.W_kg.device.type if self.W_kg.device.type != "meta" else "cpu"
+        rng = torch.Generator(device=rng_device)
+        rng.manual_seed(self.seed)
+        if isinstance(self.mean_g, torch.nn.Parameter):
+            self.mean_g.data.zero_()
+        self.W_kg.data.normal_(0, self.W_init_scale, generator=rng)
+        self.sigma_unconstrained.data.fill_(_unconstrain(torch.as_tensor(self.sigma_init_scale), constraints.positive))
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -117,7 +123,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
                     dist.LowRankMultivariateNormal(
                         loc=self.mean_g,
                         cov_factor=self.W_kg.T,
-                        cov_diag=self.sigma**2 * x_ng.new_ones(self.n_vars),
+                        cov_diag=self.sigma**2 * x_ng.new_ones(self.n_vars),  # type: ignore[operator]
                     ),
                     obs=x_ng,
                 )
@@ -168,7 +174,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
 
     @property
     def M_kk(self) -> torch.Tensor:
-        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.n_components, device=self.sigma.device)
+        return self.W_kg @ self.W_kg.T + self.sigma**2 * torch.eye(self.n_components, device=self.sigma.device)  # type: ignore[attr-defined, operator]
 
     @property
     @torch.inference_mode()
@@ -180,7 +186,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
            Gradients are disabled, used for inference only.
         """
         S_k = torch.linalg.svdvals(self.W_kg.T)
-        return S_k**2 + self.sigma**2
+        return S_k**2 + self.sigma**2  # type: ignore[operator]
 
     @property
     @torch.inference_mode()
@@ -209,4 +215,4 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         .. note::
            Gradients are disabled, used for inference only.
         """
-        return (self.n_vars * self.sigma**2).item()
+        return (self.n_vars * self.sigma**2).item()  # type: ignore[operator]

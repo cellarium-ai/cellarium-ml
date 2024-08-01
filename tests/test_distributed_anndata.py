@@ -3,9 +3,7 @@
 
 import os
 import pickle
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -36,6 +34,10 @@ def adatas_path(tmp_path: Path):
         {
             "A": rng.integers(0, 2, n_cell),
             "B": rng.integers(0, 2, n_cell),
+            "C": pd.Categorical(
+                np.array(["e", "f"])[np.random.randint(0, 2, n_cell)],
+                categories=["e", "f"],
+            ),
         },
         index=[f"ref_cell{i:03d}" for i in range(n_cell)],
     )
@@ -60,6 +62,7 @@ def adatas_path(tmp_path: Path):
     adata.write(os.path.join(tmp_path, "adata.h5ad"))
     for i, limit in enumerate(zip([0] + limits, limits)):
         sliced_adata = adata[slice(*limit)]
+        sliced_adata.obs["C"] = sliced_adata.obs["C"].cat.set_categories(adata.obs["C"].cat.categories)
         sliced_adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))
     return tmp_path
 
@@ -141,23 +144,25 @@ def test_indexing(
     oidx, n_adatas = row_select
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
+        with pytest.raises(ValueError, match="Expected the number of anndata files"):
             dat_view = dat[oidx, vidx]
     else:
         adt_view = adt[oidx, vidx]
         dat_view = dat[oidx, vidx]
+        adt_view.obs["C"] = adt_view.obs["C"].cat.set_categories(adt.obs["C"].cat.categories)
         np.testing.assert_array_equal(adt_view.X, dat_view.X)
         np.testing.assert_array_equal(adt_view.var_names, dat_view.var_names)
         np.testing.assert_array_equal(adt_view.obs_names, dat_view.obs_names)
         np.testing.assert_array_equal(adt_view.layers["L"], dat_view.layers["L"])
         np.testing.assert_array_equal(adt_view.obsm["M"], dat_view.obsm["M"])
-        np.testing.assert_array_equal(adt_view.obs["A"], dat_view.obs["A"])
+        assert adt_view.obs["A"].equals(dat_view.obs["A"])
+        assert adt_view.obs["C"].equals(dat_view.obs["C"])
 
 
 def test_pickle(dat: DistributedAnnDataCollection):
-    new_dat = pickle.loads(pickle.dumps(dat))
+    new_dat: DistributedAnnDataCollection = pickle.loads(pickle.dumps(dat))
 
-    assert len(new_dat.cache) == 0
+    assert len(new_dat.cache) == 1
 
     new_dat_view, dat_view = new_dat[:2], dat[:2]
 
@@ -166,7 +171,8 @@ def test_pickle(dat: DistributedAnnDataCollection):
     np.testing.assert_array_equal(new_dat_view.obs_names, dat_view.obs_names)
     np.testing.assert_array_equal(new_dat_view.layers["L"], dat_view.layers["L"])
     np.testing.assert_array_equal(new_dat_view.obsm["M"], dat_view.obsm["M"])
-    np.testing.assert_array_equal(new_dat_view.obs["A"], dat_view.obs["A"])
+    assert new_dat_view.obs["A"].equals(dat_view.obs["A"])
+    assert new_dat_view.obs["C"].equals(dat_view.obs["C"])
 
 
 @pytest.mark.parametrize(
@@ -193,7 +199,7 @@ def test_indexing_dataset(
     )
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
+        with pytest.raises(ValueError, match="Expected the number of anndata files"):
             dataset_X = dataset[oidx]["x_ng"]
     else:
         adt_X = adt[oidx].X
@@ -215,50 +221,7 @@ def test_pickle_dataset(dat: DistributedAnnDataCollection):
     )
     new_dataset = pickle.loads(pickle.dumps(dataset))
 
-    assert len(new_dataset.dadc.cache) == 0
+    assert len(new_dataset.dadc.cache) == 1
 
     np.testing.assert_array_equal(new_dataset[:2]["x_ng"], dataset[:2]["x_ng"])
     np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])
-
-
-@pytest.fixture
-def dadc(adatas_path: Path):
-    # distributed anndata
-    filenames = str(os.path.join(adatas_path, "adata.{000..002}.h5ad"))
-    limits = [2, 5, 10]
-    dadc = DistributedAnnDataCollection(
-        filenames,
-        limits,
-        max_cache_size=2,
-    )
-    return dadc
-
-
-@pytest.mark.parametrize(
-    "attr,key,convert_fn",
-    [
-        ("X", None, None),
-        ("obs", "A", None),
-        ("obs_names", None, None),
-        ("var_names", None, None),
-        ("layers", "L", None),
-    ],
-)
-@pytest.mark.parametrize("idx", [slice(0, 5), [0, 2, 4], 0])
-def test_anndata_field(
-    dadc: DistributedAnnDataCollection,
-    attr: str,
-    key: str | None,
-    convert_fn: Callable[[Any], np.ndarray] | None,
-    idx: slice | list,
-):
-    expected = getattr(dadc[idx], attr)
-    if key is not None:
-        expected = expected[key]
-    if convert_fn is not None:
-        expected = convert_fn(expected)
-
-    field = AnnDataField(attr, key, convert_fn)
-    actual = field(dadc)[idx]
-
-    np.testing.assert_array_equal(expected, actual)

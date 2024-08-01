@@ -27,20 +27,20 @@ class AnnDataSchema:
     Args:
         adata:
             Reference AnnData object.
-        obs_columns:
+        obs_columns_to_validate:
             Subset of columns to validate in the ``.obs`` attribute.
             If ``None``, all columns are validated.
     """
 
     attrs = ["obs", "obsm", "var", "varm", "varp", "var_names", "layers"]
 
-    def __init__(self, adata: AnnData, obs_columns: Sequence | None = None) -> None:
+    def __init__(self, adata: AnnData, obs_columns_to_validate: Sequence[str] | None = None) -> None:
         self.attr_values = {}
         for attr in self.attrs:
             # FIXME: some of the attributes have a reference to the anndata object itself.
             # This results in anndata object not being garbage collected.
             self.attr_values[attr] = getattr(adata, attr)
-        self.obs_columns = obs_columns
+        self.obs_columns_to_validate = obs_columns_to_validate
 
     def validate_anndata(self, adata: AnnData) -> None:
         """Validate anndata has proper attributes."""
@@ -49,10 +49,10 @@ class AnnDataSchema:
             value = getattr(adata, attr)
             ref_value = self.attr_values[attr]
             if attr == "obs":
-                if self.obs_columns is not None:
+                if self.obs_columns_to_validate is not None:
                     # Subset the columns to validate
-                    ref_value = ref_value[self.obs_columns]
-                    value = value[self.obs_columns]
+                    ref_value = ref_value[self.obs_columns_to_validate]
+                    value = value[self.obs_columns_to_validate]
                 # compare the elements inside the Index object and their order
                 if not ref_value.columns.equals(value.columns):
                     raise ValueError(
@@ -60,9 +60,23 @@ class AnnDataSchema:
                         "of the reference anndata."
                     )
                 if not ref_value.dtypes.equals(value.dtypes):
+                    for col in ref_value.columns:
+                        if ref_value[col].dtype != value[col].dtype:
+                            if ref_value[col].dtype == "category":
+                                diff = set(ref_value[col].cat.categories).symmetric_difference(
+                                    set(value[col].cat.categories)
+                                )
+                                raise ValueError(
+                                    f".obs['{col}'].cat.categories for anndata passed in "
+                                    f"do not match those in the reference anndata. symmetric_differece: {diff}"
+                                )
+                            raise ValueError(
+                                f".obs['{col}'] dtype for anndata passed in ({value[col].dtype}) "
+                                f"does not match .obs['{col}'] dtype of the reference anndata ({ref_value[col].dtype})"
+                            )
                     raise ValueError(
-                        ".obs attribute dtypes for anndata passed in does not match .obs attribute dtypes "
-                        "of the reference anndata."
+                        f".obs columns for anndata passed in ({value.columns}) do not match .obs columns "
+                        f"of the reference anndata ({ref_value.columns})."
                     )
             elif attr in ["var", "var_names"]:
                 # For var compare if two DataFrames have the same shape and elements

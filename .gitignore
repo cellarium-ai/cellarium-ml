@@ -2,10 +2,15 @@ __pycache__/
 runs/
 .ipynb_checkpoints
 .mypy_cache/
+.ruff_cache/
+.pytest_cache/
 docs/build/
 docs/source/examples/
+docs/source/tutorials/
 eggs/
 *.egg*
 lightning_logs/
+.idea/
+build/
 notebooks/.ipynb_checkpoints/
 output/

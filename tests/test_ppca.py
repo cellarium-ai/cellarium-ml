@@ -63,7 +63,7 @@ def test_probabilistic_pca_multi_device(
     s = np.sqrt(0.5 * total_var / g)
     ppca = ProbabilisticPCA(
         n_obs=n,
-        var_names_g=[f"gene_{i}" for i in range(g)],
+        var_names_g=np.array([f"gene_{i}" for i in range(g)]),
         n_components=k,
         ppca_flavor=ppca_flavor,
         mean_g=x_mean_g,
@@ -97,7 +97,7 @@ def test_probabilistic_pca_multi_device(
     actual_total_var = ppca.W_variance + ppca.sigma_variance
     np.testing.assert_allclose(expected_total_var, actual_total_var, rtol=1e-3)
 
-    # variance explained be each PC
+    # variance explained by each PC
     expected_explained_var = L_g[:k]
     actual_explained_var = ppca.L_k
     np.testing.assert_allclose(expected_explained_var, actual_explained_var, rtol=1e-3)
@@ -116,18 +116,19 @@ def test_probabilistic_pca_multi_device(
 def test_variance_monitor(x_ng: np.ndarray):
     n, g = x_ng.shape
     k = 3
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             x_ng,
-            np.array([f"gene_{i}" for i in range(g)]),
+            var_names_g,
         ),
         batch_size=n // 2,
         collate_fn=collate_fn,
     )
     # model
-    ppca = ProbabilisticPCA(n, [f"gene_{i}" for i in range(g)], k, "marginalized")
-    module = CellariumModule(model=ppca)
+    ppca = ProbabilisticPCA(n, var_names_g, k, "marginalized")
+    module = CellariumModule(model=ppca, optim_fn=torch.optim.Adam)
     # trainer
     var_monitor = VarianceMonitor(total_variance=np.var(x_ng, axis=0).sum())
     trainer = pl.Trainer(
@@ -143,33 +144,25 @@ def test_variance_monitor(x_ng: np.ndarray):
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 3, 2
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g).astype(np.float32),
-            np.array([f"gene_{i}" for i in range(g)]),
+            var_names_g,
         ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {
-        "n_obs": n,
-        "var_names_g": [f"gene_{i}" for i in range(g)],
-        "n_components": 1,
-        "ppca_flavor": "marginalized",
-    }
     pyro.clear_param_store()
-    model = ProbabilisticPCA(**init_args)  # type: ignore[arg-type]
-    config = {
-        "model": {
-            "model": {
-                "class_path": "cellarium.ml.models.ProbabilisticPCA",
-                "init_args": init_args,
-            }
-        }
-    }
-    module = CellariumModule(model=model, config=config)
+    model = ProbabilisticPCA(
+        n_obs=n,
+        var_names_g=var_names_g,
+        n_components=1,
+        ppca_flavor="marginalized",
+    )
+    module = CellariumModule(model=model, optim_fn=torch.optim.Adam)
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",
@@ -190,5 +183,5 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     loaded_model: ProbabilisticPCA = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
     np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())
-    np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())
+    np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())  # type: ignore[attr-defined]
     np.testing.assert_allclose(model.mean_g.detach(), loaded_model.mean_g.detach())

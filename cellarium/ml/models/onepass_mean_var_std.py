@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
 from typing import Literal
 
 import lightning.pytorch as pl
@@ -11,7 +10,7 @@ import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.utilities.data import get_rank_and_num_replicas
+from cellarium.ml.utilities.distributed import get_rank_and_num_replicas
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -32,9 +31,9 @@ class OnePassMeanVarStd(CellariumModel):
         var_names_g: The variable names schema for the input data validation.
     """
 
-    def __init__(self, var_names_g: Sequence[str], algorithm: Literal["naive", "shifted_data"] = "naive") -> None:
+    def __init__(self, var_names_g: np.ndarray, algorithm: Literal["naive", "shifted_data"] = "naive") -> None:
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.algorithm = algorithm
@@ -43,11 +42,23 @@ class OnePassMeanVarStd(CellariumModel):
         self.x_squared_sums: torch.Tensor
         self.x_size: torch.Tensor
         self.x_shift: torch.Tensor | None
-        self.register_buffer("x_sums", torch.zeros(n_vars))
-        self.register_buffer("x_squared_sums", torch.zeros(n_vars))
-        self.register_buffer("x_size", torch.tensor(0))
-        self.register_buffer("x_shift", None)
-        self._dummy_param = torch.nn.Parameter(torch.tensor(0.0))
+        self.register_buffer("x_sums", torch.empty(n_vars))
+        self.register_buffer("x_squared_sums", torch.empty(n_vars))
+        self.register_buffer("x_size", torch.empty(()))
+        if self.algorithm == "shifted_data":
+            self.register_buffer("x_shift", torch.empty(n_vars))
+        else:
+            self.register_buffer("x_shift", None)
+        self._dummy_param = torch.nn.Parameter(torch.empty(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.x_sums.zero_()
+        self.x_squared_sums.zero_()
+        self.x_size.zero_()
+        if self.x_shift is not None:
+            self.x_shift.zero_()
+        self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -68,7 +79,8 @@ class OnePassMeanVarStd(CellariumModel):
             self.x_squared_sums = self.x_squared_sums + (x_ng**2).sum(dim=0)
             self.x_size = self.x_size + x_ng.shape[0]
         elif self.algorithm == "shifted_data":
-            if self.x_shift is None:
+            assert self.x_shift is not None
+            if (self.x_shift == 0).all():
                 _, world_size = get_rank_and_num_replicas()
                 if world_size > 1:
                     gathered_x_ng = torch.zeros(

@@ -23,6 +23,16 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
 
     __call__: Callable[..., torch.Tensor | None]
 
+    @abstractmethod
+    def reset_parameters(self) -> None:
+        """
+        Reset the model parameters and buffers that were constructed in the __init__ method.
+        Constructed means methods like ``torch.tensor``, ``torch.empty``, ``torch.zeros``,
+        ``torch.randn``, ``torch.as_tensor``, etc.
+        If the parameter or buffer was assigned (e.g. from a torch.Tensor passed to the __init__)
+        then there is no need to reset it.
+        """
+
     def __getattr__(self, name: str) -> Any:
         if "_pyro_params" in self.__dict__:
             _pyro_params = self.__dict__["_pyro_params"]
@@ -43,6 +53,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
                 pass
             constrained_value, constraint, event_dim = value
             self._pyro_params[name] = constraint, event_dim
+            assert constrained_value is not None
             unconstrained_value = _unconstrain(constrained_value, constraint)
             super().__setattr__(name + "_unconstrained", unconstrained_value)
             return
@@ -66,4 +77,16 @@ class PredictMixin(metaclass=ABCMeta):
     def predict(self, *args: Any, **kwargs: Any) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Perform prediction.
+        """
+
+
+class ValidateMixin(metaclass=ABCMeta):
+    """
+    Abstract mixin class for models that can perform validation.
+    """
+
+    @abstractmethod
+    def validate(self, *args: Any, **kwargs: Any) -> None:
+        """
+        Perform validation.
         """

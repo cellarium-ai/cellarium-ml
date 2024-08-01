@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
-from collections.abc import Sequence
 
 import lightning.pytorch as pl
 import numpy as np
@@ -44,13 +43,13 @@ class IncrementalPCA(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        var_names_g: Sequence[str],
+        var_names_g: np.ndarray,
         n_components: int,
         svd_lowrank_niter: int = 2,
-        perform_mean_correction: bool = False,
+        perform_mean_correction: bool = True,
     ) -> None:
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.n_components = n_components
@@ -60,11 +59,19 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.S_k: torch.Tensor
         self.x_mean_g: torch.Tensor
         self.x_size: torch.Tensor
-        self.register_buffer("V_kg", torch.zeros(n_components, n_vars))
-        self.register_buffer("S_k", torch.zeros(n_components))
-        self.register_buffer("x_mean_g", torch.zeros(n_vars))
-        self.register_buffer("x_size", torch.tensor(0))
-        self._dummy_param = nn.Parameter(torch.tensor(0.0))
+        self.register_buffer("V_kg", torch.empty(n_components, n_vars))
+        self.register_buffer("S_k", torch.empty(n_components))
+        self.register_buffer("x_mean_g", torch.empty(n_vars))
+        self.register_buffer("x_size", torch.empty(()))
+        self._dummy_param = nn.Parameter(torch.empty(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.V_kg.zero_()
+        self.S_k.zero_()
+        self.x_mean_g.zero_()
+        self.x_size.zero_()
+        self._dummy_param.data.zero_()
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """

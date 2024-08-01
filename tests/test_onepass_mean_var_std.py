@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -56,7 +57,7 @@ def test_onepass_mean_var_std_multi_device(
     shuffle: bool,
     num_workers: int,
     batch_size: int,
-    algorithm: str,
+    algorithm: Literal["naive", "shifted_data"],
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
@@ -113,29 +114,21 @@ def test_onepass_mean_var_std_multi_device(
 
 
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
-def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: str):
+def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["naive", "shifted_data"]):
     n, g = 3, 2
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array([f"gene_{i}" for i in range(g)]),
+            var_names_g,
         ),
         collate_fn=collate_fn,
     )
     # model
-    init_args = {"var_names_g": [f"gene_{i}" for i in range(g)], "algorithm": algorithm}
-    model = OnePassMeanVarStd(**init_args)  # type: ignore[arg-type]
-    config = {
-        "model": {
-            "model": {
-                "class_path": "cellarium.ml.models.OnePassMeanVarStd",
-                "init_args": init_args,
-            }
-        }
-    }
-    module = CellariumModule(model=model, config=config)
+    model = OnePassMeanVarStd(var_names_g=var_names_g, algorithm=algorithm)
+    module = CellariumModule(model=model)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -157,21 +150,24 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: str):
     assert ckpt_path.is_file()
     loaded_model: OnePassMeanVarStd = CellariumModule.load_from_checkpoint(ckpt_path).model
     # assert
-    np.testing.assert_allclose(model.mean_g, loaded_model.mean_g)
+    np.testing.assert_allclose(model.mean_g, loaded_model.mean_g, atol=1e-6)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g, atol=1e-6)
+    if algorithm == "shifted_data":
+        assert model.x_shift is not None and loaded_model.x_shift is not None
+        np.testing.assert_allclose(model.x_shift, loaded_model.x_shift, atol=1e-6)
     assert model.algorithm == loaded_model.algorithm
 
 
 @pytest.mark.parametrize("mean", [1, 100])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["float32", "float64"])
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
-def test_accuracy(mean, dtype, algorithm):
+def test_accuracy(mean: float, dtype: torch.dtype, algorithm: Literal["naive", "shifted_data"]):
     n_trials = 5_000_000
     std = 0.1
     x = mean + std * torch.randn(n_trials, dtype=dtype)
 
-    onepass = OnePassMeanVarStd(var_names_g=["x"], algorithm=algorithm)
+    onepass = OnePassMeanVarStd(var_names_g=np.array(["x"]), algorithm=algorithm)
     for chunk in x.split(1000):
         onepass(x_ng=chunk[:, None], var_names_g=["x"])
 

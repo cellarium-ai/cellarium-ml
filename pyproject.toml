@@ -26,22 +26,20 @@ dependencies = [
   "braceexpand",
   "crick>=0.0.4",
   "google-cloud-storage",
-  "jsonargparse[signatures]",
-  "lightning>=2.0.9",
-  "pyro-ppl",
+  "jsonargparse[signatures]==4.27.7",
+  "lightning>=2.2.0",
+  "numpy<=1.26.4",
+  "pyro-ppl>=1.9.1",
   "pytest",
-  "torch>=2.0.0",
+  "torch>=2.2.0",
   "transformers",
 ]
 
 dynamic = ["version"]
 
 [project.optional-dependencies]
-lint = [
-    "black[jupyter]",
-    "ruff",
-]
-mypy = ["mypy", "types-PyYAML"]
+lint = ["ruff"]
+mypy = ["mypy==1.10.0", "types-PyYAML"]
 test = [
   "pytest-xdist",
   "tensorboard",
@@ -78,10 +76,11 @@ dev_template = "{tag}.post{ccount}"
 
 [tool.ruff]
 line-length = 120
-select = ["E", "F", "I", "W"]
+extend-include = ["*.ipynb"]
+target-version = "py310"
 
-[tool.black]
-line-length = 120
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
 
 [tool.mypy]
 ignore_missing_imports = true
