@@ -134,8 +134,8 @@ def test_cpu_transforms(
     print("\nFull loaded module ---------")
     print(loaded_module)
     assert (
-        not loaded_module._lightning_training_using_datamodule
-    ), "Upon manual loading, flag for lightning training should be False"
+        loaded_module._cpu_transforms_in_module_pipeline
+    ), "Upon manual loading, flag for CPU transforms should be True"
     print("    ... ✓")
 
     # ensure loading from a checkpoint at lightning `fit` time results in the correct location of transforms
@@ -170,8 +170,8 @@ def test_cpu_transforms(
     print("\nFull loaded module ---------")
     print(trainer.model)
     assert (
-        trainer.model._lightning_training_using_datamodule
-    ), "Upon Trainer.fit() checkpoint restart, flag for lightning training should be True"
+        not trainer.model._cpu_transforms_in_module_pipeline
+    ), "Upon Trainer.fit() checkpoint restart, flag for CPU transforms should be False"
     print("    ... ✓")
 
 

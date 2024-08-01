@@ -71,7 +71,7 @@ class CellariumModule(pl.LightningModule):
             warnings.filterwarnings("ignore", message="Attribute 'model' is an instance of `nn.Module`")
             self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
-        self._lightning_training_using_datamodule: bool = False
+        self._cpu_transforms_in_module_pipeline: bool = True
 
         if optim_fn is None:
             # Starting from PyTorch Lightning 2.3, automatic optimization doesn't allow to return None
@@ -153,21 +153,21 @@ class CellariumModule(pl.LightningModule):
         if self._trainer is not None:
             if hasattr(self.trainer, "datamodule"):
                 if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
-                    self._lightning_training_using_datamodule = True
+                    self._cpu_transforms_in_module_pipeline = False
                     self.trainer.datamodule.collate_fn = FunctionComposer(
                         first_applied=collate_fn,
                         second_applied=self.cpu_transforms,
                     )
 
     def __repr__(self) -> str:
-        if self._lightning_training_using_datamodule:
+        if not self._cpu_transforms_in_module_pipeline:
             cpu_trans_str = str(self.cpu_transforms).replace("\n", "\n   ")
             trans_str = str(self.transforms).replace("\n", "\n ")
             repr = (
                 f"{self.__class__.__name__}("
                 + (
                     f"\n [ dataloader CPU transforms = \n   {cpu_trans_str}\n ]"
-                    if self._lightning_training_using_datamodule
+                    if not self._cpu_transforms_in_module_pipeline
                     else ""
                 )
                 + f"\n transforms = {trans_str}"
@@ -212,7 +212,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[self._num_cpu_transforms :] if self._lightning_training_using_datamodule else self.pipeline
+        return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
