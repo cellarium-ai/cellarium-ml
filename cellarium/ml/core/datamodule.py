@@ -116,6 +116,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
+        self.collate_fn = collate_fn
 
     def setup(self, stage: str | None = None) -> None:
         """
@@ -126,8 +127,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             :attr:`val_dataset` is not shuffled and uses the ``same_order`` iteration strategy.
 
         """
-        self.collate_fn = collate_fn
-
         if stage == "fit":
             self.train_dataset = IterableDistributedAnnDataCollectionDataset(
                 dadc=self.dadc,

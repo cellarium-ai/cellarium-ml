@@ -3,7 +3,7 @@
 
 import warnings
 from collections.abc import Iterable
-from typing import Any, Callable
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
@@ -13,20 +13,7 @@ from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerC
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule, collate_fn
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.models import CellariumModel
-from cellarium.ml.utilities.core import copy_module
-
-
-class FunctionComposer:
-    """
-    Compose two functions into a single callable, in a way that is picklable.
-    """
-
-    def __init__(self, first_applied: Callable, second_applied: Callable):
-        self.first_applied = first_applied
-        self.second_applied = second_applied
-
-    def __call__(self, batch):
-        return self.second_applied(self.first_applied(batch))
+from cellarium.ml.utilities.core import FunctionComposer, copy_module
 
 
 class CellariumModule(pl.LightningModule):
@@ -165,18 +152,15 @@ class CellariumModule(pl.LightningModule):
             self.hparams["is_initialized"] = True
 
         # move the cpu_transforms to the dataloader's collate_fn if the dataloader is going to apply them
-        try:
-            if hasattr(self, "trainer"):  # for some reason this check raises a RuntimeError rather than returning False
-                if hasattr(self.trainer, "datamodule"):
-                    if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
-                        self._lightning_training_using_datamodule = True
-                        self.trainer.datamodule.collate_fn = FunctionComposer(
-                            first_applied=collate_fn,
-                            second_applied=self.cpu_transforms,
-                        )
-                        self.remove_cpu_transforms_from_module_pipeline()
-        except RuntimeError:
-            pass
+        if self._trainer is not None:
+            if hasattr(self.trainer, "datamodule"):
+                if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
+                    self._lightning_training_using_datamodule = True
+                    self.trainer.datamodule.collate_fn = FunctionComposer(
+                        first_applied=collate_fn,
+                        second_applied=self.cpu_transforms,
+                    )
+                    self.remove_cpu_transforms_from_module_pipeline()
 
     def __repr__(self) -> str:
         if self._lightning_training_using_datamodule:
