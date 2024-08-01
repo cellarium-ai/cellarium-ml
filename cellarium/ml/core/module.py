@@ -72,7 +72,6 @@ class CellariumModule(pl.LightningModule):
             self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
         self._lightning_training_using_datamodule: bool = False
-        self._cpu_transforms_in_module_pipeline: bool = not self._lightning_training_using_datamodule
 
         if optim_fn is None:
             # Starting from PyTorch Lightning 2.3, automatic optimization doesn't allow to return None
@@ -159,7 +158,6 @@ class CellariumModule(pl.LightningModule):
                         first_applied=collate_fn,
                         second_applied=self.cpu_transforms,
                     )
-                    self.remove_cpu_transforms_from_module_pipeline()
 
     def __repr__(self) -> str:
         if self._lightning_training_using_datamodule:
@@ -208,32 +206,13 @@ class CellariumModule(pl.LightningModule):
     def _num_cpu_transforms(self) -> int:
         return 0 if self.hparams["cpu_transforms"] is None else len(self.hparams["cpu_transforms"])
 
-    def remove_cpu_transforms_from_module_pipeline(self) -> None:
-        """
-        Remove the CPU transforms from self.module_pipeline.
-        To be called during :class:`CellariumAnnDataDataModule` setup, so that if a user is using
-        a dataloader that will apply the CPU transforms, those transforms do not happen again as
-        part of the self.module_pipeline.
-        """
-        if self.pipeline is None:
-            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
-
-        self._cpu_transforms_in_module_pipeline = False
-
-    def add_cpu_transforms_to_module_pipeline(self) -> None:
-        """Include the CPU transforms in self.module_pipeline"""
-        if self.pipeline is None:
-            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
-
-        self._cpu_transforms_in_module_pipeline = True
-
     @property
     def module_pipeline(self) -> CellariumPipeline:
         """The pipeline applied by :meth:`training_step`, :meth:`validation_step`, and :meth:`forward`"""
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
+        return self.pipeline[self._num_cpu_transforms :] if self._lightning_training_using_datamodule else self.pipeline
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
