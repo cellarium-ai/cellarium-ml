@@ -170,13 +170,11 @@ class CellariumModule(pl.LightningModule):
                 if hasattr(self.trainer, "datamodule"):
                     if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
                         self._lightning_training_using_datamodule = True
-            if self._lightning_training_using_datamodule:
-                if hasattr(self.trainer, "datamodule"):  # mypy
-                    self.trainer.datamodule.collate_fn = FunctionComposer(
-                        first_applied=collate_fn,
-                        second_applied=self.cpu_transforms,
-                    )
-                    self.remove_cpu_transforms_from_module_pipeline()
+                        self.trainer.datamodule.collate_fn = FunctionComposer(
+                            first_applied=collate_fn,
+                            second_applied=self.cpu_transforms,
+                        )
+                        self.remove_cpu_transforms_from_module_pipeline()
         except RuntimeError:
             pass
 
