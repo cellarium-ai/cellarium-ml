@@ -56,6 +56,15 @@ def test_cpu_transforms(
                 assert isinstance(module_transforms[i], t.__class__)
         assert isinstance(module.model, BoringModel)
 
+    def _check_transform_lists_match(iterable_modules1, iterable_modules2):
+        if iterable_modules1 is None:
+            iterable_modules1 = []
+        if iterable_modules2 is None:
+            iterable_modules2 = []
+        assert len(iterable_modules1) == len(iterable_modules2)
+        for m1, m2 in zip(iterable_modules1, iterable_modules2):
+            assert type(m1) == type(m2), "Transforms should be the same type"
+
     # no lightning
     print("Checking pipeline configuration when CellariumModule is not used with a lightning Trainer... ", end="")
     module = _new_module()
@@ -96,17 +105,16 @@ def test_cpu_transforms(
     print(cpu_transforms)
     print("Loaded cpu_transforms")
     print(loaded_module.cpu_transforms)
+    _check_transform_lists_match(cpu_transforms, loaded_module.cpu_transforms)
 
     print("\nExpected transforms")
     print(transforms)
     print("Loaded transforms")
     print(loaded_module.transforms)
+    _check_transform_lists_match(transforms, loaded_module.transforms)
 
     print("\nFull loaded module ---------")
     print(loaded_module)
-    assert (
-        loaded_module._cpu_transforms_in_module_pipeline
-    ), "Upon manual loading, CPU transforms should be in the module pipeline"
     assert (
         not loaded_module._lightning_training_using_datamodule
     ), "Upon manual loading, flag for lightning training should be False"
@@ -125,17 +133,16 @@ def test_cpu_transforms(
     print(cpu_transforms)
     print("Loaded cpu_transforms")
     print(trainer.model.cpu_transforms)
+    _check_transform_lists_match(cpu_transforms, trainer.model.cpu_transforms)
 
     print("\nExpected transforms")
     print(transforms)
     print("Loaded transforms")
     print(trainer.model.transforms)
+    _check_transform_lists_match(transforms, trainer.model.transforms)
 
     print("\nFull loaded module ---------")
     print(trainer.model)
-    assert (
-        not trainer.model._cpu_transforms_in_module_pipeline
-    ), "Upon Trainer.fit() checkpoint restart, CPU transforms should not be in the module pipeline"
     assert (
         trainer.model._lightning_training_using_datamodule
     ), "Upon Trainer.fit() checkpoint restart, flag for lightning training should be True"
