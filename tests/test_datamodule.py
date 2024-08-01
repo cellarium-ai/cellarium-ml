@@ -56,20 +56,25 @@ def test_cpu_transforms(
                 assert isinstance(module_transforms[i], t.__class__)
         assert isinstance(module.model, BoringModel)
 
-    def _check_transform_lists_match(iterable_modules1, iterable_modules2):
+    def _check_transform_lists_match(iterable_modules1, iterable_modules2, message):
         if iterable_modules1 is None:
             iterable_modules1 = []
         if iterable_modules2 is None:
             iterable_modules2 = []
-        assert len(iterable_modules1) == len(iterable_modules2)
         for m1, m2 in zip(iterable_modules1, iterable_modules2):
-            assert type(m1) == type(m2), "Transforms should be the same type"
+            assert isinstance(m1, m2.__class__), message
+        assert len(iterable_modules1) == len(iterable_modules2), "Transform lists different lengths"
 
     # no lightning
     print("Checking pipeline configuration when CellariumModule is not used with a lightning Trainer... ", end="")
     module = _new_module()
     module.configure_model()
     _check_pipeline(module)
+    _check_transform_lists_match(
+        (cpu_transforms if cpu_transforms else []) + (transforms if transforms else []),
+        module.module_pipeline[:-1],
+        "Transforms in CellariumModule.module_pipeline do not contain CPU transforms when used outside lightning",
+    )
     print("✓")
 
     # lightning
@@ -78,6 +83,11 @@ def test_cpu_transforms(
     trainer = pl.Trainer(accelerator=accelerator, devices=1, max_steps=1, default_root_dir=tmp_path)
     trainer.fit(module, datamodule)
     _check_pipeline(module)
+    _check_transform_lists_match(
+        transforms,  # no CPU transforms in lightning
+        module.module_pipeline[:-1],
+        "Transforms in CellariumModule.module_pipeline are incorrect when used by lightning",
+    )
     print("    ... ✓")
 
     # ensure the data from the dataloader is filtered if appropriate
@@ -105,13 +115,21 @@ def test_cpu_transforms(
     print(cpu_transforms)
     print("Loaded cpu_transforms")
     print(loaded_module.cpu_transforms)
-    _check_transform_lists_match(cpu_transforms, loaded_module.cpu_transforms)
+    _check_transform_lists_match(
+        cpu_transforms,
+        loaded_module.cpu_transforms,
+        "CPU transforms do not match after loading from checkpoint manually",
+    )
 
     print("\nExpected transforms")
     print(transforms)
     print("Loaded transforms")
     print(loaded_module.transforms)
-    _check_transform_lists_match(transforms, loaded_module.transforms)
+    _check_transform_lists_match(
+        transforms,
+        loaded_module.transforms,
+        "Transforms do not match after loading from checkpoint manually",
+    )
 
     print("\nFull loaded module ---------")
     print(loaded_module)
@@ -133,13 +151,21 @@ def test_cpu_transforms(
     print(cpu_transforms)
     print("Loaded cpu_transforms")
     print(trainer.model.cpu_transforms)
-    _check_transform_lists_match(cpu_transforms, trainer.model.cpu_transforms)
+    _check_transform_lists_match(
+        cpu_transforms,
+        trainer.model.cpu_transforms,
+        "CPU transforms do not match after loading from checkpoint using lightning Trainer.fit(ckpt)",
+    )
 
     print("\nExpected transforms")
     print(transforms)
     print("Loaded transforms")
     print(trainer.model.transforms)
-    _check_transform_lists_match(transforms, trainer.model.transforms)
+    _check_transform_lists_match(
+        transforms,
+        trainer.model.transforms,
+        "Transforms do not match after loading from checkpoint using lightning Trainer.fit(ckpt)",
+    )
 
     print("\nFull loaded module ---------")
     print(trainer.model)
