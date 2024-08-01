@@ -71,8 +71,8 @@ class CellariumModule(pl.LightningModule):
             warnings.filterwarnings("ignore", message="Attribute 'model' is an instance of `nn.Module`")
             self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
-        self.module_pipeline: CellariumPipeline | None = self.pipeline
-        self._lightning_training_using_datamodule = False
+        self._lightning_training_using_datamodule: bool = False
+        self._cpu_transforms_in_module_pipeline: bool = not self._lightning_training_using_datamodule
 
         if optim_fn is None:
             # Starting from PyTorch Lightning 2.3, automatic optimization doesn't allow to return None
@@ -145,7 +145,6 @@ class CellariumModule(pl.LightningModule):
         if model is None:
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
         self.pipeline = CellariumPipeline(cpu_transforms + transforms + (model,))  # the full pipeline
-        self.module_pipeline = self.pipeline  # training loop pipeline: initially the full pipeline
 
         if not self.hparams["is_initialized"]:
             model.reset_parameters()
@@ -219,14 +218,22 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        self.module_pipeline = self.pipeline[self._num_cpu_transforms :]
+        self._cpu_transforms_in_module_pipeline = False
 
     def add_cpu_transforms_to_module_pipeline(self) -> None:
         """Include the CPU transforms in self.module_pipeline"""
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        self.module_pipeline = self.pipeline
+        self._cpu_transforms_in_module_pipeline = True
+
+    @property
+    def module_pipeline(self) -> CellariumPipeline:
+        """The pipeline applied by :meth:`training_step`, :meth:`validation_step`, and :meth:`forward`"""
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
@@ -361,3 +368,8 @@ class CellariumModule(pl.LightningModule):
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
             on_batch_end(self.trainer)
+
+    # def on_load_checkpoint(self, checkpoint: torch.Dict[str, Any]) -> None:
+    #     print('here!')
+    #     print(checkpoint)
+    #     return super().on_load_checkpoint(checkpoint)
