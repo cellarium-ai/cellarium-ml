@@ -368,8 +368,3 @@ class CellariumModule(pl.LightningModule):
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
             on_batch_end(self.trainer)
-
-    # def on_load_checkpoint(self, checkpoint: torch.Dict[str, Any]) -> None:
-    #     print('here!')
-    #     print(checkpoint)
-    #     return super().on_load_checkpoint(checkpoint)
