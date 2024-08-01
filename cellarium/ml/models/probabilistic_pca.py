@@ -86,7 +86,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         self.W_init_scale = W_init_scale
         self.sigma_init_scale = sigma_init_scale
         self.W_kg = torch.nn.Parameter(torch.empty(n_components, n_vars))
-        self.sigma = PyroParam(torch.empty(()), constraint=constraints.positive)  # type: ignore[call-arg]
+        self.sigma = PyroParam(torch.empty(()), constraint=constraints.positive)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -120,7 +120,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             if self.ppca_flavor == "marginalized":
                 pyro.sample(
                     "counts",
-                    dist.LowRankMultivariateNormal(  # type: ignore[attr-defined]
+                    dist.LowRankMultivariateNormal(
                         loc=self.mean_g,
                         cov_factor=self.W_kg.T,
                         cov_diag=self.sigma**2 * x_ng.new_ones(self.n_vars),  # type: ignore[operator]
@@ -130,11 +130,11 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             else:
                 z_nk = pyro.sample(
                     "z",
-                    dist.Normal(x_ng.new_zeros(self.n_components), 1).to_event(1),  # type: ignore[attr-defined]
+                    dist.Normal(x_ng.new_zeros(self.n_components), 1).to_event(1),
                 )
                 pyro.sample(
                     "counts",
-                    dist.Normal(self.mean_g + z_nk @ self.W_kg, self.sigma).to_event(1),  # type: ignore[attr-defined]
+                    dist.Normal(self.mean_g + z_nk @ self.W_kg, self.sigma).to_event(1),
                     obs=x_ng,
                 )
 
@@ -145,7 +145,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         with pyro.plate("cells", size=self.n_obs, subsample_size=x_ng.shape[0]):
             V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
-            pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))  # type: ignore[attr-defined]
+            pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
     def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
