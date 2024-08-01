@@ -7,7 +7,6 @@ import torch
 from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.distributed import GatherLayer, get_rank_and_num_replicas
 
-
 USE_CUDA = torch.cuda.is_available()
 
 

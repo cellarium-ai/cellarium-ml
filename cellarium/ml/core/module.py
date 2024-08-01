@@ -3,25 +3,25 @@
 
 import warnings
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Callable
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
-import functools
 
+from cellarium.ml.core.datamodule import CellariumAnnDataDataModule, collate_fn
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.core import copy_module
-from cellarium.ml.core.datamodule import CellariumAnnDataDataModule, collate_fn
 
 
 class FunctionComposer:
     """
     Compose two functions into a single callable, in a way that is picklable.
     """
-    def __init__(self, first_applied: callable, second_applied: callable):
+
+    def __init__(self, first_applied: Callable, second_applied: Callable):
         self.first_applied = first_applied
         self.second_applied = second_applied
 
@@ -45,7 +45,7 @@ class CellariumModule(pl.LightningModule):
 
     Args:
         cpu_transforms:
-            A list of transforms to apply to the input data as part of the dataloader on CPU. 
+            A list of transforms to apply to the input data as part of the dataloader on CPU.
             These transforms get applied before other ``transforms``.
             If ``None``, no transforms are applied as part of the dataloader.
         transforms:
@@ -84,7 +84,7 @@ class CellariumModule(pl.LightningModule):
             warnings.filterwarnings("ignore", message="Attribute 'model' is an instance of `nn.Module`")
             self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
-        self.module_pipeline = self.pipeline
+        self.module_pipeline: CellariumPipeline | None = self.pipeline
         self._lightning_training_using_datamodule = False
 
         if optim_fn is None:
@@ -140,7 +140,7 @@ class CellariumModule(pl.LightningModule):
             )
         else:
             cpu_transforms = tuple()
-        
+
         if self.hparams["transforms"]:
             for transform in self.hparams["transforms"]:
                 if isinstance(transform, CellariumModule):
@@ -157,7 +157,7 @@ class CellariumModule(pl.LightningModule):
 
         if model is None:
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
-        self.pipeline = CellariumPipeline(cpu_transforms + transforms + (model,)) # the full pipeline
+        self.pipeline = CellariumPipeline(cpu_transforms + transforms + (model,))  # the full pipeline
         self.module_pipeline = self.pipeline  # training loop pipeline: initially the full pipeline
 
         if not self.hparams["is_initialized"]:
@@ -167,22 +167,30 @@ class CellariumModule(pl.LightningModule):
         # move the cpu_transforms to the dataloader's collate_fn if the dataloader is going to apply them
         try:
             if hasattr(self, "trainer"):  # for some reason this check raises a RuntimeError rather than returning False
-                if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
-                    self._lightning_training_using_datamodule = True
+                if hasattr(self.trainer, "datamodule"):
+                    if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
+                        self._lightning_training_using_datamodule = True
             if self._lightning_training_using_datamodule:
-                self.trainer.datamodule.collate_fn = FunctionComposer(first_applied=collate_fn, second_applied=self.cpu_transforms)
-                self.remove_cpu_transforms_from_module_pipeline()
+                if hasattr(self.trainer, "datamodule"):  # mypy
+                    self.trainer.datamodule.collate_fn = FunctionComposer(
+                        first_applied=collate_fn,
+                        second_applied=self.cpu_transforms,
+                    )
+                    self.remove_cpu_transforms_from_module_pipeline()
         except RuntimeError:
             pass
 
     def __repr__(self) -> str:
         if self._lightning_training_using_datamodule:
-            cpu_trans_str = str(self.cpu_transforms).replace('\n', '\n   ')
-            trans_str = str(self.module_pipeline[:-1]).replace('\n', '\n ')
+            cpu_trans_str = str(self.cpu_transforms).replace("\n", "\n   ")
+            trans_str = str(self.transforms).replace("\n", "\n ")
             repr = (
                 f"{self.__class__.__name__}("
-                + (f"\n [ dataloader CPU transforms = \n   {cpu_trans_str}\n ]" 
-                   if self._lightning_training_using_datamodule else "")
+                + (
+                    f"\n [ dataloader CPU transforms = \n   {cpu_trans_str}\n ]"
+                    if self._lightning_training_using_datamodule
+                    else ""
+                )
                 + f"\n transforms = {trans_str}"
                 + f"\n model = {self.model}"
                 + "\n)"
@@ -205,20 +213,20 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[self._num_cpu_transforms:-1]
-    
+        return self.pipeline[self._num_cpu_transforms : -1]
+
     @property
     def cpu_transforms(self) -> CellariumPipeline:
         """The CPU transforms pipeline to be applied by the dataloader"""
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[:self._num_cpu_transforms]
+        return self.pipeline[: self._num_cpu_transforms]
 
     @property
     def _num_cpu_transforms(self) -> int:
         return 0 if self.hparams["cpu_transforms"] is None else len(self.hparams["cpu_transforms"])
-    
+
     def remove_cpu_transforms_from_module_pipeline(self) -> None:
         """
         Remove the CPU transforms from self.module_pipeline.
@@ -229,7 +237,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        self.module_pipeline = self.pipeline[self._num_cpu_transforms:]
+        self.module_pipeline = self.pipeline[self._num_cpu_transforms :]
 
     def add_cpu_transforms_to_module_pipeline(self) -> None:
         """Include the CPU transforms in self.module_pipeline"""

@@ -11,7 +11,6 @@ from anndata import AnnData
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
-from cellarium.ml.core.pipeline import CellariumPipeline
 
 
 class CellariumAnnDataDataModule(pl.LightningDataModule):

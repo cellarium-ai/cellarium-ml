@@ -6,19 +6,28 @@ from pathlib import Path
 import lightning.pytorch as pl
 import pytest
 
-from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection
+from cellarium.ml.transforms import Filter, Log1p, NormalizeTotal
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField, densify
-from cellarium.ml.transforms import Filter, NormalizeTotal, Log1p
-from tests.common import BoringModel, USE_CUDA
+from tests.common import USE_CUDA, BoringModel
 
 
-@pytest.mark.parametrize('accelerator', ['cpu', pytest.param('gpu', marks=pytest.mark.skipif(not USE_CUDA, reason='requires_cuda'))])
-@pytest.mark.parametrize("cpu_transforms", [None, [Filter(filter_list=['ENSG00000187642', 'ENSG00000078808'])]], ids=[None, "cpu_filter"])
+@pytest.mark.parametrize(
+    "accelerator",
+    ["cpu", pytest.param("gpu", marks=pytest.mark.skipif(not USE_CUDA, reason="requires_cuda"))],
+)
+@pytest.mark.parametrize(
+    "cpu_transforms",
+    [None, [Filter(filter_list=["ENSG00000187642", "ENSG00000078808"])]],
+    ids=[None, "cpu_filter"],
+)
 @pytest.mark.parametrize("transforms", [None, [NormalizeTotal(), Log1p()]], ids=[None, "normalize_log"])
 @pytest.mark.parametrize("num_workers", [0, 2], ids=lambda n: f"{n}workers")
-def test_cpu_transforms(tmp_path: Path, accelerator: str, num_workers: int, cpu_transforms: list | None, transforms: list | None) -> None:
+def test_cpu_transforms(
+    tmp_path: Path, accelerator: str, num_workers: int, cpu_transforms: list | None, transforms: list | None
+) -> None:
     datamodule = CellariumAnnDataDataModule(
         DistributedAnnDataCollection(
             filenames="https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
@@ -35,7 +44,7 @@ def test_cpu_transforms(tmp_path: Path, accelerator: str, num_workers: int, cpu_
 
     def _new_module():
         return CellariumModule(cpu_transforms=cpu_transforms, transforms=transforms, model=BoringModel())
-    
+
     def _check_pipeline(module: CellariumModule):
         if cpu_transforms is not None:
             module_cpu_transforms = module.cpu_transforms
@@ -68,7 +77,10 @@ def test_cpu_transforms(tmp_path: Path, accelerator: str, num_workers: int, cpu_
         break
 
 
-@pytest.mark.parametrize('accelerator', ['cpu', pytest.param('gpu', marks=pytest.mark.skipif(not USE_CUDA, reason='requires_cuda'))])
+@pytest.mark.parametrize(
+    "accelerator",
+    ["cpu", pytest.param("gpu", marks=pytest.mark.skipif(not USE_CUDA, reason="requires_cuda"))],
+)
 @pytest.mark.parametrize("batch_size", [50, None])
 def test_datamodule(tmp_path: Path, batch_size: int | None, accelerator: str) -> None:
     datamodule = CellariumAnnDataDataModule(
