@@ -9,11 +9,24 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
+import functools
 
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.core import copy_module
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule, collate_fn
+
+
+class FunctionComposer:
+    """
+    Compose two functions into a single callable, in a way that is picklable.
+    """
+    def __init__(self, first_applied: callable, second_applied: callable):
+        self.first_applied = first_applied
+        self.second_applied = second_applied
+
+    def __call__(self, batch):
+        return self.second_applied(self.first_applied(batch))
 
 
 class CellariumModule(pl.LightningModule):
@@ -71,6 +84,8 @@ class CellariumModule(pl.LightningModule):
             warnings.filterwarnings("ignore", message="Attribute 'model' is an instance of `nn.Module`")
             self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
+        self.module_pipeline = self.pipeline
+        self._lightning_training_using_datamodule = False
 
         if optim_fn is None:
             # Starting from PyTorch Lightning 2.3, automatic optimization doesn't allow to return None
@@ -124,7 +139,7 @@ class CellariumModule(pl.LightningModule):
                 )
             )
         else:
-            cpu_transforms = []
+            cpu_transforms = tuple()
         
         if self.hparams["transforms"]:
             for transform in self.hparams["transforms"]:
@@ -138,11 +153,11 @@ class CellariumModule(pl.LightningModule):
                 )
             )
         else:
-            transforms = []
+            transforms = tuple()
 
         if model is None:
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
-        self.pipeline = CellariumPipeline(cpu_transforms + transforms + [model]) # the full pipeline
+        self.pipeline = CellariumPipeline(cpu_transforms + transforms + (model,)) # the full pipeline
         self.module_pipeline = self.pipeline  # training loop pipeline: initially the full pipeline
 
         if not self.hparams["is_initialized"]:
@@ -150,14 +165,31 @@ class CellariumModule(pl.LightningModule):
             self.hparams["is_initialized"] = True
 
         # move the cpu_transforms to the dataloader's collate_fn if the dataloader is going to apply them
-        lightning_training_using_datamodule = False
-        if hasattr(self, "trainer"):
-            if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
-                lightning_training_using_datamodule = True
-        if lightning_training_using_datamodule:
-            datamodule = self.trainer.datamodule
-            datamodule.collate_fn = lambda uncollated_batch: self.cpu_transforms(collate_fn(uncollated_batch))
-            self.remove_cpu_transforms_from_module_pipeline()
+        try:
+            if hasattr(self, "trainer"):  # for some reason this check raises a RuntimeError rather than returning False
+                if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
+                    self._lightning_training_using_datamodule = True
+            if self._lightning_training_using_datamodule:
+                self.trainer.datamodule.collate_fn = FunctionComposer(first_applied=collate_fn, second_applied=self.cpu_transforms)
+                self.remove_cpu_transforms_from_module_pipeline()
+        except RuntimeError:
+            pass
+
+    def __repr__(self) -> str:
+        if self._lightning_training_using_datamodule:
+            cpu_trans_str = str(self.cpu_transforms).replace('\n', '\n   ')
+            trans_str = str(self.module_pipeline[:-1]).replace('\n', '\n ')
+            repr = (
+                f"{self.__class__.__name__}("
+                + (f"\n [ dataloader CPU transforms = \n   {cpu_trans_str}\n ]" 
+                   if self._lightning_training_using_datamodule else "")
+                + f"\n transforms = {trans_str}"
+                + f"\n model = {self.model}"
+                + "\n)"
+            )
+        else:
+            repr = f"{self.__class__.__name__}(pipeline = {self.module_pipeline})"
+        return repr
 
     @property
     def model(self) -> CellariumModel:
