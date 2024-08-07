@@ -39,7 +39,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 lint = ["ruff"]
-mypy = ["mypy==1.10.0", "types-PyYAML"]
+mypy = ["mypy", "types-PyYAML"]
 test = [
   "pytest-xdist",
   "tensorboard",

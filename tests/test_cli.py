@@ -292,7 +292,7 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
-                "transforms": [
+                "cpu_transforms": [
                     {
                         "class_path": "cellarium.ml.transforms.Filter",
                         "init_args": {
@@ -387,7 +387,11 @@ CONFIGS = [
 ]
 
 
-@pytest.mark.parametrize("config", CONFIGS)
+@pytest.mark.parametrize(
+    "config",
+    CONFIGS,
+    ids=[config["model_name"] + "-" + config["subcommand"] for config in CONFIGS],  # type: ignore[operator]
+)
 def test_cpu_multi_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
@@ -576,3 +580,52 @@ def test_compute_var_names_g(tmp_path: Path) -> None:
     with open(lr_config_path := str(tmp_path / "lr_config.yaml"), "w") as f:
         f.write(lr_config)
     main(["logistic_regression", "fit", "--config", lr_config_path])
+
+    onepass_config_with_cpu_filter = f"""
+    model:
+      cpu_transforms:
+        - class_path: cellarium.ml.transforms.Filter
+          init_args:
+            filter_list:
+              - ENSG00000187642
+              - ENSG00000078808
+              - ENSG00000272106
+              - ENSG00000162585
+              - ENSG00000272088
+              - ENSG00000204624
+              - ENSG00000162490
+              - ENSG00000177000
+              - ENSG00000011021
+      transforms:
+        - class_path: cellarium.ml.transforms.NormalizeTotal
+          init_args:
+            target_count: 10_000
+        - cellarium.ml.transforms.Log1p
+      model: cellarium.ml.models.OnePassMeanVarStd
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+          shard_size: 100
+          obs_columns_to_validate: [total_mrna_umis]
+          max_cache_size: 2
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+        total_mrna_umis_n:
+          attr: obs
+          key: total_mrna_umis
+      batch_size: 50
+      num_workers: 2
+    trainer:
+      accelerator: cpu
+      devices: 1
+      default_root_dir: {tmp_path}
+    """
+    with open(tmp_path / "onepass_config_with_cpu_filter.yaml", "w") as f:
+        f.write(onepass_config_with_cpu_filter)
+    main(["onepass_mean_var_std", "fit", "--config", str(tmp_path / "onepass_config_with_cpu_filter.yaml")])
