@@ -223,7 +223,7 @@ def compute_var_names_g(
     """
     adata = data.dadc[0]
     batch = {key: field(adata) for key, field in data.batch_keys.items()}
-    pipeline = CellariumPipeline((cpu_transforms if cpu_transforms else []) + (transforms if transforms else []))
+    pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
         with FakeCopyMode(fake_mode):
