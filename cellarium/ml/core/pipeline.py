@@ -1,8 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from itertools import chain
+
 import numpy as np
 import torch
+from typing import Iterable
 
 from cellarium.ml.models import PredictMixin, ValidateMixin
 from cellarium.ml.utilities.core import call_func_with_batch
@@ -33,6 +36,9 @@ class CellariumPipeline(torch.nn.ModuleList):
         modules:
             Modules to be executed sequentially.
     """
+
+    def __add__(self, other: Iterable[torch.nn.Module]) -> torch.nn.ModuleList:
+        return CellariumPipeline(chain(self, other))
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
         for module in self:
