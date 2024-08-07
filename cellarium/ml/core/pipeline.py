@@ -3,6 +3,7 @@
 
 from itertools import chain
 from typing import Iterable
+from typing_extensions import Self
 
 import numpy as np
 import torch
@@ -37,8 +38,8 @@ class CellariumPipeline(torch.nn.ModuleList):
             Modules to be executed sequentially.
     """
 
-    def __add__(self, other: Iterable[torch.nn.Module]) -> torch.nn.ModuleList:
-        return CellariumPipeline(chain(self, other))
+    def __add__(self, other: Iterable[torch.nn.Module]) -> Self:
+        return self.__class__(chain(self, other))
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
         for module in self:
