@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from itertools import chain
+from typing import Iterable
 
 import numpy as np
 import torch
-from typing import Iterable
 
 from cellarium.ml.models import PredictMixin, ValidateMixin
 from cellarium.ml.utilities.core import call_func_with_batch
