@@ -1,8 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from collections.abc import Iterable
 from itertools import chain
-from typing import Iterable
 
 import numpy as np
 import torch
