@@ -116,6 +116,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
+        self.collate_fn = collate_fn
 
     def setup(self, stage: str | None = None) -> None:
         """
@@ -169,7 +170,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.train_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -177,7 +178,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.val_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
@@ -185,5 +186,5 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.predict_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
