@@ -3,10 +3,10 @@
 
 from itertools import chain
 from typing import Iterable
-from typing_extensions import Self
 
 import numpy as np
 import torch
+from typing_extensions import Self
 
 from cellarium.ml.models import PredictMixin, ValidateMixin
 from cellarium.ml.utilities.core import call_func_with_batch
