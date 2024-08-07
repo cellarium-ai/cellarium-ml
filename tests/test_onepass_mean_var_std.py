@@ -148,7 +148,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: OnePassMeanVarStd = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
+    assert isinstance(loaded_model, OnePassMeanVarStd)
     # assert
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g, atol=1e-6)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)

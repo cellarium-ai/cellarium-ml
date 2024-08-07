@@ -125,7 +125,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: IncrementalPCA = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
+    assert isinstance(loaded_model, IncrementalPCA)
     # assert
     np.testing.assert_allclose(model.V_kg.detach(), loaded_model.V_kg.detach())
     np.testing.assert_allclose(model.S_k.detach(), loaded_model.S_k.detach())

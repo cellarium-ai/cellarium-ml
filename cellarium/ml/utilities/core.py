@@ -14,6 +14,19 @@ import torch
 from cellarium.ml.utilities.testing import assert_nonnegative, assert_positive
 
 
+class FunctionComposer:
+    """
+    Compose two functions into a single callable, in a way that is picklable.
+    """
+
+    def __init__(self, first_applied: Callable, second_applied: Callable):
+        self.first_applied = first_applied
+        self.second_applied = second_applied
+
+    def __call__(self, batch):
+        return self.second_applied(self.first_applied(batch))
+
+
 def copy_module(
     module: torch.nn.Module, self_device: torch.device, copy_device: torch.device
 ) -> tuple[torch.nn.Module, torch.nn.Module]:
