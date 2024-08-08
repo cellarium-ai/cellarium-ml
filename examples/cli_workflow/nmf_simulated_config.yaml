@@ -9,7 +9,7 @@ trainer:
   logger: null
   callbacks: null
   fast_dev_run: false
-  max_epochs: 50
+  max_epochs: 6
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -46,9 +46,10 @@ model:
     class_path: cellarium.ml.models.NonNegativeMatrixFactorization
     init_args:
       k: 10
-      # r: 10
-      # density_threshold: 0.25
-      # local_neighborhood_size: 0.30
+      r: 10
+      density_threshold: 0.25
+      local_neighborhood_size: 0.30
+      log_variational: false
       algorithm: mairal
   optim_fn: null
   optim_kwargs: null
@@ -59,7 +60,7 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: /home/jupyter/data/simulated_nmf_data.h5ad
+      filenames: /home/jupyter/data/simulated_nmf_dataP05.h5ad
       limits: [100000]
       shard_size: 100000
       last_shard_size: null
@@ -72,10 +73,10 @@ data:
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
       attr: var_names
-  batch_size: 2048
+  batch_size: 10000 # 4096 # 2048
   shuffle: false
   seed: 0
-  drop_last: false
+  drop_last: true
   test_mode: false
-  num_workers: 2
+  num_workers: 4
 ckpt_path: null

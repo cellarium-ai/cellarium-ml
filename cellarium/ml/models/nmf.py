@@ -6,6 +6,7 @@ from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 
 import torch
 import torch.nn.functional as F
@@ -19,13 +20,15 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
-import pandas as pd
-
-
 # from sklearn.cluster import KMeans
 
+import warnings
+
+warnings.filterwarnings("ignore")
+
+
 class KMeans:
-    def __init__(self, n_clusters, max_iter=200, tol=1e-4):
+    def __init__(self, n_clusters, max_iter=100, tol=1e-4):
         self.n_clusters = n_clusters
         self.max_iter = max_iter
         self.tol = tol
@@ -97,16 +100,16 @@ def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=
     D = D[local_neigh_dist < density_threshold, :]
     # D = pd.DataFrame(D.cpu().numpy())
 
-    # kmeans = KMeans(n_clusters=k, n_init=10, random_state=1)
-    # kmeans.fit(D)
-    # kmeans_cluster_labels = pd.Series(kmeans.labels_+1, index=D.index)
-
     D_mean = D.mean(0)
     D_norm = D - D_mean
 
+    # kmeans = KMeans(n_clusters=k, n_init=10, random_state=1)
+    # kmeans.fit(D_norm)
+    # kmeans_cluster_labels = pd.Series(kmeans.labels_+1, index=D.index)
+
     kmeans = KMeans(n_clusters=k)
     kmeans.fit(D_norm)
-    kmeans_cluster_labels = kmeans.predict(D_norm)
+    kmeans_cluster_labels = kmeans.predict(D)
 
     D = pd.DataFrame(D.cpu().numpy())
     kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
@@ -190,7 +193,7 @@ def get_full_D(x_ng, alpha_nk, A_kk, B_kg, factors_kg, n_iterations):
             break
         D_buffer = factors_kg.clone()
 
-        return factors_kg
+    return A_kk, B_kg, factors_kg
 
 
 def init_weights(m):
@@ -220,12 +223,14 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
     def __init__(self, var_names_g: Sequence[str], k: int, r: int,
                  density_threshold: float, local_neighborhood_size: float,
+                 log_variational: bool,
                  algorithm: Literal["mairal"] = "mairal") -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         g = len(self.var_names_g)
         self.n_vars = g
         self.algorithm = algorithm
+        self.log_variational = log_variational
 
         self.A_rkk: torch.Tensor
         self.B_rkg: torch.Tensor
@@ -236,6 +241,13 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.register_buffer("D_rkg", torch.empty(r, k, g))
         self.register_buffer("D_kg", torch.empty(k, g))
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
+
+        self.full_A_kk: torch.Tensor
+        self.full_B_kg: torch.Tensor
+        self.full_D_kg: torch.Tensor
+        self.register_buffer("full_A_kk", torch.empty(k, k))
+        self.register_buffer("full_B_kg", torch.empty(k, g))
+        self.register_buffer("full_D_kg", torch.empty(k, g))
 
         self._D_tol = 0.005  # 0.01 #
         self._alpha_tol = 0.005  # 0.01 #
@@ -248,10 +260,15 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        self.D_kg.zero_()
         self.A_rkk.zero_()
         self.B_rkg.zero_()
         self.D_rkg.uniform_(0.0, 2.0)  # TODO: figure out best initialization
         self._dummy_param.data.zero_()
+
+        self.full_A_kk.zero_()
+        self.full_B_kg.zero_()
+        self.full_D_kg.uniform_(0.0, 2.0)  # TODO: figure out best initialization
 
     def online_dictionary_learning(self, x_ng: torch.Tensor, factors_kg: torch.Tensor) -> torch.Tensor:
         """
@@ -368,8 +385,11 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        x_ = x_ng
-        x_ = torch.log1p(x_)
+        if self.log_variational:
+            x_ = torch.log1p(x_ng)
+        else:
+            std = torch.std(x_ng, dim=0) + 1e-4
+            x_ = x_ng / std
 
         if self.algorithm == "mairal":
             self.D_rkg = self.online_dictionary_learning(x_ng=x_, factors_kg=self.D_rkg)
@@ -388,10 +408,14 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                     trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
             ), "OnePassMeanVarStd requires that broadcast_buffers is set to False."
 
-    def on_train_end(self, trainer: pl.Trainer) -> None:
-        self.D_kg = consensus(D_rkg=self.D_rkg, k=self.k,
-                              density_threshold=self.density_threshold,
-                              local_neighborhood_size=self.local_neighborhood_size)
+    def on_epoch_end(self, trainer: pl.Trainer) -> None:
+        D_kg = consensus(D_rkg=self.D_rkg, k=self.k,
+                         density_threshold=self.density_threshold,
+                         local_neighborhood_size=self.local_neighborhood_size)
+
+        # k, _ = D_kg.shape
+
+        self.D_kg = D_kg  # [:k, :]
 
     def predict(
             self,
@@ -405,9 +429,22 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        x_ = torch.log1p(x_ng)
+        ## get the final alpha_nk
+        if self.log_variational:
+            x_ = torch.log1p(x_ng)
+        else:
+            std = torch.std(x_ng, dim=0) + 1e-4
+            x_ = x_ng / std
 
         alpha_nk = get_final_alpha_wKL(x_ng=x_, D=self.D_kg, n_iterations=200)
+
+        ## get the final D for full transcrptome
+        x_ = torch.log1p(x_ng)
+        A, B, D = get_full_D(x_, alpha_nk, self.full_A_kk, self.full_B_kg, self.full_D_kg, 200)
+
+        self.full_A_kk = A
+        self.full_B_kg = B
+        self.full_D_kg = D
 
         return {"alpha_nk": alpha_nk}
 
