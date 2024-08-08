@@ -49,6 +49,14 @@ if not os.path.exists("tutorials"):
 for src_file in glob.glob("../../notebooks/*.ipynb"):
     shutil.copy(src_file, "tutorials/")
 
+# -- Copy examples
+
+if not os.path.exists("examples"):
+    os.makedirs("examples")
+
+for src_file in glob.glob("../../examples/cli_workflow/*.rst", recursive=True):
+    shutil.copy(src_file, "examples/")
+
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 

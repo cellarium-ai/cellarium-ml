@@ -10,16 +10,20 @@ import numpy as np
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
 
+from cellarium.ml.core.datamodule import CellariumAnnDataDataModule, collate_fn
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.models import CellariumModel
-from cellarium.ml.utilities.core import copy_module
+from cellarium.ml.utilities.core import FunctionComposer, copy_module
 
 
 class CellariumModule(pl.LightningModule):
     """
     ``CellariumModule`` organizes code into following sections:
 
+        * :attr:`cpu_transforms`: A list of transforms to apply to the input data as part of the dataloader on CPU.
         * :attr:`transforms`: A list of transforms to apply to the input data before passing it to the model.
+        * :attr:`module_pipeline`: A :class:`cellarium.ml.core.CellariumPipeline` to apply all transforms,
+          minus the CPU transforms if they are handled by a :class:`CellariumAnnDataDataModule`, and the model.
         * :attr:`model`: A :class:`cellarium.ml.models.CellariumModel` to train with
           :meth:`training_step` method and epoch end hooks.
         * :attr:`optim_fn` and :attr:`optim_kwargs`: A Pytorch optimizer class and its keyword arguments.
@@ -27,6 +31,10 @@ class CellariumModule(pl.LightningModule):
           keyword arguments.
 
     Args:
+        cpu_transforms:
+            A list of transforms to apply to the input data as part of the dataloader on CPU.
+            These transforms get applied before other ``transforms``.
+            If ``None``, no transforms are applied as part of the dataloader.
         transforms:
             A list of transforms to apply to the input data before passing it to the model.
             If ``None``, no transforms are applied.
@@ -49,6 +57,7 @@ class CellariumModule(pl.LightningModule):
 
     def __init__(
         self,
+        cpu_transforms: Iterable[torch.nn.Module] | None = None,
         transforms: Iterable[torch.nn.Module] | None = None,
         model: CellariumModel | None = None,
         optim_fn: type[torch.optim.Optimizer] | None = None,
@@ -58,34 +67,71 @@ class CellariumModule(pl.LightningModule):
         is_initialized: bool = False,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(logger=False)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Attribute 'model' is an instance of `nn.Module`")
+            self.save_hyperparameters(logger=False)
         self.pipeline: CellariumPipeline | None = None
+        self._cpu_transforms_in_module_pipeline: bool = True
+
+        if optim_fn is None:
+            # Starting from PyTorch Lightning 2.3, automatic optimization doesn't allow to return None
+            # from the training_step during distributed training. https://github.com/Lightning-AI/pytorch-lightning/pull/19918
+            # Thus, we need to use manual optimization for the No Optimizer case.
+            self.automatic_optimization = False
 
     def configure_model(self) -> None:
-        # This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
-        # implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
-        # calls to it should be a no-op.
+        """
+        .. note::
+
+            This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
+            implementation of this hook is idempotent, i.e., after the first time the hook is called, subsequent
+            calls to it should be a no-op.
+
+        Steps involved in configuring the model:
+
+        1. Freeze the transforms if they are instances of :class:`~cellarium.ml.core.CellariumModule`.
+        2. Make a copy of modules on the meta device and assign to hparams.
+        3. Send the original modules to the host device and add to self.pipeline.
+        4. Reset the model parameters if it has not been initialized before.
+
+        For more context, see discussions in
+        https://dev-discuss.pytorch.org/t/state-of-model-creation-initialization-seralization-in-pytorch-core/1240
+
+        Benefits of this approach:
+
+        1. The checkpoint stores modules on the meta device.
+        2. Loading from a checkpoint skips a wasteful step of initializing module parameters
+           before loading the ``state_dict``.
+        3. The module parameters are directly initialized on the host gpu device instead of being initialized
+           on the cpu and then moved to the gpu device (given that modules were instantiated under
+           the ``torch.device("meta")`` context).
+        """
         if self.pipeline is not None:
             return
 
-        # Steps involved in configuring the model:
-        # 1. Make a copy of modules on the meta device and assign to hparams.
-        # 2. Send the original modules to the host device and add to self.pipeline.
-        # 3. Reset the model parameters if it has not been initialized before.
-        # For more context, see discussions in
-        # https://dev-discuss.pytorch.org/t/state-of-model-creation-initialization-seralization-in-pytorch-core/1240
-        #
-        # Benefits of this approach:
-        # 1. The checkpoint stores modules on the meta device.
-        # 2. Loading from a checkpoint skips a wasteful step of initializing module parameters
-        #    before loading the state_dict.
-        # 3. The module parameters are directly initialized on the host gpu device instead of being initialized
-        #    on the cpu and then moved to the gpu device (given that modules were instantiated under
-        #    the ``torch.device("meta")`` context).
         model, self.hparams["model"] = copy_module(
             self.hparams["model"], self_device=self.device, copy_device=torch.device("meta")
         )
+
+        if self.hparams["cpu_transforms"]:
+            for transform in self.hparams["cpu_transforms"]:
+                if isinstance(transform, CellariumModule):
+                    transform.freeze()
+
+            cpu_transforms, self.hparams["cpu_transforms"] = zip(
+                *(
+                    copy_module(transform, self_device=self.device, copy_device=torch.device("meta"))
+                    for transform in self.hparams["cpu_transforms"]
+                )
+            )
+        else:
+            cpu_transforms = tuple()
+
         if self.hparams["transforms"]:
+            for transform in self.hparams["transforms"]:
+                if isinstance(transform, CellariumModule):
+                    transform.freeze()
+
             transforms, self.hparams["transforms"] = zip(
                 *(
                     copy_module(transform, self_device=self.device, copy_device=torch.device("meta"))
@@ -93,16 +139,44 @@ class CellariumModule(pl.LightningModule):
                 )
             )
         else:
-            transforms = None
+            transforms = tuple()
 
-        self.pipeline = CellariumPipeline(transforms)
         if model is None:
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
-        self.pipeline.append(model)
+        self.pipeline = CellariumPipeline(cpu_transforms + transforms + (model,))  # the full pipeline
 
         if not self.hparams["is_initialized"]:
             model.reset_parameters()
             self.hparams["is_initialized"] = True
+
+        # move the cpu_transforms to the dataloader's collate_fn if the dataloader is going to apply them
+        if self._trainer is not None:
+            if hasattr(self.trainer, "datamodule"):
+                if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
+                    self._cpu_transforms_in_module_pipeline = False
+                    self.trainer.datamodule.collate_fn = FunctionComposer(
+                        first_applied=collate_fn,
+                        second_applied=self.cpu_transforms,
+                    )
+
+    def __repr__(self) -> str:
+        if not self._cpu_transforms_in_module_pipeline:
+            cpu_trans_str = str(self.cpu_transforms).replace("\n", "\n   ")
+            trans_str = str(self.transforms).replace("\n", "\n ")
+            repr = (
+                f"{self.__class__.__name__}("
+                + (
+                    f"\n [ dataloader CPU transforms = \n   {cpu_trans_str}\n ]"
+                    if not self._cpu_transforms_in_module_pipeline
+                    else ""
+                )
+                + f"\n transforms = {trans_str}"
+                + f"\n model = {self.model}"
+                + "\n)"
+            )
+        else:
+            repr = f"{self.__class__.__name__}(pipeline = {self.module_pipeline})"
+        return repr
 
     @property
     def model(self) -> CellariumModel:
@@ -118,7 +192,27 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[:-1]
+        return self.pipeline[self._num_cpu_transforms : -1]
+
+    @property
+    def cpu_transforms(self) -> CellariumPipeline:
+        """The CPU transforms pipeline to be applied by the dataloader"""
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        return self.pipeline[: self._num_cpu_transforms]
+
+    @property
+    def _num_cpu_transforms(self) -> int:
+        return 0 if self.hparams["cpu_transforms"] is None else len(self.hparams["cpu_transforms"])
+
+    @property
+    def module_pipeline(self) -> CellariumPipeline:
+        """The pipeline applied by :meth:`training_step`, :meth:`validation_step`, and :meth:`forward`"""
+        if self.pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
@@ -135,14 +229,22 @@ class CellariumModule(pl.LightningModule):
         Returns:
             Loss tensor or ``None`` if no loss.
         """
-        if self.pipeline is None:
+        if self.module_pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        output = self.pipeline(batch)
+        output = self.module_pipeline(batch)
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
-            self.log("train_loss", loss)
+            self.log("train_loss", loss, sync_dist=True)
+
+        if not self.automatic_optimization:
+            # Note, that running .step() is necessary for incrementing the global step even though no backpropagation
+            # is performed.
+            no_optimizer = self.optimizers()
+            assert isinstance(no_optimizer, pl.core.optimizer.LightningOptimizer)
+            no_optimizer.step()
+
         return loss
 
     def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
@@ -155,10 +257,28 @@ class CellariumModule(pl.LightningModule):
         Returns:
             A dictionary containing the batch data and inference outputs.
         """
-        if self.pipeline is None:
+        if self.module_pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline.predict(batch)
+        return self.module_pipeline.predict(batch)
+
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
+        """
+        Forward pass for validation step.
+
+        Args:
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
+
+        Returns:
+            None
+        """
+        if self.module_pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        self.module_pipeline.validate(batch)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
         """Configure optimizers for the model."""

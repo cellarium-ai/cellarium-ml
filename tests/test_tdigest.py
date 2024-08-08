@@ -119,13 +119,13 @@ def test_load_from_checkpoint_multi_device():
     # so we need to use a fixed shared directory
     tmp_path = Path("/tmp/test_load_from_checkpoint_multi_device")
     n, g = 4, 3
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array(var_names_g),
+            var_names_g,
         ),
         collate_fn=collate_fn,
     )
@@ -149,7 +149,8 @@ def test_load_from_checkpoint_multi_device():
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: TDigest = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
+    assert isinstance(loaded_model, TDigest)
     # assert
     np.testing.assert_allclose(model.median_g, loaded_model.median_g)
 
