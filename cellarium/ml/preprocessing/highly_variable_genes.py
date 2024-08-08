@@ -70,7 +70,7 @@ def get_highly_variable_genes(
     df["means"] = mean
     df["dispersions"] = dispersion
     df["mean_bin"] = pd.cut(df["means"], bins=n_bins)
-    disp_grouped = df.groupby("mean_bin")["dispersions"]
+    disp_grouped = df.groupby("mean_bin", observed=False)["dispersions"]
     disp_mean_bin = disp_grouped.mean()
     disp_std_bin = disp_grouped.std(ddof=1)
     df.index = gene_names
