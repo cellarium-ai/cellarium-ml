@@ -222,16 +222,14 @@ Below we highlight the changes made to the default configuration file.
 train
 ~~~~~
 
-Change the number of devices, change strategy to ``ddp_find_unused_parameters_true`` (because trained PCA model contains a dummy parameter that is not used in producing the loss during training; read more about ``find_unused_parameters`` option in the `DDP docs <https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html#torch.nn.parallel.DistributedDataParallel>`_), set the number of epochs, and set the path for logs and weights:
+Change the number of devices, set the number of epochs, and set the path for logs and weights:
 
 .. code-block:: diff
 
-    <   strategy: auto
     <   devices: auto
     <   max_epochs: null
     <   default_root_dir: null
     ---
-    >   strategy: ddp_find_unused_parameters_true
     >   devices: 2
     >   max_epochs: 5
     >   default_root_dir: /tmp/test_examples/lr

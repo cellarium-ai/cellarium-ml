@@ -3,17 +3,31 @@
 
 import copy
 import math
+import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+import lightning.pytorch as pl
 import torch
 
 from cellarium.ml.utilities.testing import assert_nonnegative, assert_positive
 
 
-def copy_module(
-    module: torch.nn.Module, self_device: torch.device, copy_device: torch.device
-):
+class FunctionComposer:
+    """
+    Compose two functions into a single callable, in a way that is picklable.
+    """
+
+    def __init__(self, first_applied: Callable, second_applied: Callable):
+        self.first_applied = first_applied
+        self.second_applied = second_applied
+
+    def __call__(self, batch):
+        return self.second_applied(self.first_applied(batch))
+
+
+def copy_module(module: torch.nn.Module, self_device: torch.device, copy_device: torch.device):
     """
     Return an original module on ``self_device`` and its copy on ``copy_device``.
     If the module is on meta device then it is moved to ``self_device`` efficiently using ``to_empty`` method.
@@ -134,3 +148,22 @@ def call_func_with_batch(
     if "kwargs" in ann:
         input_keys |= batch.keys()
     return func(**{key: batch[key] for key in input_keys})
+
+
+def resolve_ckpt_dir(trainer: pl.Trainer) -> Path | str:
+    if len(trainer.loggers) > 0:
+        if trainer.loggers[0].save_dir is not None:
+            save_dir = trainer.loggers[0].save_dir
+        else:
+            save_dir = trainer.default_root_dir
+        name = trainer.loggers[0].name
+        version = trainer.loggers[0].version
+        version = version if isinstance(version, str) else f"version_{version}"
+        ckpt_path = os.path.join(save_dir, str(name), version, "checkpoints")
+    else:
+        # if no loggers, use default_root_dir
+        ckpt_path = os.path.join(trainer.default_root_dir, "checkpoints")
+
+    os.makedirs(ckpt_path, exist_ok=True)
+
+    return ckpt_path

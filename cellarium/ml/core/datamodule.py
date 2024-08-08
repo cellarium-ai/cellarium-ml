@@ -2,15 +2,12 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from typing import Literal
-
 import lightning.pytorch as pl
 import torch
-from anndata import AnnData
 
-from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.data import IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.utilities.core import train_val_split
-from cellarium.ml.utilities.data import AnnDataField, collate_fn
+from cellarium.ml.utilities.data import collate_fn
 
 
 class CellariumAnnDataDataModule(pl.LightningDataModule):
@@ -116,6 +113,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
+        self.collate_fn = collate_fn
 
     def setup(self, stage) -> None:
         """
@@ -169,7 +167,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.train_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -177,7 +175,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.val_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
@@ -185,5 +183,5 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.predict_dataset,
             num_workers=self.num_workers,
-            collate_fn=collate_fn,
+            collate_fn=self.collate_fn,
         )

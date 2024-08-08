@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
-from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -11,7 +9,7 @@ import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.utilities.data import get_rank_and_num_replicas
+from cellarium.ml.utilities.distributed import get_rank_and_num_replicas
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -34,7 +32,7 @@ class OnePassMeanVarStd(CellariumModel):
 
     def __init__(self, var_names_g, algorithm="naive"):
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.algorithm = algorithm

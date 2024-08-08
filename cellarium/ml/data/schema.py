@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
 
 import numpy as np
 from anndata import AnnData
@@ -60,9 +59,23 @@ class AnnDataSchema:
                         "of the reference anndata."
                     )
                 if not ref_value.dtypes.equals(value.dtypes):
+                    for col in ref_value.columns:
+                        if ref_value[col].dtype != value[col].dtype:
+                            if ref_value[col].dtype == "category":
+                                diff = set(ref_value[col].cat.categories).symmetric_difference(
+                                    set(value[col].cat.categories)
+                                )
+                                raise ValueError(
+                                    f".obs['{col}'].cat.categories for anndata passed in "
+                                    f"do not match those in the reference anndata. symmetric_differece: {diff}"
+                                )
+                            raise ValueError(
+                                f".obs['{col}'] dtype for anndata passed in ({value[col].dtype}) "
+                                f"does not match .obs['{col}'] dtype of the reference anndata ({ref_value[col].dtype})"
+                            )
                     raise ValueError(
-                        ".obs attribute dtypes for anndata passed in does not match .obs attribute dtypes "
-                        "of the reference anndata."
+                        f".obs columns for anndata passed in ({value.columns}) do not match .obs columns "
+                        f"of the reference anndata ({ref_value.columns})."
                     )
             elif attr in ["var", "var_names"]:
                 # For var compare if two DataFrames have the same shape and elements

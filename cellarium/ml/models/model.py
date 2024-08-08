@@ -3,10 +3,8 @@
 
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
-from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
@@ -53,6 +51,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
                 pass
             constrained_value, constraint, event_dim = value
             self._pyro_params[name] = constraint, event_dim
+            assert constrained_value is not None
             unconstrained_value = _unconstrain(constrained_value, constraint)
             super().__setattr__(name + "_unconstrained", unconstrained_value)
             return

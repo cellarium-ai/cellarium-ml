@@ -8,7 +8,6 @@ Testing utilities
 This module contains helper functions for testing.
 """
 
-from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -126,9 +125,7 @@ def l1_norm(x: torch.Tensor) -> float:
     return x.detach().abs().mean().item()
 
 
-def record_out_coords(
-    records, width: int, name: str, t: int
-):
+def record_out_coords(records, width: int, name: str, t: int):
     """
     Returns a hook to record layer output coordinate size.
 

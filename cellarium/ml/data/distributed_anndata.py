@@ -2,17 +2,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import gc
-from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 
-import numpy as np
 import pandas as pd
 from anndata import AnnData, concat
 from anndata._core.index import Index, Index1D, _normalize_indices
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
     AnnCollectionView,
-    ConvertType,
 )
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
@@ -162,7 +159,7 @@ class DistributedAnnDataCollection(AnnCollection):
         limits=None,
         shard_size=None,
         last_shard_size=None,
-        max_cache_size: int =1,
+        max_cache_size: int = 1,
         cache_size_strictly_enforced=True,
         label=None,
         keys=None,

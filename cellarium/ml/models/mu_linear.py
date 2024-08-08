@@ -1,9 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -45,7 +43,7 @@ class abcdParameter:
             The base width :math:`n_0`.
     """
 
-    data=None
+    data = None
     width: int = 1
     a: float = 0.0
     b: float = 0.0

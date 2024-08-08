@@ -2,22 +2,20 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from collections.abc import Sequence
-
 import lightning.pytorch as pl
 import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
 
-from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class LogisticRegression(CellariumModel):
+class LogisticRegression(CellariumModel, PredictMixin):
     """
     Logistic regression model.
 
@@ -26,8 +24,8 @@ class LogisticRegression(CellariumModel):
             Number of observations.
         var_names_g:
             The variable names schema for the input data validation.
-        n_categories:
-            Number of categories.
+        y_categories:
+            The categories for the target data.
         W_prior_scale:
             The scale of the Laplace prior for the weights.
         W_init_scale:
@@ -41,8 +39,8 @@ class LogisticRegression(CellariumModel):
     def __init__(
         self,
         n_obs: int,
-        var_names_g,
-        n_categories: int,
+        var_names_g: np.ndarray,
+        y_categories: np.ndarray,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
         seed: int = 0,
@@ -52,9 +50,10 @@ class LogisticRegression(CellariumModel):
 
         # data
         self.n_obs = n_obs
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
-        self.n_categories = n_categories
+        self.y_categories = y_categories
+        self.n_categories = len(y_categories)
 
         self.seed = seed
         # parameters
@@ -62,8 +61,8 @@ class LogisticRegression(CellariumModel):
         self.W_init_scale = W_init_scale
         self.W_prior_scale: torch.Tensor
         self.register_buffer("W_prior_scale", torch.empty(()))
-        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, n_categories))
-        self.b_c = torch.nn.Parameter(torch.empty(n_categories))
+        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_categories))
+        self.b_c = torch.nn.Parameter(torch.empty(self.n_categories))
         self.reset_parameters()
 
         # loss
@@ -79,7 +78,7 @@ class LogisticRegression(CellariumModel):
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
         self.b_c.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor):
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, y_categories: np.ndarray):
         """
         Args:
             x_ng:
@@ -88,26 +87,48 @@ class LogisticRegression(CellariumModel):
                 The variable names for the input data.
             y_n:
                 The target data.
+            y_categories:
+                The categories for the input target data.
 
         Returns:
             A dictionary with the loss value.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+        assert_arrays_equal("y_categories", y_categories, "self.y_categories", self.y_categories)
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
         return {"loss": loss}
 
     def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
-            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),  # type: ignore[attr-defined]
+            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)  # type: ignore[attr-defined]
+            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
+
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
+        """
+        Predict the target logits.
+
+        Args:
+            x_ng:
+                The input data.
+            var_names_g:
+                The variable names for the input data.
+
+        Returns:
+            A dictionary with the target logits.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+
+        logits_nc = x_ng @ self.W_gc + self.b_c
+        return {"y_logits_nc": logits_nc}
 
     def on_batch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:
