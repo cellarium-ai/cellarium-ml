@@ -19,7 +19,7 @@ class GatherLayer(torch.autograd.Function):
     """Gather tensors from all process, supporting backward propagation."""
 
     @staticmethod
-    def forward(ctx, input: torch.Tensor) -> tuple[torch.Tensor, ...]:  # type: ignore
+    def forward(ctx, input: torch.Tensor):  # type: ignore
         output = [torch.empty_like(input) for _ in range(dist.get_world_size())]
         dist.all_gather(output, input)
         return tuple(output)
@@ -31,7 +31,7 @@ class GatherLayer(torch.autograd.Function):
         return all_grads[dist.get_rank()]
 
 
-def get_rank_and_num_replicas() -> tuple[int, int]:
+def get_rank_and_num_replicas():
     """
     This helper function returns the rank of the current process and
     the number of processes in the default process group. If distributed
@@ -61,7 +61,7 @@ def get_rank_and_num_replicas() -> tuple[int, int]:
     return rank, num_replicas
 
 
-def get_worker_info() -> tuple[int, int]:
+def get_worker_info():
     """
     This helper function returns ``worker_id`` and ``num_workers``. If it is running
     in the main process then it returns ``worker_id=0`` and ``num_workers=1``.

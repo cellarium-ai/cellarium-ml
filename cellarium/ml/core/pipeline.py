@@ -37,7 +37,7 @@ class CellariumPipeline(torch.nn.ModuleList):
             Modules to be executed sequentially.
     """
 
-    def __add__(self, other: Iterable[torch.nn.Module]) -> Self:
+    def __add__(self, other) -> Self:
         return self.__class__(chain(self, other))
 
     def forward(self, batch):

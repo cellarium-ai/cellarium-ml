@@ -150,7 +150,7 @@ def call_func_with_batch(
     return func(**{key: batch[key] for key in input_keys})
 
 
-def resolve_ckpt_dir(trainer: pl.Trainer) -> Path | str:
+def resolve_ckpt_dir(trainer: pl.Trainer):
     if len(trainer.loggers) > 0:
         if trainer.loggers[0].save_dir is not None:
             save_dir = trainer.loggers[0].save_dir
