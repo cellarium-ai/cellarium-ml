@@ -60,7 +60,6 @@ def gpt_predict(
     # predict
     ouput_tensors = []
     index = []
-    # i = 0
     for batch in dm.predict_dataloader():
         batch["prompt_name_ns"] = np.broadcast_to(batch["var_names_g"].values[None, :], batch["x_ng"].shape)
         batch["prompt_value_ns"] = batch["x_ng"].to(device)
@@ -85,17 +84,26 @@ def gpt_predict(
 
         ouput_tensors.append(mat_ng.detach())
         index.extend(batch["obs_names_n"].tolist())
-        # adata_out.X[i:(i + batch["x_ng"].shape[0]), :] = mat_ng.detach().cpu().numpy()
-        # i += batch["x_ng"].shape[0]
 
     gpt_data = torch.cat(ouput_tensors, dim=0).cpu().numpy()
 
     # ensure the order is correct
-    df_ordered = pd.DataFrame(index=adata_out.obs_names)
-    df = pd.DataFrame(index=index, data=gpt_data)
-    df_ordered = df_ordered.join(df, how='left')
-    adata_out.layers[key_added] = df_ordered.values
-    # adata_out.layers[key_added] = adata_out.X.copy()
+    for i, (k, v) in enumerate(zip(adata_out.obs_names, index)):
+        if k != v:
+            print('WARNING!')
+            print(f"obs_names order does not match at index {i}: {k} != {v}")
+            print('Trying to rescue by reordering')
+            print('Check the outputs carefully')
+
+            # reorder outputs based on the indices
+            df_ordered = pd.DataFrame(index=adata_out.obs_names)
+            df = pd.DataFrame(index=index, data=gpt_data)
+            df_ordered = df_ordered.join(df, how='left')
+            gpt_data = df_ordered.values
+
+            break
+
+    adata_out.layers[key_added] = gpt_data
     
     return adata_out
 

@@ -94,6 +94,7 @@ def get_datamodule(
         seed=seed,
         drop_last=drop_last,
         num_workers=num_workers,
+        iteration_strategy="same_order",  # critical
     )
     dm.setup(stage="predict")
     return dm
