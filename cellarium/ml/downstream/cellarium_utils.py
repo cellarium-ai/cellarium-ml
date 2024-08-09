@@ -73,15 +73,16 @@ def get_datamodule(
     batch_keys={
         "x_ng": AnnDataField(attr="X", convert_fn=densify),
         "var_names_g": AnnDataField(attr="var_names"),
+        "obs_names_n": AnnDataField(attr="obs_names"),
     }
-    if "total_mrna_umis_n" in adata.obs.columns:
-        batch_keys |= {
-            "total_mrna_umis_n": AnnDataField(
-                attr="obs", 
-                key="total_mrna_umis",
-                convert_fn=np.asarray,
-            ),
-        }
+    assert "total_mrna_umis" in adata.obs.columns, "total_mrna_umis must be in adata.obs"
+    batch_keys |= {
+        "total_mrna_umis_n": AnnDataField(
+            attr="obs", 
+            key="total_mrna_umis",
+            convert_fn=np.asarray,
+        ),
+    }
     
     dm = CellariumAnnDataDataModule(
         adata,

@@ -55,18 +55,19 @@ def gpt_predict(
     device = pipeline[-1].transformer.parameters().__next__().device
     gene_inds = torch.unique(gene_inds).sort().values.long().to(device)
     adata_out = adata[:, gene_inds.cpu().numpy()].copy()
-    dm = get_datamodule(adata_out)
+    dm = get_datamodule(adata_out, shuffle=False, drop_last=False)
 
     # predict
-    i = 0
+    ouput_tensors = []
+    index = []
+    # i = 0
     for batch in dm.predict_dataloader():
         batch["prompt_name_ns"] = np.broadcast_to(batch["var_names_g"].values[None, :], batch["x_ng"].shape)
         batch["prompt_value_ns"] = batch["x_ng"].to(device)
-        batch["prompt_total_mrna_umis_n"] = batch["x_ng"].sum(-1).to(device)
+        batch["prompt_total_mrna_umis_n"] = batch["total_mrna_umis_n"].to(device)
         batch["prompt_measured_genes_mask_ns"] = torch.ones_like(batch["prompt_value_ns"], dtype=bool)
         batch["query_name_nq"] = batch["prompt_name_ns"]
         batch["query_total_mrna_umis_n"] = torch.ones_like(batch["prompt_total_mrna_umis_n"]) * query_total_umis
-
         out = pipeline.predict(batch)
         logits_ngm = out["logits_nqm"]
 
@@ -82,10 +83,19 @@ def gpt_predict(
             case _:
                 raise ValueError(f"summarize must be 'mean', 'median', or 'mode'")
 
-        adata_out.X[i:(i + batch["x_ng"].shape[0]), :] = mat_ng.detach().cpu().numpy()
-        i += batch["x_ng"].shape[0]
+        ouput_tensors.append(mat_ng.detach())
+        index.extend(batch["obs_names_n"].tolist())
+        # adata_out.X[i:(i + batch["x_ng"].shape[0]), :] = mat_ng.detach().cpu().numpy()
+        # i += batch["x_ng"].shape[0]
 
-    adata_out.layers[key_added] = adata_out.X.copy()
+    gpt_data = torch.cat(ouput_tensors, dim=0).cpu().numpy()
+
+    # ensure the order is correct
+    df_ordered = pd.DataFrame(index=adata_out.obs_names)
+    df = pd.DataFrame(index=index, data=gpt_data)
+    df_ordered = df_ordered.join(df, how='left')
+    adata_out.layers[key_added] = df_ordered.values
+    # adata_out.layers[key_added] = adata_out.X.copy()
     
     return adata_out
 
@@ -523,28 +533,28 @@ def snap_measured_data_to_manifold(
     adata: anndata.AnnData,
     pipeline: CellariumPipeline,
     highly_expressed_gene_inds: torch.LongTensor,
+    measured_count_layer_key: str = 'measured',
 ) -> sp.csr_matrix:
     """
     Snap the measured data to the GPT manifold.
 
     Args:
-        adata: AnnData object with a single cell
+        adata: AnnData object
         pipeline: CellariumPipeline object
         highly_expressed_gene_inds: indices of highly expressed genes
+        measured_count_layer_key: layer key where raw count data is
 
     Returns:
         sparse matrix with predicted on-manifold expression (floats)
     """
-
-    assert len(adata) == 1, 'only give one cell to snap_measured_data_to_manifold'
-    assert 'measured' in adata.layers.keys(), '"measured" must be in adata.layers'
+    assert measured_count_layer_key in adata.layers.keys(), f'key "{measured_count_layer_key}" not in adata.layers'
 
     # put the measured dataset through the pipeline
     adata_out = gpt_predict(
         adata,
         pipeline=pipeline, 
         gene_inds=highly_expressed_gene_inds,
-        layer='measured',
+        layer=measured_count_layer_key,
         key_added='measured_gpt',
     )
     return adata_out.layers['measured_gpt']
