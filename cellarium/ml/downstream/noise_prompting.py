@@ -526,7 +526,10 @@ def snap_noised_data_to_manifold_and_analyze(
         layer='perturbed',
         key_added='perturbed_gpt',
     )
-    adata_perturbed_set_out.layers['measured_gpt'] = sp.vstack([adata_perturbed.uns['measured_gpt']] * len(adata_perturbed_set_out))
+    if sp.issparse(adata_perturbed.uns['measured_gpt']):
+        adata_perturbed_set_out.layers['measured_gpt'] = sp.vstack([adata_perturbed.uns['measured_gpt']] * len(adata_perturbed_set_out))
+    else:
+        adata_perturbed_set_out.layers['measured_gpt'] = np.vstack([adata_perturbed.uns['measured_gpt']] * len(adata_perturbed_set_out))
 
     # do PCA and ICA
     adata_perturbed_set_out = analyze_lfc(
