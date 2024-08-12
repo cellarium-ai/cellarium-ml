@@ -474,7 +474,11 @@ def nmf(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.NonNegativeMatrixFactorization",
         link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
         ],
     )
     cli(args=args)
