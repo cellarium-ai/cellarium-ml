@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from collections.abc import Sequence
-from typing import Literal
+from functools import partial
+from typing import Literal, Callable
 
 import lightning.pytorch as pl
 import numpy as np
@@ -195,6 +196,71 @@ def get_full_D(x_ng, alpha_nk, A_kk, B_kg, factors_kg, n_iterations):
     return A_kk, B_kg, factors_kg
 
 
+@torch.no_grad()
+def dictionary_update(
+    factors_rkg: torch.Tensor, 
+    A_rkk: torch.Tensor,
+    B_rkg: torch.Tensor,
+    n_iterations: int = 100,
+    D_tol: int = 0.005,
+) -> torch.Tensor:
+    """
+    Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
+
+    Args:
+        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+        n_iterations: The number of iterations to perform.
+    """
+    n_nmf = factors_rkg.shape[0]
+    k = factors_rkg.shape[1]
+    n_vars = factors_rkg.shape[2]
+
+    D_buffer = factors_rkg.clone()
+    updated_factors_rkg = factors_rkg.clone()
+
+    for _ in range(n_iterations):
+        for k in range(k):
+            scalar_r = A_rkk[:, k, k].view(n_nmf, 1, 1)
+            a_r1k = A_rkk[:, k, :].unsqueeze(1)
+            b_r1g = B_rkg[:, k, :].unsqueeze(1)
+
+            # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
+            u_r1g = torch.clamp(
+                updated_factors_rkg[:, k, :].unsqueeze(1)
+                + (b_r1g - torch.bmm(a_r1k, updated_factors_rkg)) / scalar_r,
+                min=0.0,
+            )
+
+            u_r1g_reshape = u_r1g.squeeze(1)
+            u_r1g_reshape = torch.linalg.norm(u_r1g_reshape, dim=1)
+
+            updated_factors_r1g = u_r1g / torch.clamp(u_r1g_reshape.view(n_nmf, 1, 1), min=1.0)
+            updated_factors_rkg[:, k, :] = updated_factors_r1g.squeeze(1)
+
+        D_diff = torch.linalg.norm(
+            updated_factors_rkg.view(-1, n_vars) - D_buffer.view(-1, n_vars)
+        ) / torch.linalg.norm(updated_factors_rkg.view(-1, n_vars))
+        # if D_diff <= D_tol:
+        #     break
+        D_buffer = updated_factors_rkg.clone()
+
+    return updated_factors_rkg
+
+
+# traced_dictionary_update = torch.jit.trace(
+#     dictionary_update,
+#     (
+#         torch.rand(3, 10, 100),
+#         torch.rand(3, 10, 10),
+#         torch.rand(3, 10, 100),
+#         100,
+#         10,
+#         100,
+#         0.005,
+#         3,
+#     )
+# )
+
 def init_weights(m):
     classname = m.__class__.__name__
     if classname.find("BatchNorm") != -1:
@@ -256,6 +322,15 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.density_threshold = density_threshold
         self.local_neighborhood_size = local_neighborhood_size
 
+        self.traced_dictionary_update: Callable = torch.jit.trace(
+            dictionary_update,
+            (
+                torch.rand(self.n_nmf, self.k, self.n_vars), 
+                torch.rand(self.n_nmf, self.k, self.k),
+                torch.rand(self.n_nmf, self.k, self.n_vars),
+            )
+        )
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -269,7 +344,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.full_B_kg.zero_()
         self.full_D_kg.uniform_(0.0, 2.0)  # TODO: figure out best initialization
 
-    def online_dictionary_learning(self, x_ng: torch.Tensor, factors_kg: torch.Tensor) -> torch.Tensor:
+    def online_dictionary_learning(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor) -> torch.Tensor:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
@@ -278,19 +353,24 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         """
 
         n, g = x_ng.shape
-        r = factors_kg.shape[0]
-        k = factors_kg.shape[1]
+        r = factors_rkg.shape[0]
+        k = factors_rkg.shape[1]
 
         # updata alpha
-        alpha_rnk = torch.zeros((r, n, k), requires_grad=True, device=factors_kg.device)
+        alpha_rnk = torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)
         alpha_rnk = self.solve_alpha_wKL(alpha_rnk, x_ng, 100)
 
         # update D
-        self.A_rkk = self.A_rkk + torch.bmm(alpha_rnk.transpose(1, 2), alpha_rnk) / n
-        self.B_rkg = self.B_rkg + torch.bmm(alpha_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
-        updated_factors_kg = self.dictionary_update_3d(factors_kg, 100)
+        with torch.no_grad():
+            self.A_rkk = self.A_rkk + torch.bmm(alpha_rnk.transpose(1, 2), alpha_rnk) / n
+            self.B_rkg = self.B_rkg + torch.bmm(alpha_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+            updated_factors_rkg = self.traced_dictionary_update(
+                factors_rkg,
+                self.A_rkk,
+                self.B_rkg,
+            )
 
-        return updated_factors_kg
+        return updated_factors_rkg
 
     def solve_alpha_wKL(self, alpha_rnk: torch.nn.Parameter,
                         x_ng: torch.Tensor,
@@ -331,45 +411,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         return alpha_rnk.exp().detach()
 
-    def dictionary_update_3d(self, factors_kg: torch.Tensor, n_iterations: int = 1) -> torch.Tensor:
-        """
-        Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
-
-        Args:
-            factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
-            n_iterations: The number of iterations to perform.
-        """
-        D_buffer = factors_kg.clone()
-        updated_factors_kg = factors_kg.clone()
-
-        for _ in range(n_iterations):
-            for k in range(self.k):
-                scalar = self.A_rkk[:, k, k].view(self.n_nmf, 1, 1)
-                a_1k = self.A_rkk[:, k, :].unsqueeze(1)
-                b_1g = self.B_rkg[:, k, :].unsqueeze(1)
-
-                # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
-                u_1g = torch.clamp(
-                    updated_factors_kg[:, k, :].unsqueeze(1)
-                    + (b_1g - torch.bmm(a_1k, updated_factors_kg)) / scalar,
-                    min=0.0,
-                )
-
-                u_1g_reshape = u_1g.squeeze(1)
-                u_1g_reshape = torch.linalg.norm(u_1g_reshape, dim=1)
-
-                updated_factors_1g = u_1g / torch.clamp(u_1g_reshape.view(self.n_nmf, 1, 1), min=1.0)
-                updated_factors_kg[:, k, :] = updated_factors_1g.squeeze(1)
-
-            D_diff = torch.linalg.norm(
-                updated_factors_kg.view(-1, self.n_vars) - D_buffer.view(-1, self.n_vars)
-            ) / torch.linalg.norm(updated_factors_kg.view(-1, self.n_vars))
-            if D_diff <= self._D_tol:
-                break
-            D_buffer = updated_factors_kg.clone()
-
-        return updated_factors_kg
-
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
@@ -391,7 +432,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             x_ = x_ng / std
 
         if self.algorithm == "mairal":
-            self.D_rkg = self.online_dictionary_learning(x_ng=x_, factors_kg=self.D_rkg)
+            self.D_rkg = self.online_dictionary_learning(x_ng=x_, factors_rkg=self.D_rkg)
 
         else:
             raise ValueError(f"Unknown algorithm: {self.algorithm}")
