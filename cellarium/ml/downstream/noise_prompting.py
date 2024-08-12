@@ -571,6 +571,53 @@ def snap_measured_data_to_manifold(
     return adata_out.layers['measured_gpt']
 
 
+def in_silico_perturbation(
+    adata: anndata.AnnData,
+    pipeline: CellariumPipeline,
+    prompt_gene_inds: torch.LongTensor,
+    perturbation: dict[str, float],
+    measured_count_layer_key: str = 'measured',
+    output_layer_key: str = 'perturbed_gpt',
+) -> anndata.AnnData:
+    """
+    Perform an in silico perturbation on the measured data.
+
+    Args:
+        adata: AnnData object
+        pipeline: CellariumPipeline object
+        prompt_gene_inds: indices of genes to include in the prompt
+        perturbation: dictionary with gene IDs as keys and perturbation values as values
+        measured_count_layer_key: layer key where raw count data is
+        output_layer_key: layer key to store the perturbed data
+
+    Returns:
+        anndata object with the perturbed data
+    """
+    assert measured_count_layer_key in adata.layers.keys(), f'key "{measured_count_layer_key}" not in adata.layers'
+
+    # apply the perturbation
+    pert_key = 'perturbed_raw'
+    adata.layers[pert_key] = adata.layers[measured_count_layer_key].copy()
+    for gene_id, value in perturbation.items():
+        print(f'original counts of {gene_id} = {adata.layers[measured_count_layer_key][:, adata.var_names == gene_id].sum()}')
+        times_found = (adata.var_names[prompt_gene_inds] == gene_id).sum()
+        assert times_found == 1, \
+            f'gene "{gene_id}" found {times_found} times when limiting to prompt_gene_inds'
+        adata.layers[pert_key][:, adata.var_names == gene_id] = value
+        print(f'final counts of {gene_id} = {adata.layers[pert_key][:, adata.var_names == gene_id].sum()}')
+
+    # put the measured dataset through the pipeline
+    adata_out = gpt_predict(
+        adata, 
+        pipeline=pipeline, 
+        gene_inds=prompt_gene_inds,
+        layer=pert_key,
+        key_added=output_layer_key,
+    )
+
+    return adata_out
+
+
 def noise_prompt_gene_set(
     adata: anndata.AnnData, 
     pipeline: CellariumPipeline,
