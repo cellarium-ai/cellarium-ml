@@ -13,7 +13,6 @@ import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
-from cellarium.ml.utilities.data import get_rank_and_num_replicas
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
