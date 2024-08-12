@@ -416,6 +416,8 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         self.D_kg = D_kg  # [:k, :]
 
+        trainer.save_checkpoint(trainer._default_root_dir / "consensus.ckpt")
+
     def predict(
             self,
             x_ng: torch.Tensor,
