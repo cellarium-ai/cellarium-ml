@@ -393,7 +393,11 @@ CONFIGS = [
                     "class_path": "cellarium.ml.models.NonNegativeMatrixFactorization",
                     "init_args": {
                         "k": 10,
+                        "r": 10,
                         "algorithm": "mairal",
+                        "local_neighborhood_size": 0.3,
+                        "density_threshold": 0.25,
+                        "log_variational": False,
                     },
                 },
             },
