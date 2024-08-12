@@ -18,13 +18,13 @@ from tests.common import BoringDataset
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 4, 3
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.arange(n * g).reshape(n, g),
-            var_names=np.array(var_names_g),
+            var_names=var_names_g,
         ),
         collate_fn=collate_fn,
     )
@@ -55,7 +55,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: Geneformer = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
+    assert isinstance(loaded_model, Geneformer)
     # assert
     assert np.array_equal(model.var_names_g, loaded_model.var_names_g)
     np.testing.assert_allclose(model.feature_ids, loaded_model.feature_ids)
@@ -63,7 +64,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
 
 @pytest.mark.parametrize("perturb", ["activation", "deletion", "map", "none"])
 def test_tokenize_with_perturbations(perturb: str):
-    var_names_g = ["a", "b", "c", "d"]
+    var_names_g = np.array(["a", "b", "c", "d"])
     geneformer = Geneformer(var_names_g=var_names_g)
     x_ng = torch.tensor([[4, 3, 2, 1]])  # sort order will be [a,b,c,d] and tokens will be [2,3,4,5]
 

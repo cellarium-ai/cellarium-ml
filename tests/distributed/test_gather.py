@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from cellarium.ml.distributed import GatherLayer
+from cellarium.ml.utilities.distributed import GatherLayer
 
 
 def init_process(rank, size, return_dict, fn, backend="gloo"):

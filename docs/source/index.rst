@@ -14,7 +14,6 @@ Table of Contents
    cli
    core
    data
-   distributed
    distributions
    lr_schedulers
    models
@@ -33,6 +32,7 @@ Table of Contents
    :caption: Tutorials
 
    tutorials/mup_mlp
+   tutorials/geneformer_demo
 
 Indices and tables
 ==================

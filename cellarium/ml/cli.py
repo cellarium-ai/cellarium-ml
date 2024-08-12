@@ -39,7 +39,7 @@ class FileLoader:
     .. code-block:: yaml
 
         model:
-          transforms:
+          cpu_transforms:
             - class_path: cellarium.ml.transforms.Filter
               init_args:
                 filter_list:
@@ -182,33 +182,37 @@ def compute_n_obs(data: CellariumAnnDataDataModule) -> int:
     return data.dadc.n_obs
 
 
-def compute_n_categories(data: CellariumAnnDataDataModule) -> int:
+def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     """
-    Compute the number of categories in the target variable.
+    Compute the categories in the target variable.
 
     E.g. if the target variable is ``obs["cell_type"]`` then this function
-    returns the number of categories in ``obs["cell_type"]``::
+    returns the categories in ``obs["cell_type"]``::
 
-        >>> len(data.dadc[0].obs["cell_type"].cat.categories)
+        >>> np.asarray(data.dadc[0].obs["cell_type"].cat.categories)
 
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
 
     Returns:
-        The number of categories in the target variable.
+        The categories in the target variable.
     """
-    field = data.batch_keys["y_n"]
-    value = getattr(data.dadc[0], field.attr)
-    if field.key is not None:
-        value = value[field.key]
-    return len(value.cat.categories)
+    adata = data.dadc[0]
+    field = data.batch_keys["y_categories"]
+    return field(adata)
 
 
-def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDataDataModule) -> np.ndarray:
+def compute_var_names_g(
+    cpu_transforms: list[torch.nn.Module] | None,
+    transforms: list[torch.nn.Module] | None,
+    data: CellariumAnnDataDataModule,
+) -> np.ndarray:
     """
     Compute variable names from the data by applying the transforms.
 
     Args:
+        cpu_transforms:
+            A list of of CPU transforms applied by the dataloader.
         transforms:
             A list of transforms.
         data:
@@ -217,8 +221,9 @@ def compute_var_names_g(transforms: list[torch.nn.Module], data: CellariumAnnDat
     Returns:
         The variable names.
     """
-    batch = {key: field(data.dadc, 0) for key, field in data.batch_keys.items()}
-    pipeline = CellariumPipeline(transforms)
+    adata = data.dadc[0]
+    batch = {key: field(adata) for key, field in data.batch_keys.items()}
+    pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
         with FakeCopyMode(fake_mode):
@@ -241,7 +246,11 @@ def lightning_cli_factory(
         cli = lightning_cli_factory(
             "cellarium.ml.models.IncrementalPCA",
             link_arguments=[
-                LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+                LinkArguments(
+                    ("model.cpu_transforms", "model.transforms", "data"),
+                    "model.model.init_args.var_names_g",
+                    compute_var_names_g,
+                )
             ],
             trainer_defaults={
                 "max_epochs": 1,  # one pass
@@ -274,6 +283,11 @@ def lightning_cli_factory(
                 trainer_defaults=trainer_defaults,
                 args=args,
             )
+
+        def _add_instantiators(self) -> None:
+            # disable breaking dependency injection support change introduced in PyTorch Lightning 2.3
+            # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
+            pass
 
         def instantiate_classes(self) -> None:
             with torch.device("meta"):
@@ -327,7 +341,11 @@ def geneformer(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.Geneformer",
         link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
         ],
     )
     cli(args=args)
@@ -367,7 +385,11 @@ def incremental_pca(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.IncrementalPCA",
         link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
@@ -410,9 +432,13 @@ def logistic_regression(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.LogisticRegression",
         link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
-            LinkArguments("data", "model.model.init_args.n_categories", compute_n_categories),
+            LinkArguments("data", "model.model.init_args.y_categories", compute_y_categories),
         ],
     )
     cli(args=args)
@@ -485,7 +511,11 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.OnePassMeanVarStd",
         link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
@@ -547,7 +577,11 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.ProbabilisticPCA",
         link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g),
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
         ],
     )
@@ -585,7 +619,11 @@ def tdigest(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.TDigest",
         link_arguments=[
-            LinkArguments(("model.transforms", "data"), "model.model.init_args.var_names_g", compute_var_names_g)
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass

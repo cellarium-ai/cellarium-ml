@@ -26,7 +26,7 @@ def log_normalize(x_ng: torch.Tensor):
     y_ng = torch.log1p(target_count * x_ng / l_n1)
     mean_g = y_ng.mean(dim=0)
     std_g = y_ng.std(dim=0)
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     transform = CellariumPipeline(
         [
             NormalizeTotal(target_count),
