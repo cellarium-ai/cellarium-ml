@@ -116,13 +116,13 @@ def test_onepass_mean_var_std_multi_device(
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
 def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["naive", "shifted_data"]):
     n, g = 3, 2
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array(var_names_g),
+            var_names_g,
         ),
         collate_fn=collate_fn,
     )
@@ -148,7 +148,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: OnePassMeanVarStd = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
+    assert isinstance(loaded_model, OnePassMeanVarStd)
     # assert
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g, atol=1e-6)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
@@ -167,7 +168,7 @@ def test_accuracy(mean: float, dtype: torch.dtype, algorithm: Literal["naive", "
     std = 0.1
     x = mean + std * torch.randn(n_trials, dtype=dtype)
 
-    onepass = OnePassMeanVarStd(var_names_g=["x"], algorithm=algorithm)
+    onepass = OnePassMeanVarStd(var_names_g=np.array(["x"]), algorithm=algorithm)
     for chunk in x.split(1000):
         onepass(x_ng=chunk[:, None], var_names_g=["x"])
 

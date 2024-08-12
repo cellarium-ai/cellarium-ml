@@ -53,6 +53,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
                 pass
             constrained_value, constraint, event_dim = value
             self._pyro_params[name] = constraint, event_dim
+            assert constrained_value is not None
             unconstrained_value = _unconstrain(constrained_value, constraint)
             super().__setattr__(name + "_unconstrained", unconstrained_value)
             return

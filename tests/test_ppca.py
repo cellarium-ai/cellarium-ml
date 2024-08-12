@@ -63,7 +63,7 @@ def test_probabilistic_pca_multi_device(
     s = np.sqrt(0.5 * total_var / g)
     ppca = ProbabilisticPCA(
         n_obs=n,
-        var_names_g=[f"gene_{i}" for i in range(g)],
+        var_names_g=np.array([f"gene_{i}" for i in range(g)]),
         n_components=k,
         ppca_flavor=ppca_flavor,
         mean_g=x_mean_g,
@@ -116,12 +116,12 @@ def test_probabilistic_pca_multi_device(
 def test_variance_monitor(x_ng: np.ndarray):
     n, g = x_ng.shape
     k = 3
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             x_ng,
-            np.array(var_names_g),
+            var_names_g,
         ),
         batch_size=n // 2,
         collate_fn=collate_fn,
@@ -144,13 +144,13 @@ def test_variance_monitor(x_ng: np.ndarray):
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 3, 2
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g).astype(np.float32),
-            np.array(var_names_g),
+            var_names_g,
         ),
         collate_fn=collate_fn,
     )
@@ -180,7 +180,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: ProbabilisticPCA = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
+    assert isinstance(loaded_model, ProbabilisticPCA)
     # assert
     np.testing.assert_allclose(model.W_kg.detach(), loaded_model.W_kg.detach())
     np.testing.assert_allclose(model.sigma.detach(), loaded_model.sigma.detach())  # type: ignore[attr-defined]
