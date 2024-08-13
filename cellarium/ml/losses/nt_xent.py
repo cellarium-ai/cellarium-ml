@@ -4,8 +4,7 @@
 import torch
 from torch import nn
 
-from cellarium.ml.distributed.gather import GatherLayer
-from cellarium.ml.utilities.data import get_rank_and_num_replicas
+from cellarium.ml.utilities.distributed import GatherLayer, get_rank_and_num_replicas
 
 
 class NT_Xent(nn.Module):
@@ -31,12 +30,10 @@ class NT_Xent(nn.Module):
 
     def __init__(
         self,
-        world_size: int,
         temperature: float = 1.0,
     ):
         super(NT_Xent, self).__init__()
 
-        self.world_size = world_size
         self.temperature = temperature
         self.criterion = nn.CrossEntropyLoss(reduction="mean")
 
@@ -49,8 +46,10 @@ class NT_Xent(nn.Module):
             rank:
                 The rank of the specified device.
         """
+        _, world_size = get_rank_and_num_replicas()
+
         negative_mask_full = ~torch.eye(size).bool().repeat((1, 2))
-        mask = torch.chunk(negative_mask_full, self.world_size, dim=0)[rank]
+        mask = torch.chunk(negative_mask_full, world_size, dim=0)[rank]
         return mask
 
     @staticmethod
@@ -66,8 +65,10 @@ class NT_Xent(nn.Module):
         Gathers all inputs, then computes NT-Xent loss averaged over all
         2n augmented samples.
         """
+        _, world_size = get_rank_and_num_replicas()
+
         # gather embeddings from distributed forward pass
-        if self.world_size > 1:
+        if world_size > 1:
             z_i_full = torch.cat(GatherLayer.apply(z_i), dim=0)
             z_j_full = torch.cat(GatherLayer.apply(z_j), dim=0)
         else:
@@ -75,10 +76,10 @@ class NT_Xent(nn.Module):
             z_j_full = z_j
 
         assert (
-            len(z_i_full) % self.world_size == 0
+            len(z_i_full) % world_size == 0
         ), "Expected batch to evenly divide across devices (set drop_last to True)."
 
-        batch_size = len(z_i_full) // self.world_size
+        batch_size = len(z_i_full) // world_size
         rank, _ = get_rank_and_num_replicas()
         negative_mask = self._slice_negative_mask(len(z_i_full), rank)
 
@@ -88,7 +89,7 @@ class NT_Xent(nn.Module):
         sim_i = NT_Xent._similarity_fn(z_i, z_both_full) / self.temperature
         sim_j = NT_Xent._similarity_fn(z_j, z_both_full) / self.temperature
 
-        pos_i = torch.diag(sim_i, (self.world_size + rank) * batch_size)
+        pos_i = torch.diag(sim_i, (world_size + rank) * batch_size)
         pos_j = torch.diag(sim_j, rank * batch_size)
 
         positive_samples = torch.cat((pos_i, pos_j))

@@ -41,10 +41,14 @@ class GaussianNoise(nn.Module):
         Returns:
             Gene counts with added Gaussian noise.
         """
-        sigma_ng = Uniform(self.sigma_min, self.sigma_max).sample(x_ng.shape).type_as(x_ng)
-        p_apply_n = Bernoulli(probs=self.p_apply).sample(x_ng.shape[:1]).type_as(x_ng).bool()
+        sigma_min = torch.Tensor([self.sigma_min]).type_as(x_ng)
+        sigma_max = torch.Tensor([self.sigma_max]).type_as(x_ng)
+        p_apply = torch.Tensor([self.p_apply]).type_as(x_ng)
+
+        sigma_ng = Uniform(sigma_min, sigma_max).sample(x_ng.shape).squeeze(-1)
+        p_apply_n1 = Bernoulli(probs=p_apply).sample(x_ng.shape[:1]).bool()
 
         x_aug = x_ng + Normal(0, sigma_ng).sample()
 
-        x_ng = torch.where(p_apply_n.unsqueeze(1), x_ng, x_aug)
+        x_ng = torch.where(p_apply_n1, x_aug, x_ng)
         return {"x_ng": x_ng}

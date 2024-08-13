@@ -643,12 +643,10 @@ def contrastive_mlp(args: ArgsType = None) -> None:
     cli = lightning_cli_factory(
         "cellarium.ml.models.ContrastiveMLP",
         link_arguments=[
-            LinkArguments("data", "model.model.init_args.g_genes", compute_n_vars),
-            LinkArguments("trainer.devices", "model.model.init_args.world_size", None, "parse"),
+            LinkArguments("data", "model.model.init_args.n_obs", compute_n_vars),
         ],
         trainer_defaults={
             "max_epochs": 20,
-            "strategy": {"class_path": "lightning.pytorch.strategies.DDPStrategy"},
         },
     )
     cli(args=args)

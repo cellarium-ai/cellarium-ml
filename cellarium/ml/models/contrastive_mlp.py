@@ -8,8 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from cellarium.ml.losses.nt_xent import NT_Xent
 from cellarium.ml.models.model import CellariumModel, PredictMixin
-from cellarium.ml.models.nt_xent import NT_Xent
 
 
 class ContrastiveMLP(CellariumModel, PredictMixin):
@@ -17,43 +17,36 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
     Multilayer perceptron trained with contrastive learning.
 
     Args:
-        g_genes:
-            Number of genes in each entry (network input size).
+        n_obs:
+            Number of observations in each entry (network input size).
         hidden_size:
             Dimensionality of the fully-connected hidden layers.
         embed_dim:
             Size of embedding (network output size).
-        world_size:
-            Number of devices used in training.
         temperature:
             Parameter governing Normalized Temperature-scaled cross-entropy (NT-Xent) loss.
     """
 
     def __init__(
         self,
-        g_genes: int,
+        n_obs: int,
         hidden_size: Sequence[int],
         embed_dim: int,
-        world_size: int,
         temperature: float = 1.0,
     ):
         super(ContrastiveMLP, self).__init__()
 
-        layer_list: List[nn.Module] = []
-        layer_list.append(nn.Linear(g_genes, hidden_size[0]))
-        layer_list.append(nn.BatchNorm1d(hidden_size[0]))
-        layer_list.append(nn.ReLU())
+        self.layers = nn.Sequential()
+        self.layers.append(nn.Linear(n_obs, hidden_size[0]))
+        self.layers.append(nn.BatchNorm1d(hidden_size[0]))
+        self.layers.append(nn.ReLU())
         for size_i, size_j in zip(hidden_size[:-1], hidden_size[1:]):
-            layer_list.append(nn.Linear(size_i, size_j))
-            layer_list.append(nn.BatchNorm1d(size_j))
-            layer_list.append(nn.ReLU())
-        layer_list.append(nn.Linear(hidden_size[-1], embed_dim))
+            self.layers.append(nn.Linear(size_i, size_j))
+            self.layers.append(nn.BatchNorm1d(size_j))
+            self.layers.append(nn.ReLU())
+        self.layers.append(nn.Linear(hidden_size[-1], embed_dim))
 
-        self.layers = nn.Sequential(*layer_list)
-
-        self.world_size = world_size
-
-        self.Xent_loss = NT_Xent(world_size, temperature)
+        self.Xent_loss = NT_Xent(temperature)
 
         self.reset_parameters()
 
@@ -84,9 +77,9 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
         loss = self.Xent_loss(z1, z2)
         return {"loss": loss}
 
-    def predict(self, x_ng: torch.Tensor, **kwargs: Any):
+    def predict(self, x_ng: torch.Tensor):
         """
-        Send (transformed) data through the model and return outputs.
+        Sends (transformed) data through the model and returns outputs.
 
         Args:
             x_ng:
