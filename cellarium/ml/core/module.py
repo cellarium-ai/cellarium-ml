@@ -22,10 +22,9 @@ class CellariumModule(pl.LightningModule):
 
         * :attr:`cpu_transforms`: A list of transforms to apply to the input data as part of the dataloader on CPU.
         * :attr:`transforms`: A list of transforms to apply to the input data before passing it to the model.
-        * :attr:`module_pipeline`: A :class:`cellarium.ml.core.CellariumPipeline` to apply all transforms,
-          minus the CPU transforms if they are handled by a :class:`CellariumAnnDataDataModule`, and the model.
-        * :attr:`model`: A :class:`cellarium.ml.models.CellariumModel` to train with
-          :meth:`training_step` method and epoch end hooks.
+        * :attr:`module_pipeline`: A :class:`CellariumPipeline` to apply all transforms, minus the CPU transforms
+          if they are handled by a :class:`CellariumAnnDataDataModule`, and the model.
+        * :attr:`model`: A :class:`CellariumModel` to train with :meth:`training_step` method and epoch end hooks.
         * :attr:`optim_fn` and :attr:`optim_kwargs`: A Pytorch optimizer class and its keyword arguments.
         * :attr:`scheduler_fn` and :attr:`scheduler_kwargs`: A Pytorch lr scheduler class and its
           keyword arguments.
@@ -39,7 +38,7 @@ class CellariumModule(pl.LightningModule):
             A list of transforms to apply to the input data before passing it to the model.
             If ``None``, no transforms are applied.
         model:
-            A :class:`cellarium.ml.models.CellariumModel` to train.
+            A :class:`CellariumModel` to train.
         optim_fn:
             A Pytorch optimizer class, e.g., :class:`~torch.optim.Adam`. If ``None``,
             no optimizer is used.
@@ -90,9 +89,14 @@ class CellariumModule(pl.LightningModule):
         Steps involved in configuring the model:
 
         1. Freeze the transforms if they are instances of :class:`~cellarium.ml.core.CellariumModule`.
-        2. Make a copy of modules on the meta device and assign to hparams.
-        3. Send the original modules to the host device and add to self.pipeline.
+        2. Make a copy of modules on the ``meta`` device and assign to :attr:`hparams`.
+        3. Send the original modules to the host device and add to :attr:`pipeline`.
         4. Reset the model parameters if it has not been initialized before.
+        5. Assemble the full pipeline by concatenating the CPU transforms, transforms, and the model.
+        6. If the training is handled by the ``pl.Trainer`` and the dataloader is an instance of
+           :class:`CellariumAnnDataDataModule`, then the CPU transforms are dispatched to the dataloader's
+           ``collate_fn`` and the :attr:`module_pipeline` calls only the (GPU) transforms and the model.
+           Otherwise, the :attr:`module_pipeline` calls the full pipeline.
 
         For more context, see discussions in
         https://dev-discuss.pytorch.org/t/state-of-model-creation-initialization-seralization-in-pytorch-core/1240
@@ -141,7 +145,7 @@ class CellariumModule(pl.LightningModule):
         else:
             transforms = tuple()
 
-        if model is None:
+        if not isinstance(model, CellariumModel):
             raise ValueError(f"`model` must be an instance of {CellariumModel}. Got {model}")
         self.pipeline = CellariumPipeline(cpu_transforms + transforms + (model,))  # the full pipeline
 
@@ -332,18 +336,18 @@ class CellariumModule(pl.LightningModule):
 
     def on_train_epoch_end(self) -> None:
         """
-        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
-        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
-        ``on_epoch_end`` must be called at the end of every epoch.
+        Calls the ``on_train_epoch_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_train_epoch_end`` method defined, then
+        ``on_train_epoch_end`` must be called at the end of every epoch.
         """
-        on_epoch_end = getattr(self.model, "on_epoch_end", None)
-        if callable(on_epoch_end):
-            on_epoch_end(self.trainer)
+        on_train_epoch_end = getattr(self.model, "on_train_epoch_end", None)
+        if callable(on_train_epoch_end):
+            on_train_epoch_end(self.trainer)
 
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         """
-        Calls the ``on_batch_end`` method on the module.
+        Calls the ``on_train_batch_end`` method on the module.
         """
-        on_batch_end = getattr(self.model, "on_batch_end", None)
-        if callable(on_batch_end):
-            on_batch_end(self.trainer)
+        on_train_batch_end = getattr(self.model, "on_train_batch_end", None)
+        if callable(on_train_batch_end):
+            on_train_batch_end(self.trainer)
