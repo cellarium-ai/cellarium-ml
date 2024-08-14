@@ -120,7 +120,10 @@ data:
   iteration_strategy: cache_efficient
   shuffle: false
   seed: 0
-  drop_last: false
+  drop_last_indices: false
   test_mode: false
   num_workers: 2
+  drop_last_batch: false
+  prefetch_factor: null
+  persistent_workers: false
 ckpt_path: null
