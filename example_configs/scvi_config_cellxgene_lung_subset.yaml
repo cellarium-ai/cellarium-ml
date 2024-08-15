@@ -44,7 +44,7 @@ trainer:
   inference_mode: false
   use_distributed_sampler: true
   profiler: null
-  detect_anomaly: false
+  detect_anomaly: false #for debugging
   barebones: false
   plugins: null
   sync_batchnorm: false
@@ -124,14 +124,9 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      #filenames: gs://yx-data/pbmc_count.h5ad
-      #filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
-      #filenames: /opt/project/cellarium-ml/data/pbmc_count.h5ad #use with cli.py
-      #filenames: ../data/pbmc_count.h5ad # use with scvi_demo.py # use for the limits and shard_size 31774
-      filenames: ../data/tucker_human_heart_atlas.h5ad # use with scvi_demo.py #276940 limits cells
-      #filenames: /opt/project/cellarium-ml/data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad #remember to set the limits to 10000 when using this file
-      limits: [276940]
-      shard_size: 276940
+      filenames: ../data/single_cell_lung_atlas_subset.h5ad # use with scvi_demo.py #
+      limits: [10000]
+      shard_size: 10000
       last_shard_size: null
       max_cache_size: 1
       cache_size_strictly_enforced: true
@@ -149,7 +144,7 @@ data:
       attr: var_names
     batch_index_n:
       attr: obs
-      key: batch
+      key: dataset
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 512
   shuffle: true

@@ -9,6 +9,7 @@ import importlib
 import numpy as np
 import torch
 from torch.distributions import Distribution, Normal, Poisson
+from pyro.distributions import ZeroInflatedNegativeBinomial
 from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.distributions import NegativeBinomial
@@ -313,7 +314,7 @@ class DecoderSCVI(torch.nn.Module):
                 dist = Poisson(count_mean_ng + self.eps)
             case "zinb":
                 raise NotImplementedError("ZINB is not currently implemented")
-                # dist = ZeroInflatedNegativeBinomial(count_mean_ng, inverse_overdispersion, self.dropout_decoder(q_nh))
+                # dist = ZeroInflatedNegativeBinomial(count_mean_ng + self.eps, inverse_overdispersion + self.eps, self.dropout_decoder(q_nh))
 
         return dist
 
