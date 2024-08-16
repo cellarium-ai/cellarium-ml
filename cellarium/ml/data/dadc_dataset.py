@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+from itertools import islice
+from typing import Literal
 
 import numpy as np
 import torch
 from anndata import AnnData
+from boltons.iterutils import chunked_iter
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
-from cellarium.ml.utilities.data import AnnDataField, get_rank_and_num_replicas, get_worker_info
+from cellarium.ml.utilities.data import AnnDataField
+from cellarium.ml.utilities.distributed import get_rank_and_num_replicas, get_worker_info
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):
@@ -47,6 +51,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         ...         "var_names_g": AnnDataField(attr="var_names"),
         ...     },
         ...     batch_size=5000,
+        ...     iteration_strategy="cache_efficient",
         ...     shuffle=True,
         ...     seed=0,
         ...     drop_last=True,
@@ -62,6 +67,10 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             :class:`cellarium.ml.utilities.data.AnnDataField`.
         batch_size:
             How many samples per batch to load.
+        iteration_strategy:
+            Strategy to use for iterating through the dataset. Options are ``same_order`` and ``cache_efficient``.
+            ``same_order`` will iterate through the dataset in the same order independent of the number of replicas
+            and workers. ``cache_efficient`` will try to minimize the amount of anndata files fetched by each worker.
         shuffle:
             If ``True``, the data is reshuffled at every epoch.
         seed:
@@ -71,6 +80,11 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
             the replicas.
+        start_idx:
+            The starting index of the dataset. If ``None``, then the dataset will start from the first index.
+        end_idx:
+            The ending index (exclusive) of the dataset. If ``None``, then the dataset will end at
+            the last index (inclusive).
         test_mode:
             If ``True``, then tracking of cache and worker informations will be enabled.
     """
@@ -80,9 +94,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         dadc: DistributedAnnDataCollection | AnnData,
         batch_keys: dict[str, AnnDataField],
         batch_size: int = 1,
+        iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
         seed: int = 0,
         drop_last: bool = False,
+        start_idx: int | None = None,
+        end_idx: int | None = None,
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
@@ -91,9 +108,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             self.dadc.limits = [dadc.n_obs]
         self.batch_keys = batch_keys
         self.batch_size = batch_size
+        self.iteration_strategy = iteration_strategy
         self.shuffle = shuffle
         self.seed = seed
         self.drop_last = drop_last
+        self.start_idx = 0 if start_idx is None else start_idx
+        self.end_idx = dadc.n_obs if end_idx is None else end_idx
         self.epoch = 0
         self.test_mode = test_mode
 
@@ -103,12 +123,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
         _, num_replicas = get_rank_and_num_replicas()
 
-        if self.drop_last and len(self.dadc) % num_replicas != 0:
+        n_obs = self.end_idx - self.start_idx
+        if self.drop_last and n_obs % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data.
-            per_replica = len(self.dadc) // num_replicas
+            per_replica = n_obs // num_replicas
         else:
-            per_replica = math.ceil(len(self.dadc) / num_replicas)
+            per_replica = math.ceil(n_obs / num_replicas)
         return math.ceil(per_replica / float(self.batch_size))
 
     def set_epoch(self, epoch: int) -> None:
@@ -125,8 +146,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
 
         data = {}
+        adata = self.dadc[idx]
         for key, field in self.batch_keys.items():
-            data[key] = field(self.dadc, idx)
+            data[key] = field(adata)
 
         # for testing purposes
         if self.test_mode:
@@ -143,159 +165,206 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __iter__(self):
         r"""
-        Iterate through the dataset by trying to minimize the amount of anndata files
-        fetched by each worker.
+        Iterate through the dataset by trying to minimize the amount of anndata files fetched by each worker.
+        Iterated indices are evenly divided between replicas (see :attr:`drop_last`).
 
         .. note::
-            Returned iterator is determined by the ``torch.utils.data.get_worker_info()``
-            and ``torch.distributed`` contexts. Iterated indices are evenly divided between replicas
-            (see :attr:`drop_last`). If multiple workers per replica, then indices are further
-            divided between workers (last worker might contain less indices than other workers, see
-            examples below). Indices are shuffled and iterated in a manner that minimizes the overlap
-            between the data chunks loaded by each worker.
 
-        Example 1::
+            1. For both strategies the amount of anndata files fetched is reduced by
+               shuffling the shards first and then the datapoints within the shards.
+            2. ``same_order`` strategy will iterate through the dataset in the same order independent
+               of the number of replicas and workers.
+            3. For ``cache_efficient`` strategy the amount of anndata files fetched is further
+               reduced by assigning to each worker a contiguous chunk of the dataset.
+               The returned iterator is determined by the ``torch.utils.data.get_worker_info()``
+               and ``torch.distributed`` contexts.
+
+        **Example 1**::
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-            n_obs=12
             num_replicas=1
             batch_size=2
             num_workers=3
-            num_batches=6
-            batches_per_worker=2
-            per_worker=4
 
-        +----------+-------+---------+
-        |          |batch 0| batch 1 |
-        +==========+=======+=========+
-        | worker 0 | (0,1) | (2,3)   |
-        +----------+-------+---------+
-        | worker 1 | (4,5) | (6,7)   |
-        +----------+-------+---------+
-        | worker 2 | (8,9) | (10,11) |
-        +----------+-------+---------+
+        Same order:
+
+        +------------+-------+-------+-------+-------+-------+---------+
+        | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
+        +============+=======+=======+=======+=======+=======+=========+
+        | indices    | (0,1) | (2,3) | (4,5) | (6,7) | (8,9) | (10,11) |
+        +------------+-------+-------+-------+-------+-------+---------+
+        | worker id  | 0     | 1     | 2     | 0     | 1     | 2       |
+        +------------+-------+-------+-------+-------+-------+---------+
+
+        Cache efficient:
+
+        +------------+-------+-------+-------+-------+-------+---------+
+        | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
+        +============+=======+=======+=======+=======+=======+=========+
+        | indices    | (0,1) | (4,5) | (8,9) | (2,3) | (6,7) | (10,11) |
+        +------------+-------+-------+-------+-------+-------+---------+
+        | worker id  | 0     | 1     | 2     | 0     | 1     | 2       |
+        +------------+-------+-------+-------+-------+-------+---------+
 
 
-        Example 2::
+        **Example 2**::
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-            n_obs=11
             num_replicas=1
             batch_size=2
             num_workers=2
-            num_batches=6
-            batches_per_worker=3
-            per_worker=6
 
-        +----------+-------+-------+-------+
-        |          |batch 0|batch 1|batch 2|
-        +==========+=======+=======+=======+
-        | worker 0 | (0,1) | (2,3) | (4,5) |
-        +----------+-------+-------+-------+
-        | worker 1 | (6,7) | (8,9) | (10,) |
-        +----------+-------+-------+-------+
+        Same order:
 
+        +------------+-------+-------+-------+-------+-------+---------+
+        | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
+        +============+=======+=======+=======+=======+=======+=========+
+        | indices    | (0,1) | (2,3) | (4,5) | (6,7) | (8,9) | (10,)   |
+        +------------+-------+-------+-------+-------+-------+---------+
+        | worker id  | 0     | 1     | 0     | 1     | 0     | 1       |
+        +------------+-------+-------+-------+-------+-------+---------+
 
-        Example 3::
+        Cache efficient:
+
+        +------------+-------+-------+-------+-------+-------+---------+
+        | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
+        +============+=======+=======+=======+=======+=======+=========+
+        | indices    | (0,1) | (6,7) | (2,3) | (8,9) | (4,5) | (10,)   |
+        +------------+-------+-------+-------+-------+-------+---------+
+        | worker id  | 0     | 1     | 0     | 1     | 0     | 1       |
+        +------------+-------+-------+-------+-------+-------+---------+
+
+        **Example 3**::
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7]
-            n_obs=8
             num_replicas=1
             batch_size=3
             num_workers=2
-            num_batches=3
-            batches_per_worker=2
-            per_worker=6
 
-        +----------+---------+---------+
-        |          | batch 0 | batch 1 |
-        +==========+=========+=========+
-        | worker 0 | (0,1,2) | (3,4,5) |
-        +----------+---------+---------+
-        | worker 1 | (6,7)   |         |
-        +----------+---------+---------+
+        Same order:
 
+        +------------+---------+---------+-------+
+        | batch idx  | 0       | 1       | 2     |
+        +============+=========+=========+=======+
+        | indices    | (0,1,2) | (3,4,5) | (6,7) |
+        +------------+---------+---------+-------+
+        | worker id  | 0       | 1       | 0     |
+        +------------+---------+---------+-------+
 
-        Example 4::
+        Cache efficient:
+
+        +------------+---------+-------+---------+
+        | batch idx  | 0       | 1     | 2       |
+        +============+=========+=======+=========+
+        | indices    | (0,1,2) | (6,7) | (3,4,5) |
+        +------------+---------+-------+---------+
+        | worker id  | 0       | 1     | 0       |
+        +------------+---------+-------+---------+
+
+        **Example 4**::
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-            n_obs=11
             num_replicas=2
             drop_last=True
-
-            truncated_indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-            total_size=10
-
-            first_replica=[0, 1, 2, 3, 4]
             batch_size=2
             num_workers=1
-            num_batches=3
-            batches_per_worker=3
-            per_worker=6
 
-            second_replica=[5, 6, 7, 8, 9]
-            batch_size=2
-            num_workers=1
-            num_batches=3
-            batches_per_worker=3
-            per_worker=6
+        Same order:
 
         *Replica 1*
 
-        +----------+-------+-------+-------+
-        |          |batch 0|batch 1|batch 2|
-        +==========+=======+=======+=======+
-        | worker 0 | (0,1) | (2,3) | (4,)  |
-        +----------+-------+-------+-------+
+        +------------+-------+-------+------+
+        | batch idx  | 0     | 1     | 2    |
+        +============+=======+=======+======+
+        | indices    | (0,2) | (4,6) | (8,) |
+        +------------+-------+-------+------+
+        | worker id  | 0     | 0     | 0    |
+        +------------+-------+-------+------+
 
         *Replica 2*
 
-        +----------+-------+-------+-------+
-        |          |batch 0|batch 1|batch 2|
-        +==========+=======+=======+=======+
-        | worker 0 | (5,6) | (7,8) | (9,)  |
-        +----------+-------+-------+-------+
+        +------------+-------+-------+------+
+        | batch idx  | 0     | 1     | 2    |
+        +============+=======+=======+======+
+        | indices    | (1,3) | (5,7) | (9,) |
+        +------------+-------+-------+------+
+        | worker id  | 0     | 0     | 0    |
+        +------------+-------+-------+------+
+
+        Cache efficient:
+
+        *Replica 1*
+
+        +------------+-------+-------+------+
+        | batch idx  | 0     | 1     | 2    |
+        +============+=======+=======+======+
+        | indices    | (0,1) | (2,3) | (4,) |
+        +------------+-------+-------+------+
+        | worker id  | 0     | 0     | 0    |
+        +------------+-------+-------+------+
+
+        *Replica 2*
+
+        +------------+-------+-------+------+
+        | batch idx  | 0     | 1     | 2    |
+        +============+=======+=======+======+
+        | indices    | (5,6) | (7,8) | (9,) |
+        +------------+-------+-------+------+
+        | worker id  | 0     | 0     | 0    |
+        +------------+-------+-------+------+
 
 
-        Example 5::
+        **Example 5**::
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-            n_obs=11
             num_replicas=2
             drop_last=False
-
-            padded_indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0]
-            total_size=12
-
-            first_replica=[0, 1, 2, 3, 4, 5]
             batch_size=2
             num_workers=1
-            num_batches=3
-            batches_per_worker=3
-            per_worker=6
 
-            second_replica=[6, 7, 8, 9, 10, 0]
-            batch_size=2
-            num_workers=1
-            num_batches=3
-            batches_per_worker=3
-            per_worker=6
+        Same order:
 
         *Replica 1*
 
-        +----------+-------+-------+-------+
-        |          |batch 0|batch 1|batch 2|
-        +==========+=======+=======+=======+
-        | worker 0 | (0,1) | (2,3) | (4,5) |
-        +----------+-------+-------+-------+
+        +------------+-------+-------+--------+
+        | batch idx  | 0     | 1     | 2      |
+        +============+=======+=======+========+
+        | indices    | (0,2) | (4,6) | (8,10) |
+        +------------+-------+-------+--------+
+        | worker id  | 0     | 0     | 0      |
+        +------------+-------+-------+--------+
 
         *Replica 2*
 
-        +----------+-------+-------+--------+
-        |          |batch 0|batch 1|batch 2 |
-        +==========+=======+=======+========+
-        | worker 0 | (6,7) | (8,9) | (10,0) |
-        +----------+-------+-------+--------+
+        +------------+-------+-------+-------+
+        | batch idx  | 0     | 1     | 2     |
+        +============+=======+=======+=======+
+        | indices    | (1,3) | (5,7) | (9,0) |
+        +------------+-------+-------+-------+
+        | worker id  | 0     | 0     | 0     |
+        +------------+-------+-------+-------+
+
+        Cache efficient:
+
+        *Replica 1*
+
+        +------------+-------+-------+-------+
+        | batch idx  | 0     | 1     | 2     |
+        +============+=======+=======+=======+
+        | indices    | (0,1) | (2,3) | (4,5) |
+        +------------+-------+-------+-------+
+        | worker id  | 0     | 0     | 0     |
+        +------------+-------+-------+-------+
+
+        *Replica 2*
+
+        +------------+-------+-------+--------+
+        | batch idx  | 0     | 1     | 2      |
+        +============+=======+=======+========+
+        | indices    | (6,7) | (8,9) | (10,0) |
+        +------------+-------+-------+--------+
+        | worker id  | 0     | 0     | 0      |
+        +------------+-------+-------+--------+
         """
         if self.test_mode and isinstance(self.dadc, DistributedAnnDataCollection):
             # clear lru cache
@@ -311,23 +380,16 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             per_replica = math.ceil(len(self.dadc) / num_replicas)
         total_size = per_replica * num_replicas
-        batches_per_replica = math.ceil(per_replica / float(self.batch_size))
 
         # workers
         worker_id, num_workers = get_worker_info()
-
-        batches_per_worker = math.ceil(batches_per_replica / float(num_workers))
-        per_worker = batches_per_worker * self.batch_size
-
-        # split workload
-        iter_start = worker_id * per_worker
-        iter_end = min(iter_start + per_worker, per_replica)
 
         # indices
         if self.shuffle:
             rng = torch.Generator()
             rng.manual_seed(self.seed + self.epoch)
-            iter_limits = list(zip([0] + self.dadc.limits, self.dadc.limits))
+            limits = [idx for idx in self.dadc.limits if idx > self.start_idx and idx < self.end_idx]
+            iter_limits = list(zip([self.start_idx] + limits, limits + [self.end_idx]))
             # shuffle shards
             limit_indices = torch.randperm(len(iter_limits), generator=rng).tolist()
             indices = []
@@ -336,7 +398,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 # shuffle cells within shards
                 indices.extend((torch.randperm(upper - lower, generator=rng) + lower).tolist())
         else:
-            indices = list(range(len(self.dadc)))
+            indices = list(range(self.start_idx, self.end_idx))
 
         if not self.drop_last:
             # add extra samples to make it evenly divisible
@@ -348,9 +410,41 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
-        indices = indices[rank * per_replica : (rank + 1) * per_replica]
-        assert len(indices) == per_replica
 
-        yield from (self[indices[i : i + self.batch_size]] for i in range(iter_start, iter_end, self.batch_size))
+        if self.iteration_strategy == "same_order":
+            # replica indices
+            indices = indices[rank:total_size:num_replicas]
+            if len(indices) != per_replica:
+                raise ValueError(
+                    f"The number of indices must be equal to the per_replica size. "
+                    f"Got {len(indices)} != {per_replica} at rank {rank}."
+                )
+
+            # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
+            for batch_indices in islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers):
+                yield self[batch_indices]
+
+        elif self.iteration_strategy == "cache_efficient":
+            # replica indices
+            indices = indices[rank * per_replica : (rank + 1) * per_replica]
+            if len(indices) != per_replica:
+                raise ValueError(
+                    f"The number of indices must be equal to the per_replica size. "
+                    f"Got {len(indices)} != {per_replica} at rank {rank}."
+                )
+
+            # worker indices
+            batches_per_replica = math.ceil(per_replica / float(self.batch_size))
+            batches_per_worker = math.ceil(batches_per_replica / float(num_workers))
+            per_worker = batches_per_worker * self.batch_size
+
+            iter_start = worker_id * per_worker
+            iter_end = min(iter_start + per_worker, per_replica)
+            indices = indices[iter_start:iter_end]
+
+            # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
+            for batch_indices in chunked_iter(indices, self.batch_size):
+                yield self[batch_indices]
+
         # Sets epoch for persistent workers
         self.set_epoch(self.epoch + 1)

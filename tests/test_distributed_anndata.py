@@ -3,9 +3,7 @@
 
 import os
 import pickle
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -17,7 +15,7 @@ from cellarium.ml.data import (
     IterableDistributedAnnDataCollectionDataset,
     read_h5ad_file,
 )
-from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
+from cellarium.ml.utilities.data import AnnDataField
 
 
 @pytest.fixture
@@ -146,7 +144,7 @@ def test_indexing(
     oidx, n_adatas = row_select
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
+        with pytest.raises(ValueError, match="Expected the number of anndata files"):
             dat_view = dat[oidx, vidx]
     else:
         adt_view = adt[oidx, vidx]
@@ -201,7 +199,7 @@ def test_indexing_dataset(
     )
 
     if cache_size_strictly_enforced and (n_adatas > max_cache_size):
-        with pytest.raises(AssertionError, match="Expected the number of anndata files"):
+        with pytest.raises(ValueError, match="Expected the number of anndata files"):
             dataset_X = dataset[oidx]["x_ng"]
     else:
         adt_X = adt[oidx].X
@@ -227,47 +225,3 @@ def test_pickle_dataset(dat: DistributedAnnDataCollection):
 
     np.testing.assert_array_equal(new_dataset[:2]["x_ng"], dataset[:2]["x_ng"])
     np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])
-
-
-@pytest.fixture
-def dadc(adatas_path: Path):
-    # distributed anndata
-    filenames = str(os.path.join(adatas_path, "adata.{000..002}.h5ad"))
-    limits = [2, 5, 10]
-    dadc = DistributedAnnDataCollection(
-        filenames,
-        limits,
-        max_cache_size=2,
-    )
-    return dadc
-
-
-@pytest.mark.parametrize(
-    "attr,key,convert_fn",
-    [
-        ("X", None, None),
-        ("obs", "A", None),
-        ("obs", "C", categories_to_codes),
-        ("obs_names", None, None),
-        ("var_names", None, None),
-        ("layers", "L", None),
-    ],
-)
-@pytest.mark.parametrize("idx", [slice(0, 5), [0, 2, 4], 0])
-def test_anndata_field(
-    dadc: DistributedAnnDataCollection,
-    attr: str,
-    key: str | None,
-    convert_fn: Callable[[Any], np.ndarray] | None,
-    idx: slice | list,
-):
-    expected = getattr(dadc[idx], attr)
-    if key is not None:
-        expected = expected[key]
-    if convert_fn is not None:
-        expected = convert_fn(expected)
-
-    field = AnnDataField(attr, key, convert_fn)
-    actual = field(dadc, idx)
-
-    np.testing.assert_array_equal(expected, actual)

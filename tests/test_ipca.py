@@ -33,6 +33,7 @@ def x_ng():
 def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correction: bool, batch_size: int, k: int):
     n, g = x_ng.shape
     x_ng_centered = x_ng - x_ng.mean(dim=0)
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     batch_size = batch_size // devices
 
@@ -40,7 +41,7 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             (x_ng if perform_mean_correction else x_ng_centered).numpy(),
-            np.array([f"gene_{i}" for i in range(g)]),
+            var_names_g,
         ),
         batch_size=batch_size,
         shuffle=False,
@@ -48,7 +49,7 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
     )
     # model
     ipca = IncrementalPCA(
-        var_names_g=[f"gene_{i}" for i in range(g)],
+        var_names_g=var_names_g,
         n_components=k,
         perform_mean_correction=perform_mean_correction,
     )
@@ -88,13 +89,13 @@ def test_incremental_pca_multi_device(x_ng: torch.Tensor, perform_mean_correctio
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
     n, g = 3, 2
-    var_names_g = [f"gene_{i}" for i in range(g)]
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDataset(
             np.random.randn(n, g),
-            np.array(var_names_g),
+            var_names_g,
         ),
         collate_fn=collate_fn,
     )
@@ -124,7 +125,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     # load model from checkpoint
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
-    loaded_model: IncrementalPCA = CellariumModule.load_from_checkpoint(ckpt_path).model
+    loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
+    assert isinstance(loaded_model, IncrementalPCA)
     # assert
     np.testing.assert_allclose(model.V_kg.detach(), loaded_model.V_kg.detach())
     np.testing.assert_allclose(model.S_k.detach(), loaded_model.S_k.detach())

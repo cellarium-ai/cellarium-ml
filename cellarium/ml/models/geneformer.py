@@ -1,8 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
-
 import numpy as np
 import torch
 from transformers import BertConfig, BertForMaskedLM
@@ -62,7 +60,7 @@ class Geneformer(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        var_names_g: Sequence[str],
+        var_names_g: np.ndarray,
         hidden_size: int = 256,
         num_hidden_layers: int = 6,
         num_attention_heads: int = 4,
@@ -78,7 +76,7 @@ class Geneformer(CellariumModel, PredictMixin):
         mlm_probability: float = 0.15,
     ) -> None:
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
+        self.var_names_g = var_names_g
         # model configuration
         config = {
             "vocab_size": len(self.var_names_g) + 2,  # number of genes + 2 for <mask> and <pad> tokens
@@ -134,7 +132,6 @@ class Geneformer(CellariumModel, PredictMixin):
         feature_deletion: list[str] | None = None,
         feature_map: dict[str, int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
         # activation and deletion happen before sorting
         if feature_deletion:
             if not all([g in self.var_names_g for g in feature_deletion]):
@@ -246,16 +243,18 @@ class Geneformer(CellariumModel, PredictMixin):
 
         .. note::
             In silico perturbations can be achieved in one of three ways:
-            1. Use feature_map to replace a feature token with MASK (1) or PAD (0)
-                e.g. feature_map={"ENSG0001": 1} will replace var_names_g feature
-                ENSG0001 with a MASK token.
-            2. Use feature_deletion to remove a feature from the cell's inputs, which instead of adding a
-                PAD or MASK token, will allow another feature to take its place.
-                e.g. feature_deletion=["ENSG0001"] will remove var_names_g feature ENSG0001 from the input,
-                and allow a new feature token to take its place.
-            3. Use feature_activation to move a feature all the way to the top rank position in the input.
-                e.g. feature_activation=["ENSG0001"] will make var_names_g feature ENSG0001 the first in
-                rank order. Multiple input features will be ranked according to their order in the input list.
+
+            1. Use ``feature_map`` to replace a feature token with ``MASK`` (1) or ``PAD`` (0)
+               (e.g. ``feature_map={"ENSG0001": 1}`` will replace ``var_names_g`` feature
+               ``ENSG0001`` with a ``MASK`` token).
+            2. Use ``feature_deletion`` to remove a feature from the cell's inputs, which instead of adding a
+               ``PAD`` or ``MASK`` token, will allow another feature to take its place
+               (e.g. ``feature_deletion=["ENSG0001"]`` will remove ``var_names_g`` feature ``ENSG0001`` from the input,
+               and allow a new feature token to take its place).
+            3. Use ``feature_activation`` to move a feature all the way to the top rank position in the input
+               (e.g. ``feature_activation=["ENSG0001"]`` will make ``var_names_g`` feature ``ENSG0001`` the first in
+               rank order. Multiple input features will be ranked according to their order in the input list).
+
             Number (2) and (3) are described in the Geneformer paper under "In silico perturbation" in the
             Methods section.
         """

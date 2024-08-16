@@ -4,8 +4,10 @@
 import numpy as np
 import torch
 
-from cellarium.ml.models import CellariumModel, GatherLayer
-from cellarium.ml.utilities.data import get_rank_and_num_replicas
+from cellarium.ml.models import CellariumModel
+from cellarium.ml.utilities.distributed import GatherLayer, get_rank_and_num_replicas
+
+USE_CUDA = torch.cuda.is_available()
 
 
 class BoringDataset(torch.utils.data.Dataset):

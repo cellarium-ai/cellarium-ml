@@ -14,6 +14,7 @@ Table of Contents
    cli
    core
    data
+   distributions
    lr_schedulers
    models
    transforms
@@ -22,9 +23,16 @@ Table of Contents
 
 .. toctree::
    :maxdepth: 1
+   :caption: Examples
+
+   examples/cli_workflow
+
+.. toctree::
+   :maxdepth: 1
    :caption: Tutorials
 
    tutorials/mup_mlp
+   tutorials/geneformer_demo
 
 Indices and tables
 ==================

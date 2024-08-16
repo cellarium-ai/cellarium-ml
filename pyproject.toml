@@ -26,9 +26,10 @@ dependencies = [
   "braceexpand",
   "crick>=0.0.4",
   "google-cloud-storage",
-  "jsonargparse[signatures]",
+  "jsonargparse[signatures]==4.27.7",
   "lightning>=2.2.0",
-  "pyro-ppl",
+  "numpy<=1.26.4",
+  "pyro-ppl>=1.9.1",
   "pytest",
   "torch>=2.2.0",
   "transformers",
@@ -37,10 +38,7 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
-lint = [
-    "black[jupyter]",
-    "ruff",
-]
+lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML"]
 test = [
   "pytest-xdist",
@@ -78,10 +76,11 @@ dev_template = "{tag}.post{ccount}"
 
 [tool.ruff]
 line-length = 120
-select = ["E", "F", "I", "W"]
+extend-include = ["*.ipynb"]
+target-version = "py310"
 
-[tool.black]
-line-length = 120
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
 
 [tool.mypy]
 ignore_missing_imports = true

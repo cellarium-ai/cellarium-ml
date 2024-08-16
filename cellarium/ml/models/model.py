@@ -54,6 +54,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
                 pass
             constrained_value, constraint, event_dim = value
             self._pyro_params[name] = constraint, event_dim
+            assert constrained_value is not None
             unconstrained_value = _unconstrain(constrained_value, constraint)
             super().__setattr__(name + "_unconstrained", unconstrained_value)
             return
@@ -77,4 +78,16 @@ class PredictMixin(metaclass=ABCMeta):
     def predict(self, *args: Any, **kwargs: Any) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Perform prediction.
+        """
+
+
+class ValidateMixin(metaclass=ABCMeta):
+    """
+    Abstract mixin class for models that can perform validation.
+    """
+
+    @abstractmethod
+    def validate(self, *args: Any, **kwargs: Any) -> None:
+        """
+        Perform validation.
         """
