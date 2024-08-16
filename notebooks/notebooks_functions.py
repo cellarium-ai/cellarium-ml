@@ -1,3 +1,4 @@
+import gc
 import warnings
 
 import pandas as pd
@@ -601,12 +602,13 @@ def plot_avg_expression(adata:anndata.AnnData,basis:str,gene_set_dict:dict,figpa
             genes_list.append(gene_key)
             adata = settings_plot["adata"]
 
-    nrows,ncols,nrows_idx,ncols_idx,width_ratios = calculate_dimensions_plot(genes_list,include_colorbars=False)
+    nrows,ncols,nrows_idx,ncols_idx,width_ratios = calculate_dimensions_plot(genes_list,max_rows=4,include_colorbars=False)
 
+    color_by = [color_keys[0]] + genes_list if len(adata.obs[color_keys[0]].value_counts().keys()) <= 20 else genes_list
     sc.pl.embedding(adata,
                     basis=basis,
-                    #color=[color_keys[0]] + genes_list,
-                    color=genes_list,
+                    color=color_by,
+                    #color=genes_list,
                     projection="2d",
                     cmap = "magma_r",
                     ncols=nrows,
@@ -766,7 +768,7 @@ def plot_rank_expression(adata:anndata.AnnData,genes_list:list,layer_name:str,fi
                table_conversion="matplotlib",
                )
 
-def analysis_variance(adata,adata_subset,genes_list:list,filepath_subset:str,filepath:str,gene_group_name:str):
+def analysis_nmf(adata,adata_subset,genes_list:list,filepath_subset:str,filepath:str,gene_group_name:str):
     """"""
     # #Restrict only to the glyco genes
     adata.var[f'gene_subset_{gene_group_name}'] = adata.var_names.isin(genes_list)
@@ -792,6 +794,7 @@ def analysis_variance(adata,adata_subset,genes_list:list,filepath_subset:str,fil
 
         sc.pp.normalize_total(adata)
         sc.pp.log1p(adata)
+
         if adata.X.size != 0:
             sc.pp.pca(adata, mask_var=f'gene_subset_{gene_group_name}') #before glyco_gene #n_comps=5
             sc.pp.neighbors(adata, n_neighbors=15, metric='euclidean', method='umap') #does not have mask_var
@@ -857,7 +860,7 @@ def plot_scree_plot(adata):
     plt.xlabel('Principal Component')
     plt.ylabel('Variance Explained')
 
-def plot_neighbour_leiden_clusters(adata,genes_list,figpath,color_keys,filepath,overwrite):
+def plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepath,overwrite):
     """
 
     NOTES:
@@ -872,16 +875,23 @@ def plot_neighbour_leiden_clusters(adata,genes_list,figpath,color_keys,filepath,
         -Silhouette score: https://github.com/scverse/scanpy/issues/222
 
     """
-    #cluster_assignments = adata.obs["clusters"].array
-    cell_type = color_keys[0]
-    cell_counts = adata.obs[cell_type].value_counts()  # .index[0]
-    # print("cell counts : {}".format(cell_counts))
-    maxfreq_cell = cell_counts.index[0]
-    maxfreq = cell_counts.loc[maxfreq_cell]
-    print(f"Most frequent cell found is {maxfreq_cell} with {maxfreq} members---------------------- ")
-    adata_maxfreqcell = adata[adata.obs[cell_type].isin([maxfreq_cell])].copy()
-    datasets_dict = {"all":[adata,""],
-                     "maxfreqcell":[adata_maxfreqcell,"_maxfreqcell"]}
+
+    if not os.path.exists(filepath.replace(".h5ad","maxfreqcell.h5ad")):
+        #cluster_assignments = adata.obs["clusters"].array
+        cell_type = color_keys[0]
+        cell_counts = adata.obs[cell_type].value_counts()  # .index[0]
+        # print("cell counts : {}".format(cell_counts))
+        maxfreq_cell = cell_counts.index[0]
+        maxfreq = cell_counts.loc[maxfreq_cell]
+        print(f"Most frequent cell found is {maxfreq_cell} with {maxfreq} members---------------------- ")
+        adata_maxfreqcell = adata[adata.obs[cell_type].isin([maxfreq_cell])].copy()
+    else:
+        adata_maxfreqcell = sc.read(filepath.replace(".h5ad","_maxfreqcell.h5ad"))
+    datasets_dict = {"maxfreqcell":[adata_maxfreqcell,"_maxfreqcell"],
+                      "all":[adata,""],
+                     #"maxfreqcell": [adata_maxfreqcell, "_maxfreqcell"]
+
+                     }
     overwrite=False
     for dataset_info in list(datasets_dict.values()):
         dataset,name = dataset_info
@@ -932,16 +942,18 @@ def plot_neighbour_leiden_clusters(adata,genes_list,figpath,color_keys,filepath,
             print("Removing clusters with a single element")
             dataset = dataset[~dataset.obs["clusters"].isin(singlemember_clusters)] #remove clusters with a single element
 
-        print("Before")
-        print(cluster_counts_dict)
-
-        print("After")
-        print(dataset.obs["clusters"].value_counts())
+        # print("Before")
+        # print(cluster_counts_dict)
+        #
+        # print("After")
+        # print(dataset.obs["clusters"].value_counts())
 
         gene_set =  dataset.var_names[dataset.var['genes_of_interest']]
 
-        sc.pp.log1p(dataset)
+        if name == "_maxfreqcell":
+            plot_avg_expression(dataset, "X_scvi_reconstructed_0_umap", gene_set_dict, figpath, "glyco_expression_maxfreqcell" , color_keys)
 
+        sc.pp.log1p(dataset)
         sc.tl.dendrogram(dataset,groupby="clusters") #need to re-run because
         sc.pl.dotplot(dataset,
                       gene_set,
@@ -979,7 +991,9 @@ def plot_neighbour_leiden_clusters(adata,genes_list,figpath,color_keys,filepath,
         plt.clf()
 
         dataset.write(filepath.replace(".h5ad",f"{name}.h5ad"))
-    exit()
+        del dataset
+        gc.collect()
+
 
 def scanpy_scvi(adata_file):
 

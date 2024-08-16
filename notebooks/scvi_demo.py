@@ -62,8 +62,13 @@ foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_58/checkpoints/ep
                     7: ["cellxgene_lung_subset","","../example_configs/scvi_config_cellxgene_lung_subset.yaml","../data/single_cell_lung_atlas_subset.h5ad",[""],""],
                     }
 
-#Done
-foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[3]
+
+
+#TODO:
+# 1) merge new branch and test it
+# 2) Ask Hi again, can you pretty please do me a small favour and explain the motivation behind the sc.tl.score_genes function? I am not sure what do they refer as "comparing the average of the reference genes vs the average of a randomly sampled set of genes with the same distribution". If the have the same distribution , then why compare them?
+# 3) Ask about rank genes function
+foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[5]
 
 
 
@@ -87,7 +92,7 @@ pipeline = CellariumPipeline([scvi_model])
 filename_suffix = ""
 figpath = f"figures/{foldername}"
 datapath = f"tmp_data/{foldername}"
-overwrite = True
+overwrite = False
 
 
 def matching_file(datapath:str,filename:str):
@@ -95,10 +100,15 @@ def matching_file(datapath:str,filename:str):
     pattern = re.compile(filename)
     matched = [ file if pattern.match(file) else None for file in os.listdir(datapath)]
     matched = [i for i in matched if i is not None]
-    filepath = os.path.join(datapath, matched[0]) if len(matched) > 0 else datapath
+    if len(matched) > 1:
+        matched = [match for match in matched if "_maxfreqcell" not in match]
+        matched = list(sorted(matched))
+        filepath = os.path.join(datapath, matched[0])
+    elif len(matched) == 1:
+        filepath = os.path.join(datapath, matched[0])
+    else:
+        filepath = f"{datapath}/{filename}"
 
-    if datapath == filepath:
-        filepath = f"{filepath}/{filename}"
     return matched,filepath
 
 filename = f"adata_processed{filename_suffix}"
@@ -139,22 +149,6 @@ else:
         adata.var_names = adata.var[gene_names]
 
 
-# if 'scvi_reconstructed_0' not in list(adata.layers.keys()) or overwrite:
-#     print("Key 'scvi_reconstructed_0' not found, computing")
-#     # Highlight: Reconstruct de-noised/de-batched data
-#     for label in range(pipeline[-1].n_batch):
-#         print("Label: {}".format(label))
-#         adata_tmp = NF.reconstruct_debatched(dataset, pipeline, transform_to_batch_label=label,layer_key_added=f'scvi_reconstructed_{label}', device=device)
-#         adata.layers[f'scvi_reconstructed_{label}'] = adata_tmp.layers[f'scvi_reconstructed_{label}']
-#         break
-#     adata.write(filepath)
-# else:
-#     print("Key 'scvi_reconstructed_0' found, continue")
-#
-# exit()
-#filename = f"adata_scvi_reconstructed_raw_umap{filename_suffix}"
-#matched,filepath = matching_file(datapath,filename)
-
 
 if "X_raw_umap" not in list(adata.obsm.keys()) or overwrite:
     print("Key 'X_raw_umap' not found, computing")
@@ -177,7 +171,7 @@ gene_set_dict = {
 'piga':['PGAP4', 'PIGA', 'PIGB', 'PIGM', 'PIGV', 'PIGZ'],
 'ugcg':['A4GALT', 'B3GALNT1', 'B3GALT4', 'B3GNT5', 'B4GALNT1', 'B4GALT5', 'B4GALT6', 'UGCG'],
 'ugt8':['UGT8'],
-'ost':['ALG10', 'ALG10B', 'ALG11', 'ALG12', 'ALG13', 'ALG14', 'ALG2', 'ALG3', 'ALG6', 'ALG8', 'ALG9', 'DPAGT1', 'FUT8', 'MGAT1', 'MGAT2', 'MGAT3', 'MGAT4A', 'MGAT4B', 'MGAT4C', 'MGAT4D', 'MGAT5', 'STT3A', 'UGGT1', 'UGGT2'],
+'ost':['OST','STT3A/B','ALG10', 'ALG10B', 'ALG11', 'ALG12', 'ALG13', 'ALG14', 'ALG2', 'ALG3', 'ALG6', 'ALG8', 'ALG9', 'DPAGT1', 'FUT8', 'MGAT1', 'MGAT2', 'MGAT3', 'MGAT4A', 'MGAT4B', 'MGAT4C', 'MGAT4D', 'MGAT5', 'STT3A', 'UGGT1', 'UGGT2'],
 'ogt':['OGT'],
 'colgalt':['COLGALT1', 'COLGALT2'],
 'eogt':['EOGT'],
@@ -237,19 +231,22 @@ else:
 
 # figname = "expression_density_difference"
 # NF.differential_gene_expression(adata,gene_set,figpath,figname)
-#
-#
-# figname = "glyco_expression_RAW"
-# # # figname = "cell_cycle_expression_RAW"
-# NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,figpath,figname,color_keys)
 # #
+# #
+# figname = "glyco_expression_RAW"
+# # # # figname = "cell_cycle_expression_RAW"
+# NF.plot_avg_expression(adata,"X_raw_umap",gene_set_dict,figpath,figname,color_keys)
+#
 # figname = "glyco_expression_RECONSTRUCTED"
-# # # figname = "cell_cycle_expression_RECONSTRUCTED"
+# # # # figname = "cell_cycle_expression_RECONSTRUCTED"
 # NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,figpath,figname,color_keys)
-#
-#
+
+
+
 # #Highlight: Leiden clustering
-NF.plot_neighbour_leiden_clusters(adata,gene_set,figpath,color_keys,filepath,overwrite)
+NF.plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepath,overwrite)
+
+
 
 #Highlight: Glyco genes KDE expression
 
@@ -290,7 +287,7 @@ if "gene_subset_glyco" not in list(adata.var.keys()) or overwrite:
         filepath_subset = os.path.join(datapath, f"{filename_subset}.h5ad")
         adata_subset = adata[:, slice]
         present_gene_set = adata_subset.var_names.tolist()
-        adata,adata_subset = NF.analysis_variance(adata,adata_subset,present_gene_set,filepath_subset,filepath,gene_group_name)
+        adata,adata_subset = NF.analysis_nmf(adata,adata_subset,present_gene_set,filepath_subset,filepath,gene_group_name)
 
 
 for gene_group_name in gene_group_names:
