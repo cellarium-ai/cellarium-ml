@@ -98,8 +98,6 @@ class FileLoader:
                 cached_loaders[loader_fn] = cache(loader_fn)
             loader_fn = cached_loaders[loader_fn]
             obj = loader_fn(file_path)
-
-
             if attr is not None:
                 obj = itemattrgetter(attr)(obj)
             if isinstance(convert_fn, str):
@@ -279,7 +277,6 @@ def compute_var_names_g(
     batch = {key: field(adata) for key, field in data.batch_keys.items()}
     pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
 
-    batch = {key: field(data.dadc, 0) for key, field in data.batch_keys.items()}
 
     if batch["batch_index_n"] is None:
         warnings.warn("Batch information has not been specified, setting it to np.array([3],dtype=np.int8)")
@@ -507,7 +504,6 @@ def logistic_regression(args: ArgsType = None) -> None:
         ],
     )
     cli(args=args)
-
 
 @register_model
 def onepass_mean_var_std(args: ArgsType = None) -> None:

@@ -75,8 +75,9 @@ foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = folde
 
 
 #NF.scanpy_scvi(adata_file) #too slow to handle
-#subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
+subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
 
+exit()
 
 NF.folders(foldername,"figures",overwrite=False)
 NF.folders(foldername,"tmp_data",overwrite=False)
