@@ -52,7 +52,9 @@ cellxgene_liver: 481828 × 60664
 # Lung: https://data.humancellatlas.org/hca-bio-networks/lung/atlases/lung-v1-0
 
 
-foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_58/checkpoints/epoch=49-step=3150.ckpt',"../example_configs/scvi_config_pbmc.yaml","../data/pbmc_count.h5ad",['final_annotation', 'batch'],""],
+foldername_dict = {
+                    0: ["pmbc_results",'lightning_logs/version_58/checkpoints/epoch=49-step=3150.ckpt',"../example_configs/scvi_config_pbmc.yaml","../data/pbmc_count.h5ad",['final_annotation', 'batch'],""],
+                    1: ["pmbc_results_subset_genes",'',"../example_configs/scvi_config_pbmc_subset_genes.yaml","../data/pbmc_count.h5ad",['final_annotation', 'batch'],""],
                     #1:  ["cas_50m_homo_sapiens_no_cancer_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt',"../example_configs/scvi_config_cas_50m_homo_sapiens_no_cancer.yaml","../data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad",['final_annotation', 'batch'],"" ],
                     2 : ["tucker_human_heart_atlas","lightning_logs/version_52/checkpoints/epoch=29-step=16230.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad",["Cluster","batch"],"gene_names"],
                     3 : ["human_heart_atlas","lightning_logs/version_53/checkpoints/epoch=39-step=26640.ckpt","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad",["cell_type","batch"],"gene_name-new"], #10 GB
@@ -68,13 +70,12 @@ foldername_dict = { 0: ["pmbc_results",'lightning_logs/version_58/checkpoints/ep
 # 1) merge new branch and test it
 # 2) Ask Hi again, can you pretty please do me a small favour and explain the motivation behind the sc.tl.score_genes function? I am not sure what do they refer as "comparing the average of the reference genes vs the average of a randomly sampled set of genes with the same distribution". If the have the same distribution , then why compare them?
 # 3) Ask about rank genes function
-foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[5]
+foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[1]
 
 
 
 #NF.scanpy_scvi(adata_file) #too slow to handle
 #subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
-
 
 
 NF.folders(foldername,"figures",overwrite=False)
