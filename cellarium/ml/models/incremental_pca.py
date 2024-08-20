@@ -46,7 +46,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         var_names_g: np.ndarray,
         n_components: int,
         svd_lowrank_niter: int = 2,
-        perform_mean_correction: bool = False,
+        perform_mean_correction: bool = True,
     ) -> None:
         super().__init__()
         self.var_names_g = var_names_g
@@ -138,7 +138,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
                 "Distributed and Incremental PCA requires that " "broadcast_buffers is set to False."
             )
 
-    def on_epoch_end(self, trainer: pl.Trainer) -> None:
+    def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         """
         Merge partial SVD results from parallel processes at the end of the epoch.
 
