@@ -282,10 +282,16 @@ class CellariumModule(pl.LightningModule):
         if self.module_pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        batch["pl_module"] = self
-        batch["trainer"] = self.trainer
-        batch["batch_idx"] = batch_idx
-        self.module_pipeline.validate(batch)
+        output = self.module_pipeline(batch)
+        loss = output.get("loss")
+        if loss is not None:
+            # Logging to TensorBoard by default
+            self.log("val_loss", loss, sync_dist=True, on_epoch=True)
+
+        # batch["pl_module"] = self
+        # batch["trainer"] = self.trainer
+        # batch["batch_idx"] = batch_idx
+        # self.module_pipeline.validate(batch)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
         """Configure optimizers for the model."""
