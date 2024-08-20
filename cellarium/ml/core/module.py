@@ -347,3 +347,21 @@ class CellariumModule(pl.LightningModule):
         on_batch_end = getattr(self.model, "on_batch_end", None)
         if callable(on_batch_end):
             on_batch_end(self.trainer)
+
+    def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
+        """
+        Calls the ``on_batch_end`` method on the module.
+        """
+        on_batch_end = getattr(self.model, "on_batch_end", None)
+        if callable(on_batch_end):
+            on_batch_end(self.trainer)
+
+    def on_predict_end(self) -> None:
+        """
+        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
+        ``on_epoch_end`` must be called at the end of every epoch.
+        """
+        on_prediction_end = getattr(self.model, "on_prediction_end", None)
+        if callable(on_prediction_end):
+            on_prediction_end(self.trainer)
