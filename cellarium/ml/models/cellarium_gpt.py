@@ -455,7 +455,7 @@ class Tokenizer(torch.nn.Module):
         gene_id_g: torch.Tensor,
         gene_value_ng: torch.Tensor,
         total_mrna_umis_n: torch.Tensor,
-        measured_genes_mask_ng: torch.Tensor,
+        measured_genes_mask_ng: torch.Tensor | None = None,
     ) -> dict[str, np.ndarray | torch.Tensor]:
         device = gene_id_g.device
         gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
@@ -465,7 +465,10 @@ class Tokenizer(torch.nn.Module):
         shuffle_idx_nc = shuffle_idx_ng[:, : self.context_len]
         gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
         gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
-        measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
+        if measured_genes_mask_ng is not None:
+            measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
+        else:
+            measured_genes_mask_nc = torch.ones_like(gene_value_nc, dtype=torch.bool)
 
         label_nc = gene_value_nc.clone()
         prefix_len_n = torch.randint(0, self.max_prefix_len, (1,), device=device)
