@@ -1,15 +1,20 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import gc
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 
+import numpy as np
 import pandas as pd
 from anndata import AnnData, concat
 from anndata._core.index import Index, Index1D, _normalize_indices
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
     AnnCollectionView,
+    ConvertType,
 )
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
@@ -155,18 +160,18 @@ class DistributedAnnDataCollection(AnnCollection):
 
     def __init__(
         self,
-        filenames,
-        limits=None,
-        shard_size=None,
-        last_shard_size=None,
+        filenames: Sequence[str] | str,
+        limits: Iterable[int] | None = None,
+        shard_size: int | None = None,
+        last_shard_size: int | None = None,
         max_cache_size: int = 1,
-        cache_size_strictly_enforced=True,
-        label=None,
-        keys=None,
-        index_unique=None,
-        convert=None,
-        indices_strict=True,
-        obs_columns_to_validate=None,
+        cache_size_strictly_enforced: bool = True,
+        label: str | None = None,
+        keys: Sequence[str] | None = None,
+        index_unique: str | None = None,
+        convert: ConvertType | None = None,
+        indices_strict: bool = True,
+        obs_columns_to_validate: Sequence[str] | None = None,
     ):
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
@@ -238,7 +243,7 @@ class DistributedAnnDataCollection(AnnCollection):
         adata.obs = adata.obs.astype(self.schema.attr_values["obs"].dtypes)
         return adata
 
-    def materialize(self, adatas_oidx, vidx: Index1D):
+    def materialize(self, adatas_oidx: list[np.ndarray | None], vidx: Index1D) -> list[AnnData]:
         """
         Buffer and return anndata files at given indices from the list of lazy anndatas.
 
@@ -336,9 +341,9 @@ class LazyAnnData:
     def __init__(
         self,
         filename: str,
-        limits,
+        limits: tuple[int, int],
         schema: AnnDataSchema,
-        cache=None,
+        cache: LRU | None = None,
     ):
         self.filename = filename
         self.limits = limits
@@ -358,7 +363,7 @@ class LazyAnnData:
         return len(self.schema.attr_values["var_names"])
 
     @property
-    def shape(self):
+    def shape(self) -> tuple[int, int]:
         """Shape of the data matrix."""
         return self.n_obs, self.n_vars
 

@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import math
 import os
 from pathlib import Path
@@ -69,19 +71,18 @@ def test_tokenize_with_perturbations(perturb: str):
     x_ng = torch.tensor([[4, 3, 2, 1]])  # sort order will be [a,b,c,d] and tokens will be [2,3,4,5]
 
     # test that we get the expected output for a well-formed set of input args
-    match perturb:
-        case "none":
-            input_ids, _ = geneformer.tokenize_with_perturbations(x_ng)
-            expected_input_ids = torch.tensor([[2, 3, 4, 5]])
-        case "activation":
-            input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_activation=["d"])
-            expected_input_ids = torch.tensor([[5, 2, 3, 4]])
-        case "deletion":
-            input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_deletion=["c"])
-            expected_input_ids = torch.tensor([[2, 3, 5, 0]])
-        case "map":
-            input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_map={"a": 1, "b": 1})
-            expected_input_ids = torch.tensor([[1, 1, 4, 5]])
+    if perturb == "none":
+        input_ids, _ = geneformer.tokenize_with_perturbations(x_ng)
+        expected_input_ids = torch.tensor([[2, 3, 4, 5]])
+    elif perturb == "activation":
+        input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_activation=["d"])
+        expected_input_ids = torch.tensor([[5, 2, 3, 4]])
+    elif perturb == "deletion":
+        input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_deletion=["c"])
+        expected_input_ids = torch.tensor([[2, 3, 5, 0]])
+    elif perturb == "map":
+        input_ids, _ = geneformer.tokenize_with_perturbations(x_ng, feature_map={"a": 1, "b": 1})
+        expected_input_ids = torch.tensor([[1, 1, 4, 5]])
 
     print(f"Expected input_ids:\n{expected_input_ids}")
     print(f"Actual input_ids:\n{input_ids}")
@@ -91,10 +92,9 @@ def test_tokenize_with_perturbations(perturb: str):
     if perturb == "none":
         return
     with pytest.raises(ValueError):
-        match perturb:
-            case "activation":
-                geneformer.tokenize_with_perturbations(x_ng, feature_activation=["e"])
-            case "deletion":
-                geneformer.tokenize_with_perturbations(x_ng, feature_deletion=["e"])
-            case "map":
-                geneformer.tokenize_with_perturbations(x_ng, feature_map={"a": 1, "e": 1})
+        if perturb == "activation":
+            geneformer.tokenize_with_perturbations(x_ng, feature_activation=["e"])
+        elif perturb == "deletion":
+            geneformer.tokenize_with_perturbations(x_ng, feature_deletion=["e"])
+        elif perturb == "map":
+            geneformer.tokenize_with_perturbations(x_ng, feature_map={"a": 1, "e": 1})

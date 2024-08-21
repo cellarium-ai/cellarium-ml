@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import copy
 import math
 import os
@@ -27,7 +29,9 @@ class FunctionComposer:
         return self.second_applied(self.first_applied(batch))
 
 
-def copy_module(module: torch.nn.Module, self_device: torch.device, copy_device: torch.device):
+def copy_module(
+    module: torch.nn.Module, self_device: torch.device, copy_device: torch.device
+) -> tuple[torch.nn.Module, torch.nn.Module]:
     """
     Return an original module on ``self_device`` and its copy on ``copy_device``.
     If the module is on meta device then it is moved to ``self_device`` efficiently using ``to_empty`` method.
@@ -55,7 +59,7 @@ def copy_module(module: torch.nn.Module, self_device: torch.device, copy_device:
     return module, module_copy
 
 
-def train_val_split(n_samples: int, train_size, val_size):
+def train_val_split(n_samples: int, train_size: float | int | None, val_size: float | int | None) -> tuple[int, int]:
     """
     Validate the train and validation sizes and return the number of samples for each.
 
@@ -122,7 +126,7 @@ def train_val_split(n_samples: int, train_size, val_size):
 
 def call_func_with_batch(
     func: Callable,
-    batch,
+    batch: dict[str, Any],
 ) -> Any:
     """
     Call a function with a batch dictionary. If the function is a method of a :class:`CellariumModule`, the function
@@ -150,7 +154,7 @@ def call_func_with_batch(
     return func(**{key: batch[key] for key in input_keys})
 
 
-def resolve_ckpt_dir(trainer: pl.Trainer):
+def resolve_ckpt_dir(trainer: pl.Trainer) -> Path | str:
     if len(trainer.loggers) > 0:
         if trainer.loggers[0].save_dir is not None:
             save_dir = trainer.loggers[0].save_dir

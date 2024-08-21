@@ -1,10 +1,14 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
@@ -19,7 +23,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
         super(torch.nn.Module, self).__setattr__("_pyro_params", OrderedDict())
         super().__init__()
 
-    # __call__: Callable[..., torch.Tensor | None]
+    __call__: Callable[..., torch.Tensor | None]
 
     @abstractmethod
     def reset_parameters(self) -> None:
@@ -42,7 +46,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
 
         return super().__getattr__(name)
 
-    def __setattr__(self, name: str, value) -> None:
+    def __setattr__(self, name: str, value: torch.Tensor | torch.nn.Module | PyroParam) -> None:
         if isinstance(value, PyroParam):
             # Create a new PyroParam, overwriting any old value.
             try:
@@ -72,7 +76,7 @@ class PredictMixin(metaclass=ABCMeta):
     """
 
     @abstractmethod
-    def predict(self, *args: Any, **kwargs: Any):
+    def predict(self, *args: Any, **kwargs: Any) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Perform prediction.
         """

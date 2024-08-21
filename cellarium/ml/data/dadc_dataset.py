@@ -1,8 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import math
 from itertools import islice
+from typing import Literal
 
 import numpy as np
 import torch
@@ -11,6 +14,7 @@ from boltons.iterutils import chunked_iter
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
+from cellarium.ml.utilities.data import AnnDataField
 from cellarium.ml.utilities.distributed import get_rank_and_num_replicas, get_worker_info
 
 
@@ -89,16 +93,16 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __init__(
         self,
-        dadc,
-        batch_keys,
-        batch_size=1,
-        iteration_strategy="cache_efficient",
-        shuffle=False,
-        seed=0,
-        drop_last=False,
-        start_idx=None,
-        end_idx=None,
-        test_mode=False,
+        dadc: DistributedAnnDataCollection | AnnData,
+        batch_keys: dict[str, AnnDataField],
+        batch_size: int = 1,
+        iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
+        shuffle: bool = False,
+        seed: int = 0,
+        drop_last: bool = False,
+        start_idx: int | None = None,
+        end_idx: int | None = None,
+        test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
         if isinstance(dadc, AnnData):
@@ -137,7 +141,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
         self.epoch = epoch
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
         r"""
         Returns a dictionary containing the data from the :attr:`dadc` with keys specified by the :attr:`batch_keys`
         at the given index ``idx``.

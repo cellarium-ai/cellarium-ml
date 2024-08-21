@@ -1,6 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
+from typing import Literal
 
 import numpy as np
 import pyro
@@ -55,8 +58,8 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         n_obs: int,
         var_names_g: np.ndarray,
         n_components: int,
-        ppca_flavor,
-        mean_g=None,
+        ppca_flavor: Literal["marginalized", "linear_vae"],
+        mean_g: torch.Tensor | None = None,
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
         seed: int = 0,
@@ -96,7 +99,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         self.W_kg.data.normal_(0, self.W_init_scale, generator=rng)
         self.sigma_unconstrained.data.fill_(_unconstrain(torch.as_tensor(self.sigma_init_scale), constraints.positive))
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
@@ -145,7 +148,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 

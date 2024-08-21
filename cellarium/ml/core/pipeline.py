@@ -1,9 +1,12 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from collections.abc import Iterable
 from itertools import chain
 
+import numpy as np
 import torch
 from typing_extensions import Self
 
@@ -37,16 +40,16 @@ class CellariumPipeline(torch.nn.ModuleList):
             Modules to be executed sequentially.
     """
 
-    def __add__(self, other) -> Self:
+    def __add__(self, other: Iterable[torch.nn.Module]) -> Self:
         return self.__class__(chain(self, other))
 
-    def forward(self, batch):
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
         for module in self:
             batch.update(call_func_with_batch(module.forward, batch))
 
         return batch
 
-    def predict(self, batch):
+    def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         for module in self[:-1]:
             batch.update(call_func_with_batch(module.forward, batch))
 
@@ -57,7 +60,7 @@ class CellariumPipeline(torch.nn.ModuleList):
 
         return batch
 
-    def validate(self, batch) -> None:
+    def validate(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
         for module in self[:-1]:
             batch.update(call_func_with_batch(module.forward, batch))
 

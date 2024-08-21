@@ -5,12 +5,14 @@
 Command line interface for Cellarium ML.
 """
 
+from __future__ import annotations
+
 import copy
 import sys
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-# from functools import cache
+from functools import lru_cache
 from operator import attrgetter
 from typing import Any
 
@@ -61,16 +63,16 @@ class FileLoader:
     """
 
     file_path: str
-    loader_fn: str
-    attr: str = None
-    convert_fn: str = None
+    loader_fn: Callable[[str], Any] | str
+    attr: str | None = None
+    convert_fn: Callable[[Any], Any] | str | None = None
 
     def __new__(cls, file_path, loader_fn, attr, convert_fn):
         if isinstance(loader_fn, str):
             loader_fn = import_object(loader_fn)
-        # if loader_fn not in cached_loaders:
-        #     cached_loaders[loader_fn] = cache(loader_fn)
-        # loader_fn = cached_loaders[loader_fn]
+        if loader_fn not in cached_loaders:
+            cached_loaders[loader_fn] = lru_cache(loader_fn)
+        loader_fn = cached_loaders[loader_fn]
         obj = loader_fn(file_path)
 
         if attr is not None:
@@ -114,8 +116,8 @@ class CheckpointLoader(FileLoader):
     """
 
     file_path: str
-    attr: str = None
-    convert_fn: str = None
+    attr: str | None = None
+    convert_fn: Callable[[Any], Any] | str | None = None
 
     def __new__(cls, file_path, attr, convert_fn):
         return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, convert_fn)
@@ -139,7 +141,7 @@ loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
 REGISTERED_MODELS = {}
 
 
-def register_model(model: Callable):
+def register_model(model: Callable[[ArgsType], None]):
     REGISTERED_MODELS[model.__name__] = model
     return model
 
@@ -163,9 +165,9 @@ class LinkArguments:
             At what point to set target value, ``"parse"`` or ``"instantiate"``.
     """
 
-    source: str
+    source: str | tuple[str, ...]
     target: str
-    compute_fn: Callable = None
+    compute_fn: Callable | None = None
     apply_on: str = "instantiate"
 
 
@@ -203,9 +205,9 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
 
 
 def compute_var_names_g(
-    cpu_transforms,
-    transforms,
-    data,
+    cpu_transforms: list[torch.nn.Module] | None,
+    transforms: list[torch.nn.Module] | None,
+    data: CellariumAnnDataDataModule,
 ) -> np.ndarray:
     """
     Compute variable names from the data by applying the transforms.
@@ -235,9 +237,9 @@ def compute_var_names_g(
 
 def lightning_cli_factory(
     model_class_path: str,
-    link_arguments: None = None,
-    trainer_defaults: None = None,
-):
+    link_arguments: list[LinkArguments] | None = None,
+    trainer_defaults: dict[str, Any] | None = None,
+) -> type[LightningCLI]:
     """
     Factory function for creating a :class:`LightningCLI` with a preset model and custom argument linking.
 
@@ -325,6 +327,7 @@ def cellarium_gpt(args: ArgsType = None) -> None:
         ],
     )
     cli(args=args)
+
 
 @register_model
 def geneformer(args: ArgsType = None) -> None:

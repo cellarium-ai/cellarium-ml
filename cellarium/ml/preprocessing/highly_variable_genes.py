@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import logging
 import warnings
 
@@ -67,8 +69,8 @@ def get_highly_variable_genes(
     mean = torch.log1p(mean)
     # All the following quantities are "per-gene" here
     df = pd.DataFrame()
-    df["means"] = mean
-    df["dispersions"] = dispersion
+    df["means"] = mean.numpy()
+    df["dispersions"] = dispersion.numpy()
     df["mean_bin"] = pd.cut(df["means"], bins=n_bins)
     disp_grouped = df.groupby("mean_bin")["dispersions"]
     disp_mean_bin = disp_grouped.mean()

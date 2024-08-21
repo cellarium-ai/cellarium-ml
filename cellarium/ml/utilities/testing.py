@@ -8,6 +8,9 @@ Testing utilities
 This module contains helper functions for testing.
 """
 
+from __future__ import annotations
+
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -49,9 +52,9 @@ def assert_nonnegative(name: str, number: float):
 
 def assert_columns_and_array_lengths_equal(
     matrix_name: str,
-    matrix,
+    matrix: np.ndarray | torch.Tensor,
     array_name: str,
-    array,
+    array: np.ndarray | torch.Tensor,
 ):
     """
     Assert that the number of columns in a matrix matches the length of an array.
@@ -125,7 +128,9 @@ def l1_norm(x: torch.Tensor) -> float:
     return x.detach().abs().mean().item()
 
 
-def record_out_coords(records, width: int, name: str, t: int):
+def record_out_coords(
+    records: list[dict], width: int, name: str, t: int
+) -> Callable[[torch.nn.Module, torch.Tensor, torch.Tensor], None]:
     """
     Returns a hook to record layer output coordinate size.
 
@@ -151,10 +156,10 @@ def record_out_coords(records, width: int, name: str, t: int):
 
 
 def get_coord_data(
-    models,
+    models: dict[int, Callable[[], torch.nn.Module]],
     train_loader: torch.utils.data.DataLoader,
-    loss_fn,
-    optim_fn,
+    loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    optim_fn: type[torch.optim.Optimizer],
     lr: float,
     nsteps: int,
     nseeds: int,
@@ -204,7 +209,7 @@ def get_coord_data(
                     for param_name, param in module.named_parameters():
                         if param_name.endswith("_unscaled"):
                             # muP
-                            param_name = param_name.removesuffix("_unscaled")
+                            param_name = param_name[: -len("_unscaled")]
                             multiplier = getattr(module, f"{param_name}_multiplier")
                         else:
                             # SP
@@ -231,7 +236,7 @@ def get_coord_data(
                     for param_name, param in module.named_parameters():
                         if param_name.endswith("_unscaled"):
                             # muP
-                            param_name = param_name.removesuffix("_unscaled")
+                            param_name = param_name[: -len("_unscaled")]
                             multiplier = getattr(module, f"{param_name}_multiplier")
                         else:
                             # SP

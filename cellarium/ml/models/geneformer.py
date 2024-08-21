@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import numpy as np
 import torch
 from transformers import BertConfig, BertForMaskedLM
@@ -111,7 +113,7 @@ class Geneformer(CellariumModel, PredictMixin):
         self.bert.apply(lambda module: setattr(module, "_is_hf_initialized", False))
         self.bert.init_weights()
 
-    def tokenize(self, x_ng: torch.Tensor):
+    def tokenize(self, x_ng: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         tokens = self.feature_ids.expand(x_ng.shape)
         # sort by median-scaled gene values
         sorted_indices = torch.argsort(x_ng, dim=1, descending=True)
@@ -128,10 +130,10 @@ class Geneformer(CellariumModel, PredictMixin):
     def tokenize_with_perturbations(
         self,
         x_ng: torch.Tensor,
-        feature_activation=None,
-        feature_deletion=None,
-        feature_map=None,
-    ):
+        feature_activation: list[str] | None = None,
+        feature_deletion: list[str] | None = None,
+        feature_map: dict[str, int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # activation and deletion happen before sorting
         if feature_deletion:
             if not all([g in self.var_names_g for g in feature_deletion]):
@@ -161,7 +163,7 @@ class Geneformer(CellariumModel, PredictMixin):
 
         return input_ids, attention_mask
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor]:
         """
         Args:
             x_ng:
@@ -206,14 +208,14 @@ class Geneformer(CellariumModel, PredictMixin):
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
-        output_hidden_states=True,
-        output_attentions=True,
-        output_input_ids=True,
-        output_attention_mask=True,
-        feature_activation=None,
-        feature_deletion=None,
-        feature_map=None,
-    ):
+        output_hidden_states: bool = True,
+        output_attentions: bool = True,
+        output_input_ids: bool = True,
+        output_attention_mask: bool = True,
+        feature_activation: list[str] | None = None,
+        feature_deletion: list[str] | None = None,
+        feature_map: dict[str, int] | None = None,
+    ) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Send (transformed) data through the model and return outputs.
         Optionally perform in silico perturbations and masking.

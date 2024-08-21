@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+from __future__ import annotations
+
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -78,7 +80,9 @@ class LogisticRegression(CellariumModel, PredictMixin):
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
         self.b_c.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, y_categories: np.ndarray):
+    def forward(
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, y_categories: np.ndarray
+    ) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
@@ -111,7 +115,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Predict the target logits.
 

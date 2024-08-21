@@ -8,14 +8,18 @@ Data utilities
 This module contains helper functions for data loading and processing.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from operator import attrgetter
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import scipy
 import torch
+from anndata import AnnData
 
 
 @dataclass
@@ -51,10 +55,10 @@ class AnnDataField:
     """
 
     attr: str
-    key: str = None
-    convert_fn: Callable = None
+    key: str | None = None
+    convert_fn: Callable[[Any], np.ndarray] | None = None
 
-    def __call__(self, adata) -> np.ndarray:
+    def __call__(self, adata: AnnData) -> np.ndarray:
         value = attrgetter(self.attr)(adata)
         if self.key is not None:
             value = value[self.key]
@@ -67,7 +71,7 @@ class AnnDataField:
         return value
 
 
-def collate_fn(batch):
+def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | torch.Tensor]:
     """
     Collate function for the ``DataLoader``. This function assumes that the batch is a list of
     dictionaries, where each dictionary has the same keys. If the key ends with ``_g`` or

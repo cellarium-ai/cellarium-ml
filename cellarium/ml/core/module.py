@@ -1,10 +1,14 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import warnings
-from typing import Any, List, Union, Optional, Type, Dict
+from collections.abc import Iterable
+from typing import Any
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
 
@@ -55,14 +59,14 @@ class CellariumModule(pl.LightningModule):
 
     def __init__(
         self,
-        cpu_transforms: Optional[List[torch.nn.Module]] = None,
-        transforms: Optional[List[torch.nn.Module]] = None,
-        model: Optional[CellariumModel] = None,
-        optim_fn: Optional[Type[torch.optim.Optimizer]] = None,
-        optim_kwargs: Optional[Dict[str, Any]]=None,
-        scheduler_fn: Optional[Type[torch.optim.lr_scheduler.LRScheduler]]=None,
-        scheduler_kwargs: Optional[Dict[str, Any]]=None,
-        is_initialized:bool=False,
+        cpu_transforms: Iterable[torch.nn.Module] | None = None,
+        transforms: Iterable[torch.nn.Module] | None = None,
+        model: CellariumModel | None = None,
+        optim_fn: type[torch.optim.Optimizer] | None = None,
+        optim_kwargs: dict[str, Any] | None = None,
+        scheduler_fn: type[torch.optim.lr_scheduler.LRScheduler] | None = None,
+        scheduler_kwargs: dict[str, Any] | None = None,
+        is_initialized: bool = False,
     ) -> None:
         super().__init__()
         with warnings.catch_warnings():
@@ -212,13 +216,9 @@ class CellariumModule(pl.LightningModule):
 
         return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
 
-    @module_pipeline.setter
-    def module_pipeline(self, value):
-        self._module_pipeline = value
-
     def training_step(  # type: ignore[override]
-        self, batch, batch_idx: int
-    ):
+        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
+    ) -> torch.Tensor | None:
         """
         Forward pass for training step.
 
@@ -249,7 +249,7 @@ class CellariumModule(pl.LightningModule):
 
         return loss
 
-    def forward(self, batch: dict) -> dict:
+    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Forward pass for inference step.
 
@@ -264,7 +264,7 @@ class CellariumModule(pl.LightningModule):
 
         return self.module_pipeline.predict(batch)
 
-    def validation_step(self, batch, batch_idx: int) -> None:
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
         """
         Forward pass for validation step.
 
@@ -282,7 +282,7 @@ class CellariumModule(pl.LightningModule):
 
         self.module_pipeline.validate(batch)
 
-    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
         """Configure optimizers for the model."""
         optim_fn = self.hparams["optim_fn"]
         optim_kwargs = self.hparams["optim_kwargs"] or {}

@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import math
 
 import lightning.pytorch as pl
@@ -73,7 +75,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self.x_size.zero_()
         self._dummy_param.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Incrementally update partial SVD with new data.
 
@@ -243,7 +245,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 

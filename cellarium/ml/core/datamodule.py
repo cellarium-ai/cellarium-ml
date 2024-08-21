@@ -1,7 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Optional, Union, Dict
+from __future__ import annotations
+
+from typing import Literal
 
 import lightning.pytorch as pl
 import torch
@@ -84,20 +86,20 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        dadc: Union[AnnData, DistributedAnnDataCollection],
+        dadc: DistributedAnnDataCollection | AnnData,
         # IterableDistributedAnnDataCollectionDataset args
-        batch_keys: Optional[Dict[str, AnnDataField]]=None,
-        batch_size:int=1,
-        iteration_strategy:str="cache_efficient",
-        shuffle:bool=False,
-        seed:int=0,
-        drop_last:bool=False,
-        train_size:Optional[Union[int, float]]=None,
-        val_size:Optional[Union[int, float]]=None,
-        test_mode:bool=False,
+        batch_keys: dict[str, AnnDataField] | None = None,
+        batch_size: int = 1,
+        iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
+        shuffle: bool = False,
+        seed: int = 0,
+        drop_last: bool = False,
+        train_size: float | int | None = None,
+        val_size: float | int | None = None,
+        test_mode: bool = False,
         # DataLoader args
         num_workers: int = 0,
-        prefetch_factor: Optional[int] = None,
+        prefetch_factor: int | None = None,
         persistent_workers: bool = False,
     ) -> None:
         super().__init__()
@@ -121,7 +123,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
 
-    def setup(self, stage) -> None:
+    def setup(self, stage: str | None = None) -> None:
         """
         .. note::
            setup is called from every process across all the nodes. Setting state here is recommended.

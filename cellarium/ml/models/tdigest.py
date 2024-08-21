@@ -1,6 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
+from typing import Any
 
 import crick
 import lightning.pytorch as pl
@@ -41,7 +44,7 @@ class TDigest(CellariumModel):
     def reset_parameters(self) -> None:
         self._dummy_param.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray):
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
@@ -89,8 +92,8 @@ class TDigest(CellariumModel):
         """
         return torch.as_tensor([tdigest.quantile(0.5) for tdigest in self.tdigests])
 
-    def get_extra_state(self):
+    def get_extra_state(self) -> dict[str, Any]:
         return {"tdigests": self.tdigests}
 
-    def set_extra_state(self, state) -> None:
+    def set_extra_state(self, state: dict[str, Any]) -> None:
         self.tdigests = state["tdigests"]

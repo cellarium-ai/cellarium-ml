@@ -1,8 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from collections.abc import Sequence
-from functools import cache
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -34,7 +36,7 @@ class Filter(nn.Module):
         if len(self.filter_list) == 0:
             raise ValueError(f"`filter_list` must not be empty. Got {self.filter_list}")
 
-    @cache
+    @lru_cache
     def filter(self, var_names_g: tuple) -> np.ndarray[Any, np.dtype[np.int_]]:
         """
         Args:
