@@ -5,7 +5,7 @@ import math
 from collections import defaultdict
 from collections.abc import Callable
 from functools import cached_property
-from typing import Literal
+from typing import Literal, Union, Dict
 
 import lightning.pytorch as pl
 import numpy as np
@@ -13,18 +13,23 @@ import pandas as pd
 import torch
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
+from cerebras.pytorch.utils.kernel import kernel_annotater
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 
+def negate(value: torch.Tensor):
+    zero = torch.tensor(0, dtype=value.dtype)
+    one = torch.tensor(1, dtype=value.dtype)
+    return torch.where(value == 0, one, zero)
 
-def prefix_diagonal_mask(context_len: int, prefix_len: int, device: torch.device) -> torch.Tensor:
+def prefix_diagonal_mask(context_len: int, prefix_len_n: torch.Tensor) -> torch.Tensor:
     """
     Generate a prefix diagonal mask for self-attention.
 
     Args:
         context_len:
             The length of the context.
-        prefix_len:
+        prefix_len_n:
             The length of the prefix.
         device:
             The device to create the mask on.
@@ -40,9 +45,14 @@ def prefix_diagonal_mask(context_len: int, prefix_len: int, device: torch.device
          [1, 1, 0, 1, 0],
          [1, 1, 0, 0, 1]]
     """
-    mask_cc = torch.eye(context_len, dtype=torch.bool, device=device)
-    mask_cc[:, :prefix_len] = True
-    return mask_cc
+    device = prefix_len_n.device
+    c_range = torch.arange(context_len, device=device, dtype=torch.float32)
+    diag_mask_ncc = c_range[:, None].expand(len(prefix_len_n), -1, -1) - c_range.expand(len(prefix_len_n), 1, -1)
+    zero = torch.tensor(0, dtype=torch.float32)
+    one = torch.tensor(1, dtype=torch.float32)
+    prefix_mask_n1c = c_range[None, None, :] - prefix_len_n[:, None, None] + one
+    prefix_mask_n1c = torch.maximum(prefix_mask_n1c, zero)
+    return diag_mask_ncc * prefix_mask_n1c
 
 
 class MultiHeadAttention(nn.Module):
@@ -80,8 +90,8 @@ class MultiHeadAttention(nn.Module):
         attn_backend: Literal["math", "flash", "mem_efficient"],
     ) -> None:
         super().__init__()
-        self.Wq = nn.Linear(d_model, d_model - n_heads, bias=use_bias)
-        self.Wk = nn.Linear(d_model, d_model - n_heads, bias=use_bias)
+        self.Wq = nn.Linear(d_model, d_model, bias=use_bias)
+        self.Wk = nn.Linear(d_model, d_model, bias=use_bias)
         self.Wv = nn.Linear(d_model, d_model, bias=use_bias)
         self.Wo = nn.Linear(d_model, d_model, bias=use_bias)
         self.n_heads = n_heads
@@ -108,8 +118,8 @@ class MultiHeadAttention(nn.Module):
         query_ncd: torch.Tensor,
         key_ncd: torch.Tensor,
         value_ncd: torch.Tensor,
-        attn_mask_cc: torch.Tensor,
-        measured_genes_mask_nc: torch.Tensor | None = None,
+        attn_mask_ncc: torch.Tensor,
+        # measured_genes_mask_nc=None,
     ) -> torch.Tensor:
         """
         Args:
@@ -138,31 +148,26 @@ class MultiHeadAttention(nn.Module):
         value_ncd = self.Wv(value_ncd)
         # d = k * h
         query_nhck = self.split_heads(query_ncd, n_heads)
-        if measured_genes_mask_nc is not None:
-            key_ncd[~measured_genes_mask_nc] = 0
         key_nhck = self.split_heads(key_ncd, n_heads)
         value_nhck = self.split_heads(value_ncd, n_heads)
 
         k = query_nhck.shape[3]
         scale_factor = self.attn_mult / k
 
-        if measured_genes_mask_nc is not None:
-            one_pad_nhc1 = torch.ones((n, n_heads, c, 1), device=device)
-            query_nhck = torch.cat([query_nhck, one_pad_nhc1], dim=-1)
-            measured_genes_pad_nc = torch.zeros((n, c), device=device)
-            measured_genes_pad_nc.masked_fill_(~measured_genes_mask_nc, torch.finfo(key_nhck.dtype).min)
-            measured_genes_pad_nhc1 = measured_genes_pad_nc[:, None, :, None].expand(n, n_heads, c, 1)
-            key_nhck = torch.cat([key_nhck, measured_genes_pad_nhc1], dim=-1)
-
-        with sdpa_kernel(self.backend_map[self.attn_backend]):
-            output_nhck = nn.functional.scaled_dot_product_attention(
-                query_nhck,
-                key_nhck,
-                value_nhck,
-                attn_mask=attn_mask_cc,
-                dropout_p=self.dropout_p,
-                scale=scale_factor,
-            )
+        # with sdpa_kernel(self.backend_map[self.attn_backend]):
+        #     output_nhck = nn.functional.scaled_dot_product_attention(
+        #         query_nhck,
+        #         key_nhck,
+        #         value_nhck,
+        #         attn_mask=attn_mask_ncc.unsqueeze(1).type_as(query_nhck),
+        #         dropout_p=self.dropout_p,
+        #         scale=scale_factor,
+        #     )
+        key_nhck = key_nhck * torch.tensor(scale_factor, dtype=key_nhck.dtype)
+        attn_logits_nhcc = torch.matmul(query_nhck, key_nhck.transpose(-1, -2))
+        attn_logits_nhcc += attn_mask_ncc.type_as(attn_logits_nhcc).unsqueeze(1).broadcast_to(attn_logits_nhcc.shape)
+        attn_weights_nhcc = torch.softmax(attn_logits_nhcc.float(), dim=-1).type_as(attn_logits_nhcc)
+        output_nhck = torch.matmul(attn_weights_nhcc, value_nhck)
 
         output_ncd = self.merge_heads(output_nhck)
         return self.Wo(output_ncd)  # _ncd
@@ -209,10 +214,11 @@ class ValueEmbedding(nn.Module):
             Whether to use bias in the linear transformations.
     """
 
-    def __init__(self, d_model: int, use_bias: bool) -> None:
+    def __init__(self, d_model: int) -> None:
         super().__init__()
-        self.dense = nn.Linear(1, d_model, bias=use_bias)
-        self.Em = nn.Embedding(1, d_model)
+        self.dense = nn.Linear(2, d_model, bias=False)
+        self.relu = nn.ReLU()
+        self.register_buffer("Wm", torch.tensor([[1., -1.]], dtype=torch.float32))
 
     def forward(self, value_nc: torch.Tensor) -> torch.Tensor:
         """
@@ -222,13 +228,9 @@ class ValueEmbedding(nn.Module):
         Returns:
             The value embedding tensor of shape ``(n, c, d)``.
         """
-        device = value_nc.device
-        mask_nc = value_nc < 0
-        value_nc = torch.log1p(value_nc.abs())
-        value_embedding_ncd = self.dense(value_nc.unsqueeze(-1))  # _ncd
-        if mask_nc.any():
-            mask_embedding_d = self.Em(torch.tensor(0, device=device))
-            value_embedding_ncd[mask_nc] = mask_embedding_d.to(value_embedding_ncd.dtype)
+        value_nc = value_nc.half()
+        value_nc2 = torch.matmul(value_nc.unsqueeze(-1), self.Wm)
+        value_embedding_ncd = self.dense(torch.log(self.relu(value_nc2) + 1.))
         return value_embedding_ncd
 
 
@@ -251,7 +253,7 @@ class GeneEmbedding(nn.Module):
         # gene ID embedding
         self.Ei = nn.Embedding(n_genes, d_model)
         # gene value embedding
-        self.Ev = ValueEmbedding(d_model, use_bias=use_bias)
+        self.Ev = ValueEmbedding(d_model)
         # linear transformation for gene embeddings
         self.Wg = nn.Linear(3 * d_model, d_model, bias=use_bias)
 
@@ -303,7 +305,7 @@ class NormAdd(nn.Module):
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        sublayer: Callable[[torch.Tensor], torch.Tensor],
+        sublayer,
     ) -> torch.Tensor:
         """
         Args:
@@ -347,7 +349,7 @@ class TransformerBlock(nn.Module):
         dropout_p: float,
         attn_mult: float,
         use_bias: bool,
-        attn_backend: Literal["math", "flash", "mem_efficient"],
+        attn_backend,
     ) -> None:
         super().__init__()
         self.attention = MultiHeadAttention(d_model, use_bias, n_heads, dropout_p, attn_mult, attn_backend)
@@ -358,8 +360,8 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        attn_mask_cc: torch.Tensor,
-        measured_genes_mask_nc: torch.Tensor,
+        attn_mask_ncc: torch.Tensor,
+        # measured_genes_mask_nc: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
@@ -375,7 +377,7 @@ class TransformerBlock(nn.Module):
             The output hidden state tensor of shape ``(n, c, d)``.
         """
         hidden_state_ncd = self.normadd1(
-            hidden_state_ncd, lambda X: self.attention(X, X, X, attn_mask_cc, measured_genes_mask_nc)
+            hidden_state_ncd, lambda X: self.attention(X, X, X, attn_mask_ncc)
         )
         return self.normadd2(hidden_state_ncd, lambda Y: self.ffn(Y))  # _ncd
 
@@ -412,7 +414,7 @@ class Transformer(nn.Module):
         dropout_p: float,
         use_bias: bool,
         attn_mult: float,
-        attn_backend: Literal["math", "flash", "mem_efficient"],
+        attn_backend,
     ) -> None:
         super().__init__()
         self.n_blocks = n_blocks
@@ -426,8 +428,8 @@ class Transformer(nn.Module):
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        attn_mask_cc: torch.Tensor,
-        measured_genes_mask_nc: torch.Tensor,
+        attn_mask_ncc: torch.Tensor,
+        # measured_genes_mask_nc: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
@@ -443,9 +445,63 @@ class Transformer(nn.Module):
             The output hidden state tensor of shape ``(n, c, d)``.
         """
         for block in self.blocks:
-            hidden_state_ncd = block(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
+            hidden_state_ncd = block(hidden_state_ncd, attn_mask_ncc)
 
         return hidden_state_ncd
+
+
+class Tokenize(torch.nn.Module):
+    def __init__(self, max_prefix_len: int, context_len: int) -> None:
+        super().__init__()
+        self.max_prefix_len = max_prefix_len
+        self.context_len = context_len
+        # self.max_value = max_value
+
+    def forward(
+            self,
+            gene_value_ng: torch.Tensor,
+            total_mrna_umis_n: torch.Tensor,
+            measured_genes_mask_ng: torch.Tensor = None,
+        ) -> Dict[str, Union[torch.Tensor, np.ndarray]]:
+        n, g = gene_value_ng.shape
+        device = gene_value_ng.device
+
+        gene_id_ng = torch.arange(g, dtype=torch.int, device=device).expand(n, g)
+
+        # shuffle and slice
+        shuffle_idx_ng = torch.argsort(torch.rand_like(gene_value_ng), dim=-1)
+        shuffle_idx_nc = shuffle_idx_ng[:, :self.context_len]
+        gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+        gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
+        total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, self.context_len)
+        if measured_genes_mask_ng is not None:
+            measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
+        else:
+            measured_genes_mask_nc = None
+
+        label_nc = gene_value_nc.clone().int()
+        prefix_len_n = torch.randint(0, self.max_prefix_len, (n,), device=device)
+        suffix_mask_nc = torch.arange(self.context_len, device=device) >= prefix_len_n[:, None]
+        # label_mask_nc = suffix_mask_nc & (label_nc <= self.max_value)
+        label_mask_nc = suffix_mask_nc
+        if measured_genes_mask_nc is not None:
+            label_mask_nc = label_mask_nc & measured_genes_mask_nc
+
+        gene_value_nc.masked_fill_(suffix_mask_nc, 1 - math.e)
+        # label_nc.masked_fill_(label_nc > self.max_value, self.max_value)
+        if measured_genes_mask_nc is not None:
+            measured_genes_mask_nc.masked_fill_(suffix_mask_nc, 1)
+
+        return {
+            "gene_id_nc": gene_id_nc,
+            # Q: is conversion to int necessary?
+            "gene_value_nc": gene_value_nc,
+            "measured_genes_mask_nc": measured_genes_mask_nc,
+            "total_mrna_umis_nc": total_mrna_umis_nc,
+            "label_mask_nc": label_mask_nc,
+            "label_nc": label_nc,
+            "prefix_len_n": prefix_len_n,
+        }
 
 
 class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
@@ -467,10 +523,6 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
             Dropout probability.
         use_bias:
             Whether to use bias in the linear transformations.
-        max_prefix_len:
-            Maximum length of the prefix. Must be greater than or equal to 1.
-        min_suffix_len:
-            Minimum length of the suffix. Must be greater than or equal to 1.
         max_value:
             Maximum count value (inclusive).
         attn_mult:
@@ -487,48 +539,25 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
     def __init__(
         self,
-        gene_categories: np.ndarray,
+        # gene_categories: np.ndarray,
+        n_genes: int = 36601,
         d_model: int = 256,
         d_ffn: int = 512,
         n_heads: int = 8,
         n_blocks: int = 4,
         dropout_p: float = 0.0,
         use_bias: bool = False,
-        max_prefix_len: int = 1000,
-        suffix_len: int | None = None,
-        context_len: int | None = None,
         max_value: int = 1000,
         attn_mult: float = 6.0,
         input_mult: float = 1.0,
         output_mult: float = 1.0,
         initializer_range: float = 0.02,
-        attn_backend: Literal["math", "flash", "mem_efficient"] = "mem_efficient",
+        attn_backend="mem_efficient",
     ) -> None:
         super().__init__()
-        self.gene_categories = gene_categories
-        self.n_genes = len(gene_categories)
+        # self.gene_categories = gene_categories
+        self.n_genes = n_genes
         self.max_value = max_value
-        if (suffix_len is None) == (context_len is None):
-            raise ValueError("Either `suffix_len` or `context_len` must be specified, but not both.")
-        if context_len is not None:
-            if context_len > self.n_genes:
-                raise ValueError(
-                    "`context_len` must be less than or equal to the number of genes. "
-                    f"Got {context_len} > {self.n_genes}."
-                )
-            if max_prefix_len >= context_len:
-                raise ValueError(
-                    "`max_prefix_len` must be less than `context_len`. Got {max_prefix_len} >= {context_len}."
-                )
-        if suffix_len is not None:
-            if max_prefix_len + suffix_len > self.n_genes:
-                raise ValueError(
-                    "`max_prefix_len + suffix_len` must be less than or equal to the number of genes. "
-                    f"Got {max_prefix_len + suffix_len} > {self.n_genes}."
-                )
-        self.max_prefix_len = max_prefix_len
-        self.suffix_len = suffix_len
-        self.context_len = context_len
         self.input_mult = input_mult
         self.output_mult = output_mult
 
@@ -580,7 +609,7 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
                 p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.transformer.n_blocks)))
 
     @cached_property
-    def token_to_id(self) -> dict[str, int]:
+    def token_to_id(self):
         return {var_name: i for i, var_name in enumerate(self.gene_categories)}
 
     @cached_property
@@ -589,89 +618,42 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
     def forward(
         self,
-        gene_value_ng: torch.Tensor,
-        gene_id_g: torch.Tensor,
-        gene_categories: np.ndarray,
-        total_mrna_umis_n: torch.Tensor,
-        measured_genes_mask_ng: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        # assert gene_categories.equals(self.gene_categories)
-
-        device = gene_id_g.device
-        gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
-
-        # sample the prefix length
-        prefix_len = int(torch.randint(0, self.max_prefix_len + 1, (), device=device))
-
-        # compute the context length and suffix length
-        if self.context_len is not None:
-            # use the fixed context length
-            context_len = self.context_len
-            suffix_len = context_len - prefix_len
-        elif self.suffix_len is not None:
-            # compute the context length dynamically based on the prefix length
-            suffix_len = self.suffix_len
-            context_len = prefix_len + suffix_len
-
-        # shuffle the genes
-        shuffle_idx_ng = torch.argsort(torch.rand_like(gene_value_ng), dim=-1)
-        shuffle_idx_nc = shuffle_idx_ng[:, :context_len]
-        gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
-        gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
-        measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
-
-        # downsample
-        downsample_p = torch.rand((), device=device)
-
-        downsampled_gene_value_nc = torch.binomial(gene_value_nc, downsample_p)
-        downsampled_total_mrna_umis_n = torch.round(total_mrna_umis_n * downsample_p)
-
-        if torch.rand(()) > 0.5:
-            # compute the target and mask target values
-            label_ns = downsampled_gene_value_nc[:, -suffix_len:].long()
-
-            # compute the total mRNA UMIs
-            total_mrna_umis_nc = torch.cat(
-                [
-                    total_mrna_umis_n[:, None].expand(-1, prefix_len),
-                    downsampled_total_mrna_umis_n[:, None].expand(-1, suffix_len),
-                ],
-                dim=-1,
-            )
-        else:
-            # compute the target and mask target values
-            label_ns = gene_value_nc[:, -suffix_len:].long()
-            gene_value_nc[:, :prefix_len] = downsampled_gene_value_nc[:, :prefix_len]
-
-            # compute the total mRNA UMIs
-            # total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, context_len)
-            total_mrna_umis_nc = torch.cat(
-                [
-                    downsampled_total_mrna_umis_n[:, None].expand(-1, prefix_len),
-                    total_mrna_umis_n[:, None].expand(-1, suffix_len),
-                ],
-                dim=-1,
-            )
-        gene_value_nc[:, -suffix_len:] = -1
+        gene_value_nc: torch.Tensor,
+        gene_id_nc: torch.Tensor,
+        # gene_categories: np.ndarray,
+        total_mrna_umis_nc: torch.Tensor,
+        prefix_len_n: torch.Tensor,
+        label_nc: torch.Tensor,
+        label_mask_nc: torch.Tensor,
+        measured_genes_mask_nc: torch.Tensor = None,
+    ) -> Dict[str, Union[torch.Tensor, np.ndarray]]:
+        # create attention mask
+        n, c = gene_id_nc.shape
+        attn_mask_ncc = prefix_diagonal_mask(c, prefix_len_n)
+        if measured_genes_mask_nc is not None:
+            measured_genes_mask_ncc = measured_genes_mask_nc[:, None, :].expand(n, c, c).type_as(attn_mask_ncc)
+            attn_mask_ncc = negate(negate(attn_mask_ncc) * measured_genes_mask_ncc) 
+        neg_inf = torch.tensor(float("-inf"), dtype=attn_mask_ncc.dtype)
+        attn_bias_ncc = torch.where(attn_mask_ncc == 0, 0, neg_inf)
 
         # embed the gene IDs, values, and total mRNA UMIs
         gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
+        # return {"loss": gene_embedding_ncd.mean().float()}
 
         # compute logits
-        attn_mask_cc = prefix_diagonal_mask(context_len, prefix_len, device)
         hidden_state_ncd = gene_embedding_ncd * self.input_mult
-        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
-        logits_nsm = self.head(hidden_state_ncd[:, -suffix_len:]) * self.output_mult
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_bias_ncc)
+        logits_ncm = self.head(hidden_state_ncd) * self.output_mult
+        # return {"loss": logits_ncm.mean().float()}
 
+        label_mask_nc = label_mask_nc & (label_nc <= self.max_value)
+        label_nc.masked_fill_(label_nc > self.max_value, self.max_value)
         # compute the loss
         loss_fn = nn.CrossEntropyLoss(reduction="none")
-        measured_genes_mask_ns = measured_genes_mask_nc[:, -suffix_len:]
-        label_mask_ns = (label_ns < self.max_value + 1) & measured_genes_mask_ns
-        label_weight_ns = 1 / label_mask_ns.sum(dim=-1, keepdim=True).expand(-1, suffix_len)
-        label_weights = label_weight_ns[label_mask_ns]
-        logits = logits_nsm[label_mask_ns]
-        labels = label_ns[label_mask_ns]
-        loss = (loss_fn(logits, labels) * label_weights).sum() / label_weights.sum()
+        label_weight_nc = 1 / label_mask_nc.type_as(logits_ncm).sum(dim=-1, keepdim=True).expand(-1, c)
+        loss = loss_fn(logits_ncm.view(-1, self.max_value + 1), label_nc.view(-1).long())
+        loss = loss * label_mask_nc.type_as(logits_ncm).view(-1) * label_weight_nc.view(-1)
+        loss = torch.sum(loss) / n
 
         return {"loss": loss}
 
@@ -761,13 +743,13 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
     def predict(
         self,
-        prompt_name_ns: np.ndarray | None,
-        prompt_value_ns: torch.Tensor | None,
-        prompt_total_mrna_umis_n: torch.Tensor | None,
-        prompt_measured_genes_mask_ns: torch.Tensor | None,
-        query_name_nq: np.ndarray | None,
-        query_total_mrna_umis_n: torch.Tensor | None,
-    ) -> dict[str, np.ndarray | torch.Tensor]:
+        prompt_name_ns,
+        prompt_value_ns,
+        prompt_total_mrna_umis_n,
+        prompt_measured_genes_mask_ns,
+        query_name_nq,
+        query_total_mrna_umis_n,
+    ):
         if prompt_name_ns is not None and query_name_nq is not None:
             n, q = query_name_nq.shape
             device = query_total_mrna_umis_n.device
@@ -915,4 +897,4 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
                     f"val_pred_prefix_{prefix_len + 1}",
                     fig,
                     global_step=trainer.global_step,
-                ):
+                )

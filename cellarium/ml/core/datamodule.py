@@ -1,13 +1,15 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Optional, Union, Dict
 
 import lightning.pytorch as pl
 import torch
+from anndata import AnnData
 
-from cellarium.ml.data import IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.utilities.core import train_val_split
-from cellarium.ml.utilities.data import collate_fn
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 
 class CellariumAnnDataDataModule(pl.LightningDataModule):
@@ -82,19 +84,21 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        dadc,
+        dadc: Union[AnnData, DistributedAnnDataCollection],
         # IterableDistributedAnnDataCollectionDataset args
-        batch_keys=None,
-        batch_size=1,
-        iteration_strategy="cache_efficient",
-        shuffle=False,
-        seed=0,
-        drop_last=False,
-        train_size=None,
-        val_size=None,
-        test_mode=False,
+        batch_keys: Optional[Dict[str, AnnDataField]]=None,
+        batch_size:int=1,
+        iteration_strategy:str="cache_efficient",
+        shuffle:bool=False,
+        seed:int=0,
+        drop_last:bool=False,
+        train_size:Optional[Union[int, float]]=None,
+        val_size:Optional[Union[int, float]]=None,
+        test_mode:bool=False,
         # DataLoader args
-        num_workers=0,
+        num_workers: int = 0,
+        prefetch_factor: Optional[int] = None,
+        persistent_workers: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -114,6 +118,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         # DataLoader args
         self.num_workers = num_workers
         self.collate_fn = collate_fn
+        self.prefetch_factor = prefetch_factor
+        self.persistent_workers = persistent_workers
 
     def setup(self, stage) -> None:
         """
@@ -168,6 +174,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.train_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
         )
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -176,6 +184,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.val_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
@@ -184,4 +194,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.predict_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
         )

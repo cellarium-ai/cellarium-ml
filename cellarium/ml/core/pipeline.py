@@ -42,13 +42,13 @@ class CellariumPipeline(torch.nn.ModuleList):
 
     def forward(self, batch):
         for module in self:
-            batch |= call_func_with_batch(module.forward, batch)
+            batch.update(call_func_with_batch(module.forward, batch))
 
         return batch
 
     def predict(self, batch):
         for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+            batch.update(call_func_with_batch(module.forward, batch))
 
         model = self[-1]
         if not isinstance(model, PredictMixin):
@@ -59,7 +59,7 @@ class CellariumPipeline(torch.nn.ModuleList):
 
     def validate(self, batch) -> None:
         for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+            batch.update(call_func_with_batch(module.forward, batch))
 
         model = self[-1]
         if not isinstance(model, ValidateMixin):

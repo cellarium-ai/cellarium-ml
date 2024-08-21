@@ -371,12 +371,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         # replicas
         rank, num_replicas = get_rank_and_num_replicas()
 
+        n_obs = self.end_idx - self.start_idx
         if self.drop_last and len(self.dadc) % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data.
-            per_replica = len(self.dadc) // num_replicas
+            per_replica = n_obs // num_replicas
         else:
-            per_replica = math.ceil(len(self.dadc) / num_replicas)
+            per_replica = math.ceil(n_obs / num_replicas)
         total_size = per_replica * num_replicas
 
         # workers

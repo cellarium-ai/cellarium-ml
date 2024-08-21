@@ -133,6 +133,10 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
     return np.asarray(x.cat.codes)
 
 
+def var_names_to_ids(var_names: pd.Index) -> np.ndarray:
+    return np.arange(len(var_names))
+
+
 def get_categories(x: pd.Series) -> np.ndarray:
     """
     Get the categories of a pandas Series object.

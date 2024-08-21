@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import warnings
-from typing import Any
+from typing import Any, List, Union, Optional, Type, Dict
 
 import lightning.pytorch as pl
 import torch
@@ -55,14 +55,14 @@ class CellariumModule(pl.LightningModule):
 
     def __init__(
         self,
-        cpu_transforms=None,
-        transforms=None,
-        model=None,
-        optim_fn=None,
-        optim_kwargs=None,
-        scheduler_fn=None,
-        scheduler_kwargs=None,
-        is_initialized=False,
+        cpu_transforms: Optional[List[torch.nn.Module]] = None,
+        transforms: Optional[List[torch.nn.Module]] = None,
+        model: Optional[CellariumModel] = None,
+        optim_fn: Optional[Type[torch.optim.Optimizer]] = None,
+        optim_kwargs: Optional[Dict[str, Any]]=None,
+        scheduler_fn: Optional[Type[torch.optim.lr_scheduler.LRScheduler]]=None,
+        scheduler_kwargs: Optional[Dict[str, Any]]=None,
+        is_initialized:bool=False,
     ) -> None:
         super().__init__()
         with warnings.catch_warnings():
@@ -211,6 +211,10 @@ class CellariumModule(pl.LightningModule):
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
         return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
+
+    @module_pipeline.setter
+    def module_pipeline(self, value):
+        self._module_pipeline = value
 
     def training_step(  # type: ignore[override]
         self, batch, batch_idx: int
