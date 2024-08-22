@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torch.nn.attention import SDPBackend
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 
 
 def negate(value: torch.Tensor):
@@ -52,7 +52,8 @@ def prefix_diagonal_mask(context_len: int, prefix_len_n: torch.Tensor) -> torch.
     one = torch.tensor(1, dtype=torch.float32)
     prefix_mask_n1c = c_range[None, None, :] - prefix_len_n[:, None, None] + one
     prefix_mask_n1c = torch.maximum(prefix_mask_n1c, zero)
-    return diag_mask_ncc * prefix_mask_n1c
+    return (diag_mask_ncc * prefix_mask_n1c) == 0
+    # return torch.logical_not(attn_mask_ncc.bool())
 
 
 class MultiHeadAttention(nn.Module):
@@ -244,18 +245,16 @@ class GeneEmbedding(nn.Module):
             Number of genes.
         d_model:
             Dimensionality of the embeddings and hidden states.
-        use_bias:
-            Whether to use bias in the linear transformations.
     """
 
-    def __init__(self, n_genes: int, d_model: int, use_bias: bool) -> None:
+    def __init__(self, n_genes: int, d_model: int) -> None:
         super().__init__()
         # gene ID embedding
         self.Ei = nn.Embedding(n_genes, d_model)
         # gene value embedding
         self.Ev = ValueEmbedding(d_model)
         # linear transformation for gene embeddings
-        self.Wg = nn.Linear(3 * d_model, d_model, bias=use_bias)
+        self.Wg = nn.Linear(3 * d_model, d_model)
 
     def forward(
         self,
@@ -448,23 +447,27 @@ class Transformer(nn.Module):
         return hidden_state_ncd
 
 
-class Tokenize(torch.nn.Module):
-    def __init__(self, max_prefix_len: int, context_len: int) -> None:
+class Tokenizer(torch.nn.Module):
+    def __init__(self, max_prefix_len: int, single_prefix_per_batch: bool, context_len: int) -> None:
         super().__init__()
         self.max_prefix_len = max_prefix_len
+        self.single_prefix_per_batch = single_prefix_per_batch
         self.context_len = context_len
-        # self.max_value = max_value
 
     def forward(
         self,
         gene_value_ng: torch.Tensor,
         total_mrna_umis_n: torch.Tensor,
+        gene_id_g: torch.Tensor | None = None,
         measured_genes_mask_ng: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         n, g = gene_value_ng.shape
         device = gene_value_ng.device
 
-        gene_id_ng = torch.arange(g, dtype=torch.int, device=device).expand(n, g)
+        if gene_id_g is None:
+            gene_id_ng = torch.arange(g, device=device).expand(n, g)
+        else:
+            gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
 
         # shuffle and slice
         shuffle_idx_ng = torch.argsort(torch.rand_like(gene_value_ng), dim=-1)
@@ -477,26 +480,24 @@ class Tokenize(torch.nn.Module):
         else:
             measured_genes_mask_nc = None
 
-        label_nc = gene_value_nc.clone().int()
-        prefix_len_n = torch.randint(0, self.max_prefix_len, (n,), device=device)
-        suffix_mask_nc = torch.arange(self.context_len, device=device) >= prefix_len_n[:, None]
-        # label_mask_nc = suffix_mask_nc & (label_nc <= self.max_value)
+        label_nc = gene_value_nc.clone()
+        num_prefixes = 1 if self.single_prefix_per_batch else n
+        prefix_len_n = torch.randint(0, self.max_prefix_len, (num_prefixes,), device=device)
+        suffix_mask_nc = torch.arange(self.context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
         label_mask_nc = suffix_mask_nc
         if measured_genes_mask_nc is not None:
             label_mask_nc = label_mask_nc & measured_genes_mask_nc
 
-        gene_value_nc.masked_fill_(suffix_mask_nc, 1 - math.e)
-        # label_nc.masked_fill_(label_nc > self.max_value, self.max_value)
+        gene_value_nc.masked_fill_(suffix_mask_nc, -1)
         if measured_genes_mask_nc is not None:
             measured_genes_mask_nc.masked_fill_(suffix_mask_nc, 1)
 
         output = {
             "gene_id_nc": gene_id_nc,
-            # Q: is conversion to int necessary?
             "gene_value_nc": gene_value_nc,
             "total_mrna_umis_nc": total_mrna_umis_nc,
             "label_mask_nc": label_mask_nc,
-            "label_nc": label_nc,
+            "label_nc": label_nc.int(),
             "prefix_len_n": prefix_len_n,
         }
         if measured_genes_mask_nc is not None:
@@ -504,7 +505,7 @@ class Tokenize(torch.nn.Module):
         return output
 
 
-class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
+class CellariumGPT(CellariumModel, PredictMixin):
     """
     Cellarium GPT model.
 
@@ -539,8 +540,8 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
     def __init__(
         self,
-        # gene_categories: np.ndarray,
-        n_genes: int = 36601,
+        gene_categories: np.ndarray | None,
+        n_genes: int | None = 36601,
         d_model: int = 256,
         d_ffn: int = 512,
         n_heads: int = 8,
@@ -552,16 +553,16 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
         input_mult: float = 1.0,
         output_mult: float = 1.0,
         initializer_range: float = 0.02,
-        attn_backend="mem_efficient",
+        attn_backend: Literal["flash", "mem_efficient", "math", "csx"] = "mem_efficient",
     ) -> None:
         super().__init__()
-        # self.gene_categories = gene_categories
+        self.gene_categories = gene_categories
         self.n_genes = n_genes
         self.max_value = max_value
         self.input_mult = input_mult
         self.output_mult = output_mult
 
-        self.gene_embedding = GeneEmbedding(self.n_genes, d_model, use_bias)
+        self.gene_embedding = GeneEmbedding(self.n_genes, d_model)
         self.transformer = Transformer(
             d_model,
             d_ffn,
@@ -618,38 +619,36 @@ class CellariumGPT(CellariumModel, ValidateMixin, PredictMixin):
 
     def forward(
         self,
-        gene_value_nc: torch.Tensor,
         gene_id_nc: torch.Tensor,
-        # gene_categories: np.ndarray,
+        gene_value_nc: torch.Tensor,
         total_mrna_umis_nc: torch.Tensor,
         prefix_len_n: torch.Tensor,
         label_nc: torch.Tensor,
         label_mask_nc: torch.Tensor,
         measured_genes_mask_nc: torch.Tensor | None = None,
-    ) -> dict[str, np.ndarray | torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         # create attention mask
         n, c = gene_id_nc.shape
         attn_mask_ncc = prefix_diagonal_mask(c, prefix_len_n)
-        if measured_genes_mask_nc is not None:
-            measured_genes_mask_ncc = measured_genes_mask_nc[:, None, :].expand(n, c, c).type_as(attn_mask_ncc)
-            attn_mask_ncc = negate(negate(attn_mask_ncc) * measured_genes_mask_ncc)
-        neg_inf = torch.tensor(float("-inf"), dtype=attn_mask_ncc.dtype)
-        attn_bias_ncc = torch.where(attn_mask_ncc == 0, 0, neg_inf)
+        # if measured_genes_mask_nc is not None:
+        #     measured_genes_mask_ncc = measured_genes_mask_nc[:, None, :].expand(n, c, c).type_as(attn_mask_ncc)
+        #     attn_mask_ncc = negate(negate(attn_mask_ncc) * measured_genes_mask_ncc)
+        neg_inf = torch.tensor(float("-inf"), dtype=torch.float32)
+        attn_bias_ncc = torch.where(attn_mask_ncc, 0, neg_inf)
 
         # embed the gene IDs, values, and total mRNA UMIs
         gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
-        # return {"loss": gene_embedding_ncd.mean().float()}
 
         # compute logits
         hidden_state_ncd = gene_embedding_ncd * self.input_mult
         hidden_state_ncd = self.transformer(hidden_state_ncd, attn_bias_ncc)
         logits_ncm = self.head(hidden_state_ncd) * self.output_mult
-        # return {"loss": logits_ncm.mean().float()}
 
-        label_mask_nc = label_mask_nc & (label_nc <= self.max_value)
-        label_nc.masked_fill_(label_nc > self.max_value, self.max_value)
         # compute the loss
         loss_fn = nn.CrossEntropyLoss(reduction="none")
+        # in the suffix, measured, value <= max_value
+        label_mask_nc = label_mask_nc & (label_nc <= self.max_value)
+        label_nc.masked_fill_(label_nc > self.max_value, self.max_value)
         label_weight_nc = 1 / label_mask_nc.type_as(logits_ncm).sum(dim=-1, keepdim=True).expand(-1, c)
         loss = loss_fn(logits_ncm.view(-1, self.max_value + 1), label_nc.view(-1).long())
         loss = loss * label_mask_nc.type_as(logits_ncm).view(-1) * label_weight_nc.view(-1)
