@@ -134,7 +134,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
         logits_nc = x_ng @ self.W_gc + self.b_c
         return {"y_logits_nc": logits_nc}
 
-    def on_batch_end(self, trainer: pl.Trainer) -> None:
+    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:
             return
 

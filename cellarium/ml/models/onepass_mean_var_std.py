@@ -110,7 +110,7 @@ class OnePassMeanVarStd(CellariumModel):
                 trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
             ), "OnePassMeanVarStd requires that broadcast_buffers is set to False."
 
-    def on_epoch_end(self, trainer: pl.Trainer) -> None:
+    def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         # no need to merge if only one process
         if trainer.world_size == 1:
             return
