@@ -448,19 +448,19 @@ class Tokenizer(torch.nn.Module):
         else:
             measured_genes_mask_nc = None
 
-        label_nc = gene_value_nc.clone()
-        # if self.training:
-        #     # downsample
-        #     downsample_p_nc = torch.minimum(
-        #         torch.rand((n, self.context_len), device=device) / 0.15, torch.tensor(1.0, device=device)
-        #     )
-        #     downsampled_total_mrna_umis_nc = torch.lerp(
-        #         torch.full_like(downsample_p_nc, 1001), total_mrna_umis_nc.float(), downsample_p_nc
-        #     )
-        #     downsampled_total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc).long()
+        # downsample
+        downsample_p_nc = torch.minimum(
+            torch.rand((n, self.context_len), device=device) / 0.25, torch.tensor(1.0, device=device)
+        )
+        downsampled_total_mrna_umis_nc = torch.lerp(
+            torch.full_like(downsample_p_nc, 1001), total_mrna_umis_nc.float(), downsample_p_nc
+        )
+        downsampled_total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc).long()
 
-        #     downsample_p_nc = downsampled_total_mrna_umis_nc.float() / total_mrna_umis_nc.float()
-        #     label_nc = torch.binomial(label_nc, downsample_p_nc)
+        downsample_p_nc = downsampled_total_mrna_umis_nc.float() / total_mrna_umis_nc.float()
+        gene_value_nc = torch.binomial(gene_value_nc, downsample_p_nc)
+        total_mrna_umis_nc = downsampled_total_mrna_umis_nc
+        label_nc = gene_value_nc.clone()
 
         num_prefixes = 1 if self.single_prefix_per_batch else n
         prefix_len_n = torch.randint(0, self.max_prefix_len, (num_prefixes,), device=device)
@@ -776,7 +776,7 @@ class CellariumGPT(CellariumModel, PredictMixin):
         )
         gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
         hidden_state_ncd = gene_embedding_ncd * self.input_mult
-        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc, measured_genes_mask_nc)
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc)
         logits_nqm = self.head(hidden_state_ncd[:, prefix_len:]) * self.output_mult
 
         return {
