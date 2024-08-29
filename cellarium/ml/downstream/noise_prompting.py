@@ -34,7 +34,7 @@ def gpt_predict(
     layer: str,
     key_added: str,
     summarize: str = 'mean',
-    query_total_umis: int = 10_000,
+    query_total_umis: int = 2_000,
 ) -> anndata.AnnData:
     """
     Use the pipeline to predict the expression of a subset of genes in a single cell.
@@ -578,6 +578,7 @@ def in_silico_perturbation(
     perturbation: dict[str, float],
     measured_count_layer_key: str = 'measured',
     output_layer_key: str = 'perturbed_gpt',
+    query_total_umis: int = 2_000,
 ) -> anndata.AnnData:
     """
     Perform an in silico perturbation on the measured data.
@@ -589,6 +590,7 @@ def in_silico_perturbation(
         perturbation: dictionary with gene IDs as keys and perturbation values as values
         measured_count_layer_key: layer key where raw count data is
         output_layer_key: layer key to store the perturbed data
+        query_total_umis: target UMI count for the query
 
     Returns:
         anndata object with the perturbed data
@@ -613,6 +615,7 @@ def in_silico_perturbation(
         gene_inds=prompt_gene_inds,
         layer=pert_key,
         key_added=output_layer_key,
+        query_total_umis=query_total_umis,
     )
 
     return adata_out
