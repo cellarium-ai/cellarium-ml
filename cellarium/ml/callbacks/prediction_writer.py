@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -16,6 +16,7 @@ def write_prediction(
     ids: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
+    fields: Mapping[str, np.ndarray | torch.Tensor] | None = None,
 ) -> None:
     """
     Write prediction to a CSV file.
@@ -33,6 +34,9 @@ def write_prediction(
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(prediction.cpu())
+    if fields is not None:
+        for field_name, field_data in fields.items():
+            df.insert(0, field_name, field_data)
     df.insert(0, "db_ids", ids)
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv")
     df.to_csv(output_path, header=False, index=False)
@@ -56,10 +60,13 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
             written. If not ``None``, only the first ``prediction_size`` columns will be written.
     """
 
-    def __init__(self, output_dir: Path | str, prediction_size: int | None = None) -> None:
+    def __init__(
+        self, output_dir: Path | str, prediction_size: int | None = None, field_names: Sequence[str] | None = None
+    ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
         self.prediction_size = prediction_size
+        self.field_names = field_names
 
     def write_on_batch_end(
         self,
@@ -76,9 +83,14 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
             x_ng = x_ng[:, : self.prediction_size]
 
         assert isinstance(batch["obs_names_n"], np.ndarray)
+        if self.field_names is None:
+            fields = None
+        else:
+            fields = {field_name: batch[field_name] for field_name in self.field_names}
         write_prediction(
             prediction=x_ng,
             ids=batch["obs_names_n"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,
+            fields=fields,
         )
