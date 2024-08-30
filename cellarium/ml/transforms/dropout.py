@@ -44,7 +44,7 @@ class Dropout(nn.Module):
         Returns:
             Gene counts with random dropout.
         """
-        p_dropout_ng = torch.empty_like(x_ng.shape).uniform_(self.p_dropout_min, self.p_dropout_max)
+        p_dropout_ng = torch.empty_like(x_ng).uniform_(self.p_dropout_min, self.p_dropout_max)
         x_aug = torch.where(torch.bernoulli(p_dropout_ng).bool(), 0, x_ng)
 
         x_ng = self.randomize(x_aug, x_ng)

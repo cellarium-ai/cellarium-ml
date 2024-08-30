@@ -16,7 +16,7 @@ def write_prediction(
     ids: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
-    fields: Mapping[str, np.ndarray] | None = None,
+    fields: Mapping[str, np.ndarray | torch.Tensor] | None = None,
 ) -> None:
     """
     Write prediction to a CSV file.

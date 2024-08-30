@@ -45,7 +45,7 @@ class BinomialResample(nn.Module):
         Returns:
             Binomially resampled gene counts.
         """
-        p_binom_ng = torch.empty_like(x_ng.shape).uniform_(self.p_binom_min, self.p_binom_max)
+        p_binom_ng = torch.empty_like(x_ng).uniform_(self.p_binom_min, self.p_binom_max)
         x_aug = Binomial(total_count=x_ng, probs=p_binom_ng).sample()
 
         x_ng = self.randomize(x_aug, x_ng)

@@ -44,8 +44,8 @@ class GaussianNoise(nn.Module):
         Returns:
             Gene counts with added Gaussian noise.
         """
-        sigma_ng = torch.empty_like(x_ng.shape).uniform_(self.sigma_min, self.sigma_max)
-        x_aug = x_ng + torch.normal(std=sigma_ng)
+        sigma_ng = torch.empty_like(x_ng).uniform_(self.sigma_min, self.sigma_max)
+        x_aug = x_ng + torch.normal(mean=0, std=sigma_ng)
 
         x_ng = self.randomize(x_aug, x_ng)
         return {"x_ng": x_ng}
