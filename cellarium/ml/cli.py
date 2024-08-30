@@ -66,7 +66,7 @@ class FileLoader:
     key: str | None = None
     convert_fn: Callable[[Any], Any] | str | None = None
 
-    def __new__(cls, file_path, loader_fn, attr, key, convert_fn):
+    def __new__(cls, file_path, loader_fn, attr=None, key=None, convert_fn=None):
         if isinstance(loader_fn, str):
             loader_fn = import_object(loader_fn)
         if loader_fn not in cached_loaders:
@@ -121,7 +121,7 @@ class CheckpointLoader(FileLoader):
     key: str | None = None
     convert_fn: Callable[[Any], Any] | str | None = None
 
-    def __new__(cls, file_path, attr, key, convert_fn):
+    def __new__(cls, file_path, attr=None, key=None, convert_fn=None):
         return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, key, convert_fn)
 
 

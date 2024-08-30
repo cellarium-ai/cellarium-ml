@@ -4,7 +4,8 @@
 
 import torch
 from torch import nn
-from torch.distributions import Bernoulli, Uniform
+
+from .randomize import Randomize
 
 
 class Dropout(nn.Module):
@@ -24,6 +25,8 @@ class Dropout(nn.Module):
             Lower bound on dropout parameter.
         p_dropout_max:
             Upper bound on dropout parameter.
+        p_apply:
+            Probability of applying transform to each sample.
     """
 
     def __init__(self, p_dropout_min, p_dropout_max, p_apply):
@@ -31,7 +34,7 @@ class Dropout(nn.Module):
 
         self.p_dropout_min = p_dropout_min
         self.p_dropout_max = p_dropout_max
-        self.p_apply = p_apply
+        self.randomize = Randomize(p_apply)
 
     def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
         """
@@ -41,15 +44,8 @@ class Dropout(nn.Module):
         Returns:
             Gene counts with random dropout.
         """
-        p_dropout_min = torch.Tensor([self.p_dropout_min]).type_as(x_ng)
-        p_dropout_max = torch.Tensor([self.p_dropout_max]).type_as(x_ng)
-        p_apply = torch.Tensor([self.p_apply]).type_as(x_ng)
+        p_dropout_ng = torch.empty_like(x_ng.shape).uniform_(self.p_dropout_min, self.p_dropout_max)
+        x_aug = torch.where(torch.bernoulli(p_dropout_ng).bool(), 0, x_ng)
 
-        p_dropout_ng = Uniform(p_dropout_min, p_dropout_max).sample(x_ng.shape).squeeze(-1)
-        p_apply_n1 = Bernoulli(probs=p_apply).sample(x_ng.shape[:1]).bool()
-
-        x_aug = torch.clone(x_ng)
-        x_aug[Bernoulli(probs=p_dropout_ng).sample().bool()] = 0
-
-        x_ng = torch.where(p_apply_n1, x_aug, x_ng)
+        x_ng = self.randomize(x_aug, x_ng)
         return {"x_ng": x_ng}

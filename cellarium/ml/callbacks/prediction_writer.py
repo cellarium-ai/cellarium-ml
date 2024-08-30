@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
-from collections.abc import Sequence, Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -35,7 +35,7 @@ def write_prediction(
         os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(prediction.cpu())
     if fields is not None:
-        for field_name, field_data in fields:
+        for field_name, field_data in fields.items():
             df.insert(0, field_name, field_data)
     df.insert(0, "db_ids", ids)
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv")
@@ -61,10 +61,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
     """
 
     def __init__(
-            self,
-            output_dir: Path | str,
-            prediction_size: int | None = None,
-            field_names: Sequence[str] | None = None
+        self, output_dir: Path | str, prediction_size: int | None = None, field_names: Sequence[str] | None = None
     ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir

@@ -4,7 +4,8 @@
 
 import torch
 from torch import nn
-from torch.distributions import Bernoulli, Normal, Uniform
+
+from .randomize import Randomize
 
 
 class GaussianNoise(nn.Module):
@@ -24,6 +25,8 @@ class GaussianNoise(nn.Module):
             Lower bound on Gaussian sigma parameter.
         sigma_max:
             Upper bound on Gaussian sigma parameter.
+        p_apply:
+            Probability of applying transform to each sample.
     """
 
     def __init__(self, sigma_min, sigma_max, p_apply):
@@ -31,24 +34,18 @@ class GaussianNoise(nn.Module):
 
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
-        self.p_apply = p_apply
+        self.randomize = Randomize(p_apply)
 
     def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Args:
-            x_ng: Gene counts.
+            x_ng: Gene counts (log-transformed).
 
         Returns:
             Gene counts with added Gaussian noise.
         """
-        sigma_min = torch.Tensor([self.sigma_min]).type_as(x_ng)
-        sigma_max = torch.Tensor([self.sigma_max]).type_as(x_ng)
-        p_apply = torch.Tensor([self.p_apply]).type_as(x_ng)
+        sigma_ng = torch.empty_like(x_ng.shape).uniform_(self.sigma_min, self.sigma_max)
+        x_aug = x_ng + torch.normal(std=sigma_ng)
 
-        sigma_ng = Uniform(sigma_min, sigma_max).sample(x_ng.shape).squeeze(-1)
-        p_apply_n1 = Bernoulli(probs=p_apply).sample(x_ng.shape[:1]).bool()
-
-        x_aug = x_ng + Normal(0, sigma_ng).sample()
-
-        x_ng = torch.where(p_apply_n1, x_aug, x_ng)
+        x_ng = self.randomize(x_aug, x_ng)
         return {"x_ng": x_ng}

@@ -106,6 +106,7 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
+                "transforms": [{"class_path": "cellarium.ml.transforms.Duplicate"}],
                 "model": {
                     "class_path": "cellarium.ml.models.ContrastiveMLP",
                     "init_args": {
