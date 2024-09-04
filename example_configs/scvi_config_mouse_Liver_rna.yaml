@@ -51,16 +51,12 @@ trainer:
   reload_dataloaders_every_n_epochs: 0
   default_root_dir: null
 model:
-  cpu_transforms:
-    - class_path: cellarium.ml.transforms.Filter
-      init_args:
-        filter_list:
-          !FileLoader
-          file_path: ../data/pmbc_count_select_genes.tsv
-          loader_fn: pandas.read_csv
-          attr: "ensembl_id"
-          convert_fn: pandas.Series.to_list
-  transforms: null
+#  transforms:
+#   - !CheckpointLoader #do not remove the - , otherwise it messes everything up
+#      file_path: ../notebooks/lightning_logs/version_7/checkpoints/epoch=49-step=3150.ckpt
+#      attr: model
+#      #attr: model._modules.z_encoder.mean_encoder.bias #here we extract the parameter we are looking for model._modules["z_encoder"].mean_encoder.bias
+#      convert_fn: cellarium.ml.transforms.load.to_device
   model:
     class_path: cellarium.ml.models.SingleCellVariationalInference
     init_args:
@@ -126,9 +122,9 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: ../data/pbmc_count.h5ad # use with scvi_demo.py # use for the limits and shard_size 31774
-      limits: [31774]
-      shard_size: 31774
+      filenames: ../data/mouse_Liver_rna.h5ad # use with scvi_demo.py # use for the limits and shard_size 31774
+      limits: [9714]
+      shard_size: 9714
       last_shard_size: null
       max_cache_size: 1
       cache_size_strictly_enforced: true
@@ -146,7 +142,7 @@ data:
       attr: var_names
     batch_index_n:
       attr: obs
-      key: batch
+      key: study
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 512
   shuffle: true

@@ -1,17 +1,14 @@
 import gc
 import re
-
-import matplotlib.pyplot as plt
-import torch
-import os
-import yaml
-import subprocess
 import os
 import scanpy as sc
 import sys
-import umap
+import subprocess
+import torch
+import yaml
 import numpy as np
-import inspect
+from click.core import batch
+
 local_repository= True
 if local_repository:
     module_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # /opt/project/cellarium-ml/ or /home/lys/Dropbox/PostDoc_Glycomics/cellarium-ml
@@ -40,10 +37,14 @@ import notebooks_functions as NF
 
 """
 pbmc_count:  31774 × 4000
-tucker_human_heart_atlas: 276940 × 2889
+tucker_human_heart_atlas: 276940 × 2889 #only 1 batch type
 human_heart_atlas: 665234 × 2889
 gut_cell_atlas_normed: 428469 × 30535
 cellxgene_liver: 481828 × 60664
+human_pancreas_rna: 14700 × 34363
+Kidney_muto_rna: 19985 × 33234
+mouse_Liver_rna: 9714 × 16706
+cellxgene_lung: 584944 × 27957
 
 """
 
@@ -54,30 +55,37 @@ cellxgene_liver: 481828 × 60664
 
 foldername_dict = {
                     0: ["pmbc_results",'lightning_logs/version_58/checkpoints/epoch=49-step=3150.ckpt',"../example_configs/scvi_config_pbmc.yaml","../data/pbmc_count.h5ad",['final_annotation', 'batch'],""],
-                    1: ["pmbc_results_subset_genes",'',"../example_configs/scvi_config_pbmc_subset_genes.yaml","../data/pbmc_count.h5ad",['final_annotation', 'batch'],""],
+                    1: ["pmbc_results_train",'lightning_logs/version_70/checkpoints/epoch=49-step=2500.ckpt',"../example_configs/scvi_config_pbmc_train.yaml","../data/pbmc_count_train.h5ad",['final_annotation', 'batch'],""],
+                    2: ["pmbc_results_test",'',"../example_configs/scvi_config_pbmc_test.yaml","../data/pbmc_count_test.h5ad",['final_annotation', 'batch'],""],
+                    3: ["pmbc_results_subset_genes",'',"../example_configs/scvi_config_pbmc_subset_genes.yaml","../data/pbmc_count.h5ad",['final_annotation', 'batch'],""],
                     #1:  ["cas_50m_homo_sapiens_no_cancer_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt',"../example_configs/scvi_config_cas_50m_homo_sapiens_no_cancer.yaml","../data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad",['final_annotation', 'batch'],"" ],
-                    2 : ["tucker_human_heart_atlas","lightning_logs/version_52/checkpoints/epoch=29-step=16230.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad",["Cluster","batch"],"gene_names"],
-                    3 : ["human_heart_atlas","lightning_logs/version_53/checkpoints/epoch=39-step=26640.ckpt","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad",["cell_type","batch"],"gene_name-new"], #10 GB
-                    4 : ["gut_cell_atlas_raw","lightning_logs/version_51/checkpoints/epoch=39-step=17160.ckpt","../example_configs/scvi_config_gut_cell_atlas_raw.yaml","../data/gut_cell_atlas_raw.h5ad",["category"],""],
-                    5 : ["cellxgene_liver","lightning_logs/version_57/checkpoints/epoch=49-step=47100.ckpt","../example_configs/scvi_config_cellxgene_liver.yaml","../data/cellxgene_liver.h5ad",["cell_type"],"feature_name"],
-                    6: ["cellxgene_lung","","../example_configs/scvi_config_cellxgene_lung.yaml","../data/single_cell_lung_atlas.h5ad",[""],""], #too big
-                    7: ["cellxgene_lung_subset","","../example_configs/scvi_config_cellxgene_lung_subset.yaml","../data/single_cell_lung_atlas_subset.h5ad",[""],""],
+                    4 : ["tucker_human_heart_atlas","lightning_logs/version_52/checkpoints/epoch=29-step=16230.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad",["Cluster","batch"],"gene_names"],
+                    5 : ["human_heart_atlas","lighFtning_logs/version_53/checkpoints/epoch=39-step=26640.ckpt","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad",["cell_type","batch"],"gene_name-new"], #10 GB
+                    6 : ["gut_cell_atlas_raw","lightning_logs/version_51/checkpoints/epoch=39-step=17160.ckpt","../example_configs/scvi_config_gut_cell_atlas_raw.yaml","../data/gut_cell_atlas_raw.h5ad",["category"],""],
+                    7 : ["cellxgene_liver","lightning_logs/version_57/checkpoints/epoch=49-step=47100.ckpt","../example_configs/scvi_config_cellxgene_liver.yaml","../data/cellxgene_liver.h5ad",["cell_type"],"feature_name"],
+                    8: ["cellxgene_lung","lightning_logs/version_66/checkpoints/epoch=49-step=57150.ckpt","../example_configs/scvi_config_cellxgene_lung.yaml","../data/single_cell_lung_atlas.h5ad",["cell_type","study"],"feature_name"], #too big
+                    9: ["cellxgene_lung_subset","lightning_logs/version_67/checkpoints/epoch=49-step=34200.ckpt","../example_configs/scvi_config_cellxgene_lung_subset.yaml","../data/single_cell_lung_atlas_subset.h5ad",["cell_type","study"],"feature_name"],#fails because it has floats, not integers
+                    10: ["human_pancreas_rna","","../example_configs/scvi_config_human_pancreas_rna.yaml","../data/human_pancreas_rna.h5ad",["cell_type","study"],"var.index"],
+                    11: ["Kidney_muto_rna","","../example_configs/scvi_config_Kidney_muto_rna.yaml","../data/Kidney_muto_rna.h5ad",["cell_type_category","author_cell_type"],"feature_name"],
+                    12: ["mouse_Liver_rna","","../example_configs/scvi_config_mouse_Liver_rna.yaml","../data/mouse_Liver_rna.h5ad",["cell_type","study"],"var.index"],
                     }
 
-
-
-#TODO:
-# 1) merge new branch and test it
-# 2) Ask Hi again, can you pretty please do me a small favour and explain the motivation behind the sc.tl.score_genes function? I am not sure what do they refer as "comparing the average of the reference genes vs the average of a randomly sampled set of genes with the same distribution". If the have the same distribution , then why compare them?
-# 3) Ask about rank genes function
 foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[1]
+use_test = True
+if use_test:
+    foldername_test,checkpoint_file_test,config_file_test, adata_file_test,color_keys_test,gene_names_test = foldername_dict[2]
+    color_keys += ["subset"]
+
+#adata = sc.read(adata_file)
+
+#NF.divide_train_test(adata,adata_file)
 
 
+# NF.subset_adata(adata,350000,"../data/single_cell_lung_atlas_subset.h5ad")
 
 #NF.scanpy_scvi(adata_file) #too slow to handle
-subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
+#subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
 
-exit()
 
 NF.folders(foldername,"figures",overwrite=False)
 NF.folders(foldername,"tmp_data",overwrite=False)
@@ -95,6 +103,7 @@ filename_suffix = ""
 figpath = f"figures/{foldername}"
 datapath = f"tmp_data/{foldername}"
 overwrite = False
+use_cuda = True
 
 
 def matching_file(datapath:str,filename:str):
@@ -104,7 +113,8 @@ def matching_file(datapath:str,filename:str):
     matched = [i for i in matched if i is not None]
     if len(matched) > 1:
         matched = [match for match in matched if "_maxfreqcell" not in match]
-        matched = list(sorted(matched))
+        #Return the smallest? kind of works
+        matched = list(sorted(matched,key=len))
         filepath = os.path.join(datapath, matched[0])
     elif len(matched) == 1:
         filepath = os.path.join(datapath, matched[0])
@@ -116,51 +126,42 @@ def matching_file(datapath:str,filename:str):
 filename = f"adata_processed{filename_suffix}"
 matched,filepath = matching_file(datapath,filename)
 
-if not matched or overwrite:
-    #filepath = os.path.join(datapath, f"{filename}.h5ad") #TODO: i think it can be removed
-    # get the location of the dataset
-    with open(config_file, "r") as file:
-        config_dict = yaml.safe_load(file)
-    data_path = config_dict['data']['dadc']['init_args']['filenames']
-    print(f'Data is coming from {data_path}')
-    # get a dataset object
-    dataset = NF.get_dataset_from_anndata(
-        data_path,
-        batch_size=128,
-        shard_size=None,
-        shuffle=False,
-        seed=0,
-        drop_last=False,
-    )
+if use_test:
+    filename_test = filename + "_test"
+    filename_train = filename + "_train"
+    matched_train, filepath_train = matching_file(datapath, filename_train)
+    matched_test, filepath_test = matching_file(datapath, filename_test)
+
+
+if use_test:
+    adata_train = NF.download_predict(config_file, gene_names, filepath_train, pipeline, device, matched_train, filename_train, overwrite)
+    adata_test = NF.download_predict(config_file_test, gene_names_test, filepath_test, pipeline, device,matched_test,filename_test,overwrite)
+
+    adata = sc.concat([adata_train,adata_test])
     filepath = filepath + ".h5ad" if not filepath.endswith(".h5ad") else filepath
-    adata = NF.embed(dataset, pipeline,device= device,filepath=filepath)
-    # Highlight: Reconstruct de-noised/de-batched data
-    for label in range(pipeline[-1].n_batch):
-        print("Label: {}".format(label))
-        adata_tmp = NF.reconstruct_debatched(dataset, pipeline, transform_to_batch_label=label,layer_key_added=f'scvi_reconstructed_{label}', device=device)
-        adata.layers[f'scvi_reconstructed_{label}'] = adata_tmp.layers[f'scvi_reconstructed_{label}']
-        break
-    if gene_names:
-        adata.var_names = adata.var[gene_names]
     adata.write(filepath)
 else:
-    print(f"File found : {filename}")
-    print("Reading file : {}".format(filepath))
-    adata = sc.read(filepath)
-    if gene_names:
-        adata.var_names = adata.var[gene_names]
+    adata = NF.download_predict(config_file, gene_names, filepath, pipeline, device, matched, filename, overwrite)
 
-
+# adata = adata[:1000]
 
 if "X_raw_umap" not in list(adata.obsm.keys()) or overwrite:
-    print("Key 'X_raw_umap' not found, computing")
-    adata = NF.plot_umap(adata,filepath,figpath,"raw_umap","raw_umap",None,color_keys)
+    print("Key 'X_raw_umap' not found or overwrite is True, computing")
+    if use_cuda:
+        adata = NF.plot_umap_cuda(adata,filepath,figpath,"raw_umap","raw_umap",None,color_keys)
+    else:
+        adata = NF.plot_umap(adata, filepath, figpath, "raw_umap", "raw_umap", None, color_keys)
 else:
     print("Key 'X_raw_umap' found, continue")
 
+
+
 if "X_scvi_umap" not in list(adata.obsm.keys()) or overwrite:
-    print("Key 'X_scvi_umap' not found, computing")
-    adata = NF.plot_umap(adata,filepath, figpath,"scvi_latent_umap","scvi_umap","X_scvi",color_keys)
+    print("Key 'X_scvi_umap' not found  overwrite is True,, computing")
+    if use_cuda:
+        adata = NF.plot_umap_cuda(adata, filepath, figpath, "scvi_latent_umap", "scvi_umap", "X_scvi", color_keys)
+    else:
+        adata = NF.plot_umap(adata,filepath, figpath,"scvi_latent_umap","scvi_umap","X_scvi",color_keys)
 else:
     print("Key 'X_scvi_umap' found, continue")
 
@@ -214,6 +215,8 @@ gene_set_dict = {
 gene_set = []
 list(map(gene_set.extend, list(gene_set_dict.values())))
 
+#adata = adata[:1000]
+
 if "genes_of_interest" not in list(adata.var.keys()) or overwrite:
     print("Key 'genes_of_interest' not found, computing")
     adata = NF.define_gene_expressions(adata,gene_set,foldername,filepath,gene_names)
@@ -221,11 +224,16 @@ else:
     print("Key 'genes_of_interest' found, continue")
 
 
+
+
 adata_glyco = adata[:, adata.var_names.isin(gene_set)]
 
-if "X_scvi_reconstructed_0_umap" not in list(adata.obsm.keys()) or overwrite:
+if "X_scvi_reconstructed_0_umap" not in list(adata.obsm.keys()) or overwrite: #TODO:Re-make for lung because we have overlooked the error
     print("Key 'X_scvi_reconstructed_0_umap' not found, computing")
-    adata = NF.umap_group_genes(adata,filepath)
+    if use_cuda:
+        adata = NF.umap_group_genes_cuda(adata, filepath)
+    else:
+        adata = NF.umap_group_genes(adata,filepath)
 else:
     print("Key 'X_scvi_reconstructed_0_umap' found, continue")
 
@@ -244,10 +252,13 @@ else:
 # NF.plot_avg_expression(adata,"X_scvi_reconstructed_0_umap",gene_set_dict,figpath,figname,color_keys)
 
 
-
-# #Highlight: Leiden clustering
-NF.plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepath,overwrite)
-
+#Highlight: Leiden clustering
+#
+# if use_cuda:
+#     NF.plot_neighbour_leiden_clusters_cuda(adata, gene_set_dict, figpath, color_keys, filepath, overwrite,plot_all=False)
+# else:
+#     NF.plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepath,overwrite,plot_all=False)
+#
 
 
 #Highlight: Glyco genes KDE expression
@@ -270,7 +281,7 @@ NF.plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepat
 #Highlight: Glyco genes Violin expression
 
 # figname = f"adata_subset_scvi_reconstructed_VIOLIN{filename_suffix}"
-# NF.plot_violin_expression_distribution(adata_glyco,present_gene_set,figpath,figname,"scvi_reconstructed_0")
+# NF.plot_violin_expression_distribution(adata_glyco,present_gene_set,figpath,figname,"scvi_reconstructed_0") #TODO: delete?
 
 
 dict_subsets = {
@@ -279,17 +290,24 @@ dict_subsets = {
                 "top200genes":[f"adata_subset_processed_top200genes{filename_suffix}",adata.var['high_exp_genes']]
                 }
 
-gene_group_names=["glyco","top20genes","top200genes"]
+gene_group_names=["glyco","top20genes","top200genes"] #this here for debugging, otherwise just use .keys()
+
 
 overwrite=True
 if "gene_subset_glyco" not in list(adata.var.keys()) or overwrite:
     for gene_group_name in gene_group_names:
-        filename_subset,slice = dict_subsets[gene_group_name]
+
+        filename_subset,genes_slice = dict_subsets[gene_group_name]
         print("NMF analysis not found for glyco genes, computing")
         filepath_subset = os.path.join(datapath, f"{filename_subset}.h5ad")
-        adata_subset = adata[:, slice]
+        adata_subset = adata[:, genes_slice]
         present_gene_set = adata_subset.var_names.tolist()
-        adata,adata_subset = NF.analysis_nmf(adata,adata_subset,present_gene_set,filepath_subset,filepath,gene_group_name)
+        if use_cuda:
+            adata, adata_subset = NF.analysis_nmf_cuda(adata, present_gene_set, filepath_subset, filepath,gene_group_name,genes_slice)
+        else:
+            adata,adata_subset = NF.analysis_nmf(adata,present_gene_set,filepath_subset,filepath,gene_group_name,genes_slice)
+
+
 
 
 for gene_group_name in gene_group_names:
@@ -297,10 +315,7 @@ for gene_group_name in gene_group_names:
     filepath_subset = os.path.join(datapath, f"{filename_subset}.h5ad")
     print("Reading and plotting file : {}".format(filepath_subset))
     adata_subset = sc.read(filepath_subset)
-    NF.plot_nmf(adata,adata_subset,color_keys,figpath,gene_group_name)
 
 
+    NF.plot_nmf(adata_subset,color_keys,figpath,gene_group_name)
 
-#TODO: Leiden clusters for one cell type
-
-exit()

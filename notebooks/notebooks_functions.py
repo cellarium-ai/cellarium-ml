@@ -1,5 +1,9 @@
+import concurrent
 import gc
+import itertools
+import time
 import warnings
+import datetime
 
 import pandas as pd
 import seaborn as sns
@@ -19,20 +23,63 @@ import anndata
 import scanpy as sc
 import scipy.sparse as sp
 import tqdm
-import umap
 import matplotlib.pyplot as plt
 import matplotlib
 import tempfile
 import os,shutil
-import yaml
 import scvi
+import yaml
 import matplotlib.gridspec as gridspec
-from matplotlib.colors import Normalize
-from matplotlib.colorbar import Colorbar
 from matplotlib.pyplot import rc_context
 from sklearn.decomposition import NMF
 import dataframe_image as dfi
+import anndata as ad
+import rapids_singlecell as rsc
+
 #mpl.use('agg')
+
+
+def subset_adata_by_var(adata,nsamples,filename,var="study"):
+
+    unique_studies = adata.obs[var].value_counts()
+    data_unobserved_list = []
+    nobs = adata.obs.shape[0]
+
+    for partition, counts in unique_studies.items():
+        data_unobserved_i = adata[(adata.obs["study"] == partition)]
+        percentage = (counts*100)/nobs
+        new_counts = int(percentage*nsamples/100)
+        data_unobserved_i = sc.pp.subsample(data_unobserved_i, fraction=1, n_obs=new_counts,copy=True)
+        data_unobserved_list.append(data_unobserved_i)
+
+    adata = data_unobserved_list[0].concatenate(data_unobserved_list[1:])
+
+    adata.write(filename)
+
+def divide_train_test(adata:anndata.AnnData,adata_file:str,ntrain:float=0.8):
+    """:param adata
+        :param adata_file: Path to
+       :param ntrain: percentage of train datapoints
+        """
+
+    ndata = adata.X.shape[0]
+    ntrain = int(ndata*ntrain)
+    idx_all = np.arange(0,ndata)
+    train_idx_int = np.random.choice(idx_all,ntrain,replace=False)
+    train_idx = (idx_all[...,None] == train_idx_int).any(-1)
+
+    adata_train = adata[train_idx]
+    adata_test = adata[~train_idx]
+    adata_train.obs["subset"] = "Train"
+    adata_test.obs["subset"] = "Test"
+
+    adata_train.write(adata_file.replace(".h5ad","_train.h5ad"))
+    adata_test.write(adata_file.replace(".h5ad","_test.h5ad"))
+
+    return adata_train,adata_test
+
+
+
 
 
 
@@ -61,6 +108,45 @@ def folders(folder_name,basepath,overwrite=True):
             pass
 
 
+def download_predict(config_file,gene_names,filepath,pipeline,device,matched,filename,overwrite):
+    # get the location of the dataset
+    with open(config_file, "r") as file:
+        config_dict = yaml.safe_load(file)
+    if not matched or overwrite:
+        data_path = config_dict['data']['dadc']['init_args']['filenames']
+        print(f'Data is coming from {data_path}')
+        # get a dataset object
+        dataset = get_dataset_from_anndata(
+            data_path,
+            batch_size=128,
+            shard_size=config_dict["data"]["dadc"]["init_args"]["shard_size"],
+            shuffle=False,
+            seed=0,
+            obs_batch_key = config_dict["data"]["batch_keys"]["batch_index_n"]["key"],#recall we can also change the obs key
+            drop_last=False,
+        )
+        filepath = filepath + ".h5ad" if not filepath.endswith(".h5ad") else filepath
+        adata = embed(dataset, pipeline,device= device,filepath=filepath)
+        # Highlight: Reconstruct de-noised/de-batched data
+        for label in range(pipeline[-1].n_batch):
+            print("Label: {}".format(label))
+            adata_tmp = reconstruct_debatched(dataset, pipeline, transform_to_batch_label=label,layer_key_added=f'scvi_reconstructed_{label}', device=device)
+            adata.layers[f'scvi_reconstructed_{label}'] = adata_tmp.layers[f'scvi_reconstructed_{label}']
+            break
+        if gene_names: #TODO: Warning: Not all datasets have gone through these conditions
+            if gene_names == "var.index":
+                adata.var_names = adata.var.index.map(str.upper)
+            else:
+                adata.var_names = adata.var[gene_names]
+                adata.var_names = adata.var_names.map(str.upper)
+        adata.write(filepath)
+        return adata
+    else:
+        print(f"File found : {filename}")
+        print("Reading file : {}".format(filepath))
+        adata = sc.read(filepath)
+
+        return adata
 
 class AutosizedDistributedAnnDataCollection(DistributedAnnDataCollection):
 
@@ -236,9 +322,12 @@ def reconstruct_debatched(
 
 def plot_umap(adata: anndata.AnnData,filepath: str,figpath:str,figname,basis,rep,color_keys = ['final_annotation', 'batch']):
     print(f"UMAp of {basis} ...")
+
+
     sc.set_figure_params(fontsize=14, vector_friendly=True)
     sc.pp.neighbors(adata, use_rep=rep, n_neighbors=15, metric='euclidean',knn=True,method="umap") #X_scvi #X_raw
     sc.pp.pca(adata,svd_solver="auto")
+
     sc.tl.umap(adata)
     adata.obsm[f'X_{basis}'] = adata.obsm['X_umap'].copy()
 
@@ -255,10 +344,41 @@ def plot_umap(adata: anndata.AnnData,filepath: str,figpath:str,figname,basis,rep
     else:
 
         adata.layers['raw'] = adata.X.copy()
+
     adata.write(filepath)
 
     return adata
 
+
+def plot_umap_cuda(adata: anndata.AnnData,filepath: str,figpath:str,figname,basis,rep,color_keys = ['final_annotation', 'batch']):
+    print(f"UMAP of {basis} GPU-accelerated ...")
+    rsc.get.anndata_to_GPU(adata=adata,convert_all=True)
+    rsc.pp.filter_genes(adata, min_count=1)
+
+    sc.set_figure_params(fontsize=14, vector_friendly=True)
+    rsc.pp.neighbors(adata, use_rep=rep, n_neighbors=15, metric='euclidean') #X_scvi #X_raw
+    rsc.pp.pca(adata,svd_solver="auto")
+    rsc.tl.umap(adata)
+    adata_transformed = rsc.get.anndata_to_CPU(adata,convert_all=True,copy=True)
+
+    adata_transformed.obsm[f'X_{basis}'] = adata_transformed.obsm['X_umap'].copy()
+    palette = list(matplotlib.colors.CSS4_COLORS.values()) if len(adata.obs[color_keys[0]].value_counts().keys()) > 20 else "tab20b"
+
+    sc.pl.embedding(adata_transformed, basis=f'{basis}',color=color_keys,
+                    palette=palette,
+                    ncols=1,show=False)
+    plt.savefig(f"{figpath}/{figname}_GPU.jpg", bbox_inches="tight")
+    plt.clf()
+    plt.close()
+    if basis == "raw_umap":
+        adata_transformed.obsm['X_raw_umap'] = adata.obsm['X_umap'].copy()
+    else:
+
+        adata_transformed.layers['raw'] = adata.X.copy()
+
+    adata_transformed.write(filepath)
+
+    return adata_transformed
 
 def reconstruct_debatched(
     dataset: IterableDistributedAnnDataCollectionDataset,
@@ -326,8 +446,8 @@ def define_gene_expressions(adata,gene_set,foldername,filepath,gene_names):
         warnings.warn("Please check for the name of the column/key for the genes in your dataset and try again")
 
     # aggregate umi-count expression values
-    adata.var['expr'] = np.array(adata.layers['raw'].sum(axis=0)).squeeze()
-    adata_gene_set.var['expr'] = np.array(adata_gene_set.layers['raw'].sum(axis=0)).squeeze()
+    adata.var['expr'] = np.array(adata.layers['raw'].sum(axis=0).get()).squeeze()
+    adata_gene_set.var['expr'] = np.array(adata_gene_set.layers['raw'].sum(axis=0).get()).squeeze()
     high_expressed_genes = adata.var.sort_values(by='expr').index[-200:] # highly expressed among all genes
     top20_high_expressed_genes = adata.var.sort_values(by='expr').index[-20:] # top 20 highly expressed among all genes
     high_gene_set = adata_gene_set.var.sort_values(by='expr').index[-20:] #glyco high expressed
@@ -338,12 +458,11 @@ def define_gene_expressions(adata,gene_set,foldername,filepath,gene_names):
     adata.var['high_exp_genes_of_interest'] = adata.var_names.isin(high_gene_set)
     adata.var['high_exp_genes'] = adata.var_names.isin(high_expressed_genes)
     adata.var['top20_high_exp_genes'] = adata.var_names.isin(top20_high_expressed_genes)
-
     adata.write(filepath)
     return adata
 
-def umap_group_genes(adata: anndata.AnnData,filepath: str):
-    print("UMAP per reconstructed layer")
+
+def umap_group_genes(adata: anndata.AnnData, filepath: str):
     # Before SCVI
     for layer in adata.layers.keys():
         if not layer.startswith('scvi_reconstructed'):
@@ -358,7 +477,31 @@ def umap_group_genes(adata: anndata.AnnData,filepath: str):
         adata.obsm[f'X_{layer}_umap'] = adata.obsm['X_umap'].copy()
 
     adata.write(filepath)
+
     return adata
+
+
+def umap_group_genes_cuda(adata: anndata.AnnData,filepath: str):
+    print("UMAP per reconstructed layer with GPU acceleration")
+    # Before SCVI
+    rsc.get.anndata_to_GPU(adata=adata, convert_all=True)
+    for layer in adata.layers.keys():
+        if not layer.startswith('scvi_reconstructed'):
+            continue
+        print(f'working on {layer}')
+        adata.X = adata.layers[layer].copy()
+        rsc.pp.normalize_total(adata)
+        rsc.pp.log1p(adata)
+        rsc.pp.filter_genes(adata, min_count=1)
+        rsc.pp.pca(adata)
+        rsc.pp.neighbors(adata, n_pcs=20, n_neighbors=15, metric='euclidean')
+        rsc.tl.umap(adata)
+        adata_transformed = rsc.get.anndata_to_CPU(adata, convert_all=True, copy=True)
+        adata_transformed.obsm[f'X_{layer}_umap'] = adata.obsm['X_umap'].copy()
+
+    adata_transformed.write(filepath)
+
+    return adata_transformed
 
 class SeabornFig2Grid():
     """Class from https://stackoverflow.com/questions/47535866/how-to-iteratively-populate-matplotlib-gridspec-with-a-multipart-seaborn-plot/47624348#47624348"""
@@ -464,7 +607,7 @@ def plot_settings_helper(adata, gene_key, gene_values, cmap="pink_r"):
             expression_gene = None
     if expression_gene is not None:
 
-        adata.obs[f"{gene_key}"] = expression_gene
+        adata.obs[f"{gene_key}"] = expression_gene.copy()
         expression_gene_unique = np.unique(expression_gene).tolist()
         if 0 not in expression_gene_unique:
             expression_gene_unique = [0] + expression_gene_unique  # add background color
@@ -543,54 +686,6 @@ def calculate_dimensions_plot(g_plots_list,max_rows=3,include_colorbars=True):
 
     return nrows,ncols,nrows_idx,ncols_idx,width_ratios
 
-def plot_avg_expression_old(adata,adata_proj,gene_set_dict,filename):
-
-    g_plots_list = []
-    settings_plot_list = []
-
-
-    for gene_key, gene_set in gene_set_dict.items():
-        print(gene_key)
-        g,settings_plot = plot_by_expression(adata, adata_proj, gene_set, gene_key, cmap="OrRd", alpha=0.7, size=5, fontsize=15)
-        if g is not None:
-            print("Gene set found")
-            g_plots_list.append(g)
-            settings_plot_list.append(settings_plot)
-        else:
-            print("Gene set not found")
-
-
-
-    if g_plots_list:
-
-        nrows,ncols,nrows_idx,ncols_idx,width_ratios = calculate_dimensions_plot(g_plots_list)
-        fig = plt.figure(figsize=(25, 40))
-        gs = gridspec.GridSpec(nrows, ncols,figure=fig,width_ratios=width_ratios)
-        g_plots_list = np.repeat(g_plots_list, 2) #we need to repeat it cuz the colorbar
-        settings_plot_list = np.repeat(settings_plot_list, 2) #also we need to repeat it cuz the colorbar
-
-        #g_plots_list.insert(0, [("final_annotation", "Cell annotation"),("final_annotation", "Cell annotation")])
-        #TODO: Finish
-        titles_dict = {"final_annotation":"Cell annotation"}
-        #g_plots_list = np.insert(g_plots_list,0,["final_annotation","final_annotation"])
-        #settings_plot_list = np.insert(settings_plot_list,0,[None,None])
-
-        for idx_row,idx_col,g_plot,settings_plot in zip(nrows_idx,ncols_idx,g_plots_list,settings_plot_list):
-
-            if idx_col%2 == 0:
-                SeabornFig2Grid(g_plot, fig, gs[idx_row, idx_col])
-            else:
-                if settings_plot is not None:
-                    print("Adding colorbar to position {},{}".format(idx_row, idx_col))
-                    cbax = plt.subplot(gs[idx_row, idx_col])
-                    Colorbar(ax=cbax,mappable=plt.cm.ScalarMappable(norm=Normalize(0, 1), cmap=settings_plot["colormap_expression"]))
-                    print("------------------------------------------")
-
-        plt.savefig(f"figures/avg_expression_coloured_UMAP_{filename}.jpg")
-
-    else:
-        print("Genes not found. Cannot make the plot")
-
 def plot_avg_expression(adata:anndata.AnnData,basis:str,gene_set_dict:dict,figpath:str,figname:str,color_keys:list):
     """Plots the average glyco expression per glyco pathway (averages the expression of all the genes involved in that pathway)"""
     print("Plotting average glyco expression per glyco pathway")
@@ -617,6 +712,74 @@ def plot_avg_expression(adata:anndata.AnnData,basis:str,gene_set_dict:dict,figpa
 
 
     plt.savefig(f"{figpath}/{figname}.jpg",dpi=600, bbox_inches="tight")
+
+def plot_settings_cluster_helper(adata_cluster,cluster, present_gene_set,gene_key,gene_set):
+    # pool.starmap(partial(plot_settings_cluster_helper, adata_cluster,cluster,present_gene_set,gene_set_dict),zip(list(gene_set_dict.keys()),list(gene_set_dict.values())))
+    gene_set = [gene_set] if not isinstance(gene_set, list) else gene_set
+    if len(set(present_gene_set).intersection(gene_set)) >= 1:
+        adata_cluster = adata_cluster[adata_cluster.obs["clusters"].isin([cluster])]
+        adata_gene_cluster = adata_cluster[:, adata_cluster.var_names.isin(gene_set)]
+        gene_key = gene_key.lower()
+        if adata_gene_cluster.X.size != 0:
+            settings_plot = plot_settings_helper(adata_gene_cluster, f"cluster_{cluster}_{gene_key}", gene_set,cmap="OrRd")
+            average_expression = settings_plot["expression_gene"].mean()
+            del settings_plot
+
+            return (gene_key,cluster,average_expression)
+
+def plot_avg_expression_cluster(adata:anndata.AnnData,basis:str,gene_set_dict:dict,cluster_counts_dict:dict,figpath:str,figname:str,color_keys:list,by_pathway:bool=False):
+    """Plots the average glyco expression per glyco pathway (averages the expression of all the genes involved in that pathway)"""
+    print("Plotting average glyco expression per leiden cluster")
+
+    if not by_pathway: #plot all genes separately
+        all_genes = sum(gene_set_dict.values(), [])
+        gene_set_dict = dict(zip(all_genes,all_genes))
+    present_gene_set = adata.var_names.tolist()
+    start = time.time()
+    def parallel_nested_loops(present_gene_set):
+        """Parallelization of the computation of the average expression per gene per Leiden cluster"""
+        results = []
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            # Submit all combinations of i, j to the ThreadPool
+            for cluster in cluster_counts_dict.keys():  # Outer loop
+                adata_cluster = adata[adata.obs["clusters"].isin([cluster])]
+                for gene_key,gene_set in gene_set_dict.items(): #inner loop
+                    futures.append(executor.submit(partial(plot_settings_cluster_helper, adata_cluster,cluster,present_gene_set), gene_key, gene_set))
+            # Collecting the results as they complete
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+        results = list(filter(lambda v: v is not None, results))  # clear None values
+        genes_cluster_dict = {k: {sub_k: v for _, sub_k, v in group} for k, group in itertools.groupby(sorted(results), key=lambda x: x[0])} #itertools groups by the elements in the first position of all tuples. data = [("a", "3", "5"), ("a", "4", "6"), ("b", "7", "9"), ("b", "8", "10")] -> (a : [("a", "3", "5"),("a", "4", "6")], b: [("b", "7", "9"),("b", "8", "10")])
+        return genes_cluster_dict
+    end = time.time()
+
+    genes_cluster_dict = parallel_nested_loops(present_gene_set)
+    print("Overall calculation time {}".format(str(datetime.timedelta(seconds=end - start))))
+
+    nrows,ncols,nrows_idx,ncols_idx,width_ratios = calculate_dimensions_plot(list(genes_cluster_dict.keys()),max_rows=4,include_colorbars=False)
+
+    def plot_cluster_size_avg(cluster_counts_dict,ax,gene_name,cluster_values):
+        """"""
+
+        cluster_sizes = [cluster_counts_dict[cluster] for cluster in cluster_values.keys()] #TODO: Are they same all the time, I think so
+        df = pd.DataFrame({"sizes":cluster_sizes,"expression":cluster_values.values()})
+        df.sort_values(by="sizes",inplace=True)
+        df.plot(x="sizes",y="expression",marker="o",ax=ax,legend=False)
+        ax.set_title(gene_name)
+        ax.set_ylim(0,1)
+        ax.set_xscale('log')
+        del df
+
+    fig, axs = plt.subplots(ncols = ncols,nrows=nrows,figsize=(30,20))
+    axs = axs.ravel()
+    with ThreadPool(multiprocessing.cpu_count() - 1) as pool:
+         pool.starmap(partial(plot_cluster_size_avg,cluster_counts_dict),zip(axs,genes_cluster_dict.keys(),genes_cluster_dict.values()))
+
+    fig.savefig(f"{figpath}/{figname}.jpg",dpi=600, bbox_inches="tight")
+    plt.subplots_adjust(wspace=0.2,hspace=0.4)
+    plt.close()
+    plt.clf()
 
 def differential_gene_expression(adata,gene_set,figpath,figname):
 
@@ -768,7 +931,7 @@ def plot_rank_expression(adata:anndata.AnnData,genes_list:list,layer_name:str,fi
                table_conversion="matplotlib",
                )
 
-def analysis_nmf(adata,adata_subset,genes_list:list,filepath_subset:str,filepath:str,gene_group_name:str):
+def analysis_nmf(adata,genes_list:list,filepath_subset:str,filepath:str,gene_group_name:str,genes_slice):
     """"""
     # #Restrict only to the glyco genes
     adata.var[f'gene_subset_{gene_group_name}'] = adata.var_names.isin(genes_list)
@@ -802,7 +965,7 @@ def analysis_nmf(adata,adata_subset,genes_list:list,filepath_subset:str,filepath
             adata.obsm[f'X_{layer}_{gene_group_name}_geneset_umap'] = adata.obsm['X_umap'].copy()
             break
 
-
+    adata_subset = adata[:, genes_slice]
     if adata_subset.X.size != 0:
 
         #Analyze PCA components
@@ -829,6 +992,8 @@ def analysis_nmf(adata,adata_subset,genes_list:list,filepath_subset:str,filepath
         for col in nmf_cols:
             top_genes_in_set = adata_subset.var.sort_values(by=col, ascending=False).head(20).index #highest values first
             sc.tl.score_genes(adata_subset, gene_list=top_genes_in_set, score_name=f'{col}_{gene_group_name}_score') #average expression of a set of genes subtracted with the average expression of a reference set of genes
+
+
         adata_subset.write(filepath_subset)
 
     else:
@@ -837,8 +1002,87 @@ def analysis_nmf(adata,adata_subset,genes_list:list,filepath_subset:str,filepath
 
     return adata,adata_subset
 
-def plot_nmf(adata,adata_subset,color_keys,figpath,gene_group_name=""):
+def analysis_nmf_cuda(adata,genes_list:list,filepath_subset:str,filepath:str,gene_group_name:str,genes_slice):
+    """"""
+    # #Restrict only to the glyco genes
+    adata.var[f'gene_subset_{gene_group_name}'] = adata.var_names.isin(genes_list)
+    #adata.var['gene_subset'].sum()
+    # TODO: Remove rows with expression values 0?
+    # sc.pp.filter_cells(adata, inplace=True,min_counts=10)
+    # sc.pp.normalize_total(adata)
+    # sc.pp.log1p(adata)
+    #
+    # sc.pp.filter_cells(adata_subset, inplace=True,min_counts=10)
+    # sc.pp.normalize_total(adata_subset)
+    # sc.pp.log1p(adata_subset)
 
+
+    #sc.pp.pca(adata_subset)
+    rsc.get.anndata_to_GPU(adata=adata, convert_all=True)
+    for layer in adata.layers.keys():
+        if not layer.startswith('scvi_reconstructed'): #ignore raw dataset
+            continue
+
+        print(f'working on {layer}')
+        adata.X = adata.layers[layer].copy()
+
+        rsc.pp.normalize_total(adata)
+        rsc.pp.log1p(adata)
+        rsc.pp.filter_genes(adata,min_count=1)
+
+        if adata.X.size != 0:
+            rsc.pp.pca(adata, mask_var=f'gene_subset_{gene_group_name}') #before glyco_gene #n_comps=5
+            rsc.pp.neighbors(adata, n_neighbors=15, metric='euclidean') #does not have mask_var
+            rsc.tl.umap(adata) #does not have mask_var
+            adata.obsm[f'X_{layer}_{gene_group_name}_geneset_umap'] = adata.obsm['X_umap'].copy()
+            break
+
+    adata_subset = adata[:, genes_slice]
+
+    if adata_subset.X.size != 0:
+        # rsc.get.anndata_to_GPU(adata=adata_subset, convert_all=True)
+        # rsc.pp.filter_genes(adata_subset, min_count=1)
+
+        #Analyze PCA components
+        num_pcs = adata_subset.varm['PCs'].shape[1]
+        for i in range(num_pcs):
+            adata_subset.var[f'pc{i}_{gene_group_name}'] = adata_subset.varm['PCs'][:, i].squeeze()
+
+        #Examing the first PC capturing the highest variance in the dataset. Then, sort the values of the first PC to find those features weighted higher
+        adata_subset.var.sort_values(by=f'pc0_{gene_group_name}', ascending=False)
+
+        print("Starting NMF")
+        nmf = NMF(n_components=5, #"auto"
+                  init='nndsvdar', # 'random' 'nndsvd' 'nndsvda' (zeros filled with the average of x), 'nndsvdar' (zeros filled with small random values)
+                  random_state=0,
+                  beta_loss='frobenius', #'frobenius','kullback-leibler', 'itakura-saito' (input matrix cannot contain zeroes)
+                  max_iter=200)
+
+        rsc.get.anndata_to_CPU(adata, convert_all=True)
+        rsc.get.anndata_to_CPU(adata_subset, convert_all=True)
+        W = nmf.fit_transform(adata_subset.layers['scvi_reconstructed_0']) # n_obs x rank (p)
+        #H = nmf.components_ # rank(p) x n_genes
+
+        inferred_rank = nmf.components_.shape[0]
+        for i in range(inferred_rank): #for i in range (inferred_rank)
+            adata_subset.var[f'{gene_group_name}_nmf{i}'] = nmf.components_[i, :].squeeze() #index the component from the H  matrix that reflects all the genes
+        nmf_cols = adata_subset.var.columns[(adata_subset.var.columns.str.startswith(f"{gene_group_name}_nmf"))]
+        for col in nmf_cols:
+            top_genes_in_set = adata_subset.var.sort_values(by=col, ascending=False).head(20).index #highest values first
+            sc.tl.score_genes(adata_subset, gene_list=top_genes_in_set, score_name=f'{col}_{gene_group_name}_score') #average expression of a set of genes subtracted with the average expression of a reference set of genes
+        adata_subset.write(filepath_subset)
+
+    else:
+        warnings.warn("Skipping NMF analysis, adata_subset shape is : {}, no genes of interest found".format(adata_subset.shape))
+
+
+    adata_transformed = rsc.get.anndata_to_CPU(adata, convert_all=True, copy=True)
+    adata_transformed.write(filepath)
+
+    return adata,adata_subset
+
+
+def plot_nmf(adata_subset,color_keys,figpath,gene_group_name=""):
 
     fig,ax = plt.subplots(figsize=(30,30))
     sc.pl.embedding(adata_subset,
@@ -860,7 +1104,160 @@ def plot_scree_plot(adata):
     plt.xlabel('Principal Component')
     plt.ylabel('Variance Explained')
 
-def plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepath,overwrite):
+def plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepath,overwrite,plot_all=True):
+    """
+
+    NOTES:
+        https://scanpy.readthedocs.io/en/stable/tutorials/plotting/core.html
+        https://chethanpatel.medium.com/community-detection-with-the-louvain-algorithm-a-beginners-guide-02df85f8da65
+        https://i11www.iti.kit.edu/_media/teaching/theses/ba-nguyen-21.pdf
+        https://www.ultipa.com/document/ultipa-graph-analytics-algorithms/leiden/v4.3
+        Resolution profile: https://leidenalg.readthedocs.io/en/stable/advanced.html
+        Benchmarking atlas-level integration single cell data: https://github.com/theislab/scib
+
+    TODO:
+        -Silhouette score: https://github.com/scverse/scanpy/issues/222
+
+    """
+
+    if not os.path.exists(filepath.replace(".h5ad","maxfreqcell.h5ad")):
+        #cluster_assignments = adata.obs["clusters"].array
+        cell_type = color_keys[0]
+        cell_counts = adata.obs[cell_type].value_counts()  # .index[0]
+        # print("cell counts : {}".format(cell_counts))
+        maxfreq_cell = cell_counts.index[0]
+        maxfreq = cell_counts.loc[maxfreq_cell]
+        print(f"Most frequent cell found is {maxfreq_cell} with {maxfreq} members---------------------- ")
+        adata_maxfreqcell = adata[adata.obs[cell_type].isin([maxfreq_cell])].copy()
+    else:
+        adata_maxfreqcell = sc.read(filepath.replace(".h5ad","_maxfreqcell.h5ad"))
+    datasets_dict = {"maxfreqcell":[adata_maxfreqcell,"_maxfreqcell"],
+                      "all":[adata,""],
+                     }
+    for dataset_info in list(datasets_dict.values()):
+        dataset,name = dataset_info
+        if "clusters" not in list(dataset.obs.keys()) or overwrite:
+            print("Computing neighbour clusters using Leiden hierarchical clustering")
+
+            # compute clusters using the leiden method and store the results with the name `clusters` > sc.pp.neighbours already run before
+            if name == "_maxfreqcell":
+                sc.pp.neighbors(dataset, n_neighbors=5)
+            sc.tl.leiden(
+                dataset,
+                key_added="clusters",
+                resolution=0.5, #higher values more clusters, increases the weight over the coarseness of the clustering.
+                n_iterations=5,
+                flavor="igraph",
+                directed=False,
+            )
+
+            dataset.write(filepath.replace(".h5ad",f"{name}.h5ad"))
+        else:
+            print("Precomputed clusters found, continue")
+
+        with rc_context({"figure.figsize": (15, 15)}):
+            sc.pl.umap(
+                dataset,
+                layer = "X_scvi_reconstructed_0_umap",
+                use_raw=False,
+                color=[color_keys[0],"clusters"],
+                add_outline=True,
+                legend_loc="on data",
+                legend_fontsize=12,
+                legend_fontoutline=2,
+                frameon=False,
+                title="clustering of cells",
+                palette="Set1",
+                show=False,
+                #legend_fontsize=20,
+            )
+            plt.savefig(f"{figpath}/leiden_clusters{name}.jpg",dpi=600, bbox_inches="tight")
+            plt.close()
+            plt.clf()
+
+        # TODO: dotplot cannot handle many clusters, if there are too many, the gridspec will complain, perhaps with a larger figsize
+        #dataset= dataset[(dataset.obs["clusters"] == "0") | (dataset.obs["clusters"] == "1")]
+
+        cluster_counts_dict = dataset.obs["clusters"].value_counts()
+        dataset_topk = dataset[dataset.obs["clusters"].isin(cluster_counts_dict.keys()[:20])] #pick only the top 20 clusters with more members
+
+        singlemember_clusters = [key for key,val in  cluster_counts_dict.items() if val == 1]
+        if singlemember_clusters:
+            print("Removing clusters with a single element")
+            dataset_topk = dataset_topk[~dataset_topk.obs["clusters"].isin(singlemember_clusters)] #remove clusters with a single element
+
+        # print("Before")
+        # print(cluster_counts_dict)
+        #
+        # print("After")
+        # print(dataset_topk.obs["clusters"].value_counts())
+
+        gene_set =  dataset_topk.var_names[dataset_topk.var['genes_of_interest']]
+        if plot_all:
+            if name == "_maxfreqcell":
+                plot_avg_expression(dataset_topk, "X_scvi_reconstructed_0_umap", gene_set_dict, figpath, "glyco_expression_maxfreqcell" , color_keys)
+            plot_avg_expression_cluster(dataset_topk, "scvi_reconstructed_0", gene_set_dict, cluster_counts_dict, figpath,f"leiden_cluster_size_glyco_expression{name}", color_keys)
+        print("Plotting Dotplot clusters {}".format(name))
+        sc.pp.log1p(dataset_topk,layer="scvi_reconstructed_0")
+        sc.tl.dendrogram(dataset_topk,groupby="clusters") #need to re-run because
+        sc.pl.dotplot(dataset_topk,
+                      gene_set,
+                      layer="scvi_reconstructed_0",
+                      use_raw=False,
+                      groupby="clusters",
+                      figsize=(20,20),
+                      dendrogram=True,
+                      show=False,
+                      dot_max=1)
+        plt.savefig(f"{figpath}/leiden_dotplot{name}.jpg", dpi=600, bbox_inches="tight")
+        plt.close()
+        plt.clf()
+        # with rc_context({"figure.figsize": (4.5, 3)}):
+        #     sc.pl.violin(adata, gene_set, groupby="clusters",ncols=5,save="violin-glyco",show=False)
+        sc.tl.dendrogram(dataset_topk, groupby="clusters")
+        fig, axs = plt.subplots(nrows=2, figsize=(25, 15))
+        print("Plotting stacked violin {}".format(name))
+        if len(gene_set) > 10:
+            batch = int(len(gene_set)/2)
+            sc.pl.stacked_violin(dataset_topk, {"Glyco_1":gene_set[:batch]}, groupby="clusters",
+                                 layer="scvi_reconstructed_0",
+                                 swap_axes=False,
+                                 dendrogram=True,
+                                 show=False,use_raw=False,ax=axs[0])
+            sc.pl.stacked_violin(dataset_topk, {"Glyco_2":gene_set[batch:]}, groupby="clusters",
+                                 layer="scvi_reconstructed_0",
+                                 swap_axes=False,
+                                 dendrogram=True,
+                                 show=False,use_raw=False,ax=axs[1])
+        else:
+
+            sc.pl.stacked_violin(dataset_topk, {"Glyco":gene_set}, groupby="clusters",
+                                 layer="scvi_reconstructed_0",
+                                 swap_axes=False,
+                                 dendrogram=True,
+                                 show=False,use_raw=False)
+        plt.savefig(f"{figpath}/leiden_stacked_violin{name}.jpg",dpi=600, bbox_inches="tight")
+        plt.close()
+        plt.clf()
+        print("Plotting rank genes {}".format(name))
+        sc.tl.rank_genes_groups(dataset_topk,
+                                layer="scvi_reconstructed_0",
+                                use_raw=False,
+                                groupby="clusters",
+                                method="wilcoxon",
+                                corr_method="benjamini-hochberg",
+                                mask_var="genes_of_interest")
+        sc.pl.rank_genes_groups(dataset_topk, n_genes=25, sharey=False,show=False)
+        plt.savefig(f"{figpath}/leiden_rank_genes{name}.jpg", dpi=600, bbox_inches="tight")
+        plt.close()
+        plt.clf()
+
+        dataset.write(filepath.replace(".h5ad",f"{name}.h5ad"))
+        del dataset
+        gc.collect()
+
+
+def plot_neighbour_leiden_clusters_cuda(adata,gene_set_dict,figpath,color_keys,filepath,overwrite,plot_all=True):
     """
 
     NOTES:
@@ -890,24 +1287,26 @@ def plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepa
     datasets_dict = {"maxfreqcell":[adata_maxfreqcell,"_maxfreqcell"],
                       "all":[adata,""],
                      #"maxfreqcell": [adata_maxfreqcell, "_maxfreqcell"]
-
                      }
-    overwrite=False
+
     for dataset_info in list(datasets_dict.values()):
         dataset,name = dataset_info
+        rsc.get.anndata_to_GPU(adata=dataset, convert_all=True)
+        rsc.pp.filter_genes(dataset,min_count=1)
         if "clusters" not in list(dataset.obs.keys()) or overwrite:
             print("Computing neighbour clusters using Leiden hierarchical clustering")
-            #sc.pp.neighbors(dataset,n_neighbors=15,)
             # compute clusters using the leiden method and store the results with the name `clusters` > sc.pp.neighbours already run before
-            sc.tl.leiden(
+
+            dataset.obs_names_make_unique(join='-')
+            if name  == "_maxfreqcell":
+                rsc.pp.neighbors(dataset, n_neighbors=5) #we need to re-run this
+            rsc.tl.leiden(
                 dataset,
                 key_added="clusters",
-                resolution=0.5, #higher values more clusters, increases the weight over the coarseness of the clustering.
-                n_iterations=5,
-                flavor="igraph",
-                directed=False,
+                resolution=0.5 , #higher values more clusters, increases the weight over the coarseness of the clustering.
+                n_iterations=100,
             )
-
+            dataset = rsc.get.anndata_to_CPU(dataset, convert_all=True, copy=True)
             dataset.write(filepath.replace(".h5ad",f"{name}.h5ad"))
         else:
             print("Precomputed clusters found, continue")
@@ -935,27 +1334,22 @@ def plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepa
         #dataset= dataset[(dataset.obs["clusters"] == "0") | (dataset.obs["clusters"] == "1")]
 
         cluster_counts_dict = dataset.obs["clusters"].value_counts()
-        dataset = dataset[dataset.obs["clusters"].isin(cluster_counts_dict.keys()[:20])] #pick only the top 20 clusters with more members
+        dataset_topk = dataset[dataset.obs["clusters"].isin(cluster_counts_dict.keys()[:20])] #pick only the top 20 clusters with more members
 
         singlemember_clusters = [key for key,val in  cluster_counts_dict.items() if val == 1]
         if singlemember_clusters:
             print("Removing clusters with a single element")
-            dataset = dataset[~dataset.obs["clusters"].isin(singlemember_clusters)] #remove clusters with a single element
+            dataset_topk = dataset_topk[~dataset_topk.obs["clusters"].isin(singlemember_clusters)] #remove clusters with a single element
 
-        # print("Before")
-        # print(cluster_counts_dict)
-        #
-        # print("After")
-        # print(dataset.obs["clusters"].value_counts())
+        gene_set =  dataset_topk.var_names[dataset_topk.var['genes_of_interest']]
+        if plot_all:
+            if name == "_maxfreqcell":
+                plot_avg_expression(dataset_topk, "X_scvi_reconstructed_0_umap", gene_set_dict, figpath, "glyco_expression_maxfreqcell" , color_keys)
+            plot_avg_expression_cluster(dataset_topk, "scvi_reconstructed_0", gene_set_dict, cluster_counts_dict, figpath,f"leiden_cluster_size_glyco_expression{name}", color_keys)
 
-        gene_set =  dataset.var_names[dataset.var['genes_of_interest']]
-
-        if name == "_maxfreqcell":
-            plot_avg_expression(dataset, "X_scvi_reconstructed_0_umap", gene_set_dict, figpath, "glyco_expression_maxfreqcell" , color_keys)
-
-        sc.pp.log1p(dataset)
-        sc.tl.dendrogram(dataset,groupby="clusters") #need to re-run because
-        sc.pl.dotplot(dataset,
+        sc.pp.log1p(dataset_topk,layer="scvi_reconstructed_0")
+        sc.tl.dendrogram(dataset_topk,groupby="clusters") #need to re-run because smth
+        sc.pl.dotplot(dataset_topk,
                       gene_set,
                       layer="scvi_reconstructed_0",
                       use_raw=False,
@@ -967,10 +1361,9 @@ def plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepa
         plt.savefig(f"{figpath}/leiden_dotplot{name}.jpg", dpi=600, bbox_inches="tight")
         plt.close()
         plt.clf()
-        # with rc_context({"figure.figsize": (4.5, 3)}):
-        #     sc.pl.violin(adata, gene_set, groupby="clusters",ncols=5,save="violin-glyco",show=False)
-        sc.tl.dendrogram(dataset, groupby="clusters")
-        sc.pl.stacked_violin(dataset, {"Glyco":gene_set}, groupby="clusters",
+
+        sc.tl.dendrogram(dataset_topk, groupby="clusters")
+        sc.pl.stacked_violin(dataset_topk, {"Glyco":gene_set}, groupby="clusters",
                              layer="scvi_reconstructed_0",
                              swap_axes=False,
                              dendrogram=True,
@@ -979,20 +1372,23 @@ def plot_neighbour_leiden_clusters(adata,gene_set_dict,figpath,color_keys,filepa
         plt.close()
         plt.clf()
 
-        sc.tl.rank_genes_groups(dataset,
+        sc.tl.rank_genes_groups(dataset_topk,
                                 layer="scvi_reconstructed_0",
                                 use_raw=False,
                                 groupby="clusters",
                                 method="wilcoxon",
                                 mask_var="genes_of_interest")
-        sc.pl.rank_genes_groups(dataset, n_genes=25, sharey=False,show=False)
-        plt.savefig(f"{figpath}/leiden_rank_genes{name}.jpg", dpi=600, bbox_inches="tight")
+        sc.pl.rank_genes_groups(dataset_topk, n_genes=25, sharey=False,show=False)
+        #plt.savefig(f"{figpath}/leiden_rank_genes{name}.jpg", dpi=600, bbox_inches="tight")
         plt.close()
         plt.clf()
-
         dataset.write(filepath.replace(".h5ad",f"{name}.h5ad"))
         del dataset
         gc.collect()
+
+
+def predict_cell_query():
+    """Use to transform the dataset: https://scanpy.readthedocs.io/en/stable/generated/scanpy.tl.ingest.html"""
 
 
 def scanpy_scvi(adata_file):
@@ -1016,6 +1412,7 @@ def scanpy_scvi(adata_file):
     model.train(max_epochs=50)
     latent = model.get_latent_representation()
     adata.obsm["og_scvi_latent"] = latent
+
 
 
 

@@ -18,7 +18,7 @@ import pandas as pd
 import scipy
 import torch
 from anndata import AnnData
-
+import warnings
 
 @dataclass
 class AnnDataField:
@@ -166,6 +166,7 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
     Returns:
         Numpy array.
     """
+
     if x is not None:
         return np.asarray(x.cat.codes)
     else:

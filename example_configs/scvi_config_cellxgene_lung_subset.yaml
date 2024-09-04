@@ -125,8 +125,8 @@ data:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
       filenames: ../data/single_cell_lung_atlas_subset.h5ad # use with scvi_demo.py #
-      limits: [10000]
-      shard_size: 10000
+      limits: [349994]
+      shard_size: 349994
       last_shard_size: null
       max_cache_size: 1
       cache_size_strictly_enforced: true
@@ -138,13 +138,13 @@ data:
       obs_columns_to_validate: null
   batch_keys:
     x_ng:
-      attr: X
+      attr: raw.X
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
       attr: var_names
     batch_index_n:
       attr: obs
-      key: dataset
+      key: study
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 512
   shuffle: true

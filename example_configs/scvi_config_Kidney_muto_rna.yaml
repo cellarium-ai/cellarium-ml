@@ -19,7 +19,7 @@ trainer:
   #     patience: 45
   #     mode: min
   fast_dev_run: false
-  max_epochs: 40
+  max_epochs: 50
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -93,9 +93,7 @@ model:
           init_args:
             batch_to_bias_hidden_layers: []
         final_additive_bias: true
-      n_latent: 10
-
-      # probably leave these alone
+      n_latent: 10 # probably leave these alone
       n_continuous_cov: 0
       n_cats_per_cov: null
       dropout_rate: 0.1
@@ -117,19 +115,16 @@ model:
     lr: 1e-3 # 6e-4
   # scheduler_fn: torch.optim.lr_scheduler.StepLR
   # scheduler_kwargs: {"step_size": 25, "gamma": 0.8} # null
-#  scheduler_fn: torch.optim.lr_scheduler.ReduceLROnPlateau
-#  scheduler_kwargs: {"mode":"min","patience":20} # , "min_lr"=0.00005
-  scheduler_fn: null
-  scheduler_kwargs: null
+  scheduler_fn: torch.optim.lr_scheduler.ReduceLROnPlateau
+  scheduler_kwargs: {"mode":"min"} # , "min_lr"=0.00005
   is_initialized: False
 data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: ../data/gut_cell_atlas_normed.h5ad # use with scvi_demo.py #665234 limits cells
-      #filenames: /opt/project/cellarium-ml/data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad #remember to set the limits to 10000 when using this file
-      limits: [428469]
-      shard_size: 428469
+      filenames: ../data/Kidney_muto_rna.h5ad # use with scvi_demo.py # use for the limits and shard_size 31774
+      limits: [19985]
+      shard_size: 19985
       last_shard_size: null
       max_cache_size: 1
       cache_size_strictly_enforced: true
@@ -147,12 +142,12 @@ data:
       attr: var_names
     batch_index_n:
       attr: obs
-      key: batch
+      key: author_cell_type
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
-  batch_size: 1000
+  batch_size: 512
   shuffle: true
   seed: 0
   drop_last: false
   test_mode: false
-  num_workers: 1 #changed from 4 to 0 to avoid memory complaints
+  num_workers: 0 #changed from 4 to 0 to avoid memory complaints
 ckpt_path: null
