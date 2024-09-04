@@ -13,7 +13,8 @@ task run_perturbseq {
         File genes_to_perturb_csv_no_header_no_index = "gs://broad-dsde-methods-sfleming/replogle_perturbed_genes.csv"
         Int shard
         Int n_shards
-        Int query_total_umis = 2000
+        Int query_total_umis = 0
+        Float perturbation_mean_expression_multiplier = 0.0  # this default represents a knockout
 
         # software
         String docker_image = "us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:noiseprompt"
@@ -102,6 +103,13 @@ task run_perturbseq {
         else:
             gids_in_shard = gids
 
+        # figure out query_total_umis
+        query_total_umis_value = ~{query_total_umis}
+        if query_total_umis_value == 0:
+            print("query_total_umis is 0, so we will use the median in the control cells")
+            query_total_umis_value = np.median(adata_control.obs['total_mrna_umis'])
+            print(f"query_total_umis: {query_total_umis_value}")
+
         # ignore those already computed to obtain final to-compute list of gene IDs
         print(f"gids_in_shard: {len(gids_in_shard)}")
         print("checking for already computed files ...")
@@ -117,7 +125,7 @@ task run_perturbseq {
             perturbation={},
             measured_count_layer_key='count',
             output_layer_key='perturbed_gpt',
-            query_total_umis=~{query_total_umis},
+            query_total_umis=query_total_umis_value,
         )
         print('... done with control cells.')
 
@@ -128,14 +136,22 @@ task run_perturbseq {
 
             print(f'... working on {gid} =====================================')
 
+            mean_gene_exp_value = np.array(adata_control.layers['count'][:, adata_control.var_names == gid].todense()).flatten().mean()
+            print(f'mean_gene_exp_value: {mean_gene_exp_value}')
+            print('adding offset 1 count')
+            mean_gene_exp_value = mean_gene_exp_value + 1
+            print(f'mean_gene_exp_value: {mean_gene_exp_value}')
+            gene_exp_value = ~{perturbation_mean_expression_multiplier} * mean_gene_exp_value
+            print(f'target value per cell after perturbation: {gene_exp_value}')
+
             adata_out = in_silico_perturbation(
                 adata_control,
                 pipeline=pipeline,
                 prompt_gene_inds=torch.arange(adata_control.shape[1]),
-                perturbation={gid: 0.0},
+                perturbation={gid: gene_exp_value},
                 measured_count_layer_key='count',
                 output_layer_key='perturbed_gpt',
-                query_total_umis=~{query_total_umis},
+                query_total_umis=query_total_umis_value,
             )
             lfc_df = pd.DataFrame(
                 np.log2(adata_out.layers['perturbed_gpt'].mean(axis=0) + 1e-10) - np.log2(adata_out_nopert.layers['perturbed_gpt'].mean(axis=0) + 1e-10) ,
@@ -184,7 +200,13 @@ task run_perturbseq {
 
     parameter_meta {
         h5ad_file :
-            {help: "gsURL path to an h5ad file containing a control cells. must have Ensembl IDs as adata.var_names and must contain 'count' in adata.layers and 'gene_name' in adata.var. Perturbed genes are taken from adata.obs['gene_id']"}
+            {help: "gsURL path to an h5ad file containing a control cells. must have Ensembl IDs as adata.var_names and must contain 'count' in adata.layers and 'gene_name' in adata.var and 'total_mrna_umis' in adata.obs."}
+        genes_to_perturb_csv_no_header_no_index :
+            {help: "gsURL path to a CSV file containing a list of Ensembl gene IDs to perturb, newline delimited, no header, no index."}
+        perturbation_mean_expression_multiplier :
+            {help: "perturbed counts per cell = perturbation_mean_expression_multiplier * (mean_control_counts + 1). the value 0.0 represents a knockout."}
+        query_total_umis :
+            {help: "the total number of UMIs to request for the query (if 0, this will be the median in control cells)"}
         hardware_gpu_count :
             {help: "choose 0 to use CPU only, otherwise choose 1"}
     }
