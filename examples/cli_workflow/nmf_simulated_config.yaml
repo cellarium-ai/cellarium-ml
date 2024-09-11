@@ -50,6 +50,7 @@ model:
       density_threshold: 0.25
       local_neighborhood_size: 0.30
       log_variational: false
+      mode: nmf
       algorithm: mairal
   optim_fn: null
   optim_kwargs: null
