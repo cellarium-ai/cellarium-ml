@@ -136,7 +136,7 @@ data:
       obs_columns_to_validate: null
   batch_keys:
     x_ng:
-      attr: X
+      attr: raw.X
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
       attr: var_names
