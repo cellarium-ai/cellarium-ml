@@ -181,6 +181,20 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 test_mode=self.test_mode,
             )
 
+        if stage == "test":
+            self.test_dataset = IterableDistributedAnnDataCollectionDataset(
+                dadc=self.dadc,
+                batch_keys=self.batch_keys,
+                batch_size=self.batch_size,
+                iteration_strategy="same_order",
+                shuffle=False,
+                seed=self.seed,
+                drop_last=False,
+                test_mode=self.test_mode,
+                start_idx=self.n_train,
+                end_idx=self.n_train + self.n_val,
+            )
+
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         """Training dataloader."""
         return torch.utils.data.DataLoader(
@@ -207,6 +221,17 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         """Prediction dataloader."""
         return torch.utils.data.DataLoader(
             self.predict_dataset,
+            num_workers=self.num_workers,
+            collate_fn=self.collate_fn,
+            drop_last=self.drop_last_batch,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
+        )
+
+    def test_dataloader(self) -> torch.utils.data.DataLoader:
+        """Test dataloader."""
+        return torch.utils.data.DataLoader(
+            self.test_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
             drop_last=self.drop_last_batch,
