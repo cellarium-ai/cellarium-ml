@@ -8,7 +8,8 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 from anndata import AnnData, concat
-from anndata._core.index import Index, Index1D, _normalize_indices
+from anndata._core.index import _normalize_indices
+from anndata.compat import Index, Index1D
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
     AnnCollectionView,
