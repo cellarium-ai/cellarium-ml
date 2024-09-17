@@ -49,16 +49,17 @@ task run_perturbseq {
             echo "Installing cellarium-ml from github"
             echo "pip install --no-cache-dir -U git+https://github.com/cellarium-ai/cellarium-ml.git@~{git_hash}"
             pip install --no-cache-dir -U git+https://github.com/cellarium-ai/cellarium-ml.git@~{git_hash}
-            pip list
         fi
 
-        pip install tqdm scikit-learn gseapy scanpy
+        pip install tqdm scikit-learn==1.5.1 gseapy==1.1.3 scanpy==1.10.2 numpy==1.26.4
+        pip list
 
         python <<CODE
 
         import scanpy as sc
         import pandas as pd
         import numpy as np
+        import scipy.sparse as sp
         import torch
         import os
         import tqdm
@@ -136,7 +137,10 @@ task run_perturbseq {
 
             print(f'... working on {gid} =====================================')
 
-            mean_gene_exp_value = np.array(adata_control.layers['count'][:, adata_control.var_names == gid].todense()).flatten().mean()
+            if sp.issparse(adata_control.layers['count']):
+                mean_gene_exp_value = np.array(adata_control.layers['count'][:, adata_control.var_names == gid].todense()).flatten().mean()
+            else:
+                mean_gene_exp_value = adata_control.layers['count'][:, adata_control.var_names == gid].flatten().mean()
             print(f'mean_gene_exp_value: {mean_gene_exp_value}')
             print('adding offset 1 count')
             mean_gene_exp_value = mean_gene_exp_value + 1
