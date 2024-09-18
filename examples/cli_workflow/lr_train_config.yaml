@@ -99,9 +99,9 @@ data:
   shuffle: false
   seed: 0
   drop_last_indices: false
+  drop_incomplete_batch: false
   test_mode: false
   num_workers: 2
-  drop_last_batch: false
   prefetch_factor: null
   persistent_workers: false
 ckpt_path: null

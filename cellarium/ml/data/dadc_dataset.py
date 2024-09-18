@@ -77,11 +77,14 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             If ``True``, the data is reshuffled at every epoch.
         seed:
             Random seed used to shuffle the sampler if :attr:`shuffle=True`.
-        drop_last:
+        drop_last_indices:
             If ``True``, then the sampler will drop the tail of the data
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
             the replicas.
+        drop_incomplete_batch:
+            If ``True``, the dataloader will drop the incomplete batch if the dataset size is not divisible by
+            the batch size.
         start_idx:
             The starting index of the dataset. If ``None``, then the dataset will start from the first index.
         end_idx:
@@ -99,7 +102,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
         seed: int = 0,
-        drop_last: bool = False,
+        drop_last_indices: bool = False,
+        drop_incomplete_batch: bool = False,
         start_idx: int | None = None,
         end_idx: int | None = None,
         test_mode: bool = False,
@@ -113,7 +117,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.iteration_strategy = iteration_strategy
         self.shuffle = shuffle
         self.seed = seed
-        self.drop_last = drop_last
+        self.drop_last_indices = drop_last_indices
+        self.drop_incomplete_batch = drop_incomplete_batch
         self.start_idx = 0 if start_idx is None else start_idx
         self.end_idx = dadc.n_obs if end_idx is None else end_idx
         self.epoch = 0
@@ -126,13 +131,18 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         _, num_replicas = get_rank_and_num_replicas()
 
         n_obs = self.end_idx - self.start_idx
-        if self.drop_last and n_obs % num_replicas != 0:
+        if self.drop_last_indices and n_obs % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data.
             per_replica = n_obs // num_replicas
         else:
             per_replica = math.ceil(n_obs / num_replicas)
-        return math.ceil(per_replica / float(self.batch_size))
+
+        if self.drop_incomplete_batch:
+            batches_per_replica = per_replica // self.batch_size
+        else:
+            batches_per_replica = math.ceil(per_replica / float(self.batch_size))
+        return batches_per_replica
 
     def set_epoch(self, epoch: int) -> None:
         r"""
@@ -168,7 +178,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __iter__(self):
         r"""
         Iterate through the dataset by trying to minimize the amount of anndata files fetched by each worker.
-        Iterated indices are evenly divided between replicas (see :attr:`drop_last`).
+        Iterated indices are evenly divided between replicas (see :attr:`drop_last_indices`).
 
         .. note::
 
@@ -265,9 +275,37 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         **Example 4**::
 
+            indices=[0, 1, 2, 3, 4, 5, 6, 7]
+            num_replicas=1
+            batch_size=3
+            drop_incomplete_batch=True
+            num_workers=2
+
+        Same order:
+
+        +------------+---------+---------+
+        | batch idx  | 0       | 1       |
+        +============+=========+=========+
+        | indices    | (0,1,2) | (3,4,5) |
+        +------------+---------+---------+
+        | worker id  | 0       | 1       |
+        +------------+---------+---------+
+
+        Cache efficient:
+
+        +------------+---------+---------+
+        | batch idx  | 0       | 2       |
+        +============+=========+=========+
+        | indices    | (0,1,2) | (3,4,5) |
+        +------------+---------+---------+
+        | worker id  | 0       | 0       |
+        +------------+---------+---------+
+
+        **Example 5**::
+
             indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             num_replicas=2
-            drop_last=True
+            drop_last_indices=True
             batch_size=2
             num_workers=1
 
@@ -316,11 +354,11 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +------------+-------+-------+------+
 
 
-        **Example 5**::
+        **Example 6**::
 
             indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             num_replicas=2
-            drop_last=False
+            drop_last_indices=False
             batch_size=2
             num_workers=1
 
@@ -376,7 +414,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         rank, num_replicas = get_rank_and_num_replicas()
 
         n_obs = self.end_idx - self.start_idx
-        if self.drop_last and len(self.dadc) % num_replicas != 0:
+        if self.drop_last_indices and n_obs % num_replicas != 0:
             # Split to nearest available length that is evenly divisible.
             # This is to ensure each rank receives the same amount of data.
             per_replica = n_obs // num_replicas
@@ -403,7 +441,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             indices = list(range(self.start_idx, self.end_idx))
 
-        if not self.drop_last:
+        if not self.drop_last_indices:
             # add extra samples to make it evenly divisible
             padding_size = total_size - len(indices)
             if padding_size <= len(indices):
@@ -425,6 +463,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
             # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
             for batch_indices in islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers):
+                if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
+                    continue
                 yield self[batch_indices]
 
         elif self.iteration_strategy == "cache_efficient":
@@ -447,6 +487,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
             # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
             for batch_indices in chunked_iter(indices, self.batch_size):
+                if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
+                    continue
                 yield self[batch_indices]
 
         # Sets epoch for persistent workers
