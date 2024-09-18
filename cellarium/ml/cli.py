@@ -484,13 +484,13 @@ def nmf(args: ArgsType = None) -> None:
     cli(args=args)
 
 @register_model
-def nmf_consensus(args: ArgsType = None) -> None:
+def nmf_refit(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.NonNegativeMatrixFactorization` model.
 
     Example run::
 
-        cellarium-ml logistic_regression fit \
+        cellarium-ml nmf_refit fit \
             --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
             --data.shard_size 100 \
             --data.max_cache_size 2 \
@@ -511,7 +511,7 @@ def nmf_consensus(args: ArgsType = None) -> None:
     """
 
     cli = lightning_cli_factory(
-        "cellarium.ml.models.NonNegativeMatrixFactorization",
+        "cellarium.ml.models.NonNegativeMatrixRefit",
         link_arguments=[
             LinkArguments(
                 ("model.cpu_transforms", "model.transforms", "data"),
