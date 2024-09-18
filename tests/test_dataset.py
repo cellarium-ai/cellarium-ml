@@ -53,20 +53,30 @@ def dadc(tmp_path: Path, request: pytest.FixtureRequest):
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
 @pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
 @pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
+@pytest.mark.parametrize(
+    "drop_incomplete_batch", [False, True], ids=["no drop incomplete batch", "drop incomplete batch"]
+)
+@pytest.mark.parametrize("start_idx", [0, 2])
+@pytest.mark.parametrize("end_idx", [10, None])
 def test_iterable_dataset(
     dadc: DistributedAnnDataCollection,
     iteration_strategy: Literal["same_order", "cache_efficient"],
     shuffle: bool,
     num_workers: int,
     batch_size: int,
+    drop_incomplete_batch: bool,
+    start_idx: int | None,
+    end_idx: int | None,
 ):
-    n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
         iteration_strategy=iteration_strategy,
         batch_keys={"x_ng": AnnDataField("X")},
         batch_size=batch_size,
         shuffle=shuffle,
+        drop_incomplete_batch=drop_incomplete_batch,
+        start_idx=start_idx,
+        end_idx=end_idx,
         test_mode=True,
     )
     data_loader = torch.utils.data.DataLoader(
@@ -75,51 +85,65 @@ def test_iterable_dataset(
         collate_fn=collate_fn,
     )
 
-    miss_counts = list(int(batch["miss_count"]) for batch in data_loader for _ in batch["x_ng"])
-    actual_idx = list(int(i) for batch in data_loader for i in batch["x_ng"])
+    all_batches = list(data_loader)
+    miss_counts = list(int(batch["miss_count"]) for batch in all_batches for _ in batch["x_ng"])
+    actual_idx = list(int(i) for batch in all_batches for i in batch["x_ng"])
 
-    if num_workers > 1:
-        worker_ids = list(int(batch["worker_id"]) for batch in data_loader for _ in batch["x_ng"])
-        adatas_oidx = np.searchsorted([0] + dadc.limits, actual_idx, side="right")
-        for worker in range(num_workers):
-            miss_count = max(c for c, w in zip(miss_counts, worker_ids) if w == worker)
-            assert miss_count == len(set([o for o, w in zip(adatas_oidx, worker_ids) if w == worker]))
-    else:
-        miss_count = max(miss_counts)
-        assert miss_count == len(dadc.limits)
+    worker_ids = list(int(batch["worker_id"]) for batch in all_batches for _ in batch["x_ng"])
+    adatas_oidx = np.searchsorted([0] + dadc.limits, actual_idx, side="right")
+    for worker in set(worker_ids):
+        miss_count = max(c for c, w in zip(miss_counts, worker_ids) if w == worker)
+        assert miss_count == len(set([o for o, w in zip(adatas_oidx, worker_ids) if w == worker]))
 
-    expected_idx = list(range(n_obs))
+    n_obs = dataset.end_idx - dataset.start_idx
+    expected_idx = list(range(dataset.start_idx, dataset.end_idx))
+    expected_len = n_obs
+    if drop_incomplete_batch and n_obs % batch_size != 0:
+        expected_len = n_obs // batch_size * batch_size
+    assert expected_len == len(actual_idx)
 
     # assert entire dataset is sampled
     if not shuffle and iteration_strategy == "same_order":
-        assert expected_idx == actual_idx
+        assert expected_idx[:expected_len] == actual_idx
     else:
-        assert len(expected_idx) == len(actual_idx)
-        assert set(expected_idx) == set(actual_idx)
+        if drop_incomplete_batch and n_obs % batch_size != 0:
+            assert len(set(expected_idx) - set(actual_idx)) < batch_size
+        else:
+            assert set(expected_idx) == set(actual_idx)
 
 
 @pytest.mark.parametrize("iteration_strategy", ["same_order", "cache_efficient"])
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
 @pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
 @pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
-@pytest.mark.parametrize("drop_last", [False, True], ids=["no drop last", "drop last"])
+@pytest.mark.parametrize("drop_last_indices", [False, True], ids=["no drop last indices", "drop last indices"])
+@pytest.mark.parametrize(
+    "drop_incomplete_batch", [False, True], ids=["no drop incomplete batch", "drop incomplete batch"]
+)
+@pytest.mark.parametrize("start_idx", [0, 2])
+@pytest.mark.parametrize("end_idx", [10, None])
 def test_iterable_dataset_multi_device(
     dadc: DistributedAnnDataCollection,
     iteration_strategy: Literal["same_order", "cache_efficient"],
     shuffle: bool,
     num_workers: int,
     batch_size: int,
-    drop_last: bool,
+    drop_last_indices: bool,
+    drop_incomplete_batch: bool,
+    start_idx: int | None,
+    end_idx: int | None,
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
-    n_obs = len(dadc)
     dataset = IterableDistributedAnnDataCollectionDataset(
         dadc,
         iteration_strategy=iteration_strategy,
         batch_keys={"x_ng": AnnDataField("X")},
         batch_size=batch_size,
         shuffle=shuffle,
-        drop_last=drop_last,
+        drop_last_indices=drop_last_indices,
+        drop_incomplete_batch=drop_incomplete_batch,
+        start_idx=start_idx,
+        end_idx=end_idx,
         test_mode=True,
     )
     data_loader = torch.utils.data.DataLoader(
@@ -144,17 +168,26 @@ def test_iterable_dataset_multi_device(
         return
 
     actual_idx = list(int(i) for batch in model.iter_data for i in batch["x_ng"])
-    expected_idx = list(range(n_obs))
+    n_obs = dataset.end_idx - dataset.start_idx
+    expected_idx = list(range(dataset.start_idx, dataset.start_idx + n_obs))
 
     # assert entire dataset is sampled
-    if drop_last and n_obs % devices != 0:
-        expected_len = (n_obs // devices) * devices
-        assert expected_len == len(actual_idx)
-        assert set(actual_idx).issubset(expected_idx)
+    if drop_last_indices and n_obs % devices != 0:
+        expected_len_per_replica = n_obs // devices
+        if drop_incomplete_batch:
+            expected_len_per_replica = expected_len_per_replica // batch_size * batch_size
+            assert len(set(expected_idx) - set(actual_idx)) < devices * (batch_size + 1)
+        else:
+            assert len(set(expected_idx) - set(actual_idx)) < devices
     else:
-        expected_len = math.ceil(n_obs / devices) * devices
-        assert expected_len == len(actual_idx)
-        assert set(expected_idx) == set(actual_idx)
+        expected_len_per_replica = math.ceil(n_obs / devices)
+        if drop_incomplete_batch:
+            expected_len_per_replica = expected_len_per_replica // batch_size * batch_size
+            assert len(set(expected_idx) - set(actual_idx)) < (devices * batch_size - devices + 1)
+        else:
+            assert set(expected_idx) == set(actual_idx)
+    expected_len = expected_len_per_replica * devices
+    assert expected_len == len(actual_idx)
 
 
 @pytest.mark.parametrize(
