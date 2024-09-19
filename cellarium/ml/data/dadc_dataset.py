@@ -95,7 +95,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection | AnnData,
-        batch_keys: dict[str, AnnDataField],
+        batch_keys: dict[str, AnnDataField | dict[str, AnnDataField]],
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
@@ -149,7 +149,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
         self.epoch = epoch
 
-    def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
+    def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray | dict[str, np.ndarray]]:
         r"""
         Returns a dictionary containing the data from the :attr:`dadc` with keys specified by the :attr:`batch_keys`
         at the given index ``idx``.
@@ -158,7 +158,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         data = {}
         adata = self.dadc[idx]
         for key, field in self.batch_keys.items():
-            data[key] = field(adata)
+            if isinstance(field, dict):
+                data[key] = {}
+                for sub_key, sub_field in field.items():
+                    data[key][sub_key] = sub_field(adata)
+            else:
+                data[key] = field(adata)
 
         # for testing purposes
         if self.test_mode:

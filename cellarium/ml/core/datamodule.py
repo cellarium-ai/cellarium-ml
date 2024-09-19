@@ -97,7 +97,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self,
         dadc: DistributedAnnDataCollection | AnnData,
         # IterableDistributedAnnDataCollectionDataset args
-        batch_keys: dict[str, AnnDataField] | None = None,
+        batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField] | None = None,
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
