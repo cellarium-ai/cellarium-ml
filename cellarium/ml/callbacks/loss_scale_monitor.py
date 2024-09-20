@@ -7,9 +7,9 @@ import lightning.pytorch as pl
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 
 
-class GradScalerMonitor(pl.Callback):
+class LossScaleMonitor(pl.Callback):
     """
-    Automatically monitors and logs the scale of the gradient scaler during training.
+    A callback that logs the loss scale during mixed-precision training.
     """
 
     @rank_zero_only
@@ -20,4 +20,4 @@ class GradScalerMonitor(pl.Callback):
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        pl_module.log("loss_scale", trainer.precision_plugin.scaler._scale.item())
+        pl_module.log("loss_scale", trainer.precision_plugin.scaler._scale.item())  # type: ignore[attr-defined]
