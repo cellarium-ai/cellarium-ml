@@ -66,10 +66,3 @@ class CellariumPipeline(torch.nn.ModuleList):
         if not isinstance(model, ValidateMixin):
             raise TypeError(f"The last module in the pipeline must be an instance of {ValidateMixin}. Got {model}")
         call_func_with_batch(model.validate, batch)
-
-    def test(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
-
-        model = self[-1]
-        call_func_with_batch(model.test, batch)
