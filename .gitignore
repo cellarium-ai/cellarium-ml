@@ -4,6 +4,7 @@ runs/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.vscode/
 docs/build/
 docs/source/examples/
 docs/source/tutorials/
