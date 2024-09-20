@@ -90,3 +90,15 @@ class ValidateMixin(metaclass=ABCMeta):
         """
         Perform validation.
         """
+
+
+class TestMixin(metaclass=ABCMeta):
+    """
+    Abstract mixin class for models that can perform testing.
+    """
+
+    @abstractmethod
+    def test(self, *args: Any, **kwargs: Any) -> None:
+        """
+        Perform testing.
+        """
