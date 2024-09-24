@@ -1,15 +1,15 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import math
 import operator
 from collections import defaultdict
 from collections.abc import Callable
 from functools import cached_property, reduce
-from typing import Literal
+from typing import Any, Literal
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import torch
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -17,11 +17,56 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 
 try:
+    from cerebras.modelzoo.common.utils.model.mup_utils import LRAdjustmentGroup
     from cerebras.pytorch.backend import use_cs
 except ImportError:
+    from cellarium.ml.utilities.mup import LRAdjustmentGroup
 
     def use_cs() -> bool:
         return False
+
+
+def create_initializer(initializer: dict[str, Any]) -> Callable[[torch.Tensor], None]:
+    initializer_fn = getattr(nn.init, initializer["name"])
+    initializer_kwargs = initializer.copy()
+    del initializer_kwargs["name"]
+    return lambda x: initializer_fn(x, **initializer_kwargs)
+
+
+def scale_initializers_by_dimension(
+    initializers: dict[str, Any] | list[dict[str, Any]],
+    width_scale: float | None = None,
+    depth_scale: float | None = None,
+) -> None:
+    """
+    Scales the std of an initializer or list of initializers by the specified
+    width and depth scalars. Unsupported initializers are ignored and a warning
+    is printed to the user.
+    """
+    if not width_scale:
+        width_scale = 1.0
+    if not depth_scale:
+        depth_scale = 1.0
+    mup_scalar = width_scale * depth_scale
+
+    if not isinstance(initializers, list):
+        initializers = [initializers]
+
+    for initializer in initializers:
+        if "name" not in initializer:
+            raise ValueError("Initializer name must be provided")
+        initializer_name = initializer["name"].lower()
+
+        if initializer_name == "normal_":
+            initializer["std"] = initializer.get("std", 1.0) * mup_scalar
+        elif initializer_name == "trunc_normal_":
+            std = initializer.get("std", 1.0)
+            initializer["std"] = std * mup_scalar
+            initializer["a"] = initializer.get("a", -2 * std) * mup_scalar
+            initializer["b"] = initializer.get("b", 2 * std) * mup_scalar
+            std = None
+        else:
+            raise ValueError(f"Initializer {initializer_name} is not supported for muP")
 
 
 def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
@@ -70,10 +115,14 @@ class MultiHeadAttention(nn.Module):
             Number of attention heads.
         dropout_p:
             Dropout probability.
-        attn_mult:
+        attention_logits_scale:
             Multiplier for the attention scores.
-        attn_backend:
+        attention_backend:
             Backend for the attention computation.
+        Wqkv_initializer:
+            Initializer for the query, key, and value linear transformations.
+        Wo_initializer:
+            Initializer for the output linear transformation.
     """
 
     backend_map = {
@@ -88,8 +137,10 @@ class MultiHeadAttention(nn.Module):
         use_bias: bool,
         n_heads: int,
         dropout_p: float,
-        attn_mult: float,
-        attn_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_logits_scale: float,
+        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        Wqkv_initializer: dict[str, Any],
+        Wo_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
         self.Wq = nn.Linear(d_model, d_model, bias=use_bias)
@@ -98,8 +149,22 @@ class MultiHeadAttention(nn.Module):
         self.Wo = nn.Linear(d_model, d_model, bias=use_bias)
         self.n_heads = n_heads
         self.dropout_p = dropout_p
-        self.attn_mult = attn_mult
-        self.attn_backend = attn_backend
+        self.attention_logits_scale = attention_logits_scale
+        self.attention_backend = attention_backend
+        self.Wqkv_initializer = Wqkv_initializer
+        self.Wo_initializer = Wo_initializer
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        for module in [self.Wq, self.Wk, self.Wv]:
+            create_initializer(self.Wqkv_initializer)(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+        create_initializer(self.Wo_initializer)(self.Wo.weight)
+        if self.Wo.bias is not None:
+            nn.init.zeros_(self.Wo.bias)
 
     @staticmethod
     def split_heads(X_nqd: torch.Tensor, n_heads: int) -> torch.Tensor:
@@ -145,9 +210,9 @@ class MultiHeadAttention(nn.Module):
         key_nhck = self.split_heads(key_ncd, n_heads)
         value_nhck = self.split_heads(value_ncd, n_heads)
 
-        scale_factor = self.attn_mult / query_nhck.shape[-1]
+        scale_factor = self.attention_logits_scale / query_nhck.shape[-1]
 
-        if self.attn_backend == "torch":
+        if self.attention_backend == "torch":
             key_nhck = key_nhck * torch.tensor(scale_factor, dtype=key_nhck.dtype)
             attn_logits_nhcc = torch.matmul(query_nhck, key_nhck.transpose(-1, -2))
             neg_inf = torch.tensor(float("-inf"), dtype=torch.float32)
@@ -157,7 +222,7 @@ class MultiHeadAttention(nn.Module):
             attn_weights_nhcc = nn.functional.dropout(attn_weights_nhcc, self.dropout_p, training=self.training)
             output_nhck = torch.matmul(attn_weights_nhcc, value_nhck)
         else:
-            with sdpa_kernel(self.backend_map[self.attn_backend]):
+            with sdpa_kernel(self.backend_map[self.attention_backend]):
                 output_nhck = nn.functional.scaled_dot_product_attention(
                     query_nhck,
                     key_nhck,
@@ -182,13 +247,37 @@ class PositionWiseFFN(nn.Module):
             Dimensionality of the embeddings and hidden states.
         use_bias:
             Whether to use bias in the linear transformations.
+        dense1_initializer:
+            Initializer for the first dense layer.
+        dense2_initializer:
+            Initializer for the second dense layer.
     """
 
-    def __init__(self, d_ffn: int, d_model: int, use_bias: bool) -> None:
+    def __init__(
+        self,
+        d_ffn: int,
+        d_model: int,
+        use_bias: bool,
+        dense1_initializer: dict[str, Any],
+        dense2_initializer: dict[str, Any],
+    ) -> None:
         super().__init__()
         self.dense1 = nn.Linear(d_model, d_ffn, bias=use_bias)
         self.relu = nn.ReLU()
         self.dense2 = nn.Linear(d_ffn, d_model, bias=use_bias)
+        self.dense1_initializer = dense1_initializer
+        self.dense2_initializer = dense2_initializer
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        create_initializer(self.dense1_initializer)(self.dense1.weight)
+        if self.dense1.bias is not None:
+            nn.init.zeros_(self.dense1.bias)
+
+        create_initializer(self.dense2_initializer)(self.dense2.weight)
+        if self.dense2.bias is not None:
+            nn.init.zeros_(self.dense2.bias)
 
     def forward(self, hidden_state_ncd: torch.Tensor) -> torch.Tensor:
         """
@@ -216,6 +305,11 @@ class NormAdd(nn.Module):
         super().__init__()
         self.dropout = nn.Dropout(dropout_p)
         self.ln = nn.LayerNorm(norm_shape)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        self.ln.reset_parameters()
 
     def forward(
         self,
@@ -248,12 +342,20 @@ class TransformerBlock(nn.Module):
             Number of attention heads.
         dropout_p:
             Dropout probability.
-        attn_mult:
+        attention_logits_scale:
             Multiplier for the attention scores.
         use_bias:
             Whether to use bias in the linear transformations.
-        attn_backend:
+        attention_backend:
             Backend for the attention computation.
+        Wqkv_initializer:
+            Initializer for the query, key, and value linear transformations.
+        Wo_initializer:
+            Initializer for the output linear transformation.
+        dense1_initializer:
+            Initializer for the first dense layer.
+        dense2_initializer:
+            Initializer for the second dense layer.
     """
 
     def __init__(
@@ -262,15 +364,40 @@ class TransformerBlock(nn.Module):
         d_ffn: int,
         n_heads: int,
         dropout_p: float,
-        attn_mult: float,
+        attention_logits_scale: float,
         use_bias: bool,
-        attn_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        Wqkv_initializer: dict[str, Any],
+        Wo_initializer: dict[str, Any],
+        dense1_initializer: dict[str, Any],
+        dense2_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
-        self.attention = MultiHeadAttention(d_model, use_bias, n_heads, dropout_p, attn_mult, attn_backend)
+        self.attention = MultiHeadAttention(
+            d_model,
+            use_bias,
+            n_heads,
+            dropout_p,
+            attention_logits_scale,
+            attention_backend,
+            Wqkv_initializer,
+            Wo_initializer,
+        )
         self.normadd1 = NormAdd(d_model, dropout_p)
-        self.ffn = PositionWiseFFN(d_ffn, d_model, use_bias)
+        self.ffn = PositionWiseFFN(
+            d_ffn,
+            d_model,
+            use_bias,
+            dense1_initializer,
+            dense2_initializer,
+        )
         self.normadd2 = NormAdd(d_model, dropout_p)
+
+    def reset_parameters(self) -> None:
+        self.attention._reset_parameters()
+        self.normadd1._reset_parameters()
+        self.ffn._reset_parameters()
+        self.normadd2._reset_parameters()
 
     def forward(
         self,
@@ -308,10 +435,18 @@ class Transformer(nn.Module):
             Dropout probability.
         use_bias:
             Whether to use bias in the linear transformations.
-        attn_mult:
+        attention_logits_scale:
             Multiplier for the attention scores.
-        attn_backend:
+        attention_backend:
             Backend for the attention computation.
+        Wqkv_initializer:
+            Initializer for the query, key, and value linear transformations.
+        Wo_initializer:
+            Initializer for the output linear transformation.
+        dense1_initializer:
+            Initializer for the first dense layer.
+        dense2_initializer:
+            Initializer for the second dense layer.
     """
 
     def __init__(
@@ -322,14 +457,30 @@ class Transformer(nn.Module):
         n_blocks: int,
         dropout_p: float,
         use_bias: bool,
-        attn_mult: float,
-        attn_backend: Literal["math", "flash", "mem_efficient"],
+        attention_logits_scale: float,
+        attention_backend: Literal["math", "flash", "mem_efficient"],
+        Wqkv_initializer: dict[str, Any],
+        Wo_initializer: dict[str, Any],
+        dense1_initializer: dict[str, Any],
+        dense2_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
         self.n_blocks = n_blocks
         self.blocks = nn.ModuleList(
             [
-                TransformerBlock(d_model, d_ffn, n_heads, dropout_p, attn_mult, use_bias, attn_backend)
+                TransformerBlock(
+                    d_model,
+                    d_ffn,
+                    n_heads,
+                    dropout_p,
+                    attention_logits_scale,
+                    use_bias,
+                    attention_backend,
+                    Wqkv_initializer,
+                    Wo_initializer,
+                    dense1_initializer,
+                    dense2_initializer,
+                )
                 for _ in range(n_blocks)
             ]
         )
@@ -366,6 +517,8 @@ class GeneEmbedding(nn.Module):
             Continuous gene token vocabulary sizes.
         d_model:
             Dimensionality of the embeddings and hidden states.
+        embeddings_initializer:
+            Initializer for the embeddings.
     """
 
     def __init__(
@@ -373,6 +526,7 @@ class GeneEmbedding(nn.Module):
         categorical_vocab_sizes: dict[str, int],
         continuous_vocab_sizes: dict[str, int],
         d_model: int,
+        embeddings_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
         self.E = nn.ModuleDict()
@@ -380,6 +534,13 @@ class GeneEmbedding(nn.Module):
         self.E.update(
             {key: nn.Linear(vocab_size, d_model, bias=False) for key, vocab_size in continuous_vocab_sizes.items()}
         )
+        self.embeddings_initializer = embeddings_initializer
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        for module in self.E.children():
+            create_initializer(self.embeddings_initializer)(module.weight)
 
     def forward(self, gene_tokens_nc: dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -390,10 +551,11 @@ class GeneEmbedding(nn.Module):
         Returns:
             The gene embedding tensor of shape ``(n, c, d)``.
         """
-        return reduce(
+        result = reduce(
             operator.add,
             [self.E[key](gene_token_nc) for key, gene_token_nc in gene_tokens_nc.items()],
         )
+        return result
 
 
 class MetaDataEmbedding(nn.Module):
@@ -405,17 +567,27 @@ class MetaDataEmbedding(nn.Module):
             Categorical metadata token vocabulary sizes.
         d_model:
             Dimensionality of the embeddings and hidden states.
+        embeddings_initializer:
+            Initializer for the embeddings.
     """
 
     def __init__(
         self,
         categorical_vocab_sizes: dict[str, int],
         d_model: int,
+        embeddings_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
         self.E = nn.ModuleDict(
             {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()}
         )
+        self.embeddings_initializer = embeddings_initializer
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        for module in self.E.children():
+            create_initializer(self.embeddings_initializer)(module.weight)
 
     def forward(self, metadata_tokens_n: dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -438,6 +610,28 @@ class DummyTokenizer(torch.nn.Module):
 
 
 class Tokenizer(torch.nn.Module):
+    """
+    Tokenizer for the Cellarium GPT model.
+
+    Args:
+        max_prefix_len:
+            Maximum prefix length.
+        context_len:
+            Context length.
+        downsample_fraction:
+            Downsample fraction.
+        min_total_mrna_umis:
+            Minimum total mRNA UMIs.
+        max_total_mrna_umis:
+            Maximum total mRNA UMIs.
+        gene_vocab_sizes:
+            Gene token vocabulary sizes.
+        metadata_vocab_sizes:
+            Metadata token vocabulary sizes.
+        ontology_infos:
+            Ontology information.
+    """
+
     def __init__(
         self,
         max_prefix_len: int,
@@ -447,6 +641,7 @@ class Tokenizer(torch.nn.Module):
         max_total_mrna_umis: int,
         gene_vocab_sizes: dict[str, int],
         metadata_vocab_sizes: dict[str, int],
+        ontology_infos: dict[str, dict[str, Any]],
     ) -> None:
         super().__init__()
         self.max_prefix_len = max_prefix_len
@@ -456,114 +651,132 @@ class Tokenizer(torch.nn.Module):
         self.max_total_mrna_umis = max_total_mrna_umis
         self.gene_vocab_sizes = gene_vocab_sizes
         self.metadata_vocab_sizes = metadata_vocab_sizes
+        self.ontology_infos = ontology_infos
 
     def forward(
         self,
         metadata_tokens_n: dict[str, torch.Tensor],
         gene_tokens_n: dict[str, torch.Tensor],
         gene_value_ng: torch.Tensor,
-        total_mrna_umis_n: torch.Tensor,
         gene_id_g: torch.Tensor | None = None,
         measured_genes_mask_ng: torch.Tensor | None = None,
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
+        ### GENE TOKENS ###
+
+        ## gene measurement (assay, suspension type, etc.)
+        gene_tokens_nc = {key: gene_tokens_n[key][:, None].expand(-1, self.context_len).int() for key in gene_tokens_n}
+
+        shuffle_idx_ng = torch.argsort(torch.rand_like(gene_value_ng), dim=-1)
+        shuffle_idx_nc = shuffle_idx_ng[:, : self.context_len]
+
+        ## gene id ##
         n, g = gene_value_ng.shape
         device = gene_value_ng.device
-
-        # gene tokens
         if gene_id_g is None:
             gene_id_g = torch.arange(g, device=device)
         gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
+        gene_tokens_nc["gene_id"] = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
 
-        # shuffle and select context
-        shuffle_idx_ng = torch.argsort(torch.rand_like(gene_value_ng), dim=-1)
-        shuffle_idx_nc = shuffle_idx_ng[:, : self.context_len]
-        gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+        ## gene value ##
         gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
-        total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(-1, self.context_len)
-        gene_tokens_nc = {key: gene_tokens_n[key][:, None].expand(-1, self.context_len).int() for key in gene_tokens_n}
-        if measured_genes_mask_ng is not None:
-            measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
-        else:
-            measured_genes_mask_nc = None
-
+        total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis")
         # downsample gene values
         max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
         downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
         if self.downsample_fraction > 0:
-            downsample_p_nc = torch.minimum(
+            gene_downsample_p_nc = torch.minimum(
                 torch.rand((n, self.context_len), device=device) / self.downsample_fraction,
                 torch.tensor(1.0, device=device),
             )
             downsampled_total_mrna_umis_nc = torch.lerp(
-                torch.full_like(downsample_p_nc, self.min_total_mrna_umis),
+                torch.full_like(gene_downsample_p_nc, self.min_total_mrna_umis),
                 downsampled_total_mrna_umis_nc,
-                downsample_p_nc,
+                gene_downsample_p_nc,
             )
-        downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
-        gene_value_nc = torch.binomial(gene_value_nc, downsample_p_nc)
+        gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
+        gene_value_nc = torch.binomial(gene_value_nc, gene_downsample_p_nc)
         total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc)
-
-        prefix_weights = self.max_prefix_len / torch.arange(self.max_prefix_len, dtype=torch.float32)
-        prefix_weights[0] = 1
-        prefix_len_n = torch.multinomial(prefix_weights, n, replacement=True)
-        # prefix_len_n = torch.randint(0, self.max_prefix_len, (num_prefixes,), device=device)
-
-        suffix_mask_nc = torch.arange(self.context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
-        gene_query_mask_nc = suffix_mask_nc
-        gene_prompt_mask_nc = ~suffix_mask_nc
-        if measured_genes_mask_nc is not None:
+        # sample prefix length
+        # prefix_len_weights = [1, max_prefix_len / 2, max_prefix_len / 3, ..., max_prefix_len / max_prefix_len]
+        prefix_len_weights = self.max_prefix_len / torch.arange(self.max_prefix_len + 1, dtype=torch.float32)
+        prefix_len_weights[0] = 1
+        prefix_len_n = torch.multinomial(prefix_len_weights, n, replacement=True)
+        # create prompt and query masks
+        gene_query_mask_nc = torch.arange(self.context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
+        gene_prompt_mask_nc = ~gene_query_mask_nc
+        if measured_genes_mask_ng is not None:
+            measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
             gene_query_mask_nc = gene_query_mask_nc & measured_genes_mask_nc
             gene_prompt_mask_nc = gene_prompt_mask_nc & measured_genes_mask_nc
 
-        gene_value_vocab_size = self.gene_vocab_sizes["gene_value"]
-        gene_label_nc = gene_value_nc.clamp(0, gene_value_vocab_size - 1).int()
         gene_value_nc3 = torch.stack(
             [
-                torch.log1p(gene_value_nc) * suffix_mask_nc.logical_not().float(),
-                suffix_mask_nc.float(),
+                torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(),
+                gene_query_mask_nc.float(),
                 torch.log1p(total_mrna_umis_nc),
             ],
             dim=2,
         )
-        gene_tokens_nc["gene_id"] = gene_id_nc
         gene_tokens_nc["gene_value"] = gene_value_nc3
+        # gene label
+        gene_value_vocab_size = self.gene_vocab_sizes["gene_value"]
+        gene_label_nc = gene_value_nc.clamp(0, gene_value_vocab_size - 1).int()
 
-        # metadata tokens
-        metadata_weights_n = prefix_len_n / (self.max_prefix_len + 1)
-        m = len(self.metadata_vocab_sizes)
-        metadata_query_mask_nm = torch.bernoulli(metadata_weights_n[:, None].expand(-1, m)).bool()
+        ### METADATA TOKENS ###
+
+        ## metadata tokens ##
+        # assign token codes based on the ontology info
+        # token values not in the ontology are treated as unmeasured and assigned a code value of -1
+        for key, ontology_info in self.ontology_infos.items():
+            assert self.metadata_vocab_sizes[key] == len(ontology_info["labels"])
+            metadata_tokens_n[key] = torch.tensor(
+                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["labels"]).codes,
+                dtype=torch.int,
+            )
+        # create metadata query and prompt masks
+        metadata_query_mask_weights_n = prefix_len_n / (self.max_prefix_len + 1)
+        m = len(metadata_tokens_n)
+        metadata_query_mask_nm = torch.bernoulli(metadata_query_mask_weights_n[:, None].expand(-1, m)).bool()
         metadata_prompt_mask_nm = ~metadata_query_mask_nm
         metadata_measured_mask_nm = torch.stack(
             [metadata_token_n < 0 for metadata_token_n in metadata_tokens_n.values()], dim=1
         ).bool()
-        metadata_prompt_mask_nm = metadata_prompt_mask_nm & metadata_measured_mask_nm
         metadata_query_mask_nm = metadata_query_mask_nm & metadata_measured_mask_nm
-
+        metadata_prompt_mask_nm = metadata_prompt_mask_nm & metadata_measured_mask_nm
+        # clamp unmeasured tokens to 0
         for key, metadata_token_n in metadata_tokens_n.items():
             metadata_tokens_n[key] = metadata_token_n.clamp(0).int()
-        block_label_nc = torch.block_diag(
-            gene_label_nc,
-            *[metadata_token_n.unsqueeze(-1) for metadata_token_n in metadata_tokens_n.values()],
-        )
-        labels_nc = {
-            key: block_label_nc[n * i : n * (i + 1)] for i, key in enumerate(["gene"] + list(metadata_tokens_n))
-        }
+        # metadata labels
+        metadata_labels_n = {key: metadata_tokens_n[key].clone() for key in metadata_tokens_n}
         # downsample metadata based on ontology
-        for key, metadata_token_n in metadata_tokens_n.items():
+        for key, ontology_info in self.ontology_infos.items():
             vocab_size = self.metadata_vocab_sizes[key]
-            ancestors_matrix = torch.triu(torch.ones(vocab_size, vocab_size, device=device))
+            metadata_token_n = metadata_tokens_n[key]
+            ontology_weights = torch.eye(vocab_size, device=device) + ontology_info["ancestors_matrix"]
+            # TODO: what should be the weights?
             metadata_tokens_n[key] = (
-                torch.multinomial(ancestors_matrix[metadata_token_n], num_samples=1).squeeze(-1).int()
+                torch.multinomial(ontology_weights[metadata_token_n], num_samples=1).squeeze(-1).int()
             )
-
+        # impute mask token for unmeasured metadata
+        # mask token is the last token in the vocabulary
         for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
             metadata_tokens_n[key] = torch.where(
                 metadata_query_mask_nm[:, i], self.metadata_vocab_sizes[key], metadata_token_n
             ).int()
 
-        # combine
+        ### PROMPT MASK ###
         prompt_mask_nc = torch.cat([gene_prompt_mask_nc, metadata_prompt_mask_nm], dim=1)
 
+        ### LABELS ###
+        block_label_nc = torch.block_diag(
+            gene_label_nc,
+            *[metadata_label_n.unsqueeze(-1) for metadata_label_n in metadata_labels_n.values()],
+        )
+        labels_nc = {
+            key: block_label_nc[n * i : n * (i + 1)] for i, key in enumerate(["gene"] + list(metadata_tokens_n))
+        }
+
+        ### LABEL WEIGHTS ###
         block_label_weight_nc = torch.block_diag(
             gene_query_mask_nc / gene_query_mask_nc.sum(dim=-1, keepdim=True),
             *[metadata_query_mask_nm[:, i].unsqueeze(-1).float() for i in range(m)],
@@ -586,8 +799,10 @@ class CellariumGPT(CellariumModel, PredictMixin):
     Cellarium GPT model.
 
     Args:
-        gene_categories:
-            Gene ID categories.
+        gene_vocab_sizes:
+            Gene token vocabulary sizes.
+        metadata_vocab_sizes:
+            Metadata token vocabulary sizes.
         d_model:
             Dimensionality of the embeddings and hidden states.
         d_ffn:
@@ -600,18 +815,24 @@ class CellariumGPT(CellariumModel, PredictMixin):
             Dropout probability.
         use_bias:
             Whether to use bias in the linear transformations.
-        max_value:
-            Maximum count value (inclusive).
-        attn_mult:
-            Multiplier for the attention scores.
-        input_mult:
-            Multiplier for the input embeddings.
-        output_mult:
-            Multiplier for the output embeddings.
+        attention_backend:
+            Backend for the attention computation.
+        gene_categories:
+            Gene ID categories.
         initializer_range:
             The standard deviation of the truncated normal initializer.
-        attn_backend:
-            Backend for the attention computation.
+        embeddings_scale:
+            Multiplier for the embeddings.
+        output_logits_scale:
+            Multiplier for the output logits.
+        attention_logits_scale:
+            Multiplier for the attention logits.
+        lr_adjustment_groups:
+            Learning rate adjustment groups.
+        mup_base_d_model:
+            Base dimensionality of the model for muP.
+        mup_base_d_ffn:
+            Base dimensionality of the inner feed-forward layers for muP.
     """
 
     def __init__(
@@ -624,29 +845,91 @@ class CellariumGPT(CellariumModel, PredictMixin):
         n_blocks: int = 4,
         dropout_p: float = 0.0,
         use_bias: bool = False,
-        attn_mult: float = 6.0,
-        input_mult: float = 1.0,
-        output_mult: float = 1.0,
-        initializer_range: float = 0.02,
-        attn_backend: Literal["math", "flash", "mem_efficient", "torch"] = "mem_efficient",
+        attention_backend: Literal["math", "flash", "mem_efficient", "torch"] = "mem_efficient",
         gene_categories: np.ndarray | None = None,
+        # tunable hyperparameters
+        initializer_range: float = 0.02,
+        embeddings_scale: float = 1.0,
+        output_logits_scale: float = 1.0,
+        attention_logits_scale=1.0,
+        # muP (maximal update parameterization)  parameters
+        lr_adjustment_groups: dict | None = None,
+        mup_base_d_model: int | None = None,
+        mup_base_d_ffn: int | None = None,
     ) -> None:
         super().__init__()
+
+        self.d_model = d_model
+        self.d_ffn = d_ffn
+        self.initializer_range = initializer_range
+        default_initializer = {
+            "name": "trunc_normal_",
+            "mean": 0.0,
+            "std": self.initializer_range,
+            "a": -2 * self.initializer_range,
+            "b": 2 * self.initializer_range,
+        }
+        embeddings_initializer = default_initializer.copy()
+        Wqkv_initializer = default_initializer.copy()
+        Wo_initializer = default_initializer.copy()
+        dense1_initializer = default_initializer.copy()
+        dense2_initializer = default_initializer.copy()
+        self.head_initializer = default_initializer.copy()
+        if lr_adjustment_groups is None:
+            lr_adjustment_groups = {
+                "embedding": LRAdjustmentGroup("*embedding*weight"),
+                "decoder_attention": LRAdjustmentGroup("*transformer*attention*W*weight"),
+                "decoder_input_ffn": LRAdjustmentGroup("*transformer*ffn.dense1*weight"),
+                "decoder_output_ffn": LRAdjustmentGroup("*transformer*ffn.dense2*weight"),
+            }
+
+        self.embeddings_scale = embeddings_scale
+        self.output_logits_scale = output_logits_scale
+        self.attention_logits_scale = attention_logits_scale
+        # Handle muP scaling
+        if mup_base_d_model:
+            d_model_width_mult = d_model / mup_base_d_model
+            scale_initializers_by_dimension(
+                [Wqkv_initializer, dense1_initializer],
+                width_scale=d_model_width_mult**-0.5,
+            )
+            scale_initializers_by_dimension(
+                Wo_initializer,
+                width_scale=d_model_width_mult**-0.5,
+                depth_scale=(2 * n_blocks) ** -0.5,
+            )
+            self.output_logits_scale /= d_model_width_mult
+            for lr_adjustment_group in [
+                "decoder_attention",
+                "decoder_input_ffn",
+            ]:
+                lr_adjustment_groups[lr_adjustment_group].set_scale(1 / d_model_width_mult)
+
+        if mup_base_d_ffn:
+            d_ffn_width_mult = d_ffn / mup_base_d_ffn
+            scale_initializers_by_dimension(
+                dense2_initializer,
+                width_scale=d_ffn_width_mult**-0.5,
+                depth_scale=(2 * n_blocks) ** -0.5,
+            )
+            lr_adjustment_groups["decoder_output_ffn"].set_scale(1 / d_ffn_width_mult)
+        self.lr_adjustment_groups = lr_adjustment_groups
+
         if gene_categories is not None:
             assert len(gene_categories) == gene_vocab_sizes["gene_id"]
         self.gene_categories = gene_categories
-        self.input_mult = input_mult
-        self.output_mult = output_mult
-        gene_value_vocab_size = gene_vocab_sizes.pop("gene_value")
 
+        gene_value_vocab_size = gene_vocab_sizes.pop("gene_value")
         self.gene_embedding = GeneEmbedding(
             categorical_vocab_sizes=gene_vocab_sizes,
             continuous_vocab_sizes={"gene_value": 3},
             d_model=d_model,
+            embeddings_initializer=embeddings_initializer,
         )
         self.metadata_embedding = MetaDataEmbedding(
             categorical_vocab_sizes={key: vocab_size + 1 for key, vocab_size in metadata_vocab_sizes.items()},
             d_model=d_model,
+            embeddings_initializer=embeddings_initializer,
         )
         self.transformer = Transformer(
             d_model,
@@ -655,8 +938,12 @@ class CellariumGPT(CellariumModel, PredictMixin):
             n_blocks,
             dropout_p,
             use_bias,
-            attn_mult,
-            attn_backend,
+            attention_logits_scale,
+            attention_backend,
+            Wqkv_initializer,
+            Wo_initializer,
+            dense1_initializer,
+            dense2_initializer,
         )
         self.head = nn.ModuleDict(
             {
@@ -664,40 +951,20 @@ class CellariumGPT(CellariumModel, PredictMixin):
                 **{key: nn.Linear(d_model, vocab_size, use_bias) for key, vocab_size in metadata_vocab_sizes.items()},
             }
         )
-        self.initializer_range = initializer_range
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        self.apply(self._init_weights)
+        def _reset_parameters(module):
+            return getattr(module, "_reset_parameters", lambda: None)()
 
-    def _init_weights(self, module) -> None:
-        """Initialize the weights."""
-        if isinstance(module, nn.Linear):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            # assert self.optimizer == "adam", "Only Adam(W) optimizer is supported for now."
-            module.weight.data.normal_(mean=0.0, std=self.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.LayerNorm):
-            if module.bias is not None:
-                module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
+        self.apply(_reset_parameters)
 
-        # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
-        #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
-        #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
-        #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
-        #
-        # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
-        for name, p in module.named_parameters():
-            if name == "dense2.weight" or name == "Wo.weight":
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                p.data.normal_(mean=0.0, std=(self.initializer_range / math.sqrt(2 * self.transformer.n_blocks)))
+        for module in self.head.children():
+            create_initializer(self.head_initializer)(module.weight)
+
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     @cached_property
     def token_to_id(self) -> dict[str, int]:
@@ -728,14 +995,14 @@ class CellariumGPT(CellariumModel, PredictMixin):
         attn_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
 
         # transformer blocks
-        hidden_state_ncd = embedding_ncd * self.input_mult
+        hidden_state_ncd = embedding_ncd * self.embeddings_scale
         hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_ncc)
 
         # compute loss
         loss = 0.0
         loss_fn = nn.CrossEntropyLoss(reduction="none")
         for key, label_nc in labels_nc.items():
-            logits_ncr = self.head[key](hidden_state_ncd) * self.output_mult
+            logits_ncr = self.head[key](hidden_state_ncd) * self.output_logits_scale
             loss += torch.sum(
                 loss_fn(logits_ncr.view(label_nc.numel(), -1), label_nc.view(-1).long())
                 * label_weights_nc[key].view(-1)
@@ -747,6 +1014,7 @@ class CellariumGPT(CellariumModel, PredictMixin):
         #     + development_stage_label_weight_nc.sum()
         #     + sex_label_weight_nc.sum()
         # )
+        loss /= reduce(operator.add, [label_weights_nc[key].sum() for key in labels_nc])
 
         return {"loss": loss}
 
