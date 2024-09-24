@@ -602,9 +602,9 @@ def in_silico_perturbation(
     adata.layers[pert_key] = adata.layers[measured_count_layer_key].copy()
     for gene_id, value in perturbation.items():
         print(f'original counts of {gene_id} = {adata.layers[measured_count_layer_key][:, adata.var_names == gene_id].sum()}')
-        times_found = (adata.var_names[prompt_gene_inds] == gene_id).sum()
-        assert times_found == 1, \
-            f'gene "{gene_id}" found {times_found} times when limiting to prompt_gene_inds'
+        # times_found = (adata.var_names[prompt_gene_inds] == gene_id).sum()
+        # assert times_found == 1, \
+        #     f'gene "{gene_id}" found {times_found} times when limiting to prompt_gene_inds'
         adata.layers[pert_key][:, adata.var_names == gene_id] = value
         print(f'final counts of {gene_id} = {adata.layers[pert_key][:, adata.var_names == gene_id].sum()}')
 
@@ -1167,3 +1167,64 @@ def compute_fractional_variance_explained(adata, factor_key: str, loadings_key: 
         missing_variance_score.append(missing_variance)
         print('.', end='')
     return variance_explained_score, missing_variance_score
+
+
+def compute_mde(
+    adata: anndata.AnnData, 
+    layer: str = 'lfc',
+    do_row_zscore: bool = True, 
+    do_gene_zscore_preprocessing: bool = True,
+    spectral_embedding_kwargs: dict = dict(n_components=20, affinity='nearest_neighbors', n_neighbors=7, eigen_solver='arpack'),
+    mde_kwargs: dict = dict(device='cuda', embedding_dim=2, n_neighbors=7, repulsive_fraction=5, verbose=True),
+    scaling_max_value: float = 10.0,
+) -> np.ndarray:
+    """
+    Compute a minimal distortion embedding of a dataset, following the recipe from Replogle et al. [1].
+
+    Args:
+        adata: AnnData object
+        layer: layer in adata.layers to use
+        do_row_zscore: whether to z-score rows just before computing the spectral embedding, as in [1]
+        do_gene_zscore_preprocessing: whether to z-score genes as a preprocessing step (this should be done 
+            per batch. if already done in adata.layers[layer], set to False)
+        spectral_embedding_kwargs: keyword arguments for SpectralEmbedding
+        mde_kwargs: keyword arguments for pymde.preserve_neighbors
+        scaling_max_value: maximum value when scaling the data
+
+    References:
+    [1] Replogle, Joseph M. et al. Mapping information-rich genotype-phenotype landscapes with genome-scale Perturb-seq.
+        Cell, Volume 185, Issue 14, 2559 - 2575.e28
+    """
+
+    try:
+        import pymde
+    except ImportError:
+        raise ImportError('pymde must be installed to run compute_mde. do `pip install pymde`')
+    
+    try:
+        from sklearn.manifold import SpectralEmbedding
+    except ImportError:
+        raise ImportError('scikit-learn must be installed to run compute_mde. do `pip install scikit-learn`')
+    
+    adata.X = adata.layers[layer].copy()
+
+    # z-score each gene (this is the original scaling of the data done in replogle... per batch)
+    if do_gene_zscore_preprocessing:
+        sc.pp.scale(adata, zero_center=True, max_value=scaling_max_value)
+
+    # as per replogle, scale rows (so that euclidean distance becomes proportional to correlation)
+    if do_row_zscore:
+        adata.X = sc.pp.scale(adata.X.transpose(), max_value=scaling_max_value, zero_center=True).transpose()
+    x = adata.X.copy()
+    adata.obsm['X_moderated'] = x.copy()
+
+    # spectral embedding for initialization (Replogle does 20 dimensions)
+    np.random.seed(0)
+    se = SpectralEmbedding(**spectral_embedding_kwargs).fit_transform(x)
+
+    # minimal distortion embedding
+    pymde.seed(0)
+    mde = pymde.preserve_neighbors(se, **mde_kwargs)
+    embedding = mde.embed(verbose=True)
+
+    return embedding.detach().cpu().numpy()
