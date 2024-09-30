@@ -17,10 +17,10 @@ task query_cellxgene {
         String X_name = "raw"
 
         # software
-        String docker_image = "continuumio/miniconda3:24.7.1-0"
+        String docker_image = "us.gcr.io/broad-dsde-methods/cellxgene_census:1.16.1"
 
         # Hardware-related inputs
-        Int hardware_disk_size_GB = 0
+        Int hardware_disk_size_GB = 50
         Int hardware_boot_disk_size_GB = 20
         Int hardware_cpu_count = 4
         Int hardware_memory_GB = 16
@@ -31,9 +31,6 @@ task query_cellxgene {
     command <<<
 
         set -e
-        echo "Installing cellxgene-census"
-        echo "pip install --no-cache-dir cellxgene-census==1.16.1"
-        pip install --no-cache-dir cellxgene-census==1.16.1
 
         python <<CODE
 
