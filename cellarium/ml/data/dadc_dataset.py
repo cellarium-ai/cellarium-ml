@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from anndata import AnnData
 from boltons.iterutils import chunked_iter
+from torch.utils._pytree import tree_map
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
@@ -54,7 +55,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         ...     iteration_strategy="cache_efficient",
         ...     shuffle=True,
         ...     seed=0,
-        ...     drop_last=True,
+        ...     drop_last_indices=True,
         ... )
 
     Args:
@@ -95,7 +96,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def __init__(
         self,
         dadc: DistributedAnnDataCollection | AnnData,
-        batch_keys: dict[str, AnnDataField],
+        batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField],
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
@@ -149,7 +150,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
         self.epoch = epoch
 
-    def __getitem__(self, idx: int | list[int] | slice) -> dict[str, np.ndarray]:
+    def __getitem__(self, idx: int | list[int] | slice) -> dict[str, dict[str, np.ndarray] | np.ndarray]:
         r"""
         Returns a dictionary containing the data from the :attr:`dadc` with keys specified by the :attr:`batch_keys`
         at the given index ``idx``.
@@ -157,8 +158,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
         data = {}
         adata = self.dadc[idx]
-        for key, field in self.batch_keys.items():
-            data[key] = field(adata)
+        data = tree_map(lambda field: field(adata), self.batch_keys)
 
         # for testing purposes
         if self.test_mode:
