@@ -94,12 +94,12 @@ def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
         c_range = torch.arange(c, device=device, dtype=torch.float32)
         diag_mask_ncc = (c_range[:, None].expand(n, -1, 1) - c_range.expand(n, 1, -1)).abs()
         prompt_mask_n1c = 1 - prompt_mask_nc[:, None, :].float()
-        attn_mask_ncc = diag_mask_ncc * prompt_mask_n1c
-        return attn_mask_ncc == 0
+        attention_mask_ncc = diag_mask_ncc * prompt_mask_n1c
+        return attention_mask_ncc == 0
     else:
         diag_mask_cc = torch.eye(c, dtype=torch.bool, device=device)
-        attn_mask_ncc = prompt_mask_nc[:, None, :] | diag_mask_cc
-        return attn_mask_ncc
+        attention_mask_ncc = prompt_mask_nc[:, None, :] | diag_mask_cc
+        return attention_mask_ncc
 
 
 class MultiHeadAttention(nn.Module):
@@ -139,6 +139,7 @@ class MultiHeadAttention(nn.Module):
         dropout_p: float,
         attention_logits_scale: float,
         attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
     ) -> None:
@@ -151,6 +152,7 @@ class MultiHeadAttention(nn.Module):
         self.dropout_p = dropout_p
         self.attention_logits_scale = attention_logits_scale
         self.attention_backend = attention_backend
+        self.attention_softmax_fp32 = attention_softmax_fp32
         self.Wqkv_initializer = Wqkv_initializer
         self.Wo_initializer = Wo_initializer
 
@@ -185,7 +187,7 @@ class MultiHeadAttention(nn.Module):
         query_ncd: torch.Tensor,
         key_ncd: torch.Tensor,
         value_ncd: torch.Tensor,
-        attn_mask_ncc: torch.Tensor,
+        attention_mask_ncc: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
@@ -195,7 +197,7 @@ class MultiHeadAttention(nn.Module):
                 Key tensor of shape ``(n, c, d)``.
             value_ncd:
                 Value tensor of shape ``(n, c, d)``.
-            attn_mask_ncc:
+            attention_mask_ncc:
                 Attention mask tensor of shape ``(n, c, c)``.
 
         Returns:
@@ -214,20 +216,27 @@ class MultiHeadAttention(nn.Module):
 
         if self.attention_backend == "torch":
             key_nhck = key_nhck * torch.tensor(scale_factor, dtype=key_nhck.dtype)
-            attn_logits_nhcc = torch.matmul(query_nhck, key_nhck.transpose(-1, -2))
+            attention_logits_nhcc = torch.matmul(query_nhck, key_nhck.transpose(-1, -2))
             neg_inf = torch.tensor(float("-inf"), dtype=torch.float32)
-            attn_bias_ncc = torch.where(attn_mask_ncc, 0, neg_inf).to(attn_logits_nhcc.dtype)
-            attn_logits_nhcc += attn_bias_ncc.unsqueeze(1).expand(attn_logits_nhcc.shape)
-            attn_weights_nhcc = torch.softmax(attn_logits_nhcc.float(), dim=-1).to(attn_logits_nhcc.dtype)
-            attn_weights_nhcc = nn.functional.dropout(attn_weights_nhcc, self.dropout_p, training=self.training)
-            output_nhck = torch.matmul(attn_weights_nhcc, value_nhck)
+            attention_bias_ncc = torch.where(attention_mask_ncc, 0, neg_inf).to(attention_logits_nhcc.dtype)
+            attention_logits_nhcc += attention_bias_ncc.unsqueeze(1).expand(attention_logits_nhcc.shape)
+            if self.attention_softmax_fp32 and attention_logits_nhcc.dtype != torch.float32:
+                attention_weights_nhcc = nn.functional.softmax(attention_logits_nhcc.float(), dim=-1).to(
+                    attention_logits_nhcc.dtype
+                )
+            else:
+                attention_weights_nhcc = nn.functional.softmax(attention_logits_nhcc, dim=-1)
+            attention_weights_nhcc = nn.functional.dropout(
+                attention_weights_nhcc, self.dropout_p, training=self.training
+            )
+            output_nhck = torch.matmul(attention_weights_nhcc, value_nhck)
         else:
             with sdpa_kernel(self.backend_map[self.attention_backend]):
                 output_nhck = nn.functional.scaled_dot_product_attention(
                     query_nhck,
                     key_nhck,
                     value_nhck,
-                    attn_mask=attn_mask_ncc.unsqueeze(1),
+                    attention_mask=attention_mask_ncc.unsqueeze(1),
                     dropout_p=self.dropout_p if self.training else 0.0,
                     scale=scale_factor,
                 )
@@ -263,7 +272,7 @@ class PositionWiseFFN(nn.Module):
     ) -> None:
         super().__init__()
         self.dense1 = nn.Linear(d_model, d_ffn, bias=use_bias)
-        self.relu = nn.ReLU()
+        self.activation = nn.GELU()
         self.dense2 = nn.Linear(d_ffn, d_model, bias=use_bias)
         self.dense1_initializer = dense1_initializer
         self.dense2_initializer = dense2_initializer
@@ -287,7 +296,7 @@ class PositionWiseFFN(nn.Module):
         Returns:
             The output hidden state tensor of shape ``(n, c, d)``.
         """
-        return self.dense2(self.relu(self.dense1(hidden_state_ncd)))  # _ncd
+        return self.dense2(self.activation(self.dense1(hidden_state_ncd)))  # _ncd
 
 
 class NormAdd(nn.Module):
@@ -301,10 +310,10 @@ class NormAdd(nn.Module):
             Dropout probability.
     """
 
-    def __init__(self, norm_shape: int, dropout_p: float) -> None:
+    def __init__(self, norm_shape: int, dropout_p: float, use_bias: bool) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout_p)
-        self.ln = nn.LayerNorm(norm_shape)
+        self.ln = nn.LayerNorm(norm_shape, bias=use_bias)
 
         self._reset_parameters()
 
@@ -367,6 +376,7 @@ class TransformerBlock(nn.Module):
         attention_logits_scale: float,
         use_bias: bool,
         attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
         dense1_initializer: dict[str, Any],
@@ -380,10 +390,11 @@ class TransformerBlock(nn.Module):
             dropout_p,
             attention_logits_scale,
             attention_backend,
+            attention_softmax_fp32,
             Wqkv_initializer,
             Wo_initializer,
         )
-        self.normadd1 = NormAdd(d_model, dropout_p)
+        self.normadd1 = NormAdd(d_model, dropout_p, use_bias)
         self.ffn = PositionWiseFFN(
             d_ffn,
             d_model,
@@ -391,7 +402,7 @@ class TransformerBlock(nn.Module):
             dense1_initializer,
             dense2_initializer,
         )
-        self.normadd2 = NormAdd(d_model, dropout_p)
+        self.normadd2 = NormAdd(d_model, dropout_p, use_bias)
 
     def reset_parameters(self) -> None:
         self.attention._reset_parameters()
@@ -402,19 +413,19 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        attn_mask_ncc: torch.Tensor,
+        attention_mask_ncc: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             hidden_state_ncd:
                 Hidden state tensor of shape ``(n, c, d)``.
-            attn_mask_ncc:
+            attention_mask_ncc:
                 Attention mask tensor of shape ``(n, c, c)``.
 
         Returns:
             The output hidden state tensor of shape ``(n, c, d)``.
         """
-        hidden_state_ncd = self.normadd1(hidden_state_ncd, lambda X: self.attention(X, X, X, attn_mask_ncc))
+        hidden_state_ncd = self.normadd1(hidden_state_ncd, lambda X: self.attention(X, X, X, attention_mask_ncc))
         return self.normadd2(hidden_state_ncd, lambda Y: self.ffn(Y))  # _ncd
 
 
@@ -459,6 +470,7 @@ class Transformer(nn.Module):
         use_bias: bool,
         attention_logits_scale: float,
         attention_backend: Literal["math", "flash", "mem_efficient"],
+        attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
         dense1_initializer: dict[str, Any],
@@ -476,6 +488,7 @@ class Transformer(nn.Module):
                     attention_logits_scale,
                     use_bias,
                     attention_backend,
+                    attention_softmax_fp32,
                     Wqkv_initializer,
                     Wo_initializer,
                     dense1_initializer,
@@ -488,20 +501,20 @@ class Transformer(nn.Module):
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        attn_mask_ncc: torch.Tensor,
+        attention_mask_ncc: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             hidden_state_ncd:
                 Hidden state tensor of shape ``(n, c, d)``.
-            attn_mask_ncc:
+            attention_mask_ncc:
                 Attention mask tensor of shape ``(n, c, c)``.
 
         Returns:
             The output hidden state tensor of shape ``(n, c, d)``.
         """
         for block in self.blocks:
-            hidden_state_ncd = block(hidden_state_ncd, attn_mask_ncc)
+            hidden_state_ncd = block(hidden_state_ncd, attention_mask_ncc)
 
         return hidden_state_ncd
 
@@ -609,6 +622,87 @@ class DummyTokenizer(torch.nn.Module):
         return kwargs
 
 
+class PredictTokenizer(torch.nn.Module):
+    def __init__(
+        self,
+        max_total_mrna_umis: int,
+        gene_vocab_sizes: dict[str, int],
+        metadata_vocab_sizes: dict[str, int],
+        ontology_infos: dict[str, dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.max_total_mrna_umis = max_total_mrna_umis
+        self.gene_vocab_sizes = gene_vocab_sizes
+        self.metadata_vocab_sizes = metadata_vocab_sizes
+        self.ontology_infos = ontology_infos
+
+    def forward(
+        self,
+        metadata_tokens_n: dict[str, torch.Tensor],
+        metadata_prompt_masks_n: dict[str, torch.Tensor],
+        gene_tokens_nc: dict[str, torch.Tensor],
+        gene_prompt_mask_nc: torch.Tensor,
+    ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
+        ### GENE TOKENS ###
+
+        ## gene value ##
+        gene_value_nc = gene_tokens_nc.pop("gene_value")
+        total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis")
+        device = gene_value_nc.device
+        # downsample gene values
+        max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
+        downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
+        gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
+        gene_value_nc = torch.binomial(gene_value_nc, gene_downsample_p_nc)
+        total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc)
+
+        gene_query_mask_nc = ~gene_prompt_mask_nc
+        gene_value_nc3 = torch.stack(
+            [
+                torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(),
+                gene_query_mask_nc.float(),
+                torch.log1p(total_mrna_umis_nc),
+            ],
+            dim=2,
+        )
+        gene_tokens_nc["gene_value"] = gene_value_nc3
+
+        ### METADATA TOKENS ###
+
+        ## metadata tokens ##
+        # assign token codes based on the ontology info
+        # token values not in the ontology are treated as unmeasured and assigned a code value of -1
+        for key, ontology_info in self.ontology_infos.items():
+            assert self.metadata_vocab_sizes[key] == len(ontology_info["labels"])
+            metadata_tokens_n[key] = torch.tensor(
+                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["labels"]).codes,
+                dtype=torch.int,
+            )
+        # create metadata query and prompt masks
+        metadata_prompt_mask_nm = torch.stack([metadata_prompt_masks_n[key] for key in metadata_tokens_n], dim=1)
+        metadata_query_mask_nm = ~metadata_prompt_mask_nm
+
+        # clamp unmeasured tokens to 0
+        # for key, metadata_token_n in metadata_tokens_n.items():
+        #     metadata_tokens_n[key] = metadata_token_n.clamp(0).int()
+
+        # impute mask token for unmeasured metadata
+        # mask token is the last token in the vocabulary
+        for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
+            metadata_tokens_n[key] = torch.where(
+                metadata_query_mask_nm[:, i], self.metadata_vocab_sizes[key], metadata_token_n
+            ).int()
+
+        ### PROMPT MASK ###
+        prompt_mask_nc = torch.cat([gene_prompt_mask_nc, metadata_prompt_mask_nm], dim=1)
+
+        return {
+            "gene_tokens_nc": gene_tokens_nc,
+            "metadata_tokens_n": metadata_tokens_n,
+            "prompt_mask_nc": prompt_mask_nc,
+        }
+
+
 class Tokenizer(torch.nn.Module):
     """
     Tokenizer for the Cellarium GPT model.
@@ -657,28 +751,29 @@ class Tokenizer(torch.nn.Module):
         self,
         metadata_tokens_n: dict[str, torch.Tensor],
         gene_tokens_n: dict[str, torch.Tensor],
-        gene_value_ng: torch.Tensor,
+        gene_tokens_ng: dict[str, torch.Tensor],
         gene_id_g: torch.Tensor | None = None,
-        measured_genes_mask_ng: torch.Tensor | None = None,
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
         ### GENE TOKENS ###
+        n, g = gene_tokens_ng["gene_value"].shape
+        device = gene_tokens_ng["gene_value"].device
 
-        ## gene measurement (assay, suspension type, etc.)
+        ## gene measurement tokens (assay, suspension type, etc.) ##
         gene_tokens_nc = {key: gene_tokens_n[key][:, None].expand(-1, self.context_len).int() for key in gene_tokens_n}
 
-        shuffle_idx_ng = torch.argsort(torch.rand_like(gene_value_ng), dim=-1)
-        shuffle_idx_nc = shuffle_idx_ng[:, : self.context_len]
-
         ## gene id ##
-        n, g = gene_value_ng.shape
-        device = gene_value_ng.device
         if gene_id_g is None:
             gene_id_g = torch.arange(g, device=device)
-        gene_id_ng = gene_id_g.expand(gene_value_ng.shape)
-        gene_tokens_nc["gene_id"] = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+        gene_tokens_ng["gene_id"] = gene_id_g.expand(n, g)
+
+        shuffle_idx_ng = torch.argsort(torch.rand((n, g), dtype=torch.float32, device=device), dim=-1)
+        shuffle_idx_nc = shuffle_idx_ng[:, : self.context_len]
+
+        for key, gene_token_ng in gene_tokens_ng.items():
+            gene_tokens_nc[key] = torch.gather(gene_token_ng, dim=-1, index=shuffle_idx_nc)
 
         ## gene value ##
-        gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
+        gene_value_nc = gene_tokens_nc.pop("gene_value")
         total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis")
         # downsample gene values
         max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
@@ -704,8 +799,8 @@ class Tokenizer(torch.nn.Module):
         # create prompt and query masks
         gene_query_mask_nc = torch.arange(self.context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
         gene_prompt_mask_nc = ~gene_query_mask_nc
-        if measured_genes_mask_ng is not None:
-            measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
+        if "measured_genes_mask" in gene_tokens_nc:
+            measured_genes_mask_nc = gene_tokens_nc.pop("measured_genes_mask")
             gene_query_mask_nc = gene_query_mask_nc & measured_genes_mask_nc
             gene_prompt_mask_nc = gene_prompt_mask_nc & measured_genes_mask_nc
 
@@ -734,9 +829,11 @@ class Tokenizer(torch.nn.Module):
                 dtype=torch.int,
             )
         # create metadata query and prompt masks
-        metadata_query_mask_weights_n = prefix_len_n / (self.max_prefix_len + 1)
         m = len(metadata_tokens_n)
-        metadata_query_mask_nm = torch.bernoulli(metadata_query_mask_weights_n[:, None].expand(-1, m)).bool()
+        metadata_prefix_len_n = torch.randint(0, m + 1, (n,), device=device)
+        metadata_prefix_mask_nm = torch.arange(m, device=device) >= metadata_prefix_len_n[:, None]
+        shuffle_idx_nm = torch.argsort(torch.rand_like(metadata_prefix_mask_nm, dtype=torch.float32), dim=-1)
+        metadata_query_mask_nm = torch.gather(metadata_prefix_mask_nm, dim=-1, index=shuffle_idx_nm)
         metadata_prompt_mask_nm = ~metadata_query_mask_nm
         metadata_measured_mask_nm = torch.stack(
             [metadata_token_n < 0 for metadata_token_n in metadata_tokens_n.values()], dim=1
@@ -846,6 +943,7 @@ class CellariumGPT(CellariumModel, PredictMixin):
         dropout_p: float = 0.0,
         use_bias: bool = False,
         attention_backend: Literal["math", "flash", "mem_efficient", "torch"] = "mem_efficient",
+        attention_softmax_fp32: bool = True,
         gene_categories: np.ndarray | None = None,
         # tunable hyperparameters
         initializer_range: float = 0.02,
@@ -904,6 +1002,11 @@ class CellariumGPT(CellariumModel, PredictMixin):
                 "decoder_input_ffn",
             ]:
                 lr_adjustment_groups[lr_adjustment_group].set_scale(1 / d_model_width_mult)
+        else:
+            scale_initializers_by_dimension(
+                Wo_initializer,
+                depth_scale=(2 * n_blocks) ** -0.5,
+            )
 
         if mup_base_d_ffn:
             d_ffn_width_mult = d_ffn / mup_base_d_ffn
@@ -913,6 +1016,12 @@ class CellariumGPT(CellariumModel, PredictMixin):
                 depth_scale=(2 * n_blocks) ** -0.5,
             )
             lr_adjustment_groups["decoder_output_ffn"].set_scale(1 / d_ffn_width_mult)
+        else:
+            scale_initializers_by_dimension(
+                dense2_initializer,
+                depth_scale=(2 * n_blocks) ** -0.5,
+            )
+
         self.lr_adjustment_groups = lr_adjustment_groups
 
         if gene_categories is not None:
@@ -940,6 +1049,7 @@ class CellariumGPT(CellariumModel, PredictMixin):
             use_bias,
             attention_logits_scale,
             attention_backend,
+            attention_softmax_fp32,
             Wqkv_initializer,
             Wo_initializer,
             dense1_initializer,
@@ -992,11 +1102,11 @@ class CellariumGPT(CellariumModel, PredictMixin):
         )
 
         # create attention mask
-        attn_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
+        attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
 
         # transformer blocks
         hidden_state_ncd = embedding_ncd * self.embeddings_scale
-        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_ncc)
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
 
         # compute loss
         loss = 0.0
@@ -1008,24 +1118,18 @@ class CellariumGPT(CellariumModel, PredictMixin):
                 * label_weights_nc[key].view(-1)
             )
 
-        # loss /= (
-        #     gene_label_weight_nc.sum()
-        #     + cell_type_label_weight_nc.sum()
-        #     + development_stage_label_weight_nc.sum()
-        #     + sex_label_weight_nc.sum()
-        # )
         loss /= reduce(operator.add, [label_weights_nc[key].sum() for key in labels_nc])
 
         return {"loss": loss}
 
-    # @torch.inference_mode()
-    def test(
+    def validate(
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        gene_id_g: torch.Tensor,
-        # gene_categories: pd.Series,
+        metadata_tokens_n: dict[str, torch.Tensor],
+        gene_tokens_n: dict[str, torch.Tensor],
         gene_value_ng: torch.Tensor,
+        gene_id_g: torch.Tensor,
         total_mrna_umis_n: torch.Tensor,
         obs_names_n: np.ndarray,
         batch_idx: int,
@@ -1038,7 +1142,7 @@ class CellariumGPT(CellariumModel, PredictMixin):
         # loss = self(gene_id_g, gene_value_ng, total_mrna_umis_n, measured_genes_mask_ng)["loss"]
         # pl_module.log("test_loss", loss, sync_dist=True, on_epoch=True)
 
-        losses: dict[int, dict[int, torch.Tensor]] = defaultdict(dict)
+        losses: dict[str, dict[int, dict[int, torch.Tensor]]] = defaultdict(dict)
         suffix_len = 500
         n_seeds = 3
         prefix_lens = [0, 1, 10, 50, 500, 1000, 3000]
@@ -1048,6 +1152,12 @@ class CellariumGPT(CellariumModel, PredictMixin):
             shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
 
             for prefix_len in prefix_lens:
+                context_len = prefix_len + suffix_len
+                prefix_len_n = torch.tensor([prefix_len], device=device)
+                ### GENE TOKENS ###
+                gene_tokens_nc = {
+                    key: gene_tokens_n[key][:, None].expand(-1, context_len).int() for key in gene_tokens_n
+                }
                 shuffle_idx_nc = torch.cat(
                     [
                         shuffle_idx_ng[:, :prefix_len],
@@ -1055,210 +1165,153 @@ class CellariumGPT(CellariumModel, PredictMixin):
                     ],
                     dim=1,
                 )
-                gene_id_nc = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+                ## gene id ##
+                gene_tokens_nc["gene_id"] = torch.gather(gene_id_ng, dim=-1, index=shuffle_idx_nc)
+                ## gene value ##
                 gene_value_nc = torch.gather(gene_value_ng, dim=-1, index=shuffle_idx_nc)
-                total_mrna_umis_nc = total_mrna_umis_n[:, None].expand(gene_id_nc.shape)
+                total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis")
+                # downsample gene values
+                max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
+                downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
+                gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
+                gene_value_nc = torch.binomial(gene_value_nc, gene_downsample_p_nc)
+                total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc)
+                # create prompt and query masks
+                gene_query_mask_nc = torch.arange(context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
+                gene_prompt_mask_nc = ~gene_query_mask_nc
                 if measured_genes_mask_ng is not None:
                     measured_genes_mask_nc = torch.gather(measured_genes_mask_ng, dim=-1, index=shuffle_idx_nc)
-                else:
-                    measured_genes_mask_nc = None
-                label_ns = gene_value_nc[:, -suffix_len:].long()
-                gene_value_nc[:, -suffix_len:] = -1
+                    gene_query_mask_nc = gene_query_mask_nc & measured_genes_mask_nc
+                    gene_prompt_mask_nc = gene_prompt_mask_nc & measured_genes_mask_nc
 
-                context_len = prefix_len + suffix_len
-                prefix_len_n = torch.tensor([prefix_len], device=device)
-                attn_mask_ncc = prefix_diagonal_mask(context_len, prefix_len_n, measured_genes_mask_nc)
+                gene_value_nc3 = torch.stack(
+                    [
+                        torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(),
+                        gene_query_mask_nc.float(),
+                        torch.log1p(total_mrna_umis_nc),
+                    ],
+                    dim=2,
+                )
+                gene_tokens_nc["gene_value"] = gene_value_nc3
+                # gene label
+                gene_value_vocab_size = self.gene_vocab_sizes["gene_value"]
+                gene_label_nc = gene_value_nc.clamp(0, gene_value_vocab_size - 1).int()
 
-                # gene type embedding
-                gene_type_nc = torch.zeros((n, context_len), dtype=torch.long, device=device)
-                suffix_mask_nc = torch.arange(context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
-                gene_type_nc.masked_fill_(suffix_mask_nc, 1)
+                ### METADATA TOKENS ###
 
-                gene_embedding = self.gene_embedding(gene_type_nc, gene_id_nc, gene_value_nc, total_mrna_umis_nc)
-                hidden_state = gene_embedding * self.input_mult
-                hidden_state = self.transformer(hidden_state, attn_mask_ncc)
-                logits_nsm = self.head(hidden_state[:, -suffix_len:]) * self.output_mult
+                ## metadata tokens ##
+                # assign token codes based on the ontology info
+                # token values not in the ontology are treated as unmeasured and assigned a code value of -1
+                for key, ontology_info in self.ontology_infos.items():
+                    assert self.metadata_vocab_sizes[key] == len(ontology_info["labels"])
+                    metadata_tokens_n[key] = torch.tensor(
+                        pd.Categorical(metadata_tokens_n[key], categories=ontology_info["labels"]).codes,
+                        dtype=torch.int,
+                    )
+                # create metadata query and prompt masks
+                m = len(metadata_tokens_n)
+                metadata_query_mask_nm = torch.ones((n, m), dtype=torch.bool)
+                metadata_prompt_mask_nm = ~metadata_query_mask_nm
+                metadata_measured_mask_nm = torch.stack(
+                    [metadata_token_n < 0 for metadata_token_n in metadata_tokens_n.values()], dim=1
+                ).bool()
+                metadata_query_mask_nm = metadata_query_mask_nm & metadata_measured_mask_nm
+                metadata_prompt_mask_nm = metadata_prompt_mask_nm & metadata_measured_mask_nm
+                # clamp unmeasured tokens to 0
+                for key, metadata_token_n in metadata_tokens_n.items():
+                    metadata_tokens_n[key] = metadata_token_n.clamp(0).int()
+                # metadata labels
+                metadata_labels_n = {key: metadata_tokens_n[key].clone() for key in metadata_tokens_n}
+                # impute mask token for unmeasured metadata
+                # mask token is the last token in the vocabulary
+                for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
+                    metadata_tokens_n[key] = torch.where(
+                        metadata_query_mask_nm[:, i], self.metadata_vocab_sizes[key], metadata_token_n
+                    ).int()
 
-                label_mask_ns = label_ns < self.max_value + 1
-                label_weight_ns = 1 / label_mask_ns.sum(dim=1, keepdim=True).expand(-1, suffix_len)
+                ### PROMPT MASK ###
+                prompt_mask_nc = torch.cat([gene_prompt_mask_nc, metadata_prompt_mask_nm], dim=1)
+
+                ### LABELS ###
+                block_label_nc = torch.block_diag(
+                    gene_label_nc,
+                    *[metadata_label_n.unsqueeze(-1) for metadata_label_n in metadata_labels_n.values()],
+                )
+                labels_nc = {
+                    key: block_label_nc[n * i : n * (i + 1)] for i, key in enumerate(["gene"] + list(metadata_tokens_n))
+                }
+
+                ### LABEL WEIGHTS ###
+                block_label_weight_nc = torch.block_diag(
+                    gene_query_mask_nc / gene_query_mask_nc.sum(dim=-1, keepdim=True),
+                    *[metadata_query_mask_nm[:, i].unsqueeze(-1).float() for i in range(m)],
+                )
+                label_weights_nc = {
+                    key: block_label_weight_nc[n * i : n * (i + 1)]
+                    for i, key in enumerate(["gene"] + list(metadata_tokens_n))
+                }
+
+                # embed the gene IDs, values, and total mRNA UMIs
+                embedding_ncd = torch.cat(
+                    [
+                        self.gene_embedding(gene_tokens_nc),
+                        self.metadata_embedding(metadata_tokens_n),
+                    ],
+                    dim=1,
+                )
+
+                # create attention mask
+                attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
+
+                # transformer blocks
+                hidden_state_ncd = embedding_ncd * self.embeddings_scale
+                hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
+
+                # compute loss
                 loss_fn = nn.CrossEntropyLoss(reduction="none")
-                label_weights = label_weight_ns[label_mask_ns]
-                loss = (
-                    loss_fn(logits_nsm[label_mask_ns], label_ns[label_mask_ns]) * label_weights
-                ).sum() / label_weights.sum()
-                losses[prefix_len][i] = loss
+                for key, label_nc in labels_nc.items():
+                    logits_ncr = self.head[key](hidden_state_ncd) * self.output_logits_scale
+                    loss = (
+                        torch.sum(
+                            loss_fn(logits_ncr.view(label_nc.numel(), -1), label_nc.view(-1).long())
+                            * label_weights_nc[key].view(-1)
+                        )
+                        / label_weights_nc[key].sum()
+                    )
+                    losses[key][prefix_len][i] = loss
 
-                # if trainer.global_rank == batch_idx == i == 0:
-                #     self._log_plots(
-                #         trainer,
-                #         label_ns,
-                #         logits_nsm,
-                #         total_mrna_umis_n,
-                #         prefix_len,
-                #     )
-
-        loss_dict = {}
-        for prefix_len in prefix_lens:
-            loss = torch.mean(torch.stack([losses[prefix_len][i] for i in range(n_seeds)], dim=0))
-            loss_dict[f"test_loss_prefix_{prefix_len}"] = loss
-        pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
+        for key in losses:
+            loss_dict = {}
+            for prefix_len in prefix_lens:
+                loss = torch.mean(torch.stack([losses[key][prefix_len][i] for i in range(n_seeds)], dim=0))
+                loss_dict[f"val_loss_{key}/prefix_{prefix_len}"] = loss
+            pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True)
 
     def predict(
         self,
-        prompt_name_ns: np.ndarray | None,
-        prompt_value_ns: torch.Tensor | None,
-        prompt_total_mrna_umis_n: torch.Tensor | None,
-        prompt_measured_genes_mask_ns: torch.Tensor | None,
-        query_name_nq: np.ndarray | None,
-        query_total_mrna_umis_n: torch.Tensor | None,
+        metadata_tokens_n: dict[str, torch.Tensor],
+        gene_tokens_nc: dict[str, torch.Tensor],
+        prompt_mask_nc: torch.Tensor | None,
     ) -> dict[str, np.ndarray | torch.Tensor]:
-        if prompt_name_ns is not None and query_name_nq is not None:
-            n, q = query_name_nq.shape
-            device = query_total_mrna_umis_n.device
-            gene_name_nc = np.concatenate([prompt_name_ns, query_name_nq], axis=1)
-            gene_value_nc = torch.cat([prompt_value_ns, -torch.ones((n, q), device=device)], dim=1)
-            total_mrna_umis_nc = torch.cat(
-                [
-                    prompt_total_mrna_umis_n[:, None].expand(prompt_name_ns.shape),
-                    query_total_mrna_umis_n[:, None].expand(query_name_nq.shape),
-                ],
-                dim=-1,
-            )
-            measured_genes_mask_nc = torch.cat(
-                [
-                    prompt_measured_genes_mask_ns,
-                    torch.ones((n, q), dtype=torch.bool, device=device),
-                ],
-                dim=1,
-            )
-        elif prompt_name_ns is not None:
-            gene_name_nc = prompt_name_ns
-            gene_value_nc = prompt_value_ns
-            total_mrna_umis_nc = prompt_total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
-            measured_genes_mask_nc = prompt_measured_genes_mask_ns
-        else:
-            n, q = query_name_nq.shape
-            device = query_total_mrna_umis_n.device
-            gene_name_nc = query_name_nq
-            gene_value_nc = -torch.ones((n, q), device=device)
-            total_mrna_umis_nc = query_total_mrna_umis_n[:, None].expand(gene_name_nc.shape)
-            measured_genes_mask_nc = torch.ones((n, q), dtype=torch.bool, device=device)
-
-        device = gene_value_nc.device
-        gene_id_nc = torch.tensor(self.vectorized_token_to_id(gene_name_nc), dtype=torch.long, device=device)
-
-        if prompt_name_ns is not None and prompt_value_ns is not None:
-            prefix_len = prompt_value_ns.shape[1]
-        else:
-            prefix_len = 0
-
-        attn_mask_cc = prefix_diagonal_mask(
-            gene_id_nc.shape[1], torch.tensor([prefix_len], device=device), measured_genes_mask_nc
+        # embed the gene IDs, values, and total mRNA UMIs
+        embedding_ncd = torch.cat(
+            [
+                self.gene_embedding(gene_tokens_nc),
+                self.metadata_embedding(metadata_tokens_n),
+            ],
+            dim=1,
         )
-        gene_embedding_ncd = self.gene_embedding(gene_id_nc, gene_value_nc, total_mrna_umis_nc)
-        hidden_state_ncd = gene_embedding_ncd * self.input_mult
-        hidden_state_ncd = self.transformer(hidden_state_ncd, attn_mask_cc)
-        logits_nqm = self.head(hidden_state_ncd[:, prefix_len:]) * self.output_mult
 
-        return {
-            "logits_nqm": logits_nqm,
-            # "query_name_nq": query_name_nq,
-        }
+        # create attention mask
+        attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
 
-    # def log_prob(self, var_names_ng: np.ndarray, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor) -> torch.Tensor:
-    #     prompt_value_ns = None
-    #     log_probs = []
-    #     ndx = torch.arange(x_ng.shape[0], device=x_ng.device)
+        # transformer blocks
+        hidden_state_ncd = embedding_ncd * self.embeddings_scale
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
 
-    #     for i in tqdm.tqdm(range(var_names_ng.shape[1])):
-    #         if prompt_value_ns is None:
-    #             prompt_name_ns = None
-    #         else:
-    #             prompt_name_ns = var_names_ng[:, :i]
-
-    #         logits_n1p: torch.Tensor = self.predict(
-    #             prompt_name_ns, prompt_value_ns, var_names_ng[:, i : i + 1], total_mrna_umis_n
-    #         )["logits_nqp"]
-    #         logits_n1p = logits_n1p - logits_n1p.logsumexp(dim=-1, keepdim=True)
-    #         value_n1 = x_ng[:, i : i + 1]
-    #         log_prob_n1 = logits_n1p[ndx[:, None], 0, value_n1.long()]
-    #         log_probs.append(log_prob_n1)
-    #         if prompt_value_ns is None:
-    #             prompt_value_ns = value_n1
-    #         else:
-    #             prompt_value_ns = torch.cat([prompt_value_ns, value_n1], dim=1)
-
-    #     return torch.cat(log_probs, dim=1)
-
-    # @torch.inference_mode()
-    # def sample(
-    #     self, var_names_ng: np.ndarray, total_mrna_umis_n: torch.Tensor, prompt_value_ns: torch.Tensor | None
-    # ) -> dict[str, torch.Tensor]:
-    #     if prompt_value_ns is None:
-    #         prompt_len = 0
-    #     else:
-    #         prompt_len = prompt_value_ns.shape[1]
-    #     total_len = var_names_ng.shape[1]
-
-    #     for i in tqdm.tqdm(range(prompt_len, total_len)):
-    #         if prompt_value_ns is None:
-    #             prompt_name_ns = None
-    #         else:
-    #             prompt_name_ns = var_names_ng[:, :i]
-
-    #         logits_n1p = self.predict(prompt_name_ns, prompt_value_ns, var_names_ng[:, i : i + 1], total_mrna_umis_n)[
-    #             "logits_nqp"
-    #         ]
-    #         probs_np = logits_n1p[:, 0].softmax(dim=-1)
-    #         value_n1 = torch.multinomial(probs_np, 1)
-    #         if prompt_value_ns is None:
-    #             prompt_value_ns = value_n1
-    #         else:
-    #             prompt_value_ns = torch.cat([prompt_value_ns, value_n1], dim=1)
-    #     return prompt_value_ns
-
-    def _log_plots(
-        self,
-        trainer: pl.Trainer,
-        value_nq: torch.Tensor,
-        logits_nqg: torch.Tensor,
-        total_mrna_umis_n: torch.Tensor,
-        prefix_len: int,
-    ) -> None:
-        import matplotlib.pyplot as plt
-
-        nonzero_mask_nq = (value_nq > 0) & (value_nq < self.max_value + 1)
-        zero_mask_nq = value_nq == 0
-        q = value_nq.shape[1]
-
-        total_mrna_umis_nq = total_mrna_umis_n[:, None].expand(-1, q)
-
-        fig = plt.figure(figsize=(12, 8))
-
-        for i in range(12):
-            plt.subplot(3, 4, i + 1)
-            if i < 8:
-                label = value_nq[nonzero_mask_nq][i].item()
-                logits = logits_nqg[nonzero_mask_nq][i].cpu()
-                total_mrna_umis = total_mrna_umis_nq[nonzero_mask_nq][i].item()
-            else:
-                label = value_nq[zero_mask_nq][i].item()
-                logits = logits_nqg[zero_mask_nq][i].cpu()
-                total_mrna_umis = total_mrna_umis_nq[zero_mask_nq][i].item()
-
-            x = torch.arange(0, min(label * 3 + 5, self.max_value + 1))
-            y = logits.softmax(dim=-1)[: len(x)]
-            plt.plot(x, y, "o")
-            assert isinstance(label, int)
-            plt.vlines(label, 0, y[label], color="r")
-            plt.title(f"total UMIs={total_mrna_umis}, x={label}")
-
-        plt.tight_layout()
-
-        for logger in trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                logger.experiment.add_figure(
-                    f"val_pred_prefix_{prefix_len + 1}",
-                    fig,
-                    global_step=trainer.global_step,
-                )
+        # compute loss
+        m = len(metadata_tokens_n)
+        output = {"gene_value": self.head["gene_value"](hidden_state_ncd[:, :-m]) * self.output_logits_scale}
+        for i, key in enumerate(metadata_tokens_n):
+            output[key] = self.head[key](hidden_state_ncd[:, -m + i]) * self.output_logits_scale
+        return output
