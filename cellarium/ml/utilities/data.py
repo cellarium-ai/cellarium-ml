@@ -107,6 +107,8 @@ def collate_fn(
             # If so, just take the first one
             value = batch[0][key]
         elif isinstance(batch[0][key], dict):
+            if not key.endswith("_n") or not key.endswith("_ng"):
+                raise ValueError(f"Sub-dictionary '{key}' must have a batch dimension (end with '_n' or '_ng').")
             subkeys = batch[0][key].keys()  # type: ignore[union-attr]
             if len(batch) > 1 and not all(subkeys == data[key].keys() for data in batch[1:]):  # type: ignore[union-attr]
                 raise ValueError(f"All '{key}' sub-dictionaries in the batch must have the same subkeys.")
