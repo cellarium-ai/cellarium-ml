@@ -37,7 +37,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ...     iteration_strategy="cache_efficient",
         ...     shuffle=True,
         ...     seed=0,
-        ...     drop_last=True,
+        ...     drop_last_indices=True,
         ...     num_workers=4,
         ... )
         >>> dm.setup()
