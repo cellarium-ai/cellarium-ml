@@ -219,7 +219,7 @@ class CellariumModule(pl.LightningModule):
         return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
 
     def training_step(  # type: ignore[override]
-        self, batch: dict[str, np.ndarray | torch.Tensor], batch_idx: int
+        self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor], batch_idx: int
     ) -> torch.Tensor | None:
         """
         Forward pass for training step.
@@ -251,7 +251,9 @@ class CellariumModule(pl.LightningModule):
 
         return loss
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
+    def forward(
+        self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
+    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
         """
         Forward pass for inference step.
 
