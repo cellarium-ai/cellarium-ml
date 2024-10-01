@@ -20,6 +20,7 @@ import pandas as pd
 import scipy
 import torch
 from anndata import AnnData
+from torch.utils._pytree import tree_map
 
 
 @dataclass
@@ -71,7 +72,9 @@ class AnnDataField:
         return value
 
 
-def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | torch.Tensor]:
+def collate_fn(
+    batch: list[dict[str, dict[str, np.ndarray] | np.ndarray]],
+) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
     """
     Collate function for the ``DataLoader``. This function assumes that the batch is a list of
     dictionaries, where each dictionary has the same keys. If the key ends with ``_g`` or
@@ -88,10 +91,9 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
         the batch dimension.
     """
     keys = batch[0].keys()
-    collated_batch: dict[str, np.ndarray | torch.Tensor] = {}
-    if len(batch) > 1:
-        if not all(keys == data.keys() for data in batch[1:]):
-            raise ValueError("All dictionaries in the batch must have the same keys.")
+    collated_batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor] = {}
+    if len(batch) > 1 and not all(keys == data.keys() for data in batch[1:]):
+        raise ValueError("All dictionaries in the batch must have the same keys.")
     for key in keys:
         if key.endswith("_g") or key.endswith("_categories"):
             # Check that all values are the same
@@ -100,14 +102,25 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
                     raise ValueError(f"All dictionaries in the batch must have the same {key}.")
             # If so, just take the first one
             value = batch[0][key]
+        elif isinstance(batch[0][key], dict):
+            subkeys = batch[0][key].keys()
+            if len(batch) > 1 and not all(subkeys == data[key].keys() for data in batch[1:]):
+                raise ValueError(f"All '{key}' sub-dictionaries in the batch must have the same subkeys.")
+            value = {}
+            for subkey in subkeys:
+                value[subkey] = np.concatenate([data[key][subkey] for data in batch], axis=0)
         else:
             value = np.concatenate([data[key] for data in batch], axis=0)
 
+        collated_batch[key] = value
+
+    def convert_to_tensor(value: np.ndarray) -> np.ndarray | torch.Tensor:
         if not np.issubdtype(value.dtype, np.str_) and not np.issubdtype(value.dtype, np.object_):
-            collated_batch[key] = torch.tensor(value, device="cpu")
+            return torch.tensor(value, device="cpu")
         else:
-            collated_batch[key] = value
-    return collated_batch
+            return value
+
+    return tree_map(convert_to_tensor, collated_batch)
 
 
 def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
