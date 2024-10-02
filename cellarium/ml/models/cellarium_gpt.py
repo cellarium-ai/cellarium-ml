@@ -710,8 +710,6 @@ class Tokenizer(torch.nn.Module):
     Tokenizer for the Cellarium GPT model.
 
     Args:
-        max_prefix_len:
-            Maximum prefix length.
         context_len:
             Context length.
         downsample_fraction:
@@ -730,7 +728,6 @@ class Tokenizer(torch.nn.Module):
 
     def __init__(
         self,
-        max_prefix_len: int,
         context_len: int,
         downsample_fraction: float,
         min_total_mrna_umis: int,
@@ -740,7 +737,6 @@ class Tokenizer(torch.nn.Module):
         ontology_infos: dict[str, dict[str, Any]],
     ) -> None:
         super().__init__()
-        self.max_prefix_len = max_prefix_len
         self.context_len = context_len
         self.downsample_fraction = downsample_fraction
         self.min_total_mrna_umis = min_total_mrna_umis
@@ -793,10 +789,10 @@ class Tokenizer(torch.nn.Module):
         gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
         gene_value_nc = torch.binomial(gene_value_nc, gene_downsample_p_nc)
         total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc)
-        # sample prefix length
-        # prefix_len_weights = [1, max_prefix_len / 2, max_prefix_len / 3, ..., max_prefix_len / max_prefix_len]
-        prefix_len_weights = self.max_prefix_len / torch.arange(self.max_prefix_len + 1, dtype=torch.float32)
-        prefix_len_weights[0] = 1
+        # sample prefix length (goes up to context_len - 1)
+        # prefix_len_weights = [1/10, 1, 1/2, ..., 1/(context_len-1)]
+        prefix_len_weights = 1 / torch.arange(self.context_len, dtype=torch.float32)
+        prefix_len_weights[0] = 1 / 10
         prefix_len_n = torch.multinomial(prefix_len_weights, n, replacement=True)
         # create prompt and query masks
         gene_query_mask_nc = torch.arange(self.context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
