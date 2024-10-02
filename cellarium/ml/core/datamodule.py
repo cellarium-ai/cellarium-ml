@@ -38,7 +38,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ...     iteration_strategy="cache_efficient",
         ...     shuffle=True,
         ...     seed=0,
-        ...     drop_last=True,
+        ...     drop_last_indices=True,
         ...     num_workers=4,
         ... )
         >>> dm.setup()
@@ -68,6 +68,9 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
             the replicas.
+        drop_incomplete_batch:
+            If ``True``, the dataloader will drop the incomplete batch if the dataset size is not divisible by
+            the batch size.
         train_size:
             Size of the train split. If :class:`float`, should be between ``0.0`` and ``1.0`` and represent
             the proportion of the dataset to include in the train split. If :class:`int`, represents
@@ -82,9 +85,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             If ``True`` enables tracking of cache and worker informations.
         num_workers:
             How many subprocesses to use for data loading. ``0`` means that the data will be loaded in the main process.
-        drop_last_batch:
-            If ``True``, the dataloader will drop the last incomplete batch if the dataset size is not divisible by
-            the batch size.
         prefetch_factor:
             Number of batches loaded in advance by each worker. 2 means there will be a total of 2 * num_workers batches
             prefetched across all workers. (default value depends on the set value for num_workers. If value of
@@ -104,12 +104,12 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         shuffle: bool = False,
         seed: int = 0,
         drop_last_indices: bool = False,
+        drop_incomplete_batch: bool = False,
         train_size: float | int | None = None,
         val_size: float | int | None = None,
         test_mode: bool = False,
         # DataLoader args
         num_workers: int = 0,
-        drop_last_batch: bool = False,
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
     ) -> None:
@@ -131,7 +131,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         # DataLoader args
         self.num_workers = num_workers
         self.collate_fn = collate_fn
-        self.drop_last_batch = drop_last_batch
+        self.drop_incomplete_batch = drop_incomplete_batch
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
 
@@ -152,7 +152,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 iteration_strategy=self.iteration_strategy,
                 shuffle=self.shuffle,
                 seed=self.seed,
-                drop_last=self.drop_last_indices,
+                drop_last_indices=self.drop_last_indices,
+                drop_incomplete_batch=self.drop_incomplete_batch,
                 test_mode=self.test_mode,
                 start_idx=0,
                 end_idx=self.n_train,
@@ -164,7 +165,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 iteration_strategy="same_order",
                 shuffle=False,
                 seed=self.seed,
-                drop_last=False,
+                drop_last_indices=self.drop_last_indices,
+                drop_incomplete_batch=self.drop_incomplete_batch,
                 test_mode=self.test_mode,
                 start_idx=self.n_train,
                 end_idx=self.n_train + self.n_val,
@@ -178,7 +180,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 iteration_strategy=self.iteration_strategy,
                 shuffle=self.shuffle,
                 seed=self.seed,
-                drop_last=self.drop_last_indices,
+                drop_last_indices=self.drop_last_indices,
+                drop_incomplete_batch=self.drop_incomplete_batch,
                 test_mode=self.test_mode,
             )
 
@@ -188,7 +191,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.train_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
-            drop_last=self.drop_last_batch,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
         )
@@ -199,7 +201,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.val_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
-            drop_last=self.drop_last_batch,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
         )
@@ -210,7 +211,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.predict_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
-            drop_last=self.drop_last_batch,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
         )

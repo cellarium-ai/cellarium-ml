@@ -6,7 +6,6 @@ from __future__ import annotations
 import fnmatch
 import re
 from collections.abc import Callable
-from typing import Any
 
 from torch import nn
 
