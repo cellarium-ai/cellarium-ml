@@ -1,5 +1,7 @@
 version 1.0
 
+import "https://api.firecloud.org/ga4gh/v1/tools/cellarium%3Acellxgene_census_query/versions/14/plain-WDL/descriptor" as util
+
 ## Copyright Broad Institute, 2024
 ##
 ## LICENSING :
@@ -11,6 +13,7 @@ task run_perturbseq {
         File trained_model_ckpt = "gs://cellarium-ml/curriculum/homo_sap_no_cancer/models/cellarium_gpt/downsample/bs_200_max_prefix_4000_context_4500/lightning_logs/version_0/checkpoints/epoch=0-step=152100.ckpt"
         File h5ad_file = "gs://broad-dsde-methods-sfleming/ReplogleWeissman2022_rpe1_100controlcells_10batches.h5ad"
         File genes_to_perturb_csv_no_header_no_index = "gs://broad-dsde-methods-sfleming/replogle_perturbed_genes.csv"
+        File? genes_in_prompt_and_query_csv_no_header_no_index
         Int shard
         Int n_shards
         Int query_total_umis = 0
@@ -33,6 +36,7 @@ task run_perturbseq {
     }
 
     Boolean install_from_git = (if defined(git_hash) then true else false)
+    Boolean subset_genes = (if defined(genes_in_prompt_and_query_csv_no_header_no_index) then true else false)
 
     command <<<
 
@@ -84,6 +88,13 @@ task run_perturbseq {
         adata_control = sc.read_h5ad('~{h5ad_file}')
         print(adata_control)
 
+        # subset genes if called for
+        if "~{subset_genes}" == "true":
+            print("subsetting genes ...")
+            gids = pd.read_csv("~{genes_in_prompt_and_query_csv_no_header_no_index}", header=None)[0].tolist()
+            adata_control = adata_control[:, adata_control.var_names.isin(gids)].copy()
+            print(adata_control)
+
         # figure out all the perturbations ...
         gids = pd.read_csv("~{genes_to_perturb_csv_no_header_no_index}", header=None)[0].tolist()
         measured_gids = set(adata_control.var_names.values)
@@ -122,7 +133,7 @@ task run_perturbseq {
         adata_out_nopert = in_silico_perturbation(
             adata_control,
             pipeline=pipeline,
-            prompt_gene_inds=torch.arange(adata_control.shape[1]),
+            prompt_gene_inds=torch.arange(adata_control.shape[1]).long(),
             perturbation={},
             measured_count_layer_key='count',
             output_layer_key='perturbed_gpt',
@@ -151,7 +162,7 @@ task run_perturbseq {
             adata_out = in_silico_perturbation(
                 adata_control,
                 pipeline=pipeline,
-                prompt_gene_inds=torch.arange(adata_control.shape[1]),
+                prompt_gene_inds=torch.arange(adata_control.shape[1]).long(),
                 perturbation={gid: gene_exp_value},
                 measured_count_layer_key='count',
                 output_layer_key='perturbed_gpt',
@@ -255,12 +266,21 @@ task consolidate_outputs {
 workflow in_silico_perturbseq {
     input {
         Int n_shards = 20
+        File? h5ad_file
     }
+    Boolean run_query = (if defined(h5ad_file) then false else true)
     Array[Int] shard_counter = range(n_shards)
+
+    if (run_query) {
+        call util.query_cellxgene as query_cellxgene
+        File? query_h5ad = query_cellxgene.output_h5ad
+    }
+    File h5ad = select_first([h5ad_file, query_h5ad])
 
     scatter (shard in shard_counter) {
         call run_perturbseq {
             input:
+                h5ad_file = h5ad,
                 shard = shard,
                 n_shards = n_shards,
         }
