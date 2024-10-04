@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from cellarium.ml.models.custom_logistic_regression import CustomLogisticRegression
 from cellarium.ml.models.geneformer import Geneformer
 from cellarium.ml.models.incremental_pca import IncrementalPCA
 from cellarium.ml.models.logistic_regression import LogisticRegression
@@ -15,6 +16,7 @@ __all__ = [
     "Geneformer",
     "IncrementalPCA",
     "LogisticRegression",
+    "CustomLogisticRegression"
     "abcdParameter",
     "MuLinear",
     "OnePassMeanVarStd",
