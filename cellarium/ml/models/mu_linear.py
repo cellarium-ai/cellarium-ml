@@ -1,12 +1,17 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Callable
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Literal
 
 
 @dataclass

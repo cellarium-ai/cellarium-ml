@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-import numpy as np
-import torch
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from torch import nn
 
 from cellarium.ml.utilities.testing import (
@@ -11,6 +13,10 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
     assert_nonnegative,
 )
+
+if TYPE_CHECKING:
+    import numpy as np
+    import torch
 
 
 class DivideByScale(nn.Module):

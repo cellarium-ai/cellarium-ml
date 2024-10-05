@@ -1,19 +1,18 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import gc
-from collections.abc import Iterable, Sequence
-from contextlib import contextmanager
+from __future__ import annotations
 
-import numpy as np
+import gc
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
 import pandas as pd
-from anndata import AnnData, concat
+from anndata import concat
 from anndata._core.index import _normalize_indices
-from anndata.compat import Index, Index1D
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
     AnnCollectionView,
-    ConvertType,
 )
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
@@ -21,9 +20,17 @@ from braceexpand import braceexpand
 from cellarium.ml.data.fileio import read_h5ad_file
 from cellarium.ml.data.schema import AnnDataSchema
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
+    import numpy as np
+    from anndata import AnnData
+    from anndata.compat import Index, Index1D
+    from anndata.experimental.multi_files._anncollection import ConvertType
+
 
 class getattr_mode:
-    lazy = False
+    lazy: bool = False
 
 
 _GETATTR_MODE = getattr_mode()
@@ -50,7 +57,7 @@ class DistributedAnnDataCollectionView(AnnCollectionView):
     of :class:`LazyAnnData` objects.
     """
 
-    def __getitem__(self, index: Index) -> "DistributedAnnDataCollectionView":
+    def __getitem__(self, index: Index) -> DistributedAnnDataCollectionView:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         resolved_idx = self._resolve_idx(oidx, vidx)
 
@@ -171,7 +178,7 @@ class DistributedAnnDataCollection(AnnCollection):
         convert: ConvertType | None = None,
         indices_strict: bool = True,
         obs_columns_to_validate: Sequence[str] | None = None,
-    ):
+    ) -> None:
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
             raise ValueError("If `last_shard_size` is specified then `shard_size` must also be specified.")
@@ -343,7 +350,7 @@ class LazyAnnData:
         limits: tuple[int, int],
         schema: AnnDataSchema,
         cache: LRU | None = None,
-    ):
+    ) -> None:
         self.filename = filename
         self.limits = limits
         self.schema = schema

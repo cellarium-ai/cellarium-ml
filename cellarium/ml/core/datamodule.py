@@ -2,15 +2,24 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from typing import Literal
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import lightning.pytorch as pl
 import torch
-from anndata import AnnData
 
-from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.data import IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.utilities.core import train_val_split
-from cellarium.ml.utilities.data import AnnDataField, collate_fn
+from cellarium.ml.utilities.data import collate_fn
+
+if TYPE_CHECKING:
+    from typing import Literal
+
+    from anndata import AnnData
+
+    from cellarium.ml.data import DistributedAnnDataCollection
+    from cellarium.ml.utilities.data import AnnDataField
 
 
 class CellariumAnnDataDataModule(pl.LightningDataModule):

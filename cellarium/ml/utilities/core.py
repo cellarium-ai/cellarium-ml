@@ -1,17 +1,22 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import copy
 import math
 import os
-from collections.abc import Callable
-from pathlib import Path
-from typing import Any
-
-import lightning.pytorch as pl
-import torch
+from typing import TYPE_CHECKING
 
 from cellarium.ml.utilities.testing import assert_nonnegative, assert_positive
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+    from typing import Any
+
+    import lightning.pytorch as pl
+    import torch
 
 
 class FunctionComposer:
@@ -19,7 +24,7 @@ class FunctionComposer:
     Compose two functions into a single callable, in a way that is picklable.
     """
 
-    def __init__(self, first_applied: Callable, second_applied: Callable):
+    def __init__(self, first_applied: Callable, second_applied: Callable) -> None:
         self.first_applied = first_applied
         self.second_applied = second_applied
 

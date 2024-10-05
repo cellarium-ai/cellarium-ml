@@ -8,17 +8,22 @@ Data utilities
 This module contains helper functions for data loading and processing.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from operator import attrgetter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import pandas as pd
-import scipy
 import torch
-from anndata import AnnData
 from torch.utils._pytree import tree_map
+
+if TYPE_CHECKING:
+    # Any and Callable are not imported here to avoid jsonargparse from failing
+    import pandas as pd
+    import scipy
+    from anndata import AnnData
 
 
 @dataclass

@@ -1,15 +1,21 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Iterable
+from __future__ import annotations
+
 from itertools import chain
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
-from typing_extensions import Self
 
 from cellarium.ml.models import PredictMixin, ValidateMixin
 from cellarium.ml.utilities.core import call_func_with_batch
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from typing_extensions import Self
 
 
 class CellariumPipeline(torch.nn.ModuleList):

@@ -1,15 +1,21 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import re
 import shutil
 import tempfile
 import urllib.request
+from typing import TYPE_CHECKING
 
-from anndata import AnnData, read_h5ad
+from anndata import read_h5ad
 from google.cloud.storage import Client
 
 url_schemes = ("http:", "https:", "ftp:")
+
+if TYPE_CHECKING:
+    from anndata import AnnData
 
 
 def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnData:

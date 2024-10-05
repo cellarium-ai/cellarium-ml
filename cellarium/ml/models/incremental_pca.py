@@ -1,9 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import math
+from __future__ import annotations
 
-import lightning.pytorch as pl
+import math
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -15,6 +17,9 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
+if TYPE_CHECKING:
+    import lightning.pytorch as pl
 
 
 class IncrementalPCA(CellariumModel, PredictMixin):
