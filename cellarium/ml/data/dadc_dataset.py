@@ -441,7 +441,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             indices = list(range(self.start_idx, self.end_idx))
 
-        if not self.drop_last:
+        if not self.drop_last_indices:
             # add extra samples to make it evenly divisible
             padding_size = total_size - len(indices)
             if padding_size <= len(indices):
