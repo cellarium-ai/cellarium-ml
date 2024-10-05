@@ -5,7 +5,7 @@ import operator
 from collections import defaultdict
 from collections.abc import Callable
 from functools import cached_property, reduce
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -24,14 +24,6 @@ except ImportError:
 
     def use_cs() -> bool:
         return False
-
-
-class OntologyInfo(TypedDict):
-    names: list[str]
-    labels: list[str]
-    shortest_distances_matrix: torch.Tensor
-    longest_distances_matrix: torch.Tensor
-    ancestors_matrix: torch.Tensor
 
 
 def create_initializer(initializer: dict[str, Any]) -> Callable[[torch.Tensor], None]:
