@@ -5,7 +5,7 @@ import operator
 from collections import defaultdict
 from collections.abc import Callable
 from functools import cached_property, reduce
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 import lightning.pytorch as pl
 import numpy as np
@@ -24,6 +24,14 @@ except ImportError:
 
     def use_cs() -> bool:
         return False
+
+
+class OntologyInfo(TypedDict):
+    names: list[str]
+    labels: list[str]
+    shortest_distances_matrix: torch.Tensor
+    longest_distances_matrix: torch.Tensor
+    ancestors_matrix: torch.Tensor
 
 
 def create_initializer(initializer: dict[str, Any]) -> Callable[[torch.Tensor], None]:
@@ -236,7 +244,7 @@ class MultiHeadAttention(nn.Module):
                     query_nhck,
                     key_nhck,
                     value_nhck,
-                    attention_mask=attention_mask_ncc.unsqueeze(1),
+                    attn_mask=attention_mask_ncc.unsqueeze(1),
                     dropout_p=self.dropout_p if self.training else 0.0,
                     scale=scale_factor,
                 )
@@ -708,11 +716,9 @@ class Tokenizer(torch.nn.Module):
     Tokenizer for the Cellarium GPT model.
 
     Args:
-        max_prefix_len:
-            Maximum prefix length.
         context_len:
             Context length.
-        downsample_fraction:
+        gene_downsample_fraction:
             Downsample fraction.
         min_total_mrna_umis:
             Minimum total mRNA UMIs.
@@ -728,24 +734,26 @@ class Tokenizer(torch.nn.Module):
 
     def __init__(
         self,
-        max_prefix_len: int,
         context_len: int,
-        downsample_fraction: float,
+        gene_downsample_fraction: float,
         min_total_mrna_umis: int,
         max_total_mrna_umis: int,
         gene_vocab_sizes: dict[str, int],
         metadata_vocab_sizes: dict[str, int],
-        ontology_infos: dict[str, dict[str, Any]],
+        ontology_downsample_p: float,
+        ontology_infos: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         super().__init__()
-        self.max_prefix_len = max_prefix_len
         self.context_len = context_len
-        self.downsample_fraction = downsample_fraction
+        self.gene_downsample_fraction = gene_downsample_fraction
         self.min_total_mrna_umis = min_total_mrna_umis
         self.max_total_mrna_umis = max_total_mrna_umis
         self.gene_vocab_sizes = gene_vocab_sizes
         self.metadata_vocab_sizes = metadata_vocab_sizes
+        if ontology_infos is None:
+            ontology_infos = torch.load("/mnt/disks/dev/repos/cellarium_gpt/ontology_infos.pt")
         self.ontology_infos = ontology_infos
+        self.ontology_downsample_p = ontology_downsample_p
 
     def forward(
         self,
@@ -778,9 +786,9 @@ class Tokenizer(torch.nn.Module):
         # downsample gene values
         max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
         downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
-        if self.downsample_fraction > 0:
+        if self.gene_downsample_fraction > 0:
             gene_downsample_p_nc = torch.minimum(
-                torch.rand((n, self.context_len), device=device) / self.downsample_fraction,
+                torch.rand((n, self.context_len), device=device) / self.gene_downsample_fraction,
                 torch.tensor(1.0, device=device),
             )
             downsampled_total_mrna_umis_nc = torch.lerp(
@@ -793,8 +801,10 @@ class Tokenizer(torch.nn.Module):
         total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc)
         # sample prefix length
         # prefix_len_weights = [1, max_prefix_len / 2, max_prefix_len / 3, ..., max_prefix_len / max_prefix_len]
-        prefix_len_weights = self.max_prefix_len / torch.arange(self.max_prefix_len + 1, dtype=torch.float32)
-        prefix_len_weights[0] = 1
+        m = len(metadata_tokens_n)
+        max_prefix_len = self.context_len - m - 1
+        prefix_len_weights = 1 / torch.arange(max_prefix_len + 1, dtype=torch.float32)
+        prefix_len_weights[0] = 1 / 10
         prefix_len_n = torch.multinomial(prefix_len_weights, n, replacement=True)
         # create prompt and query masks
         gene_query_mask_nc = torch.arange(self.context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
@@ -823,20 +833,19 @@ class Tokenizer(torch.nn.Module):
         # assign token codes based on the ontology info
         # token values not in the ontology are treated as unmeasured and assigned a code value of -1
         for key, ontology_info in self.ontology_infos.items():
-            assert self.metadata_vocab_sizes[key] == len(ontology_info["labels"])
+            assert self.metadata_vocab_sizes[key] == len(ontology_info["names"])
             metadata_tokens_n[key] = torch.tensor(
-                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["labels"]).codes,
+                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["names"]).codes,
                 dtype=torch.int,
             )
         # create metadata query and prompt masks
-        m = len(metadata_tokens_n)
         metadata_prefix_len_n = torch.randint(0, m + 1, (n,), device=device)
-        metadata_prefix_mask_nm = torch.arange(m, device=device) >= metadata_prefix_len_n[:, None]
+        metadata_prefix_mask_nm = torch.arange(m, device=device) < metadata_prefix_len_n[:, None]
         shuffle_idx_nm = torch.argsort(torch.rand_like(metadata_prefix_mask_nm, dtype=torch.float32), dim=-1)
-        metadata_query_mask_nm = torch.gather(metadata_prefix_mask_nm, dim=-1, index=shuffle_idx_nm)
-        metadata_prompt_mask_nm = ~metadata_query_mask_nm
+        metadata_prompt_mask_nm = torch.gather(metadata_prefix_mask_nm, dim=-1, index=shuffle_idx_nm)
+        metadata_query_mask_nm = ~metadata_prompt_mask_nm
         metadata_measured_mask_nm = torch.stack(
-            [metadata_token_n < 0 for metadata_token_n in metadata_tokens_n.values()], dim=1
+            [metadata_token_n >= 0 for metadata_token_n in metadata_tokens_n.values()], dim=1
         ).bool()
         metadata_query_mask_nm = metadata_query_mask_nm & metadata_measured_mask_nm
         metadata_prompt_mask_nm = metadata_prompt_mask_nm & metadata_measured_mask_nm
@@ -847,10 +856,13 @@ class Tokenizer(torch.nn.Module):
         metadata_labels_n = {key: metadata_tokens_n[key].clone() for key in metadata_tokens_n}
         # downsample metadata based on ontology
         for key, ontology_info in self.ontology_infos.items():
-            vocab_size = self.metadata_vocab_sizes[key]
+            if "shortest_distances_matrix" not in ontology_info:
+                continue
             metadata_token_n = metadata_tokens_n[key]
-            ontology_weights = torch.eye(vocab_size, device=device) + ontology_info["ancestors_matrix"]
-            # TODO: what should be the weights?
+            shortest_distances_matrix = ontology_info["shortest_distances_matrix"]
+            ontology_weights = (
+                self.ontology_downsample_p * (1 - self.ontology_downsample_p) ** shortest_distances_matrix
+            )
             metadata_tokens_n[key] = (
                 torch.multinomial(ontology_weights[metadata_token_n], num_samples=1).squeeze(-1).int()
             )
@@ -870,7 +882,7 @@ class Tokenizer(torch.nn.Module):
             *[metadata_label_n.unsqueeze(-1) for metadata_label_n in metadata_labels_n.values()],
         )
         labels_nc = {
-            key: block_label_nc[n * i : n * (i + 1)] for i, key in enumerate(["gene"] + list(metadata_tokens_n))
+            key: block_label_nc[n * i : n * (i + 1)] for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
         }
 
         ### LABEL WEIGHTS ###
@@ -879,7 +891,8 @@ class Tokenizer(torch.nn.Module):
             *[metadata_query_mask_nm[:, i].unsqueeze(-1).float() for i in range(m)],
         )
         label_weights_nc = {
-            key: block_label_weight_nc[n * i : n * (i + 1)] for i, key in enumerate(["gene"] + list(metadata_tokens_n))
+            key: block_label_weight_nc[n * i : n * (i + 1)]
+            for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
         }
 
         return {
@@ -936,24 +949,25 @@ class CellariumGPT(CellariumModel, PredictMixin):
         self,
         gene_vocab_sizes: dict[str, int],
         metadata_vocab_sizes: dict[str, int],
-        d_model: int = 256,
-        d_ffn: int = 512,
-        n_heads: int = 8,
-        n_blocks: int = 4,
-        dropout_p: float = 0.0,
-        use_bias: bool = False,
-        attention_backend: Literal["math", "flash", "mem_efficient", "torch"] = "mem_efficient",
-        attention_softmax_fp32: bool = True,
-        gene_categories: np.ndarray | None = None,
+        d_model: int,
+        d_ffn: int,
+        n_heads: int,
+        n_blocks: int,
+        dropout_p: float,
+        use_bias: bool,
+        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_softmax_fp32: bool,
+        loss_scales: dict[str, float],
         # tunable hyperparameters
         initializer_range: float = 0.02,
         embeddings_scale: float = 1.0,
+        attention_logits_scale: float = 1.0,
         output_logits_scale: float = 1.0,
-        attention_logits_scale=1.0,
         # muP (maximal update parameterization)  parameters
         lr_adjustment_groups: dict | None = None,
         mup_base_d_model: int | None = None,
         mup_base_d_ffn: int | None = None,
+        gene_categories: np.ndarray | None = None,
     ) -> None:
         super().__init__()
 
@@ -1057,10 +1071,11 @@ class CellariumGPT(CellariumModel, PredictMixin):
         )
         self.head = nn.ModuleDict(
             {
-                "gene": nn.Linear(d_model, gene_value_vocab_size, use_bias),
+                "gene_value": nn.Linear(d_model, gene_value_vocab_size, use_bias),
                 **{key: nn.Linear(d_model, vocab_size, use_bias) for key, vocab_size in metadata_vocab_sizes.items()},
             }
         )
+        self.loss_scales = loss_scales
 
         self.reset_parameters()
 
@@ -1113,12 +1128,14 @@ class CellariumGPT(CellariumModel, PredictMixin):
         loss_fn = nn.CrossEntropyLoss(reduction="none")
         for key, label_nc in labels_nc.items():
             logits_ncr = self.head[key](hidden_state_ncd) * self.output_logits_scale
-            loss += torch.sum(
-                loss_fn(logits_ncr.view(label_nc.numel(), -1), label_nc.view(-1).long())
-                * label_weights_nc[key].view(-1)
+            loss += (
+                torch.sum(
+                    loss_fn(logits_ncr.view(label_nc.numel(), -1), label_nc.view(-1).long())
+                    * label_weights_nc[key].view(-1)
+                )
+                / label_weights_nc[key].sum()
+                * self.loss_scales[key]
             )
-
-        loss /= reduce(operator.add, [label_weights_nc[key].sum() for key in labels_nc])
 
         return {"loss": loss}
 
@@ -1238,7 +1255,8 @@ class CellariumGPT(CellariumModel, PredictMixin):
                     *[metadata_label_n.unsqueeze(-1) for metadata_label_n in metadata_labels_n.values()],
                 )
                 labels_nc = {
-                    key: block_label_nc[n * i : n * (i + 1)] for i, key in enumerate(["gene"] + list(metadata_tokens_n))
+                    key: block_label_nc[n * i : n * (i + 1)]
+                    for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
                 }
 
                 ### LABEL WEIGHTS ###
@@ -1248,7 +1266,7 @@ class CellariumGPT(CellariumModel, PredictMixin):
                 )
                 label_weights_nc = {
                     key: block_label_weight_nc[n * i : n * (i + 1)]
-                    for i, key in enumerate(["gene"] + list(metadata_tokens_n))
+                    for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
                 }
 
                 # embed the gene IDs, values, and total mRNA UMIs
