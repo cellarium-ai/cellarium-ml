@@ -1,15 +1,21 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    import numpy as np
 
 
 class CellariumModel(torch.nn.Module, metaclass=ABCMeta):

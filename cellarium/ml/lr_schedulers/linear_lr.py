@@ -1,8 +1,14 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import torch
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from torch.optim.lr_scheduler import LambdaLR
+
+if TYPE_CHECKING:
+    import torch
 
 
 class LinearLR(LambdaLR):

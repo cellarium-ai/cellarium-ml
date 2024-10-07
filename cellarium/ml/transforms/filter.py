@@ -1,9 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
+from __future__ import annotations
+
 from functools import cache
-from typing import Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -12,6 +13,10 @@ from torch import nn
 from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import Any
 
 
 class Filter(nn.Module):

@@ -5,27 +5,34 @@
 Command line interface for Cellarium ML.
 """
 
+from __future__ import annotations
+
 import copy
 import sys
 import warnings
-from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from operator import attrgetter
-from typing import Any
+from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
 from jsonargparse._loaders_dumpers import DefaultLoader
 from jsonargparse._util import import_object
-from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
+from lightning.pytorch.cli import LightningCLI
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
+    import numpy as np
+    from lightning.pytorch.cli import ArgsType, LightningArgumentParser
 
 cached_loaders = {}
 

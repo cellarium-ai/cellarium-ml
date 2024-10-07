@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import lightning.pytorch as pl
-import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
@@ -13,6 +16,9 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 class LogisticRegression(CellariumModel, PredictMixin):

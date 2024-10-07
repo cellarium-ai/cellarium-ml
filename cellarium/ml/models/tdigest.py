@@ -1,11 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import crick
-import lightning.pytorch as pl
-import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -14,6 +14,12 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    import lightning.pytorch as pl
+    import numpy as np
 
 
 class TDigest(CellariumModel):

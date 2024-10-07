@@ -1,19 +1,25 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import warnings
-from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
 
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule, collate_fn
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.core import FunctionComposer, copy_module
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from typing import Any
+
+    from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
 
 
 class CellariumModule(pl.LightningModule):

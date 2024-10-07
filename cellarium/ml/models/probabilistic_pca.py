@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from typing import Literal
+from __future__ import annotations
 
-import numpy as np
+from typing import TYPE_CHECKING
+
 import pyro
 import pyro.distributions as dist
 import torch
@@ -16,6 +17,11 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
+if TYPE_CHECKING:
+    from typing import Literal
+
+    import numpy as np
 
 
 class ProbabilisticPCA(CellariumModel, PredictMixin):
@@ -62,7 +68,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         W_init_scale: float = 1.0,
         sigma_init_scale: float = 1.0,
         seed: int = 0,
-    ):
+    ) -> None:
         super().__init__()
 
         self.n_obs = n_obs

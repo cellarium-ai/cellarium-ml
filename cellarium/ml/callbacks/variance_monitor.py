@@ -1,13 +1,18 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import lightning.pytorch as pl
 import torch
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 
 from cellarium.ml.models import ProbabilisticPCA
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 class VarianceMonitor(pl.Callback):

@@ -8,8 +8,9 @@ Testing utilities
 This module contains helper functions for testing.
 """
 
-from collections.abc import Callable
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -17,8 +18,12 @@ import torch
 from pytest import approx
 from scipy.stats import linregress
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
 
-def assert_positive(name: str, number: float):
+
+def assert_positive(name: str, number: float) -> None:
     """
     Assert that a number is positive.
 
@@ -33,7 +38,7 @@ def assert_positive(name: str, number: float):
         raise ValueError(f"`{name}` must be positive. Got {number}")
 
 
-def assert_nonnegative(name: str, number: float):
+def assert_nonnegative(name: str, number: float) -> None:
     """
     Assert that a number is non-negative.
 
@@ -53,7 +58,7 @@ def assert_columns_and_array_lengths_equal(
     matrix: np.ndarray | torch.Tensor,
     array_name: str,
     array: np.ndarray | torch.Tensor,
-):
+) -> None:
     """
     Assert that the number of columns in a matrix matches the length of an array.
 
@@ -78,7 +83,7 @@ def assert_arrays_equal(
     a1: np.ndarray,
     a2_name: str,
     a2: np.ndarray,
-):
+) -> None:
     """
     Assert that two arrays are equal.
 
@@ -95,7 +100,7 @@ def assert_arrays_equal(
         raise ValueError(f"`{a1_name}` must match `{a2_name}`. " f"Got {a1} != {a2}")
 
 
-def assert_slope_equals(data: pd.Series, slope: float, loglog: bool = False, atol: float = 1e-4):
+def assert_slope_equals(data: pd.Series, slope: float, loglog: bool = False, atol: float = 1e-4) -> None:
     """
     Assert that the slope of a series is equal to a given value.
 

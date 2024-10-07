@@ -1,10 +1,16 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import numpy as np
-from anndata import AnnData
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from anndata import AnnData
 
 
 class AnnDataSchema:

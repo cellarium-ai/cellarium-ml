@@ -1,9 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import math
 from itertools import islice
-from typing import Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -13,8 +15,12 @@ from torch.utils._pytree import tree_map
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
-from cellarium.ml.utilities.data import AnnDataField
 from cellarium.ml.utilities.distributed import get_rank_and_num_replicas, get_worker_info
+
+if TYPE_CHECKING:
+    from typing import Literal
+
+    from cellarium.ml.utilities.data import AnnDataField
 
 
 class IterableDistributedAnnDataCollectionDataset(IterableDataset):

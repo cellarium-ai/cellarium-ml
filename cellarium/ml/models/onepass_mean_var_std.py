@@ -1,10 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Literal
+from __future__ import annotations
 
-import lightning.pytorch as pl
-import numpy as np
+from typing import TYPE_CHECKING
+
 import torch
 import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
@@ -15,6 +15,12 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
+if TYPE_CHECKING:
+    from typing import Literal
+
+    import lightning.pytorch as pl
+    import numpy as np
 
 
 class OnePassMeanVarStd(CellariumModel):
