@@ -1,6 +1,6 @@
 version 1.0
 
-import "https://api.firecloud.org/ga4gh/v1/tools/cellarium%3Acellxgene_census_query/versions/14/plain-WDL/descriptor" as util
+import "https://api.firecloud.org/ga4gh/v1/tools/cellarium%3Acellxgene_census_query/versions/15/plain-WDL/descriptor" as util
 
 ## Copyright Broad Institute, 2024
 ##
@@ -18,6 +18,7 @@ task run_perturbseq {
         Int n_shards
         Int query_total_umis = 0
         Float perturbation_mean_expression_multiplier = 0.0  # this default represents a knockout
+        Boolean downsample_n_cells = false  # for testing
 
         # software
         String docker_image = "us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:noiseprompt"
@@ -66,6 +67,7 @@ task run_perturbseq {
         import scipy.sparse as sp
         import torch
         import os
+        import itertools
         import tqdm
 
         from cellarium.ml.downstream.noise_prompting import in_silico_perturbation
@@ -169,7 +171,7 @@ task run_perturbseq {
                 query_total_umis=query_total_umis_value,
             )
             lfc_df = pd.DataFrame(
-                np.log2(adata_out.layers['perturbed_gpt'].mean(axis=0) + 1e-10) - np.log2(adata_out_nopert.layers['perturbed_gpt'].mean(axis=0) + 1e-10) ,
+                np.log2(adata_out.layers['perturbed_gpt'].mean(axis=0) + 1e-10) - np.log2(adata_out_nopert.layers['perturbed_gpt'].mean(axis=0) + 1e-10),
                 index=adata_out.var['gene_name'],
                 columns=[gid],
             ).transpose()
@@ -180,6 +182,30 @@ task run_perturbseq {
             # add to the checkpoint
             os.system(f"tar -rvf ckpt.tar {out_path}")
             print(f'added {out_path} to ckpt.tar')
+            
+            if "~{downsample_n_cells}" == "true":
+                print('systematically downsampling n_cells')
+                for n_cells in range(2, len(adata_out)):
+                    print(f'n_cells: {n_cells}')
+                    n_cells_dfs = []
+                    for inds in itertools.combinations(range(len(adata_out)), n_cells):
+                        # for each combination of n_cells cells
+                        n_cells_df = pd.DataFrame(
+                            np.log2(adata_out.layers['perturbed_gpt'][inds, :].mean(axis=0) + 1e-10) - np.log2(adata_out_nopert.layers['perturbed_gpt'][inds, :].mean(axis=0) + 1e-10),
+                            index=adata_out.var['gene_name'],
+                            columns=[gid],
+                        ).transpose()
+                        n_cells_dfs.append(n_cells_df)
+                    lfcs_df = pd.concat(n_cells_dfs, axis=0)
+                    mean_lfc_df = lfcs_df.mean(axis=0).to_frame().rename(columns={0: gid}).transpose()
+                    std_lfc_df = lfcs_df.std(axis=0).to_frame().rename(columns={0: gid}).transpose()
+                    out_path_downsample_prefix = f'perturbseq_lfc_{gid}__downsample_{n_cells}__'
+                    mean_lfc_df.to_csv(out_path_downsample_prefix + 'mean.csv')
+                    std_lfc_df.to_csv(out_path_downsample_prefix + 'std.csv')
+                    print(f'wrote {out_path_downsample_prefix}mean.csv and {out_path_downsample_prefix}std.csv')
+                    os.system(f"tar -rvf ckpt.tar {out_path_downsample_prefix}mean.csv")
+                    os.system(f"tar -rvf ckpt.tar {out_path_downsample_prefix}std.csv")
+                    print(f'added {out_path_downsample_prefix}mean.csv and {out_path_downsample_prefix}std.csv to ckpt.tar')
 
         CODE
 
