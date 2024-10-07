@@ -18,6 +18,7 @@ task query_cellxgene {
         String X_name = "raw"
         Boolean remove_unmeasured_features = true
         String obs_column_names = '["assay", "cell_type", "tissue", "dataset_id", "donor_id", "tissue_general", "suspension_type", "disease", "sex"]'
+        Int random_seed = 0
 
         # software
         String docker_image = "us.gcr.io/broad-dsde-methods/cellxgene_census:1.16.1"
@@ -90,6 +91,7 @@ task query_cellxgene {
         # limit to max_cells
         if (~{max_cells} > 0) and (len(obs) > ~{max_cells}):
             print("Limiting to ~{max_cells} cells, randomly shuffling first")
+            np.random.seed(~{random_seed})
             obs = obs.iloc[np.random.permutation(len(obs))][:~{max_cells}].copy()
             print(obs)
         else:
