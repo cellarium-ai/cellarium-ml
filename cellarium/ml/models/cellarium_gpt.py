@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-import operator
 from collections import defaultdict
 from collections.abc import Callable
-from functools import cached_property, reduce
+from functools import cached_property
 from typing import Any, Literal
 
 import lightning.pytorch as pl
@@ -566,11 +565,7 @@ class GeneEmbedding(nn.Module):
         Returns:
             The gene embedding tensor of shape ``(n, c, d)``.
         """
-        result = reduce(
-            operator.add,
-            [self.E[key](gene_token_nc) for key, gene_token_nc in gene_tokens_nc.items()],
-        )
-        return result
+        return sum(self.E[key](gene_token_nc) for key, gene_token_nc in gene_tokens_nc.items())
 
 
 class MetaDataEmbedding(nn.Module):
@@ -881,9 +876,9 @@ class Tokenizer(torch.nn.Module):
 
         ### LABEL WEIGHTS ###
         block_label_weight_nc = torch.block_diag(
-            gene_query_mask_nc / gene_query_mask_nc.sum(dim=-1, keepdim=True),
+            gene_query_mask_nc / torch.maximum(gene_query_mask_nc.sum(dim=-1, keepdim=True), torch.tensor(1.0)),
             *[metadata_query_mask_nm[:, i].unsqueeze(-1).float() for i in range(m)],
-        )
+        ) / n
         label_weights_nc = {
             key: block_label_weight_nc[n * i : n * (i + 1)]
             for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
@@ -1118,20 +1113,18 @@ class CellariumGPT(CellariumModel, PredictMixin):
         hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
 
         # compute loss
-        loss = 0.0
+        losses = {}
         loss_fn = nn.CrossEntropyLoss(reduction="none")
         for key, label_nc in labels_nc.items():
             logits_ncr = self.head[key](hidden_state_ncd) * self.output_logits_scale
-            loss += (
-                torch.sum(
-                    loss_fn(logits_ncr.view(label_nc.numel(), -1), label_nc.view(-1).long())
-                    * label_weights_nc[key].view(-1)
-                )
-                / label_weights_nc[key].sum()
-                * self.loss_scales[key]
+            losses[key] = torch.sum(
+                loss_fn(logits_ncr.view(label_nc.numel(), -1), label_nc.view(-1).long())
+                * label_weights_nc[key].view(-1)
             )
 
-        return {"loss": loss}
+        losses["loss"] = sum(losses[key] * self.loss_scales[key] for key in losses)
+
+        return losses
 
     def validate(
         self,
