@@ -6,5 +6,5 @@ from cellarium.ml.transforms.filter import Filter
 from cellarium.ml.transforms.log1p import Log1p
 from cellarium.ml.transforms.normalize_total import NormalizeTotal
 from cellarium.ml.transforms.z_score import ZScore
-
-__all__ = ["DivideByScale", "Filter", "Log1p", "NormalizeTotal", "ZScore"]
+from cellarium.ml.transforms.multilabel_targets import one_hot_encoded_targets
+__all__ = ["DivideByScale", "Filter", "Log1p", "NormalizeTotal", "ZScore", "one_hot_encoded_targets"]
