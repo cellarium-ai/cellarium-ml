@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from cellarium.ml.data.fileio import read_pickle_from_gcs
+from cellarium.ml.data.fileio import read_pkl_from_gcs
 
 
 class one_hot_encoded_targets(nn.Module):
@@ -21,8 +21,8 @@ when called, assigns multilabel targets. All parents of the target cell type get
     ) -> None:
         super().__init__()
         self.multilabel_flag = multilabel_flag
-        self.child_parent_list = read_pickle_from_gcs(child_parent_list_path)
-        self.unique_cell_types_nparray = read_pickle_from_gcs(unique_cell_types_nparray_path)
+        self.child_parent_list = read_pkl_from_gcs(child_parent_list_path)
+        self.unique_cell_types_nparray = read_pkl_from_gcs(unique_cell_types_nparray_path)
 
 
     def forward(
