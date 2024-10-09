@@ -157,6 +157,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 start_idx=0,
                 end_idx=self.n_train,
             )
+
+        if stage in {"fit", "validate"}:
             self.val_dataset = IterableDistributedAnnDataCollectionDataset(
                 dadc=self.dadc,
                 batch_keys=self.batch_keys,
