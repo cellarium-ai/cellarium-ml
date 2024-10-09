@@ -11,7 +11,7 @@ import torch.nn.functional
 import torchmetrics
 from pyro.distributions import Delta, Laplace
 
-from cellarium.ml.data.fileio import read_pickle_from_gcs
+from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -64,8 +64,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
         #self.y_categories = y_categories
-        self.y_categories = read_pickle_from_gcs(y_categories_path)
-        self.parent_child_list = read_pickle_from_gcs(parent_child_list_path)
+        self.y_categories = read_pkl_from_gcs(y_categories_path)
+        self.parent_child_list = read_pkl_from_gcs(parent_child_list_path)
         self.n_categories = len(self.y_categories)
         self.activation_fn = getattr(torch.nn.functional, activation_fn)
         self.probability_propagation_flag = probability_propagation_flag
