@@ -3,6 +3,7 @@
 
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any
 
 import lightning.pytorch as pl
@@ -21,6 +22,8 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
         super(torch.nn.Module, self).__setattr__("_pyro_params", OrderedDict())
         super().__init__()
 
+    __call__: Callable[..., dict[str, torch.Tensor | None]]
+
     @abstractmethod
     def reset_parameters(self) -> None:
         """
@@ -30,25 +33,6 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
         If the parameter or buffer was assigned (e.g. from a torch.Tensor passed to the __init__)
         then there is no need to reset it.
         """
-
-    def validate(
-        self,
-        trainer: pl.Trainer,
-        pl_module: pl.LightningModule,
-        batch_idx: int,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        """
-        Default validation method for models. This method logs the validation loss to TensorBoard.
-
-        Override this method to customize the validation behavior.
-        """
-        output = self(*args, **kwargs)
-        loss = output.get("loss")
-        if loss is not None:
-            # Logging to TensorBoard by default
-            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
 
     def __getattr__(self, name: str) -> Any:
         if "_pyro_params" in self.__dict__:
@@ -95,3 +79,29 @@ class PredictMixin(metaclass=ABCMeta):
         """
         Perform prediction.
         """
+
+
+class ValidateMixin:
+    """
+    Mixin class for models that can perform validation.
+    """
+
+    __call__: Callable[..., dict[str, torch.Tensor | None]]
+
+    def validate(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        batch_idx: int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Default validation method for models. This method logs the validation loss to TensorBoard.
+        Override this method to customize the validation behavior.
+        """
+        output = self(*args, **kwargs)
+        loss = output.get("loss")
+        if loss is not None:
+            # Logging to TensorBoard by default
+            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
