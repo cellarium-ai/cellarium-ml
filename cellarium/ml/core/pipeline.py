@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from typing_extensions import Self
 
-from cellarium.ml.models import PredictMixin, ValidateMixin
+from cellarium.ml.models import CellariumModel, PredictMixin
 from cellarium.ml.utilities.core import call_func_with_batch
 
 
@@ -67,6 +67,6 @@ class CellariumPipeline(torch.nn.ModuleList):
             batch |= call_func_with_batch(module.forward, batch)
 
         model = self[-1]
-        if not isinstance(model, ValidateMixin):
-            raise TypeError(f"The last module in the pipeline must be an instance of {ValidateMixin}. Got {model}")
+        if not isinstance(model, CellariumModel):
+            raise TypeError(f"The last module in the pipeline must be an instance of {CellariumModel}. Got {model}")
         call_func_with_batch(model.validate, batch)

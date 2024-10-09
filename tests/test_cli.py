@@ -345,6 +345,74 @@ CONFIGS = [
                 "batch_size": "50",
                 "shuffle": "true",
                 "num_workers": "2",
+                "val_size": "0.1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "4",
+            },
+        },
+    },
+    {
+        "model_name": "logistic_regression",
+        "subcommand": "validate",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "model": "cellarium.ml.models.LogisticRegression",
+                "optim_fn": "torch.optim.Adam",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["cell_type"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {
+                        "attr": "var_names",
+                    },
+                    "y_n": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                    "y_categories": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                        "convert_fn": "cellarium.ml.utilities.data.get_categories",
+                    },
+                },
+                "batch_size": "50",
+                "shuffle": "true",
+                "num_workers": "2",
+                "val_size": "0.1",
             },
             "trainer": {
                 "accelerator": "cpu",
