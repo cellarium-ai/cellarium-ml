@@ -8,6 +8,8 @@ Data utilities
 This module contains helper functions for data loading and processing.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from operator import attrgetter
@@ -146,6 +148,10 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
         Numpy array.
     """
     return np.asarray(x.cat.codes)
+
+
+def var_names_to_ids(var_names: pd.Index) -> np.ndarray:
+    return np.arange(len(var_names))
 
 
 def get_categories(x: pd.Series) -> np.ndarray:

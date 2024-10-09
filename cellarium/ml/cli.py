@@ -5,12 +5,14 @@
 Command line interface for Cellarium ML.
 """
 
+from __future__ import annotations
+
 import copy
 import sys
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import cache
+from functools import lru_cache
 from operator import attrgetter
 from typing import Any
 
@@ -70,7 +72,7 @@ class FileLoader:
         if isinstance(loader_fn, str):
             loader_fn = import_object(loader_fn)
         if loader_fn not in cached_loaders:
-            cached_loaders[loader_fn] = cache(loader_fn)
+            cached_loaders[loader_fn] = lru_cache(loader_fn)
         loader_fn = cached_loaders[loader_fn]
         obj = loader_fn(file_path)
 
@@ -310,6 +312,23 @@ def lightning_cli_factory(
             )
 
     return NewLightningCLI
+
+
+@register_model
+def cellarium_gpt(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.CellariumGPT` model.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.CellariumGPT",
+        link_arguments=[
+            LinkArguments("data.dadc", "model.model.init_args.gene_categories", lambda x: x.var_names.values)
+        ],
+    )
+    cli(args=args)
 
 
 @register_model

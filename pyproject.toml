@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Machine learning library for single-cell data analysis"
 readme = "README.rst"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = {file = "LICENSE.md"}
 classifiers = [
   "Intended Audience :: Developers",
@@ -25,13 +25,13 @@ dependencies = [
   "boltons",
   "braceexpand",
   "crick>=0.0.4",
-  "google-cloud-storage",
+  # "google-cloud-storage",
   "jsonargparse[signatures]==4.27.7",
   "lightning>=2.2.0",
   "numpy<=1.26.4",
   "pyro-ppl>=1.9.1",
   "pytest",
-  "torch>=2.2.0",
+  "torch>=2.3.0",
   "transformers",
 ]
 

@@ -8,6 +8,8 @@ Distributed utilities
 This module contains helper functions for distributed training.
 """
 
+from __future__ import annotations
+
 import warnings
 
 import torch

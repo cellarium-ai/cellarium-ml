@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+from __future__ import annotations
+
 import lightning.pytorch as pl
 import numpy as np
 import pyro
