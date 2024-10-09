@@ -3,6 +3,7 @@
 
 import warnings
 from collections.abc import Iterable
+from importlib import import_module
 from typing import Any
 
 import lightning.pytorch as pl
@@ -302,9 +303,16 @@ class CellariumModule(pl.LightningModule):
 
         optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
         if scheduler_fn is not None:
+            if issubclass(scheduler_fn,torch.optim.lr_scheduler.SequentialLR):
+                scheduler_kwargs["schedulers"]=[self.str_to_attr(optim_fn=value["scheduler_fn"])(optim_config["optimizer"],**value["scheduler_kwargs"]) for value in scheduler_kwargs["schedulers"]]
             scheduler = scheduler_fn(optim_config["optimizer"], **scheduler_kwargs)
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
         return optim_config
+
+    def str_to_attr(self, optim_fn: str):
+        class_module, class_name = optim_fn.rsplit(".", 1)
+        optim_module = import_module(class_module)
+        return getattr(optim_module, class_name)
 
     def on_train_epoch_start(self) -> None:
         """
