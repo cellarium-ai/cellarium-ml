@@ -15,6 +15,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 
 try:
+    # TODO: add comment
     from cerebras.modelzoo.common.utils.model.mup_utils import LRAdjustmentGroup
     from cerebras.pytorch.backend import use_cs
 except ImportError:
@@ -210,6 +211,7 @@ class MultiHeadAttention(nn.Module):
         key_nhck = self.split_heads(key_ncd, n_heads)
         value_nhck = self.split_heads(value_ncd, n_heads)
 
+        # scale_factor is computed according to the muP paper
         scale_factor = self.attention_logits_scale / query_nhck.shape[-1]
 
         if self.attention_backend == "torch":
@@ -763,7 +765,7 @@ class TrainTokenizer(torch.nn.Module):
         gene_tokens_ng["gene_id"] = gene_id_g.expand(n, g)
 
         shuffle_idx_ng = torch.argsort(torch.rand((n, g), dtype=torch.float32, device=device), dim=-1)
-        shuffle_idx_nc = shuffle_idx_ng[:, : self.context_len]
+        shuffle_idx_nc = shuffle_idx_ng[:, :gene_context_len]
 
         for key, gene_token_ng in gene_tokens_ng.items():
             gene_tokens_nc[key] = torch.gather(gene_token_ng, dim=-1, index=shuffle_idx_nc)
@@ -776,7 +778,7 @@ class TrainTokenizer(torch.nn.Module):
         downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
         if self.gene_downsample_fraction > 0:
             gene_downsample_p_nc = torch.minimum(
-                torch.rand((n, self.context_len), device=device) / self.gene_downsample_fraction,
+                torch.rand((n, gene_context_len), device=device) / self.gene_downsample_fraction,
                 torch.tensor(1.0, device=device),
             )
             downsampled_total_mrna_umis_nc = torch.lerp(
