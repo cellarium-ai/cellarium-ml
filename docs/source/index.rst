@@ -31,6 +31,7 @@ Table of Contents
    :maxdepth: 1
    :caption: Tutorials
 
+   tutorials/part_i
    tutorials/mup_mlp
    tutorials/geneformer_demo
 
