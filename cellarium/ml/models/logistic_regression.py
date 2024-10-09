@@ -107,7 +107,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
             dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
-            logits_nc = x_ng.float() @ W_gc + self.b_c
+            logits_nc = x_ng @ W_gc + self.b_c
             pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
