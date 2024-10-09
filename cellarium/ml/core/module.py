@@ -286,6 +286,9 @@ class CellariumModule(pl.LightningModule):
         if self.module_pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
+        batch["pl_module"] = self
+        batch["trainer"] = self.trainer
+        batch["batch_idx"] = batch_idx
         self.module_pipeline.validate(batch)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
@@ -302,7 +305,27 @@ class CellariumModule(pl.LightningModule):
                 warnings.warn("Scheduler is defined but no optimizer is defined.", UserWarning)
             return None
 
-        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
+        from cellarium.ml.utilities.mup import make_param_filter
+
+        for lr_group_name, lr_group in self.model.lr_adjustment_groups.items():
+            lr_group.param_filter = make_param_filter(lr_group.param_filter)
+        params_groups_dict = {}
+        for name, param in self.model.named_parameters():
+            for lr_group_name, lr_group in self.model.lr_adjustment_groups.items():
+                if lr_group.param_filter(name):
+                    params_groups_dict.setdefault(lr_group_name, []).append(param)
+                    break
+            else:
+                params_groups_dict.setdefault("default", []).append(param)
+        param_groups = []
+        for lr_group_name, params in params_groups_dict.items():
+            group_optim_kwargs = optim_kwargs.copy()
+            if lr_group_name != "default":
+                group_optim_kwargs["lr"] *= self.model.lr_adjustment_groups[lr_group_name].scale
+            param_groups.append({"params": params, **group_optim_kwargs})
+
+        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(param_groups)}
+        # optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
         if scheduler_fn is not None:
             scheduler = scheduler_fn(optim_config["optimizer"], **scheduler_kwargs)
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
