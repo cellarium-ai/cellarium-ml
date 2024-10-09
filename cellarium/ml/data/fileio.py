@@ -1,11 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import pickle
 import re
 import shutil
 import tempfile
 import urllib.request
-import pickle
 
 from anndata import AnnData, read_h5ad
 from google.cloud.storage import Client

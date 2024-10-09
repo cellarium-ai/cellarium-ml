@@ -159,3 +159,16 @@ def get_categories(x: pd.Series) -> np.ndarray:
         Numpy array.
     """
     return np.asarray(x.cat.categories)
+
+def filter_categories(x: pd.Series) -> np.ndarray:
+    """
+    Convert a pandas Series of categorical data to a numpy array of codes.
+    Returned array is always a copy.
+
+    Args:
+        x: Pandas Series object.
+
+    Returns:
+        Numpy array.
+    """
+    return np.asarray(x)
