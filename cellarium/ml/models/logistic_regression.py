@@ -56,7 +56,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
         self.n_vars = len(var_names_g)
         #self.y_categories = y_categories
         self.y_categories = read_pkl_from_gcs(y_categories_path)
-        self.n_categories = len(y_categories)
+        self.n_categories = len(self.y_categories)
 
         self.seed = seed
         # parameters
@@ -82,7 +82,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
         self.b_c.data.zero_()
 
     def forward(
-        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, y_categories: np.ndarray
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor
     ) -> dict[str, torch.Tensor | None]:
         """
         Args:
