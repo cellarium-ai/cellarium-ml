@@ -57,7 +57,7 @@ class DivideByScale(nn.Module):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
-        
+
         x_ng = x_ng / (self.scale_g + self.eps)
 
         return {"x_ng": x_ng}

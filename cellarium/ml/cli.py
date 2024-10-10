@@ -440,7 +440,7 @@ def logistic_regression(args: ArgsType = None) -> None:
                 compute_var_names_g,
             ),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
-            LinkArguments("data", "model.model.init_args.y_categories", compute_y_categories),
+            #LinkArguments("data", "model.model.init_args.y_categories", compute_y_categories),
         ],
     )
     cli(args=args)

@@ -8,8 +8,8 @@ import pyro
 import pyro.distributions as dist
 import torch
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.data.fileio import read_pkl_from_gcs
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
