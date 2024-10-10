@@ -9,6 +9,7 @@ import pyro.distributions as dist
 import torch
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -40,11 +41,12 @@ class LogisticRegression(CellariumModel, PredictMixin):
         self,
         n_obs: int,
         var_names_g: np.ndarray,
-        y_categories: np.ndarray,
+        y_categories: np.ndarray | None,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
         seed: int = 0,
         log_metrics: bool = True,
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_y_categories.pkl',
     ) -> None:
         super().__init__()
 
@@ -52,7 +54,8 @@ class LogisticRegression(CellariumModel, PredictMixin):
         self.n_obs = n_obs
         self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
-        self.y_categories = y_categories
+        #self.y_categories = y_categories
+        self.y_categories = read_pkl_from_gcs(y_categories_path)
         self.n_categories = len(y_categories)
 
         self.seed = seed
@@ -95,9 +98,10 @@ class LogisticRegression(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the loss value.
         """
+        y_n = y_n.to(self.device)
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        assert_arrays_equal("y_categories", y_categories, "self.y_categories", self.y_categories)
+        #assert_arrays_equal("y_categories", y_categories, "self.y_categories", self.y_categories)
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
         return {"loss": loss}
 
@@ -108,7 +112,8 @@ class LogisticRegression(CellariumModel, PredictMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
+            print(f"NIMISH LOGITS NC SHAPE IS {logits_nc.shape}")
+            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=torch.argmax(y_n, dim=-1))
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
