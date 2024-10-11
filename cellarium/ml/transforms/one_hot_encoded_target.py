@@ -28,6 +28,7 @@ class OneHotEncodedTargets(nn.Module):
 
         """
         out_array = np.zeros((len(y_n), len(self.unique_cell_types_nparray)), dtype=int)
+        print(f"NIMISH UNIQUE CELLS ARE {self.unique_cell_types_nparray}")
         for i, target_name in enumerate(y_n):
             target_index = np.where(self.unique_cell_types_nparray == 'CL_' + target_name[3:])[0][0] #get index of target cell type
             # Set the corresponding columns to 1
