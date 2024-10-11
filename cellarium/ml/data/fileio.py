@@ -92,14 +92,13 @@ def read_h5ad_file(filename: str, **kwargs) -> AnnData:
 
     return read_h5ad(filename)
 
-
 def read_pkl_from_gcs(filename: str, storage_client: Client | None = None):
     r"""
-    Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
+    Read ``.pkl``-formatted pickle file from the Google Cloud Storage.
 
     Example::
 
-        >>> adata = read_h5ad_gcs("gs://dsp-cellarium-cas-public/test-data/test_0.h5ad")
+        >>> adata = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_y_categories.pkl")
 
     Args:
         filename: Path to the data file in Cloud Storage.

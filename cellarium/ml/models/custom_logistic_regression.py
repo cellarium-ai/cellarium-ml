@@ -5,21 +5,21 @@
 import lightning.pytorch as pl
 import numpy as np
 import pyro
-import pyro.distributions
+import pyro.distributions as dist
 import torch
 import torch.nn.functional
 import torchmetrics
-from pyro.distributions import Delta, Laplace
+#from pyro.distributions import Delta, Laplace
 
 from cellarium.ml.data.fileio import read_pkl_from_gcs
-from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
+class CustomLogisticRegression(CellariumModel, PredictMixin):
     """
     Logistic regression model.
 
@@ -42,7 +42,6 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
 
     def __init__(
         self,
-        loss_fn: str|None,
         n_obs: int,
         var_names_g: np.ndarray,
         y_categories: np.ndarray|None,
@@ -52,9 +51,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         out_distribution: str = 'Categorical',
         seed: int = 0,
         probability_propagation_flag: bool = False,
-        normalize_post_propagation: bool = False,
         parent_child_list_path: str = 'gs://cellarium-file-system/ml-configs/Supervised_cell_classification/tdigest_config/parent_child_indices_list.pkl', # Ask Yerdos, where these files can be stored on gcs
-        y_categories_path: str = 'gs://cellarium-file-system/ml-configs/Supervised_cell_classification/tdigest_config/unique_cell_types.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
@@ -69,10 +67,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.n_categories = len(self.y_categories)
         self.activation_fn = getattr(torch.nn.functional, activation_fn)
         self.probability_propagation_flag = probability_propagation_flag
-        self.normalize_post_propagation = normalize_post_propagation
-        self.loss_fn = loss_fn
-        self.out_distribution = getattr(pyro.distributions,out_distribution)
-        self.f1 = torchmetrics.F1Score(task="multiclass", num_classes=len(self.y_categories))
+        self.out_distribution = getattr(dist,out_distribution)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.seed = seed
@@ -128,10 +123,11 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
-            Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
+            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
+            print(f"NIMISH LOGITS NC DTYPE IS {logits_nc.dtype}")
             activation_out = self.activation_fn(logits_nc.to(dtype=torch.float64), dim=1)
             if (self.probability_propagation_flag==1):
                 #activation_out = custom_functions.multi_label_target(pp_flag=1,softmax_out_gpu=activation_out)
@@ -139,14 +135,14 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
 
             print(f"NIMISH SHAPE OF ACTIVATION OUT IS {activation_out.shape}")
             print(f"NIMISH SHAPE OF Y_N IS {y_n.shape}")
-            print(f"TYPE OF Y_N IS {type(y_n)}")
-            if self.out_distribution == pyro.distributions.Categorical:
-                pyro.sample("y", self.out_distribution(probs=torch.round(activation_out,decimals=5)), obs=torch.argmax(y_n, dim=-1))
-            elif self.out_distribution == pyro.distributions.Bernoulli:
+            print(f"NIMISH DTYPE OF Y_N IS {y_n.dtype}")
+            if self.out_distribution == dist.Categorical:
+                pyro.sample("y", self.out_distribution(probs=torch.round(activation_out,decimals=5)), obs=y_n)
+            elif self.out_distribution == dist.Bernoulli:
                 pyro.sample("y", self.out_distribution(probs=torch.round(activation_out,decimals=5)).to_event(1), obs=y_n.float())
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
-        pyro.sample("W", Delta(self.W_gc).to_event(2))
+        pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
     def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
         """
@@ -207,9 +203,9 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     #     print("RETURNING SOFTMAX OUT GPU CLONE")
     #     return softmax_out_gpu_clone
 
-    def validate(self,x_ng: torch.Tensor,y_n: torch.Tensor,pl_module: pl.LightningModule) -> None:
-        logits_nc = x_ng @ self.W_gc + self.b_c
-        y_hat = torch.argmax(logits_nc, dim=-1)
-        f1_score = self.f1(y_hat, y_n)
-        pl_module.log("F1_score_val",f1_score,sync_dist=True, on_epoch=True)
-        return None
+    # def validate(self,x_ng: torch.Tensor,y_n: torch.Tensor,pl_module: pl.LightningModule) -> None:
+    #     logits_nc = x_ng @ self.W_gc + self.b_c
+    #     y_hat = torch.argmax(logits_nc, dim=-1)
+    #     f1_score = self.f1(y_hat, y_n)
+    #     pl_module.log("F1_score_val",f1_score,sync_dist=True, on_epoch=True)
+    #     return None
