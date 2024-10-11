@@ -18,10 +18,12 @@ class MultiHeadReadout(nn.Module):
             Categorical token vocabulary sizes.
         d_model:
             Dimensionality of the embeddings and hidden states.
-        initializer:
-            Initializer for the output linear transformations.
+        use_bias:
+            Whether to use bias in the linear transformations.
         output_logits_scale:
             Multiplier for the output logits.
+        heads_initializer:
+            Initializer for the output linear transformations.
     """
 
     def __init__(
@@ -29,21 +31,21 @@ class MultiHeadReadout(nn.Module):
         categorical_vocab_sizes: dict[str, int],
         d_model: int,
         use_bias: bool,
-        initializer: dict[str, Any],
         output_logits_scale: float,
+        heads_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
         self.W = nn.ModuleDict(
             {key: nn.Linear(d_model, vocab_size, use_bias) for key, vocab_size in categorical_vocab_sizes.items()}
         )
-        self.initializer = initializer
         self.output_logits_scale = output_logits_scale
+        self.heads_initializer = heads_initializer
 
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
         for module in self.W.children():
-            create_initializer(self.initializer)(module.weight)
+            create_initializer(self.heads_initializer)(module.weight)
 
             if module.bias is not None:
                 nn.init.zeros_(module.bias)

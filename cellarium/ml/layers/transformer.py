@@ -58,6 +58,8 @@ class TransformerBlock(nn.Module):
         dense2_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError(f"`d_model` ({d_model}) must be divisible by `n_heads` ({n_heads})")
         self.attention = MultiHeadAttention(
             d_model,
             use_bias,
@@ -78,12 +80,6 @@ class TransformerBlock(nn.Module):
             dense2_initializer,
         )
         self.normadd2 = NormAdd(d_model, dropout_p, use_bias)
-
-    def reset_parameters(self) -> None:
-        self.attention._reset_parameters()
-        self.normadd1._reset_parameters()
-        self.ffn._reset_parameters()
-        self.normadd2._reset_parameters()
 
     def forward(
         self,
@@ -144,7 +140,7 @@ class Transformer(nn.Module):
         n_blocks: int,
         dropout_p: float,
         attention_logits_scale: float,
-        attention_backend: Literal["math", "flash", "mem_efficient"],
+        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
@@ -172,6 +168,12 @@ class Transformer(nn.Module):
                 for _ in range(n_blocks)
             ]
         )
+        self.ln = nn.LayerNorm(d_model, use_bias)
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        self.ln.reset_parameters()
 
     def forward(
         self,
@@ -191,4 +193,4 @@ class Transformer(nn.Module):
         for block in self.blocks:
             hidden_state_ncd = block(hidden_state_ncd, attention_mask_ncc)
 
-        return hidden_state_ncd
+        return self.ln(hidden_state_ncd)

@@ -9,7 +9,7 @@ from torch import nn
 from cellarium.ml.utilities.layers import create_initializer
 
 
-class GeneEmbedding(nn.Module):
+class GeneExpressionEmbedding(nn.Module):
     """
     Gene embedding.
 
@@ -57,7 +57,7 @@ class GeneEmbedding(nn.Module):
         return sum(self.E[key](gene_token_nc) for key, gene_token_nc in gene_tokens_nc.items())
 
 
-class MetaDataEmbedding(nn.Module):
+class MetadataEmbedding(nn.Module):
     """
     Metadata embedding.
 
@@ -74,19 +74,19 @@ class MetaDataEmbedding(nn.Module):
         self,
         categorical_vocab_sizes: dict[str, int],
         d_model: int,
-        initializer: dict[str, Any],
+        embeddings_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
         self.E = nn.ModuleDict(
             {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()}
         )
-        self.initializer = initializer
+        self.embeddings_initializer = embeddings_initializer
 
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
         for module in self.E.children():
-            create_initializer(self.initializer)(module.weight)
+            create_initializer(self.embeddings_initializer)(module.weight)
 
     def forward(self, metadata_tokens_n: dict[str, torch.Tensor]) -> torch.Tensor:
         """

@@ -102,19 +102,19 @@ class MultiHeadAttention(nn.Module):
 
     def forward(
         self,
-        query_ncd: torch.Tensor,
-        key_ncd: torch.Tensor,
-        value_ncd: torch.Tensor,
+        x_query_ncd: torch.Tensor,
+        x_key_ncd: torch.Tensor,
+        x_value_ncd: torch.Tensor,
         attention_mask_ncc: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
-            query_ncd:
-                Query tensor of shape ``(n, c, d)``.
-            key_ncd:
-                Key tensor of shape ``(n, c, d)``.
-            value_ncd:
-                Value tensor of shape ``(n, c, d)``.
+            x_query_ncd:
+                Input query tensor of shape ``(n, c, d)``.
+            x_key_ncd:
+                Input key tensor of shape ``(n, c, d)``.
+            x_value_ncd:
+                Input value tensor of shape ``(n, c, d)``.
             attention_mask_ncc:
                 Attention mask tensor of shape ``(n, c, c)``.
 
@@ -122,9 +122,9 @@ class MultiHeadAttention(nn.Module):
             The output hidden state tensor of shape ``(n, c, d)``.
         """
         n_heads = self.n_heads
-        query_ncd = self.Wq(query_ncd)
-        key_ncd = self.Wk(key_ncd)
-        value_ncd = self.Wv(value_ncd)
+        query_ncd = self.Wq(x_query_ncd)
+        key_ncd = self.Wk(x_key_ncd)
+        value_ncd = self.Wv(x_value_ncd)
         # d = k * h
         query_nhck = self.split_heads(query_ncd, n_heads)
         key_nhck = self.split_heads(key_ncd, n_heads)
