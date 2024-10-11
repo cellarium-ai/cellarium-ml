@@ -96,13 +96,13 @@ model:
 
       # probably leave these alone
       n_continuous_cov: 0
-      n_cats_per_cov: null
+      n_cats_per_cov: []
       dropout_rate: 0.1
       dispersion: gene
       log_variational: true
       gene_likelihood: nb
       latent_distribution: normal
-      encode_covariates: false
+      # encode_covariates: false
       batch_representation: one-hot
       use_batch_norm: both
       use_layer_norm: none

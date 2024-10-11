@@ -310,6 +310,8 @@ class DecoderSCVI(torch.nn.Module):
         if self.final_additive_bias:
             count_mean_ng = torch.exp(library_size_n) * chi_ng + self.final_additive_bias_layer(
                 torch.cat([batch_nb, categorical_covariate_np], dim=-1)
+                if categorical_covariate_np is not None
+                else batch_nb
             )
         else:
             count_mean_ng = torch.exp(library_size_n) * chi_ng
@@ -413,7 +415,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         n_batch: int = 0,
         n_latent: int = 10,
         n_continuous_cov: int = 0,
-        n_cats_per_cov: list[int] | None = None,
+        n_cats_per_cov: list[int] = [],
         dropout_rate: float = 0.1,
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
         log_variational: bool = True,
@@ -691,7 +693,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         z_nk: torch.Tensor,
         library_n: torch.Tensor,
         batch_nb: torch.Tensor,
-        cont_covs: torch.Tensor | None = None,
+        continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_np: torch.Tensor | None = None,
         size_factor: torch.Tensor | None = None,
         # y: torch.Tensor | None = None,
