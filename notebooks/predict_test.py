@@ -31,8 +31,9 @@ train_database = {
                   }
 
 test_database = {
+                #"2a": ["pmbc_results_test_raw",'',"../example_configs/scvi_config_pbmc_test.yaml","../data/pbmc_count_test.h5ad",['final_annotation', 'batch'],""],
+                "2b": ["pmbc_results_test_masked",'',"../example_configs/scvi_config_pbmc_test_masked.yaml","../data/pbmc_count_test.h5ad",['final_annotation', 'batch'],""],
                 "2a": ["pmbc_results_test_raw",'',"../example_configs/scvi_config_pbmc_test.yaml","../data/pbmc_count_test.h5ad",['final_annotation', 'batch'],""],
-                "2b": ["pmbc_results_test_masked",'',"../example_configs/scvi_config_pbmc_test.yaml","../data/pbmc_count_test.h5ad",['final_annotation', 'batch'],""],
                  }
 
 def cosine_similarity2(a,b,correlation_matrix=False,parallel=False): #TODO: import from utils?
@@ -148,47 +149,60 @@ for train_model in train_database.values():
         filename_test = f"adata_processed{filename_suffix_test}"
 
         matched_test, filepath_test = NF.matching_file(datapath_test, filename_test)
+        adata_test = sc.read(adata_file_test)
 
-        adata_test = NF.download_predict(config_file_test, gene_names_test, filepath_test, pipeline, device,
-                                         matched_test, filename_test,
-                                         overwrite)  # prediction of the test dataset with this model
 
         if "masked" in foldername_test:
+            print("Here")
             #Highlight: Mask or set to 0 some of the genes in the test that are not in the highly expressed train dataset
             nomask_train = adata_train.var['high_exp_genes'].tolist()
             mask_test_idx = ~adata_test.var_names.isin(nomask_train)
             cols_to_mask_test = adata_test.var_names[mask_test_idx].tolist()
-            random_mask_cols_test = np.random.choice(cols_to_mask_test, 200, replace=False)
+            random_mask_cols_test = np.random.choice(cols_to_mask_test, 2000, replace=False) #mask 200 genes
+            print("Done")
             random_mask_cols_test_idx = adata_test.var_names.isin(random_mask_cols_test)
+            #adata_test.X[:] = 0
             adata_test.X[:,random_mask_cols_test_idx] = 0
+
+            adata_test.write(adata_file_test.replace(".h5ad","_masked.h5ad"))
             filename_suffix_test = f"_test_MASKED_predictions_{foldername_test}"
             filename_test = f"adata_processed{filename_suffix_test}"
             matched_test, filepath_test = NF.matching_file(datapath_test, filename_test)
-
+            overwrite=True
+            adata_test = NF.download_predict(config_file_test, gene_names_test, filepath_test, pipeline, device,
+                                             matched_test, filename_test,
+                                             overwrite)  # prediction of the test dataset with this model
+        else:
+            print("Not masked version")
             adata_test = NF.download_predict(config_file_test, gene_names_test, filepath_test, pipeline, device,
                                              matched_test, filename_test,
                                              overwrite)  # prediction of the test dataset with this model
 
-        start = time.time()
-        print(adata_train)
+
 
         #TODO: Random subsampling of adata_train by cluster
 
         #TODO: Make this optional if it has already been done
         cossim_matrix = cosine_similarity(adata_train.obsm["X_scvi"],adata_test.obsm["X_scvi"]) #(ntrain,ntest)
-        argmax_cos_train = cossim_matrix.argmax(axis=0)
+        argmax_cos_train = cossim_matrix.argmax(axis=0) # there are duplicates ....
         adata_test.obs["argmax_cos_train"] = argmax_cos_train
 
         train_obs_idx = np.arange(adata_train.X.shape[0])
+        adata_train.obs["cell_index"] = train_obs_idx
+        adata_train_subset = adata_train.obs[["cell_index","clusters",color_keys_train[0]]]
+        adata_train_subset.rename(columns={"clusters":"clusters_train",color_keys_train[0]:f"{color_keys_train[0]}_train"}, inplace=True)
 
-        train_obs_idx = (train_obs_idx[...,None] == argmax_cos_train).any(-1)
+        adata_test.obs = adata_test.obs.merge(adata_train_subset, left_on="argmax_cos_train", right_on="cell_index", how="inner" )
 
-        print(train_obs_idx)
+        #print(adata_test.obs[[color_keys_test[0],f"{color_keys_train[0]}_train"]])
+        target = adata_test.obs[color_keys_test[0]].values.to_numpy()
+        prediction = adata_test.obs[f"{color_keys_train[0]}_train"].values.to_numpy()
+        accuracy = (target == prediction).sum()/len(target) * 100
+        print("------------------------------Pairwise-accuracy--------------------------")
+        print(accuracy)
 
-        #Pick the corresponding cluster
 
 
-        exit()
 
 
 #Find a way to compare the cluster assignations for the test datasets predicted with the same train dataset

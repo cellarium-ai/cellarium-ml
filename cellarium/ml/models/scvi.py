@@ -83,6 +83,7 @@ class LinearWithBatch(torch.nn.Linear):
         Returns:
             a tensor of shape (n, out_features)
         """
+
         return self.bias_decoder(batch_nb)
 
     def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor) -> torch.Tensor:

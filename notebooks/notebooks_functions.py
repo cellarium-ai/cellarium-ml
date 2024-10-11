@@ -137,7 +137,6 @@ def setup_model(checkpoint_file):
     return pipeline, device
 
 
-
 def download_predict(config_file,gene_names,filepath,pipeline,device,matched,filename,overwrite):
     # get the location of the dataset
     with open(config_file, "r") as file:

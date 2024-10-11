@@ -1,0 +1,157 @@
+# lightning.pytorch==2.2.1
+seed_everything: true
+trainer:
+  accelerator: auto
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: 32
+  logger: null
+  callbacks: 
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
+      log_momentum: false
+  # - class_path: lightning.pytorch.callbacks.EarlyStopping
+  #   init_args:
+  #     monitor: train_loss
+  #     min_delta: 0.0
+  #     patience: 45
+  #     mode: min
+  fast_dev_run: false
+  max_epochs: 50
+  min_epochs: null
+  max_steps: -1
+  min_steps: null
+  max_time: null
+  limit_train_batches: null
+  limit_val_batches: null
+  limit_test_batches: null
+  limit_predict_batches: null
+  overfit_batches: 0.0
+  val_check_interval: null
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: null
+  log_every_n_steps: 1
+  enable_checkpointing: true
+  enable_progress_bar: true
+  enable_model_summary: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+  deterministic: null
+  benchmark: null
+  inference_mode: false
+  use_distributed_sampler: true
+  profiler: null
+  detect_anomaly: false
+  barebones: false
+  plugins: null
+  sync_batchnorm: false
+  reload_dataloaders_every_n_epochs: 0
+  default_root_dir: null
+model:
+#  transforms:
+#   - !CheckpointLoader #do not remove the - , otherwise it messes everything up
+#      file_path: ../notebooks/lightning_logs/version_7/checkpoints/epoch=49-step=3150.ckpt
+#      attr: model
+#      #attr: model._modules.z_encoder.mean_encoder.bias #here we extract the parameter we are looking for model._modules["z_encoder"].mean_encoder.bias
+#      convert_fn: cellarium.ml.transforms.load.to_device
+  model:
+    class_path: cellarium.ml.models.SingleCellVariationalInference
+    init_args:
+      var_names_g: null # these are pulled from data, leave null
+      n_batch: null # these can be changed
+      batch_embedded: true
+      batch_representation_sampled: true
+      n_latent_batch: null
+      batch_kl_weight: 0.01
+      encoder: 
+        hidden_layers:
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
+          init_args:
+            out_features: 128
+            batch_to_bias_hidden_layers: []  # one linear transformation: what scvi-tools does
+        final_layer:
+          class_path: torch.nn.Linear
+          init_args: {}
+      decoder:
+        hidden_layers:
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
+          init_args:
+            out_features: 128
+            batch_to_bias_hidden_layers: []
+              # hidden_layers:
+              # - class_path: torch.nn.Linear
+              #     init_args:
+              #       out_features: 10
+              # - class_path: torch.nn.Linear
+              #     init_args:
+              #       out_features: 20
+        final_layer: 
+          class_path: cellarium.ml.models.scvi.LinearWithBatch
+          init_args:
+            batch_to_bias_hidden_layers: []
+        final_additive_bias: true
+      n_latent: 10 # probably leave these alone
+      n_continuous_cov: 0
+      n_cats_per_cov: null
+      dropout_rate: 0.1
+      dispersion: gene
+      log_variational: true
+      gene_likelihood: nb
+      latent_distribution: normal
+      encode_covariates: false
+      batch_representation: one-hot
+      use_batch_norm: both
+      use_layer_norm: none
+      use_size_factor_key: false
+      use_observed_lib_size: true
+      library_log_means: null
+      library_log_vars: null
+      batch_embedding_kwargs: null
+  optim_fn: torch.optim.AdamW
+  optim_kwargs: 
+    lr: 1e-3 # 6e-4
+  # scheduler_fn: torch.optim.lr_scheduler.StepLR
+  # scheduler_kwargs: {"step_size": 25, "gamma": 0.8} # null
+  scheduler_fn: torch.optim.lr_scheduler.ReduceLROnPlateau
+  scheduler_kwargs: {"mode":"min"} # , "min_lr"=0.00005
+  is_initialized: False
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      #filenames: gs://yx-data/pbmc_count.h5ad
+      #filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
+      #filenames: /opt/project/cellarium-ml/data/pbmc_count.h5ad #use with cli.py
+      filenames: ../data/pbmc_count_test_masked.h5ad # use with scvi_demo.py # use for the limits and shard_size 31774
+      #filenames: ../data/tucker_human_heart_atlas.h5ad # use with scvi_demo.py #276940 limits cells
+      limits: [6355]
+      shard_size: 6355
+      last_shard_size: null
+      max_cache_size: 1
+      cache_size_strictly_enforced: true
+      label: null
+      keys: null
+      index_unique: null
+      convert: null
+      indices_strict: true
+      obs_columns_to_validate: null
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
+    var_names_g:
+      attr: var_names
+    batch_index_n:
+      attr: obs
+      key: batch
+      convert_fn: cellarium.ml.utilities.data.categories_to_codes
+  batch_size: 512
+  shuffle: true
+  seed: 0
+  drop_last: false
+  test_mode: false
+  num_workers: 0 #changed from 4 to 0 to avoid memory complaints
+ckpt_path: null
