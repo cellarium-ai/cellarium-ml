@@ -8,9 +8,8 @@ import pyro
 import pyro.distributions as dist
 import torch
 import torch.nn.functional
-import torchmetrics
-#from pyro.distributions import Delta, Laplace
 
+#from pyro.distributions import Delta, Laplace
 from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
@@ -44,14 +43,14 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
         self,
         n_obs: int,
         var_names_g: np.ndarray,
-        y_categories: np.ndarray|None,
+        y_categories: np.ndarray | None,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
         activation_fn: str = 'softmax',
         out_distribution: str = 'Categorical',
         seed: int = 0,
         probability_propagation_flag: bool = False,
-        parent_child_list_path: str = 'gs://cellarium-file-system/ml-configs/Supervised_cell_classification/tdigest_config/parent_child_indices_list.pkl', # Ask Yerdos, where these files can be stored on gcs
+        target_descendents_list_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_descendents_list.pkl',
         y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
         log_metrics: bool = True,
     ) -> None:
@@ -63,7 +62,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
         self.n_vars = len(var_names_g)
         #self.y_categories = y_categories
         self.y_categories = read_pkl_from_gcs(y_categories_path)
-        self.parent_child_list = read_pkl_from_gcs(parent_child_list_path)
+        self.target_descendents_list = read_pkl_from_gcs(target_descendents_list_path)
         self.n_categories = len(self.y_categories)
         self.activation_fn = getattr(torch.nn.functional, activation_fn)
         self.probability_propagation_flag = probability_propagation_flag
@@ -191,7 +190,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
         """
         activation_out_gpu_clone = activation_out_gpu.clone()
         for col in range(activation_out_gpu.shape[1]):
-            activation_out_gpu_clone[:, col] += activation_out_gpu[torch.arange(activation_out_gpu_clone.shape[0]).unsqueeze(1),self.parent_child_list[col]].sum(dim=1)
+            activation_out_gpu_clone[:, col] += activation_out_gpu[torch.arange(activation_out_gpu_clone.shape[0]).unsqueeze(1),self.target_descendents_list[col]].sum(dim=1)
         return activation_out_gpu_clone
 
 
