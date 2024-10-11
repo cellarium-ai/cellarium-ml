@@ -53,7 +53,7 @@ class AnnDataField:
     """
 
     attr: str
-    key: str | None = None
+    key: list[str] | str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
     def __call__(self, adata: AnnData) -> np.ndarray:
@@ -136,18 +136,18 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
     return np.asarray(x.cat.codes)
 
 
-def multiple_categories_to_codes(x: pd.Series) -> np.ndarray:
+def multiple_categories_to_codes(x: pd.DataFrame) -> np.ndarray:
     """
-    Convert a pandas Series of categorical data to a numpy array of codes.
+    Convert a pandas DataFrame of categorical data to a 2d numpy array of codes.
     Returned array is always a copy.
 
     Args:
-        x: Pandas Series object.
+        x: Pandas DataFrame object.
 
     Returns:
-        Numpy array.
+        Numpy array, shape (n, n_categorical_columns)
     """
-    return np.asarray(x.cat.codes)[:, None]  # TODO: this is a hack for now because we can only have one column
+    return x.apply(lambda col: col.cat.codes).to_numpy()
 
 
 def get_categories(x: pd.Series) -> np.ndarray:
