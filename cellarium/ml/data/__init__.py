@@ -7,7 +7,7 @@ from cellarium.ml.data.distributed_anndata import (
     DistributedAnnDataCollectionView,
     LazyAnnData,
 )
-from cellarium.ml.data.fileio import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url
+from cellarium.ml.data.fileio import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url, read_pkl_from_gcs
 from cellarium.ml.data.schema import AnnDataSchema
 
 __all__ = [
@@ -20,4 +20,5 @@ __all__ = [
     "read_h5ad_gcs",
     "read_h5ad_local",
     "read_h5ad_url",
+    "read_pkl_from_gcs",
 ]

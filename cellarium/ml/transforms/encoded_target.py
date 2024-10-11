@@ -8,7 +8,7 @@ from torch import nn
 from cellarium.ml.data.fileio import read_pkl_from_gcs
 
 
-class one_hot_encoded_targets(nn.Module):
+class EncodedTargets(nn.Module):
     """
 when called, assigns multilabel targets. All parents of the target cell type get assigned as targets. 
     """
@@ -17,7 +17,7 @@ when called, assigns multilabel targets. All parents of the target cell type get
         self,
         multilabel_flag: bool = True,
         child_parent_list_path: str = '/home/nmagre/P1_logistic_regression/child_parent_indices_list.pkl',
-        unique_cell_types_nparray_path: str = '/home/nmagre/P1_logistic_regression/unique_cell_types.pkl',
+        unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
     ) -> None:
         super().__init__()
         self.multilabel_flag = multilabel_flag
@@ -27,18 +27,17 @@ when called, assigns multilabel targets. All parents of the target cell type get
 
     def forward(
         self,y_n: np.ndarray
-    ) -> dict[str, np.ndarray]:
+    ) -> dict[str, torch.tensor]:
         """
 
         """
-        out_array = np.zeros((len(y_n), len(self.child_parent_list)), dtype=int)
-        for i, target_name in enumerate(y_n):
-            #print(f"TARGET NAME IS {target_name}")
-            target_index = np.where(self.unique_cell_types_nparray == 'CL_' + target_name[3:])[0][0] #get index of target cell type
-            # Set the corresponding columns to 1
-            if self.multilabel_flag==1:
+        if self.multilabel_flag==0:
+            return({'y_n':torch.tensor(np.searchsorted(self.unique_cell_types_nparray, y_n))})
+        else:
+            out_array = np.zeros((len(y_n), len(self.child_parent_list)), dtype=int)
+            for i, target_name in enumerate(y_n):
+                #print(f"TARGET NAME IS {target_name}")
+                target_index = np.where(self.unique_cell_types_nparray == target_name)[0][0] #get index of target cell type
+                # Set the corresponding columns to 1
                 out_array[i, [target_index]+self.child_parent_list[target_index]] = 1
-            else:
-                out_array[i,[target_index]] = 1
-
-        return {'y_n':torch.tensor(out_array)}
+            return {'y_n':torch.tensor(out_array)}
