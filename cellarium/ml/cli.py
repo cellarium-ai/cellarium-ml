@@ -204,6 +204,29 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     return field(adata)
 
 
+def nunique_scvi(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of categories in the target variable.
+
+    E.g. if the target variable is ``obs["cell_type"]`` then this function
+    returns the number of categories in ``obs["cell_type"]``::
+
+        >>> len(data.dadc[0].obs["cell_type"].cat.categories)
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+        key: Data is pulled from adata.obs[key]
+
+    Returns:
+        The number of categories in the target variable.
+    """
+    field = data.batch_keys["batch_index_n"]
+    value = getattr(data.dadc[0], field.attr)
+    if field.key is not None:
+        value = value[field.key]
+    return len(value.cat.categories)
+
+
 def compute_var_names_g(
     cpu_transforms: list[torch.nn.Module] | None,
     transforms: list[torch.nn.Module] | None,
@@ -549,6 +572,48 @@ def probabilistic_pca(args: ArgsType = None) -> None:
                 compute_var_names_g,
             ),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
+def scvi(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SingleCellVariationalInference` model.
+
+    This example shows how to fit feature count data to the scVI model [1].
+
+    Example run::
+
+        cellarium-ml scvi fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 5 \
+            --data.num_workers 1 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/scvi \
+            --trainer.max_steps 10
+
+    **References:**
+
+    1. `Deep generative modeling for single-cell transcriptomics (Lopez et al.)
+       <https://www.nature.com/articles/s41592-018-0229-2>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SingleCellVariationalInference",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_batch", nunique_scvi),
         ],
     )
     cli(args=args)
