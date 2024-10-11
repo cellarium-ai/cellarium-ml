@@ -46,7 +46,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
         W_init_scale: float = 1.0,
         seed: int = 0,
         log_metrics: bool = True,
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_y_categories.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
     ) -> None:
         super().__init__()
 
@@ -113,8 +113,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            print(f"NIMISH LOGITS NC SHAPE IS {logits_nc.shape}")
-            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=torch.argmax(y_n, dim=-1))
+            pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
