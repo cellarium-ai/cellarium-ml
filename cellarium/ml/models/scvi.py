@@ -48,7 +48,8 @@ class LinearWithBatch(torch.nn.Linear):
     Args:
         in_features: passed to `torch.nn.Linear`
         out_features: passed to `torch.nn.Linear`
-        batch_latent_dim: the dimensionality of the batch representation
+        n_batch: the dimensionality of the batch representation
+        categorical_covariate_dimensions: a list of integers containing the number of categories for each categorical covariate
         batch_to_bias_hidden_layers: a list of hidden layer sizes for the batch-to-bias decoder
         bias: passed to `torch.nn.Linear` (True is like the scvi-tools implementation)
         batch_to_bias_dressing_init_kwargs: a dictionary of keyword arguments to pass to the `DressedLayer` constructor
@@ -60,38 +61,48 @@ class LinearWithBatch(torch.nn.Linear):
             out_features: int, 
             n_batch: int, 
             batch_to_bias_hidden_layers: list[int], 
+            categorical_covariate_dimensions: list[int] = [],
             bias: bool = True,
             batch_to_bias_dressing_init_kwargs: dict[str, any] = {},
         ):
         super().__init__(in_features, out_features, bias=bias)
         self.bias_decoder = FullyConnectedLinear(
-            in_features=n_batch,
+            in_features=n_batch + sum(categorical_covariate_dimensions),
             out_features=out_features,
             n_hidden=batch_to_bias_hidden_layers,
             dressing_init_kwargs=batch_to_bias_dressing_init_kwargs,
         )
     
-    def compute_bias(self, batch_nb: torch.Tensor) -> torch.Tensor:
+    def compute_bias(self, batch_nb: torch.Tensor, categorical_covariate_np: torch.Tensor | None = None) -> torch.Tensor:
         """
         Returns the bias given batch representations.
 
         Args:
             batch_nb: a tensor of batch representations (could be one-hot) of shape (n, batch_latent_dim)
+            categorical_covariates_nd: a tensor of categorical covariates of shape (n, sum(n_categories_per_covariate))
 
         Returns:
             a tensor of shape (n, out_features)
         """
-        return self.bias_decoder(batch_nb)
+        if categorical_covariate_np is None:
+            return self.bias_decoder(batch_nb)
+        else:
+            return self.bias_decoder(torch.cat([batch_nb, categorical_covariate_np], dim=-1))
 
-    def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor, categorical_covariate_np: torch.Tensor | None = None) -> torch.Tensor:
         """
         Computes the forward pass of the layer as
         out = x @ self.weight.T + self.bias + bias
 
         where bias is computed as
         bias = bias_encoder(batch)
+
+        Args:
+            x_ng: a tensor of shape (n, in_features)
+            batch_nb: a tensor of batch indices of shape (n, batch_latent_dim)
+            categorical_covariates_nd: a tensor of categorical covariates of shape (n, sum(n_categories_per_covariate))
         """
-        return super().forward(x_ng) + self.compute_bias(batch_nb)
+        return super().forward(x_ng) + self.compute_bias(batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
 
 
 class FullyConnectedWithBatchArchitecture(torch.nn.Module):
@@ -147,10 +158,10 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
         self.module_list = module_list
         self.out_features = out_features
 
-    def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor, categorical_covariate_np: torch.Tensor | None) -> torch.Tensor:
         x_ = x_ng
         for dressed_layer in self.module_list:
-            x_ = (dressed_layer(x_, batch_nb=batch_nb) 
+            x_ = (dressed_layer(x_, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np) 
                   if (hasattr(dressed_layer, "layer") and isinstance(dressed_layer.layer, LinearWithBatch)) 
                   else dressed_layer(x_))
         return x_
@@ -200,8 +211,8 @@ class EncoderSCVI(torch.nn.Module):
         self.mean_encoder_takes_batch = isinstance(self.mean_encoder, LinearWithBatch)
         self.var_eps = var_eps
 
-    def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor) -> torch.distributions.Distribution:
-        q_nh = self.fully_connected(x_ng, batch_nb)
+    def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor, categorical_covariate_np: torch.Tensor | None) -> torch.distributions.Distribution:
+        q_nh = self.fully_connected(x_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
         q_mean_nk = self.mean_encoder(q_nh, batch_nb) if self.mean_encoder_takes_batch else self.mean_encoder(q_nh)
         q_var_nk = torch.exp(self.var_encoder(q_nh, batch_nb) if self.mean_encoder_takes_batch else self.var_encoder(q_nh)) + self.var_eps
         return torch.distributions.Normal(q_mean_nk, q_var_nk.sqrt())
@@ -237,6 +248,7 @@ class DecoderSCVI(torch.nn.Module):
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
         scale_activation: Literal["softmax", "softplus"] = "softmax",
         final_additive_bias: bool = False,
+        n_cats_per_cov: list[int] | None = None,
         eps: float = 1e-10,
     ):
         super().__init__()
@@ -268,7 +280,7 @@ class DecoderSCVI(torch.nn.Module):
         if self.final_additive_bias:
             self.final_additive_bias_layer = torch.nn.Sequential(
                 FullyConnectedLinear(
-                    in_features=final_layer["init_args"]["n_batch"],
+                    in_features=final_layer["init_args"]["n_batch"] + sum(n_cats_per_cov),
                     out_features=out_features,
                     n_hidden=[],
                     dressing_init_kwargs={},
@@ -284,16 +296,21 @@ class DecoderSCVI(torch.nn.Module):
         batch_nb: torch.Tensor, 
         inverse_overdispersion: torch.Tensor | None, 
         library_size_n: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None = None,
     ) -> torch.distributions.Distribution:
-        q_nh = self.fully_connected(z_nk, batch_nb)
+        
+        # bulk of the network
+        q_nh = self.fully_connected(z_nk, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
 
         # mean counts
-        unnormalized_chi_ng = (self.normalized_count_decoder(q_nh, batch_nb) 
+        unnormalized_chi_ng = (self.normalized_count_decoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np) 
                                if self.count_decoder_takes_batch 
                                else self.normalized_count_decoder(q_nh))
         chi_ng = self.normalized_count_activation(unnormalized_chi_ng)
         if self.final_additive_bias:
-            count_mean_ng = torch.exp(library_size_n) * chi_ng + self.final_additive_bias_layer(batch_nb)
+            count_mean_ng = torch.exp(library_size_n) * chi_ng + self.final_additive_bias_layer(
+                torch.cat([batch_nb, categorical_covariate_np], dim=-1)
+            )
         else:
             count_mean_ng = torch.exp(library_size_n) * chi_ng
 
@@ -406,7 +423,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_representation_sampled: bool = False,
         n_latent_batch: int | None = None,
         batch_kl_weight: float = 0.0,
-        encode_covariates: bool = False,
+        # encode_covariates: bool = False,
         batch_representation: Literal["one-hot", "embedding"] = "one-hot",
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -425,7 +442,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.log_variational = log_variational
         self.gene_likelihood = gene_likelihood
         self.latent_distribution = latent_distribution
-        self.encode_covariates = encode_covariates
+        self.n_cats_per_cov = n_cats_per_cov
+        # self.encode_covariates = encode_covariates
         self.use_size_factor_key = use_size_factor_key
         self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
         self.batch_embedded = batch_embedded
@@ -504,6 +522,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         for layer in encoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
                 layer["init_args"]["n_batch"] = self.n_latent_batch
+                layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
             if "dressing_init_args" not in layer:
                 layer["dressing_init_args"] = {}
             layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_encoder
@@ -511,11 +530,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layer["dressing_init_args"]["dropout_rate"] = dropout_rate
         if encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
             encoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
+            encoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
 
         # decoder layers
         for layer in decoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
                 layer["init_args"]["n_batch"] = self.n_latent_batch
+                layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
             if "dressing_init_args" not in layer:
                 layer["dressing_init_args"] = {}
             layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_decoder
@@ -523,6 +544,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
         if decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
             decoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
+            decoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
 
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
@@ -544,6 +566,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             gene_likelihood=self.gene_likelihood,
             scale_activation="softplus" if use_size_factor_key else "softmax",
             final_additive_bias=decoder["final_additive_bias"],
+            n_cats_per_cov=n_cats_per_cov,  # currently used only for the sizing of the final additive bias layer
         )
 
         print(self)
@@ -581,13 +604,32 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             else:
                 batch_nb = self.batch_representation_mean_bd[batch_index_n.long(), :]
         return batch_nb
+    
+    def categorical_onehot_from_categorical_index(self, categorical_covariate_index_nd: torch.Tensor | None) -> torch.Tensor | None:
+        """Compute one-hot encoding of categorical covariates from integer category indices.
+
+        Args:
+            categorical_covariate_index_nd: a tensor of shape (n, n_categorical_covariates)
+        
+        """
+        if categorical_covariate_index_nd is not None:
+
+            # make the categorical covariates one-hot
+            categorical_covariate_np = torch.cat(
+                [torch.nn.functional.one_hot(categorical_covariate_index_nd[:, i].long(), num_classes=n_cats).float()
+                 for i, n_cats in enumerate(self.n_cats_per_cov)], 
+                 dim=1,
+            )
+            return categorical_covariate_np
+
+        return None
 
     def inference(
         self,
-        x_ng,
-        batch_nb,
-        cont_covs=None,
-        cat_covs=None,
+        x_ng: torch.Tensor,
+        batch_nb: torch.Tensor,
+        continuous_covariates_nc: torch.Tensor | None = None,
+        categorical_covariate_np: torch.Tensor | None = None,
         n_samples=1,
     ):
         """
@@ -601,31 +643,32 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         if self.log_variational:
             x_ = torch.log1p(x_)
 
-        if cont_covs is not None and self.encode_covariates:
-            encoder_input = torch.cat((x_, cont_covs), dim=-1)
-        else:
-            encoder_input = x_
-        if cat_covs is not None and self.encode_covariates:
-            categorical_input = torch.split(cat_covs, 1, dim=1)
-        else:
-            categorical_input = ()
+        # if continuous_covariates_nc is not None and self.encode_covariates:
+        #     encoder_input = torch.cat((x_, continuous_covariates_nc), dim=-1)
+        # else:
+        encoder_input = x_
+            
+        #     # categorical_input = torch.split(categorical_covariate_index_nd, 1, dim=1)
+        # else:
+        #     categorical_input = ()
 
-        if self.batch_representation == "embedding" and self.encode_covariates:
-            raise NotImplementedError
+        # if self.batch_representation == "embedding":# and self.encode_covariates:
+        #     raise NotImplementedError
             # batch_rep = self.compute_embedding(REGISTRY_KEYS.BATCH_KEY, batch_index)
             # encoder_input = torch.cat([encoder_input, batch_rep], dim=-1)
             # qz, z = self.z_encoder(encoder_input, *categorical_input)
-        else:
-            qz = self.z_encoder(x_ng=encoder_input, batch_nb=batch_nb)
-            z = qz.rsample()
+        # else:
+        qz = self.z_encoder(x_ng=encoder_input, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
+        z = qz.rsample()
 
         ql = None
         if not self.use_observed_lib_size:
-            if self.batch_representation == "embedding":
-                ql, library_encoded = self.l_encoder(encoder_input, *categorical_input)
-            else:
-                ql, library_encoded = self.l_encoder(encoder_input, batch_index_n, *categorical_input)
-            library = library_encoded
+            raise NotImplementedError
+            # if self.batch_representation == "embedding":
+            #     ql, library_encoded = self.l_encoder(encoder_input, *categorical_input)
+            # else:
+            #     ql, library_encoded = self.l_encoder(encoder_input, batch_index_n, *categorical_input)
+            # library = library_encoded
 
         if n_samples > 1:
             untran_z = qz.sample((n_samples,))
@@ -649,7 +692,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         library_n: torch.Tensor,
         batch_nb: torch.Tensor,
         cont_covs: torch.Tensor | None = None,
-        cat_covs: torch.Tensor | None = None,
+        categorical_covariate_np: torch.Tensor | None = None,
         size_factor: torch.Tensor | None = None,
         # y: torch.Tensor | None = None,
     ) -> dict[str, Distribution | None]:
@@ -704,6 +747,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         count_distribution = self.decoder(
             z_nk=z_nk,
             batch_nb=batch_nb, 
+            categorical_covariate_np=categorical_covariate_np,
             inverse_overdispersion=inverse_overdispersion, 
             library_size_n=size_factor,
         )
@@ -723,8 +767,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         batch_index_n: torch.Tensor,
-        cont_covs_nc: torch.Tensor | None = None,
-        cat_covs_nd: torch.Tensor | None = None,
+        continuous_covariates_nc: torch.Tensor | None = None,
+        categorical_covariate_index_nd: torch.Tensor | None = None,  # d is the number of categorical covariates; tensor is integer membership
         size_factor_n: torch.Tensor | None = None,
     ):
         """
@@ -735,10 +779,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 The list of the variable names in the input data.
             batch_index_n:
                 Batch indices of input cells as integers.
-            cont_covs_nc:
+            continuous_covariates_nc:
                 Continuous covariates for each cell (c-dimensional).
-            cat_covs_nd:
-                Categorical covariates for each cell (d-dimensional).
+            categorical_covariate_index_nd:
+                Categorical covariates for each cell (d-dimensional). Integer membership categorical codes.
             size_factor_n:
                 Library size factor for each cell.
 
@@ -750,20 +794,21 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
+        categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
         inference_outputs = self.inference(
             x_ng=x_ng,
             batch_nb=batch_nb,
-            cont_covs=cont_covs_nc,
-            cat_covs=cat_covs_nd,
+            continuous_covariates_nc=continuous_covariates_nc,
+            categorical_covariate_np=categorical_covariate_np,
             n_samples=1,
         )
         generative_outputs = self.generative(
             z_nk=inference_outputs["z"],
             library_n=inference_outputs["library"],
             batch_nb=batch_nb,
-            cont_covs=cont_covs_nc,
-            cat_covs=cat_covs_nd,
+            continuous_covariates_nc=continuous_covariates_nc,
+            categorical_covariate_np=categorical_covariate_np,
             size_factor=size_factor_n,
             # y=y,
             # transform_batch=transform_batch_n,  # see self.predict()
@@ -826,7 +871,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             x_ng=x_ng,
             batch_nb=batch_nb,
             cont_covs=cont_covs_nc,
-            cat_covs=cat_covs_nd,
+            categorical_covariates_nd=cat_covs_nd,
             n_samples=1,
         )
     
@@ -877,7 +922,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             x_ng=x_ng,
             batch_nb=batch_nb,
             cont_covs=cont_covs_nc,
-            cat_covs=cat_covs_nd,
+            categorical_covariates_nd=cat_covs_nd,
             n_samples=1,
         )
 
@@ -886,7 +931,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             library_n=inference_outputs["library"],
             batch_nb=batch_nb,
             cont_covs=cont_covs_nc,
-            cat_covs=cat_covs_nd,
+            categorical_covariate_index_nd=cat_covs_nd,
             size_factor=size_factor_n,
         )
 
