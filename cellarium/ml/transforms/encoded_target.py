@@ -35,9 +35,8 @@ when called, assigns multilabel targets. All parents of the target cell type get
             return({'y_n':torch.tensor(np.searchsorted(self.unique_cell_types_nparray, y_n))})
         else:
             out_array = np.zeros((len(y_n), len(self.child_parent_list)), dtype=int)
-            for i, target_name in enumerate(y_n):
-                #print(f"TARGET NAME IS {target_name}")
-                target_index = np.where(self.unique_cell_types_nparray == target_name)[0][0] #get index of target cell type
+            indices = np.searchsorted(self.unique_cell_types_nparray, y_n)
+            for i, target_index in enumerate(indices):
                 # Set the corresponding columns to 1
                 out_array[i, [target_index]+self.child_parent_list[target_index]] = 1
             return {'y_n':torch.tensor(out_array)}
