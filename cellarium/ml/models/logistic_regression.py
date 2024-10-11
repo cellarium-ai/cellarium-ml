@@ -57,6 +57,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
         #self.y_categories = y_categories
         self.y_categories = read_pkl_from_gcs(y_categories_path)
         self.n_categories = len(self.y_categories)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.seed = seed
         # parameters
