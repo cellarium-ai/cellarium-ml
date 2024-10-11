@@ -182,6 +182,13 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
                 )
 
     def probability_propagation(self,activation_out_gpu:torch.tensor) -> torch.tensor:
+        """
+        for each column in activation_out_gpu_clone, col, we get a tensor of 
+        activation_out_gpu[:,[children_indices[col]]],
+        then we take the rowwise sume of these columns.
+        then we add those values with all rows in 'col' column in activation_out_gpu_clone
+        TRIAL CODE AVAILABLE IN TRIAL.IPYNB - PROBABILITY PROPAGATION CODE TRIAL
+        """
         activation_out_gpu_clone = activation_out_gpu.clone()
         for col in range(activation_out_gpu.shape[1]):
             activation_out_gpu_clone[:, col] += activation_out_gpu[torch.arange(activation_out_gpu_clone.shape[0]).unsqueeze(1),self.parent_child_list[col]].sum(dim=1)
