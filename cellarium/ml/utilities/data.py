@@ -53,12 +53,13 @@ class AnnDataField:
     """
 
     attr: str
-    key: str | None = None
+    key: list[str] | str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
     def __call__(self, adata: AnnData) -> np.ndarray:
         value = attrgetter(self.attr)(adata)
         if self.key is not None:
+            # TODO: could we put something here to accept a list of keys?
             value = value[self.key]
 
         if self.convert_fn is not None:
@@ -133,6 +134,20 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
         Numpy array.
     """
     return np.asarray(x.cat.codes)
+
+
+def multiple_categories_to_codes(x: pd.DataFrame) -> np.ndarray:
+    """
+    Convert a pandas DataFrame of categorical data to a 2d numpy array of codes.
+    Returned array is always a copy.
+
+    Args:
+        x: Pandas DataFrame object.
+
+    Returns:
+        Numpy array, shape (n, n_categorical_columns)
+    """
+    return x.apply(lambda col: col.cat.codes).to_numpy()
 
 
 def get_categories(x: pd.Series) -> np.ndarray:
