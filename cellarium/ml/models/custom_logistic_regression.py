@@ -111,7 +111,6 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
         """
         print(f"NIMISH SELF.ACTIVATION_FN is {self.activation_fn}")
         print(f"NIMISH SELF.OUT_DISTRIBUTION is {self.out_distribution}")
-        print(f"NIMISH SELF.PP FLAG is {self.probability_propagation_flag}")
         y_n = y_n.to(self.device)
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
@@ -129,6 +128,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
             print(f"NIMISH LOGITS NC DTYPE IS {logits_nc.dtype}")
             activation_out = self.activation_fn(logits_nc.to(dtype=torch.float64), dim=1)
             if (self.probability_propagation_flag==1):
+                print(f"NIMISH SELF.PP FLAG is {self.probability_propagation_flag}")
                 #activation_out = custom_functions.multi_label_target(pp_flag=1,softmax_out_gpu=activation_out)
                 activation_out = self.probability_propagation(activation_out_gpu=activation_out)
 
