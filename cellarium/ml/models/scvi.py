@@ -87,6 +87,8 @@ class LinearWithBatch(torch.nn.Linear):
         if categorical_covariate_np is None:
             return self.bias_decoder(batch_nb)
         else:
+            print("categorical covariates seem to be actually being used")
+            print(categorical_covariate_np)
             return self.bias_decoder(torch.cat([batch_nb, categorical_covariate_np], dim=-1))
 
     def forward(self, x_ng: torch.Tensor, batch_nb: torch.Tensor, categorical_covariate_np: torch.Tensor | None = None) -> torch.Tensor:
