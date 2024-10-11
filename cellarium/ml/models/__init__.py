@@ -13,10 +13,10 @@ from cellarium.ml.models.tdigest import TDigest
 
 __all__ = [
     "CellariumModel",
+    "CustomLogisticRegression",
     "Geneformer",
     "IncrementalPCA",
     "LogisticRegression",
-    "CustomLogisticRegression"
     "abcdParameter",
     "MuLinear",
     "OnePassMeanVarStd",
