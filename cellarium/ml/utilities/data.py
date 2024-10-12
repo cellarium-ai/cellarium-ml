@@ -54,7 +54,7 @@ class AnnDataField:
     """
 
     attr: str
-    key: str | None = None
+    key: list[str] | str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
     def __call__(self, adata: AnnData) -> np.ndarray:
@@ -134,18 +134,21 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
     return x.toarray()
 
 
-def categories_to_codes(x: pd.Series) -> np.ndarray:
+def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
     """
-    Convert a pandas Series of categorical data to a numpy array of codes.
+    Convert a pandas Series or DataFrame of categorical data to a numpy array of codes.
     Returned array is always a copy.
 
     Args:
-        x: Pandas Series object.
+        x: Pandas Series object or a pandas DataFrame containing multiple categorical Series.
 
     Returns:
         Numpy array.
     """
-    return np.asarray(x.cat.codes)
+    if isinstance(x, pd.DataFrame):
+        return x.apply(lambda col: col.cat.codes).to_numpy()
+    else:
+        return np.asarray(x.cat.codes)
 
 
 def get_categories(x: pd.Series) -> np.ndarray:
