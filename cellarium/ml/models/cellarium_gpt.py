@@ -497,6 +497,7 @@ class Transformer(nn.Module):
                 for _ in range(n_blocks)
             ]
         )
+        self.ln = nn.LayerNorm(d_model, bias=use_bias)
 
     def forward(
         self,
@@ -516,7 +517,7 @@ class Transformer(nn.Module):
         for block in self.blocks:
             hidden_state_ncd = block(hidden_state_ncd, attention_mask_ncc)
 
-        return hidden_state_ncd
+        return self.ln(hidden_state_ncd)
 
 
 class GeneEmbedding(nn.Module):
