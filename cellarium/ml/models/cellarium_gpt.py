@@ -15,7 +15,6 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 
 try:
-    # TODO: add comment
     from cerebras.modelzoo.common.utils.model.mup_utils import LRAdjustmentGroup
     from cerebras.pytorch.backend import use_cs
 except ImportError:
@@ -211,7 +210,6 @@ class MultiHeadAttention(nn.Module):
         key_nhck = self.split_heads(key_ncd, n_heads)
         value_nhck = self.split_heads(value_ncd, n_heads)
 
-        # scale_factor is computed according to the muP paper
         scale_factor = self.attention_logits_scale / query_nhck.shape[-1]
 
         if self.attention_backend == "torch":
@@ -497,6 +495,7 @@ class Transformer(nn.Module):
                 for _ in range(n_blocks)
             ]
         )
+        self.ln = nn.LayerNorm(d_model, bias=use_bias)
 
     def forward(
         self,
@@ -516,7 +515,7 @@ class Transformer(nn.Module):
         for block in self.blocks:
             hidden_state_ncd = block(hidden_state_ncd, attention_mask_ncc)
 
-        return hidden_state_ncd
+        return self.ln(hidden_state_ncd)
 
 
 class GeneEmbedding(nn.Module):
@@ -1230,8 +1229,9 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         context_len = 4096
         m = len(metadata_tokens_n)
         gene_context_len = context_len - m
-        # prefix_lens = [0, 1, 3, 10, 30, 100, 300, 1000, 3000, 7000]
-        prefix_lens = [0, 1, 10, 50, 500, 1000, 3000]
+        prefix_lens = [0, 1, 3, 10, 30, 100, 300, 1000, 3000]
+        suffix_len = gene_context_len - max(prefix_lens)
+        # prefix_lens = [0, 1, 10, 50, 500, 1000, 3000]
 
         n = gene_tokens_nc["gene_value"].shape[0]
         device = gene_tokens_nc["gene_value"].device
@@ -1258,10 +1258,13 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
         for prefix_len in prefix_lens:
             prefix_len_n = torch.tensor([prefix_len], device=device)
+            suffix_len_n = torch.tensor([suffix_len], device=device)
 
             # create prompt and query masks
-            gene_query_mask_nc = torch.arange(gene_context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
-            gene_prompt_mask_nc = ~gene_query_mask_nc
+            gene_query_mask_nc = torch.arange(gene_context_len, device=device) >= (
+                gene_context_len - suffix_len_n[:, None].expand(n, -1)
+            )
+            gene_prompt_mask_nc = torch.arange(gene_context_len, device=device) < prefix_len_n[:, None].expand(n, -1)
             if measured_genes_mask_nc is not None:
                 gene_query_mask_nc = gene_query_mask_nc & measured_genes_mask_nc
                 gene_prompt_mask_nc = gene_prompt_mask_nc & measured_genes_mask_nc
