@@ -176,10 +176,4 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     #         # Logging to TensorBoard by default
     #         pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
 
-    def validate(self,x_ng: torch.Tensor,y_n: torch.Tensor,pl_module: pl.LightningModule) -> None:
-        print("NIMISH VALIDATE FUNCTION IS GETTING CALLED")
-        logits_nc = x_ng @ self.W_gc + self.b_c
-        y_hat = torch.argmax(logits_nc, dim=-1)
-        f1_score = self.f1(y_hat, y_n)
-        pl_module.log("F1_score_val",f1_score,sync_dist=True, on_epoch=True)
-        return None
+
