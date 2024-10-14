@@ -96,13 +96,13 @@ model:
 
       # probably leave these alone
       n_continuous_cov: 0
-      n_cats_per_cov: null
+      n_cats_per_cov: [3, 9]  # TODO: we definitely don't want to have to input this... take it from the dataset
       dropout_rate: 0.1
       dispersion: gene
       log_variational: true
       gene_likelihood: nb
       latent_distribution: normal
-      encode_covariates: false
+      # encode_covariates: false
       batch_representation: one-hot
       use_batch_norm: both
       use_layer_norm: none
@@ -144,6 +144,12 @@ data:
       attr: obs
       key: specimen
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
+    categorical_covariate_index_nd:
+      attr: obs
+      key: 
+        - chemistry
+        - condition
+      convert_fn: cellarium.ml.utilities.data.multiple_categories_to_codes
   batch_size: 512
   shuffle: true
   seed: 0

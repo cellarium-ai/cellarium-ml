@@ -53,24 +53,15 @@ class AnnDataField:
     """
 
     attr: str
-    key: str | None = None
+    key: list[str] | str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
     convert_fn_kwargs: dict[str, Any] | None = None
 
     def __call__(self, adata: AnnData) -> np.ndarray:
         value = attrgetter(self.attr)(adata)
         if self.key is not None:
-            if hasattr(value,"columns"):
-                if self.key in value.columns:
-                    value = value[self.key]
-                else:
-                    value = None
-            else:
-                try:
-                    value = value[self.key]
-                except:
-                    warnings.warn("Attribute : {} not found in object {}".format(self.key,value))
-                    value = None
+            # TODO: could we put something here to accept a list of keys?
+            value = value[self.key]
 
         if self.convert_fn is not None:
             if (self.convert_fn_kwargs is not None) and ('var_name_key' in self.convert_fn_kwargs):
@@ -172,6 +163,19 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
     else:
         warnings.warn("Batch information not specified, setting number of batches/categories to 2")
         return np.asarray([3])
+
+def multiple_categories_to_codes(x: pd.DataFrame) -> np.ndarray:
+    """
+    Convert a pandas DataFrame of categorical data to a 2d numpy array of codes.
+    Returned array is always a copy.
+
+    Args:
+        x: Pandas DataFrame object.
+
+    Returns:
+        Numpy array, shape (n, n_categorical_columns)
+    """
+    return x.apply(lambda col: col.cat.codes).to_numpy()
 
 
 def get_categories(x: pd.Series) -> np.ndarray:
