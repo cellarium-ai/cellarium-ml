@@ -2,21 +2,23 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+
 import lightning.pytorch as pl
 import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
+import torchmetrics
 
 from cellarium.ml.data.fileio import read_pkl_from_gcs
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class LogisticRegression(CellariumModel, PredictMixin):
+class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     """
     Logistic regression model.
 
@@ -68,6 +70,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
         self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_categories))
         self.b_c = torch.nn.Parameter(torch.empty(self.n_categories))
         self.reset_parameters()
+        self.f1 = torchmetrics.F1Score(task="multiclass", num_classes=len(self.y_categories))
 
         # loss
         self.elbo = pyro.infer.Trace_ELBO()
@@ -154,3 +157,29 @@ class LogisticRegression(CellariumModel, PredictMixin):
                     self.W_gc,
                     global_step=trainer.global_step,
                 )
+
+    # def validate(
+    #     self,
+    #     trainer: pl.Trainer,
+    #     pl_module: pl.LightningModule,
+    #     batch_idx: int,
+    #     *args: Any,
+    #     **kwargs: Any,
+    # ) -> None:
+    #     """
+    #     Default validation method for models. This method logs the validation loss to TensorBoard.
+    #     Override this method to customize the validation behavior.
+    #     """
+    #     output = self(*args, **kwargs)
+    #     loss = output.get("loss")
+    #     if loss is not None:
+    #         # Logging to TensorBoard by default
+    #         pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
+
+    def validate(self,x_ng: torch.Tensor,y_n: torch.Tensor,pl_module: pl.LightningModule) -> None:
+        print("NIMISH VALIDATE FUNCTION IS GETTING CALLED")
+        logits_nc = x_ng @ self.W_gc + self.b_c
+        y_hat = torch.argmax(logits_nc, dim=-1)
+        f1_score = self.f1(y_hat, y_n)
+        pl_module.log("F1_score_val",f1_score,sync_dist=True, on_epoch=True)
+        return None
