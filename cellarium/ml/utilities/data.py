@@ -60,7 +60,17 @@ class AnnDataField:
     def __call__(self, adata: AnnData) -> np.ndarray:
         value = attrgetter(self.attr)(adata)
         if self.key is not None:
-            # TODO: could we put something here to accept a list of keys?
+            # if hasattr(value,"columns"):
+            #     if self.key in value.columns:
+            #         value = value[self.key]
+            #     else:
+            #         value = None
+            # else:
+            #     try:
+            #         value = value[self.key]
+            #     except:
+            #         warnings.warn("Attribute : {} not found in object {}".format(self.key,value))
+            #         value = None
             value = value[self.key]
 
         if self.convert_fn is not None:
