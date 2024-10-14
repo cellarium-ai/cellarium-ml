@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from collections.abc import Iterable
 from itertools import chain
 
@@ -45,7 +47,7 @@ class CellariumPipeline(torch.nn.ModuleList):
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
     ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | torch.Tensor | np.ndarray]:
         for module in self:
-            batch |= call_func_with_batch(module.forward, batch)
+            batch.update(call_func_with_batch(module.forward, batch))
 
         return batch
 
@@ -53,7 +55,7 @@ class CellariumPipeline(torch.nn.ModuleList):
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
     ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
         for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+            batch.update(call_func_with_batch(module.forward, batch))
 
         model = self[-1]
         if not isinstance(model, PredictMixin):
@@ -64,7 +66,7 @@ class CellariumPipeline(torch.nn.ModuleList):
 
     def validate(self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]) -> None:
         for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+            batch.update(call_func_with_batch(module.forward, batch))
 
         model = self[-1]
         if not isinstance(model, ValidateMixin):
