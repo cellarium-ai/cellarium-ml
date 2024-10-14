@@ -86,7 +86,7 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c.data.zero_()
 
     def forward(
-        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, **kwargs
     ) -> dict[str, torch.Tensor | None]:
         """
         Args:
@@ -157,23 +157,3 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                     self.W_gc,
                     global_step=trainer.global_step,
                 )
-
-    # def validate(
-    #     self,
-    #     trainer: pl.Trainer,
-    #     pl_module: pl.LightningModule,
-    #     batch_idx: int,
-    #     *args: Any,
-    #     **kwargs: Any,
-    # ) -> None:
-    #     """
-    #     Default validation method for models. This method logs the validation loss to TensorBoard.
-    #     Override this method to customize the validation behavior.
-    #     """
-    #     output = self(*args, **kwargs)
-    #     loss = output.get("loss")
-    #     if loss is not None:
-    #         # Logging to TensorBoard by default
-    #         pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
-
-
