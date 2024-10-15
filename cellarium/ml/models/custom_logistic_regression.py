@@ -9,16 +9,15 @@ import pyro.distributions as dist
 import torch
 import torch.nn.functional
 
-#from pyro.distributions import Delta, Laplace
 from cellarium.ml.data.fileio import read_pkl_from_gcs
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class CustomLogisticRegression(CellariumModel, PredictMixin):
+class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     """
     Logistic regression model.
 
@@ -93,7 +92,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
         self.b_c.data.zero_()
 
     def forward(
-        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, **kwargs
     ) -> dict[str, torch.Tensor | None]:
         """
         Args:
@@ -109,8 +108,6 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the loss value.
         """
-        print(f"NIMISH SELF.ACTIVATION_FN is {self.activation_fn}")
-        print(f"NIMISH SELF.OUT_DISTRIBUTION is {self.out_distribution}")
         y_n = y_n.to(self.device)
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
@@ -125,16 +122,9 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            print(f"NIMISH LOGITS NC DTYPE IS {logits_nc.dtype}")
             activation_out = self.activation_fn(logits_nc.to(dtype=torch.float64), dim=1)
             if (self.probability_propagation_flag==1):
-                print(f"NIMISH SELF.PP FLAG is {self.probability_propagation_flag}")
-                #activation_out = custom_functions.multi_label_target(pp_flag=1,softmax_out_gpu=activation_out)
                 activation_out = self.probability_propagation(activation_out_gpu=activation_out)
-
-            print(f"NIMISH SHAPE OF ACTIVATION OUT IS {activation_out.shape}")
-            print(f"NIMISH SHAPE OF Y_N IS {y_n.shape}")
-            print(f"NIMISH DTYPE OF Y_N IS {y_n.dtype}")
             if self.out_distribution == dist.Categorical:
                 pyro.sample("y", self.out_distribution(probs=torch.round(activation_out,decimals=5)), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
@@ -192,26 +182,3 @@ class CustomLogisticRegression(CellariumModel, PredictMixin):
         for col in range(activation_out_gpu.shape[1]):
             activation_out_gpu_clone[:, col] += activation_out_gpu[torch.arange(activation_out_gpu_clone.shape[0]).unsqueeze(1),self.target_descendents_list[col]].sum(dim=1)
         return activation_out_gpu_clone
-
-
-
-    # def probability_propagation(self,softmax_out_gpu:torch.tensor):
-    #     softmax_out_gpu_clone = softmax_out_gpu.clone() #cannot modify softmax output tensor in place due to gradients
-    #     for i in range(softmax_out_gpu.shape[1]):
-    #         softmax_out_gpu_clone[:][i].add_(softmax_out_gpu[torch.arange(softmax_out_gpu.shape[0].unsqueeze(1)),self.parent_child_list[i]].sum(dim=1))
-    #     for i in range(softmax_out_gpu.shape[0]):
-    #         for j in range(softmax_out_gpu.shape[1]):
-    #             #children_indices = np.where(child_parent_array.transpose()[j] == 1)[0] #list of child cell type indices
-    #             softmax_out_gpu_clone[i][j].add_(softmax_out_gpu[i][self.parent_child_list[j]].sum()) #parent cell type probability is sum of all child cell type probabilities
-    #         #softmax_out_gpu_clone[i][:] = softmax_out_gpu_clone[i][:]/torch.sum(softmax_out_gpu[i][:]) #normalization step after probability propagation
-    #         if (softmax_out_gpu_clone[i][j]>1).any():
-    #             print(f"FOUND ERROR VALUE AT INDICES {i,j} AND VALUE IS {softmax_out_gpu_clone[i][j]}")
-    #     print("RETURNING SOFTMAX OUT GPU CLONE")
-    #     return softmax_out_gpu_clone
-
-    # def validate(self,x_ng: torch.Tensor,y_n: torch.Tensor,pl_module: pl.LightningModule) -> None:
-    #     logits_nc = x_ng @ self.W_gc + self.b_c
-    #     y_hat = torch.argmax(logits_nc, dim=-1)
-    #     f1_score = self.f1(y_hat, y_n)
-    #     pl_module.log("F1_score_val",f1_score,sync_dist=True, on_epoch=True)
-    #     return None
