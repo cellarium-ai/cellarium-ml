@@ -277,7 +277,7 @@ class CellariumModule(pl.LightningModule):
         """
         if self.module_pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
-        
+
         batch["pl_module"] = self
         batch["trainer"] = self.trainer
         batch["batch_idx"] = batch_idx
