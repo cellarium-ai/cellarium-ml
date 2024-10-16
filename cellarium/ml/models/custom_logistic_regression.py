@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-import time
-
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -68,7 +66,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.n_categories = len(self.y_categories)
         self.activation_fn = getattr(torch.nn.functional, activation_fn)
         self.probability_propagation_flag = probability_propagation_flag
-        self.out_distribution = getattr(categorical_distribution,'Pyro'+out_distribution)
+        if out_distribution == "Categorical":
+            self.out_distribution = getattr(categorical_distribution,'Pyro'+out_distribution)
+        else:
+            self.out_distribution = getattr(dist,out_distribution)
         #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.seed = seed
@@ -127,11 +128,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             logits_nc = x_ng @ W_gc + self.b_c
             activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
             if (self.probability_propagation_flag==1):
-                print("NIMISH ENTERED PP FLAG 1")
                 activation_out = self.probability_propagation(activation_out_gpu=activation_out)
             if self.out_distribution == categorical_distribution.PyroCategorical:
-                print(f"NIMISH OUT DIST IS CATEGORICAL AND Y_N TYPE IS {y_n.dtype}")
-                print(f"NIMISH ACTIVATION OUT DTYPE BEFORE CATEGORICAL IS {activation_out.dtype}")
                 pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
                 pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
@@ -184,10 +182,5 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         then we add those values with all rows in 'col' column in activation_out_gpu_clone
         TRIAL CODE AVAILABLE IN TRIAL.IPYNB - PROBABILITY PROPAGATION CODE TRIAL
         """
-        print(f"NIMISH ACTIVATION OUT BEFORE PP IS {activation_out_gpu[0:2,0:3]}")
-        start_time = time.time()
-        propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(activation_out_gpu.device))
-        end_time = time.time()
-        print(f"NIMISH PP ELAPSED TIME IS {end_time - start_time} seconds")
-        print(f"NIMISH ACTIVATION OUT AFTER PP IS {propagated_p[0:2,0:3]}")
-        return propagated_p
+        propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device))
+        return torch.clamp(propagated_p, max=1.0)
