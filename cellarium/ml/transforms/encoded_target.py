@@ -17,12 +17,12 @@ class EncodedTargets(nn.Module):
     def __init__(
         self,
         multilabel_flag: bool = False,
-        target_ancestors_list_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_ancestors_list.pkl',
+        target_row_ancestors_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_ancestors_col_torch_tensor.pkl',
         unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
     ) -> None:
         super().__init__()
         self.multilabel_flag = multilabel_flag
-        self.target_ancestors_list = read_pkl_from_gcs(target_ancestors_list_path)
+        self.target_row_ancestors_col_torch_tensor = read_pkl_from_gcs(target_row_ancestors_col_torch_tensor_path)
         self.unique_cell_types_nparray = read_pkl_from_gcs(unique_cell_types_nparray_path)
 
 
@@ -36,9 +36,6 @@ class EncodedTargets(nn.Module):
             print(f"NIMISH ENCODED TARGET ENTERED MULTILABEL WITH FLAG {self.multilabel_flag}")
             return({'y_n':torch.tensor(np.searchsorted(self.unique_cell_types_nparray, y_n))})
         else:
-            out_array = np.zeros((len(y_n), len(self.target_ancestors_list)), dtype=int)
+            #out_array = np.zeros((len(y_n), len(self.target_ancestors_list)), dtype=int)
             indices = np.searchsorted(self.unique_cell_types_nparray, y_n)
-            for i, target_index in enumerate(indices):
-                # Set the corresponding columns to 1
-                out_array[i, [target_index]+self.target_ancestors_list[target_index]] = 1
-            return {'y_n':torch.tensor(out_array)}
+            return {'y_n':self.target_row_ancestors_col_torch_tensor[indices]}
