@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+
 import numpy as np
 import torch
 from torch import nn
@@ -32,6 +33,7 @@ class EncodedTargets(nn.Module):
 
         """
         if self.multilabel_flag==0:
+            print(f"NIMISH ENCODED TARGET ENTERED MULTILABEL WITH FLAG {self.multilabel_flag}")
             return({'y_n':torch.tensor(np.searchsorted(self.unique_cell_types_nparray, y_n))})
         else:
             out_array = np.zeros((len(y_n), len(self.target_ancestors_list)), dtype=int)

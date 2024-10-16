@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+import time
+
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -124,8 +126,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             logits_nc = x_ng @ W_gc + self.b_c
             activation_out = self.activation_fn(logits_nc.to(dtype=torch.float64), dim=1)
             if (self.probability_propagation_flag==1):
+                print("NIMISH ENTERED PP FLAG 1")
                 activation_out = self.probability_propagation(activation_out_gpu=activation_out)
             if self.out_distribution == dist.Categorical:
+                print("NIMISH OUT DIST IS CATEGORICAL")
                 pyro.sample("y", self.out_distribution(probs=torch.round(activation_out,decimals=5)), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
                 pyro.sample("y", self.out_distribution(probs=torch.round(activation_out,decimals=5)).to_event(1), obs=y_n.float())
@@ -178,7 +182,12 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         then we add those values with all rows in 'col' column in activation_out_gpu_clone
         TRIAL CODE AVAILABLE IN TRIAL.IPYNB - PROBABILITY PROPAGATION CODE TRIAL
         """
+        start_time = time.time()
         activation_out_gpu_clone = activation_out_gpu.clone()
+        print(f"NIMISH ACTIVATION OUT BEFORE PP IS {activation_out_gpu_clone[0:1,0:3]}")
         for col in range(activation_out_gpu.shape[1]):
             activation_out_gpu_clone[:, col] += activation_out_gpu[torch.arange(activation_out_gpu_clone.shape[0]).unsqueeze(1),self.target_descendents_list[col]].sum(dim=1)
+        end_time = time.time()
+        print(f"NIMISH PP ELAPSED TIME IS {end_time - start_time} seconds")
+        print(f"NIMISH ACTIVATION OUT AFTER PP IS {activation_out_gpu_clone[0:1,0:3]}")
         return activation_out_gpu_clone
