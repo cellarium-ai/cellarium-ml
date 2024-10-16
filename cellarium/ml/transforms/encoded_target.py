@@ -33,9 +33,7 @@ class EncodedTargets(nn.Module):
 
         """
         if self.multilabel_flag==0:
-            print(f"NIMISH ENCODED TARGET ENTERED MULTILABEL WITH FLAG {self.multilabel_flag}")
             return({'y_n':torch.tensor(np.searchsorted(self.unique_cell_types_nparray, y_n))})
         else:
-            #out_array = np.zeros((len(y_n), len(self.target_ancestors_list)), dtype=int)
             indices = np.searchsorted(self.unique_cell_types_nparray, y_n)
             return {'y_n':self.target_row_ancestors_col_torch_tensor[indices]}
