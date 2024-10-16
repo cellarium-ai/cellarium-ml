@@ -11,6 +11,7 @@ import pyro.distributions as dist
 import torch
 import torch.nn.functional
 
+from cellarium.ml.categorical_distribution import categorical_distribution
 from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
@@ -51,7 +52,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         out_distribution: str = 'Categorical',
         seed: int = 0,
         probability_propagation_flag: bool = False,
-        target_descendents_list_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_descendents_list.pkl',
+        target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
         y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
         log_metrics: bool = True,
     ) -> None:
@@ -63,12 +64,12 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.n_vars = len(var_names_g)
         #self.y_categories = y_categories
         self.y_categories = read_pkl_from_gcs(y_categories_path)
-        self.target_descendents_list = read_pkl_from_gcs(target_descendents_list_path)
+        self.target_row_descendent_col_torch_tensor = read_pkl_from_gcs(target_row_descendent_col_torch_tensor_path)
         self.n_categories = len(self.y_categories)
         self.activation_fn = getattr(torch.nn.functional, activation_fn)
         self.probability_propagation_flag = probability_propagation_flag
-        self.out_distribution = getattr(dist,out_distribution)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.out_distribution = getattr(categorical_distribution,'Pyro'+out_distribution)
+        #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.seed = seed
         # parameters
@@ -110,7 +111,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         Returns:
             A dictionary with the loss value.
         """
-        y_n = y_n.to(self.device)
+        #y_n = y_n.to(self.device)
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         #assert_arrays_equal("y_categories", y_categories, "self.y_categories", self.y_categories)
@@ -124,15 +125,16 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            activation_out = self.activation_fn(logits_nc.to(dtype=torch.float64), dim=1)
+            activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
             if (self.probability_propagation_flag==1):
                 print("NIMISH ENTERED PP FLAG 1")
                 activation_out = self.probability_propagation(activation_out_gpu=activation_out)
-            if self.out_distribution == dist.Categorical:
-                print("NIMISH OUT DIST IS CATEGORICAL")
-                pyro.sample("y", self.out_distribution(probs=torch.round(activation_out,decimals=5)), obs=y_n)
+            if self.out_distribution == categorical_distribution.PyroCategorical:
+                print(f"NIMISH OUT DIST IS CATEGORICAL AND Y_N TYPE IS {y_n.dtype}")
+                print(f"NIMISH ACTIVATION OUT DTYPE BEFORE CATEGORICAL IS {activation_out.dtype}")
+                pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
-                pyro.sample("y", self.out_distribution(probs=torch.round(activation_out,decimals=5)).to_event(1), obs=y_n.float())
+                pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
@@ -182,12 +184,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         then we add those values with all rows in 'col' column in activation_out_gpu_clone
         TRIAL CODE AVAILABLE IN TRIAL.IPYNB - PROBABILITY PROPAGATION CODE TRIAL
         """
+        print(f"NIMISH ACTIVATION OUT BEFORE PP IS {activation_out_gpu[0:2,0:3]}")
         start_time = time.time()
-        activation_out_gpu_clone = activation_out_gpu.clone()
-        print(f"NIMISH ACTIVATION OUT BEFORE PP IS {activation_out_gpu_clone[0:1,0:3]}")
-        for col in range(activation_out_gpu.shape[1]):
-            activation_out_gpu_clone[:, col] += activation_out_gpu[torch.arange(activation_out_gpu_clone.shape[0]).unsqueeze(1),self.target_descendents_list[col]].sum(dim=1)
+        propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(activation_out_gpu.device))
         end_time = time.time()
         print(f"NIMISH PP ELAPSED TIME IS {end_time - start_time} seconds")
-        print(f"NIMISH ACTIVATION OUT AFTER PP IS {activation_out_gpu_clone[0:1,0:3]}")
-        return activation_out_gpu_clone
+        print(f"NIMISH ACTIVATION OUT AFTER PP IS {propagated_p[0:2,0:3]}")
+        return propagated_p
