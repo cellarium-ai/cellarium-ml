@@ -44,6 +44,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         n_obs: int,
         var_names_g: np.ndarray,
         y_categories: np.ndarray | None,
+        alpha: float = 0.5 | None,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
         activation_fn: str = 'softmax',
@@ -57,6 +58,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         super().__init__()
 
         # data
+        self.alpha = alpha
         self.n_obs = n_obs
         self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
@@ -96,7 +98,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c.data.zero_()
 
     def forward(
-        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, **kwargs
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, descendents_nc: torch.Tensor, **kwargs
     ) -> dict[str, torch.Tensor | None]:
         """
         Args:
@@ -116,10 +118,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         #assert_arrays_equal("y_categories", y_categories, "self.y_categories", self.y_categories)
-        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, descendents_nc)
         return {"loss": loss}
 
-    def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
+    def model(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
             dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
@@ -133,7 +135,11 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 #pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
                 pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
-                pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
+                scale = self.get_scale(descendents_nc=descendents_nc) #n,c
+                print(f'NIMISH SCALE IS {scale[1]}')
+                with pyro.plate("categories", size=self.n_categories):
+                    with pyro.poutine.scale(scale=scale):
+                        pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
@@ -185,3 +191,17 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         """
         propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device))
         return torch.clamp(propagated_p, max=1.0)
+    
+    def get_scale(self, descendents_nc:torch.Tensor) -> torch.Tensor:
+        """
+        scale: torch.tensor(ones) same shape as y_n
+        for each sample, 
+            get indices of children of y_n_original (original single target),
+            in scale, multiply these indices by alpha for that particular sample
+        return scale
+        - 1 way to get y_n_original is to use y_n and y_n_original from the extracts, and pass y_n as multilabel target and pass
+        y_n_original as single label target
+        - another way is: get column indices of 1s from y_n (ones_indices). then get the children column indices for all these
+          one_indices.
+        """
+        return descendents_nc.masked_fill_(descendents_nc == 0, self.alpha)
