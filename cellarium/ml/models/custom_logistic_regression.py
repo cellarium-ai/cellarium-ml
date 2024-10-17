@@ -44,7 +44,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         n_obs: int,
         var_names_g: np.ndarray,
         y_categories: np.ndarray | None,
-        alpha: float = 0.5 | None,
+        alpha: float = 0.5,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
         activation_fn: str = 'softmax',
@@ -126,7 +126,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             "W",
             dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
         )
-        with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
+        with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0],dim=-2):
             logits_nc = x_ng @ W_gc + self.b_c
             activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
             if (self.probability_propagation_flag==1):
@@ -136,12 +136,17 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
                 scale = self.get_scale(descendents_nc=descendents_nc) #n,c
-                print(f'NIMISH SCALE IS {scale[1]}')
-                with pyro.plate("categories", size=self.n_categories):
-                    with pyro.poutine.scale(scale=scale):
+                with pyro.poutine.scale(scale=scale):
+                    with pyro.plate("categories", size=self.n_categories, dim=-1):
+                        print(f"NIMISH XNG SHAPE 0 IS {x_ng.shape[0]}")
+                        print(f"NIMISH OBS_N SHAPE IS {self.n_obs}")
+                        print(f'NIMISH SCALE SHAPE IS {scale.shape}')
+                        print(f"NIMISH N CATEGORIES ARE {self.n_categories}")
+                        print(f"NIMISH Y_N SIZE IS {y_n.shape}")
+                        print(f"NIMISH ACTIVATION OUT SHAPE IS {activation_out.shape}")
                         pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
 
-    def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
+    def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
     def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
@@ -191,7 +196,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         """
         propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device))
         return torch.clamp(propagated_p, max=1.0)
-    
+
     def get_scale(self, descendents_nc:torch.Tensor) -> torch.Tensor:
         """
         scale: torch.tensor(ones) same shape as y_n
