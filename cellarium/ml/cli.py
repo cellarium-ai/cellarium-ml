@@ -313,6 +313,23 @@ def lightning_cli_factory(
 
 
 @register_model
+def cellarium_gpt(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.CellariumGPT` model.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.CellariumGPT",
+        link_arguments=[
+            LinkArguments("data.dadc", "model.model.init_args.gene_categories", lambda x: x.var_names.values)
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
 def geneformer(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.Geneformer` model.
