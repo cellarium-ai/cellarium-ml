@@ -273,7 +273,7 @@ def nunique_scvi(data: CellariumAnnDataDataModule) -> int:
 #     return covariates_nd
 
 
-def extract_unique_covariates(data:CellariumAnnDataDataModule) -> list:
+def extract_n_cats_per_cov(data:CellariumAnnDataDataModule) -> list:
     """Extract the number of unique categories in each covariate through the entire dataset
     Example:
         The field "categorical_covariate_index_nd" indicates that the covariates the columnns ["chemistry","condition"] from the AnnData are to be used as covariates,
@@ -690,7 +690,7 @@ def scvi(args: ArgsType = None) -> None:
                 compute_var_names_g,
             ),
             LinkArguments("data", "model.model.init_args.n_batch", nunique_scvi),
-            LinkArguments("data","model.model.init_args.categorical_covariates_unique",extract_unique_covariates), #uses multiple_categories_to_codes
+            LinkArguments("data","model.model.init_args.n_cats_per_cov",extract_n_cats_per_cov), #uses multiple_categories_to_codes
         ],
     )
 

@@ -95,7 +95,6 @@ model:
         final_additive_bias: true
       n_latent: 10 # probably leave these alone
       n_continuous_cov: 0
-      #n_cats_per_cov: [3, 9] #TODO: Removing and making sure that it is used
       dropout_rate: 0.1
       dispersion: gene
       log_variational: true

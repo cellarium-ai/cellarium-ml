@@ -430,7 +430,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         n_latent_batch: int | None = None,
         batch_kl_weight: float = 0.0,
         # encode_covariates: bool = False,
-        categorical_covariates_unique: np.ndarray | list = [],
+        n_cats_per_cov: np.ndarray | list = [],
         batch_representation: Literal["one-hot", "embedding"] = "one-hot",
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
@@ -528,7 +528,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # encoder_cat_list = cat_list if encode_covariates else None
         # _extra_encoder_kwargs = extra_encoder_kwargs or {}
 
-        self.n_cats_per_cov = categorical_covariates_unique
+        self.n_cats_per_cov = n_cats_per_cov
         # encoder layers
         for layer in encoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
