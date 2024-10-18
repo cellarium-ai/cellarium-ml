@@ -135,15 +135,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 #pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
                 pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
-                scale = self.get_scale(descendents_nc=descendents_nc) #n,c
+                #scale = self.get_scale(descendents_nc=descendents_nc) #n,c
+                scale = (descendents_nc+self.alpha)-(descendents_nc*self.alpha)
                 with pyro.poutine.scale(scale=scale):
                     with pyro.plate("categories", size=self.n_categories, dim=-1):
-                        print(f"NIMISH XNG SHAPE 0 IS {x_ng.shape[0]}")
-                        print(f"NIMISH OBS_N SHAPE IS {self.n_obs}")
-                        print(f'NIMISH SCALE SHAPE IS {scale.shape}')
-                        print(f"NIMISH N CATEGORIES ARE {self.n_categories}")
-                        print(f"NIMISH Y_N SIZE IS {y_n.shape}")
-                        print(f"NIMISH ACTIVATION OUT SHAPE IS {activation_out.shape}")
                         pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor) -> None:
@@ -196,17 +191,3 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         """
         propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device))
         return torch.clamp(propagated_p, max=1.0)
-
-    def get_scale(self, descendents_nc:torch.Tensor) -> torch.Tensor:
-        """
-        scale: torch.tensor(ones) same shape as y_n
-        for each sample, 
-            get indices of children of y_n_original (original single target),
-            in scale, multiply these indices by alpha for that particular sample
-        return scale
-        - 1 way to get y_n_original is to use y_n and y_n_original from the extracts, and pass y_n as multilabel target and pass
-        y_n_original as single label target
-        - another way is: get column indices of 1s from y_n (ones_indices). then get the children column indices for all these
-          one_indices.
-        """
-        return descendents_nc.masked_fill(descendents_nc == 0, self.alpha)
