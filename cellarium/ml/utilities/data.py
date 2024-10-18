@@ -60,26 +60,9 @@ class AnnDataField:
     def __call__(self, adata: AnnData) -> np.ndarray:
         value = attrgetter(self.attr)(adata)
         if self.key is not None:
-            # if hasattr(value,"columns"):
-            #     if self.key in value.columns:
-            #         value = value[self.key]
-            #     else:
-            #         value = None
-            # else:
-            #     try:
-            #         value = value[self.key]
-            #     except:
-            #         warnings.warn("Attribute : {} not found in object {}".format(self.key,value))
-            #         value = None
             value = value[self.key]
-
         if self.convert_fn is not None:
-            if (self.convert_fn_kwargs is not None) and ('var_name_key' in self.convert_fn_kwargs):
-                gene_logic = adata[idx].var[self.convert_fn_kwargs['var_name_key']].isin(self.convert_fn_kwargs['gene_names'])
-                kwargs = {'gene_logic': gene_logic}
-            else:
-                kwargs = {}
-            value = self.convert_fn(value, **kwargs)
+            value = self.convert_fn(value)
         else:
             value = np.asarray(value)
 
@@ -156,6 +139,8 @@ def subset_genes_and_densify(x: scipy.sparse.csr_matrix, gene_logic: np.ndarray)
         return x[np.asarray(gene_logic)]
 
 
+
+
 def categories_to_codes(x: pd.Series) -> np.ndarray:
     """
     Convert a pandas Series of categorical data to a numpy array of codes.
@@ -171,8 +156,8 @@ def categories_to_codes(x: pd.Series) -> np.ndarray:
     if x is not None:
         return np.asarray(x.cat.codes)
     else:
-        warnings.warn("Batch information not specified, setting number of batches/categories to 2")
-        return np.asarray([3])
+        raise ValueError("batch_index_n information not provided")
+
 
 def multiple_categories_to_codes(x: pd.DataFrame) -> np.ndarray:
     """
@@ -184,8 +169,11 @@ def multiple_categories_to_codes(x: pd.DataFrame) -> np.ndarray:
 
     Returns:
         Numpy array, shape (n, n_categorical_columns)
+
     """
+
     return x.apply(lambda col: col.cat.codes).to_numpy()
+
 
 
 def get_categories(x: pd.Series) -> np.ndarray:
@@ -198,4 +186,5 @@ def get_categories(x: pd.Series) -> np.ndarray:
     Returns:
         Numpy array.
     """
+
     return np.asarray(x.cat.categories)

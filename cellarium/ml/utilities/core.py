@@ -149,6 +149,8 @@ def call_func_with_batch(
     # allow all keys to be passed to the function
     if "kwargs" in ann:
         input_keys |= batch.keys()
+
+
     return func(**{key: batch[key] for key in input_keys})
 
 

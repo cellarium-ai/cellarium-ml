@@ -1,7 +1,7 @@
 # lightning.pytorch==2.2.1
 seed_everything: true
 trainer:
-  accelerator: auto
+  accelerator: auto #gpu name?
   strategy: auto
   devices: auto
   num_nodes: 1
@@ -95,13 +95,13 @@ model:
         final_additive_bias: true
       n_latent: 10 # probably leave these alone
       n_continuous_cov: 0
-      n_cats_per_cov: null
+      #n_cats_per_cov: [3, 9] #TODO: Removing and making sure that it is used
       dropout_rate: 0.1
       dispersion: gene
       log_variational: true
       gene_likelihood: nb
       latent_distribution: normal
-      encode_covariates: false
+      #encode_covariates: false
       batch_representation: one-hot
       use_batch_norm: both
       use_layer_norm: none
@@ -148,6 +148,12 @@ data:
       attr: obs
       key: batch
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
+    categorical_covariate_index_nd: #integer-encoded covariates? how does it take into account all the other rows/cells
+      attr: obs
+      key:
+        - chemistry
+        - condition
+      convert_fn: cellarium.ml.utilities.data.multiple_categories_to_codes
   batch_size: 512
   shuffle: true
   seed: 0

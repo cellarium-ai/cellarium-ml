@@ -91,7 +91,7 @@ class FileLoader:
     convert_fn: Callable[[Any], Any] | str | None = None
 
     def __new__(cls, file_path, loader_fn, attr, convert_fn):
-        #with torch.device("meta"):
+        with torch.device("meta"):
             if isinstance(loader_fn, str):
                 loader_fn = import_object(loader_fn)
             if loader_fn not in cached_loaders:
@@ -247,12 +247,52 @@ def nunique_scvi(data: CellariumAnnDataDataModule) -> int:
             if field.key is not None:
                 value = value[field.key]
             return len(value.cat.categories)
-        else:
-            warnings.warn("Number of categories (batch) not found, setting them to 3")
-            return 3 #find out why does it have to be larger than "batch"
-    else:
-        warnings.warn("Number of categories (batch) not found, setting them to 3")
-        return 3
+
+
+# def extract_nd_covariates(data:CellariumAnnDataDataModule) -> np.ndarray: #TODO: delete
+#     """Convert the categorical covariates to integer encoded array
+#     Example:
+#         The field "categorical_covariates_index" indicates that the covariates the columnns ["chemistry","condition"] from the AnnData are to be used as covariates,
+#         ["chemistry"] => ["methodA","methodA","methodB","methodA","methodC"] ---> [0,0,1,0,2]
+#     Args:
+#         data: A :class:`CellariumAnnDataDataModule` instance.
+#     Returns:
+#         Numpy array of integer-encoded covariates, size N x num_cat_covs
+#     """
+#
+#     field = data.batch_keys["categorical_covariates_index"] #applies the multiple categories to code function one by one??
+#     adata = data.dadc.adatas[0].obs
+#
+#     covariates_nd = []
+#     for cov_key in field.key:
+#         covariate_nd = adata[cov_key].cat.codes.to_numpy()
+#         covariates_nd.append(covariate_nd[:,None])
+#
+#     covariates_nd = np.concatenate(covariates_nd,axis=1)
+#
+#     return covariates_nd
+
+
+def extract_unique_covariates(data:CellariumAnnDataDataModule) -> list:
+    """Extract the number of unique categories in each covariate through the entire dataset
+    Example:
+        The field "categorical_covariate_index_nd" indicates that the covariates the columnns ["chemistry","condition"] from the AnnData are to be used as covariates,
+        then we extract those columns from the AnnData and we count the number of unique elements in each of them, under chemistry we find 3 unique categories ['10X', 'v2_10X', 'v3_10X'] and under assay 9 categories ['10X', 'Freytag', 'Oetjen_A', 'Oetjen_P', ..., 'Sun_sample1_CS',
+                         'Sun_sample2_KC', 'Sun_sample3_TB', 'Sun_sample4_TC']. Therefore, we return [3,9].
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+    Returns:
+        List of size -number-covariates- containing the number of unique elements in each of the fields pointed as a covariate
+    """
+
+    field = data.batch_keys["categorical_covariate_index_nd"]
+    obs = getattr(data.dadc[0], field.attr)
+    covariates = []
+    for cov_key in field.key:
+        covariate_nunique = getattr(obs, cov_key)
+        covariates.append(len(covariate_nunique.cat.categories))
+
+    return covariates
 
 def compute_var_names_g(
     cpu_transforms: list[torch.nn.Module] | None,
@@ -278,9 +318,9 @@ def compute_var_names_g(
     pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
 
 
-    if batch["batch_index_n"] is None:
-        warnings.warn("Batch information has not been specified, setting it to np.array([3],dtype=np.int8)")
-        batch["batch_index_n"] = np.array([3],dtype=np.int8)
+    # if batch["batch_index_n"] is None:
+    #     warnings.warn("Batch information has not been specified, setting it to np.array([3],dtype=np.int8)")
+    #     batch["batch_index_n"] = np.array([3],dtype=np.int8)
 
 
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
@@ -650,6 +690,7 @@ def scvi(args: ArgsType = None) -> None:
                 compute_var_names_g,
             ),
             LinkArguments("data", "model.model.init_args.n_batch", nunique_scvi),
+            LinkArguments("data","model.model.init_args.categorical_covariates_unique",extract_unique_covariates), #uses multiple_categories_to_codes
         ],
     )
 

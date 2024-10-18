@@ -23,3 +23,7 @@ output/
 *.h5ad
 
 *.jpg
+
+scvi_demo.py
+
+notebooks/prototypes/
