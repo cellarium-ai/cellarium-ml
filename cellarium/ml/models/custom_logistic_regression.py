@@ -130,8 +130,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             if (self.probability_propagation_flag==1):
                 activation_out = self.probability_propagation(activation_out_gpu=activation_out)
             if self.out_distribution == categorical_distribution.PyroCategorical:
-                #pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
-                pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
+                pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
+                #pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
                 pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
 
