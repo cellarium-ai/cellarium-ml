@@ -209,4 +209,4 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         - another way is: get column indices of 1s from y_n (ones_indices). then get the children column indices for all these
           one_indices.
         """
-        return descendents_nc.masked_fill_(descendents_nc == 0, self.alpha)
+        return descendents_nc.masked_fill(descendents_nc == 0, self.alpha)
