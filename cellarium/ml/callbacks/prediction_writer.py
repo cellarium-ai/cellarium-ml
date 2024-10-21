@@ -10,12 +10,16 @@ import numpy as np
 import pandas as pd
 import torch
 
+from cellarium.ml.data.fileio import read_pkl_from_gcs
+
 
 def write_prediction(
     prediction: torch.Tensor,
     ids: np.ndarray,
+    cell_type_names: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
+    columns: np.ndarray,
 ) -> None:
     """
     Write prediction to a CSV file.
@@ -29,13 +33,16 @@ def write_prediction(
             The directory to write the prediction to.
         postfix:
             A postfix to add to the CSV file name.
+        columns:
+            name of columns to save the csv file.
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    df = pd.DataFrame(prediction.cpu())
+    df = pd.DataFrame(prediction.cpu(), columns=columns)
+    df.insert(0,"cell_type_names", cell_type_names)
     df.insert(0, "db_ids", ids)
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv")
-    df.to_csv(output_path, header=False, index=False)
+    df.to_csv(output_path, header=True, index=False)
 
 
 class PredictionWriter(pl.callbacks.BasePredictionWriter):
@@ -71,14 +78,26 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        x_ng = prediction["x_ng"]
+        #x_ng = prediction["x_ng"]
+        columns = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl")
+        #collated_predictions = collate_fn(prediction)
+        x_ng = prediction["cell_type_probs_nc"]
         if self.prediction_size is not None:
             x_ng = x_ng[:, : self.prediction_size]
 
-        assert isinstance(batch["obs_names_n"], np.ndarray)
+        #assert isinstance(batch["y_n_predict"], np.ndarray)
+        #print(f"NIMISH BATCH Y_N TYPE IS {type(batch["y_n"])}")
+        y_n = batch['y_n'].cpu().numpy()
+        y_n = np.argmax(y_n)
+        y_n_cell_type_ids = np.take(columns,y_n)
+        cell_type_names = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/ontology_term_id_to_cell_type_np_array.pkl")
+        y_n_cell_type_names = np.take(cell_type_names,y_n)
         write_prediction(
             prediction=x_ng,
-            ids=batch["obs_names_n"],
+            ids=y_n_cell_type_ids,
+            cell_type_names = y_n_cell_type_names,
+            #ids = np.arange(0, 2048),
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,
+            columns=columns[0:self.prediction_size],
         )
