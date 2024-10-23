@@ -181,7 +181,8 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[-1]
+        assert isinstance(model := self.pipeline[-1], CellariumModel)
+        return model
 
     @property
     def transforms(self) -> CellariumPipeline:
@@ -189,7 +190,8 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[self._num_cpu_transforms : -1]
+        assert isinstance(transforms := self.pipeline[self._num_cpu_transforms : -1], CellariumPipeline)
+        return transforms
 
     @property
     def cpu_transforms(self) -> CellariumPipeline:
@@ -197,7 +199,8 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[: self._num_cpu_transforms]
+        assert isinstance(cpu_transforms := self.pipeline[: self._num_cpu_transforms], CellariumPipeline)
+        return cpu_transforms
 
     @property
     def _num_cpu_transforms(self) -> int:
@@ -209,7 +212,11 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
+        if self._cpu_transforms_in_module_pipeline:
+            return self.pipeline
+        else:
+            assert isinstance(module_pipeline := self.pipeline[self._num_cpu_transforms :], CellariumPipeline)
+            return module_pipeline
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor], batch_idx: int
