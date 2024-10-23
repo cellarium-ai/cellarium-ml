@@ -37,3 +37,4 @@ class EncodedTargets(nn.Module):
         else:
             indices = np.searchsorted(self.unique_cell_types_nparray, y_n)
             return {'y_n':self.target_row_ancestors_col_torch_tensor[indices]}
+            #return {'y_n':self.target_row_ancestors_col_torch_tensor[indices], 'y_n_predict':indices} # only use for prediction of model 4

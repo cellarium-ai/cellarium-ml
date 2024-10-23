@@ -89,7 +89,8 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
 
         #assert isinstance(batch["y_n_predict"], np.ndarray)
         #print(f"NIMISH BATCH Y_N TYPE IS {type(batch["y_n"])}")
-        y_n = batch['y_n'].cpu().numpy()
+        #y_n = batch['y_n'].cpu().numpy()
+        y_n = batch['y_n_predict']
         #y_n = np.argmax(y_n)
         y_n_cell_type_ids = np.take(columns,y_n)
         cell_type_names = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/ontology_term_id_to_cell_type_np_array.pkl")
