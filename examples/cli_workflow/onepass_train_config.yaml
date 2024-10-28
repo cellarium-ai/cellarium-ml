@@ -100,8 +100,12 @@ data:
   batch_size: 100
   iteration_strategy: cache_efficient
   shuffle: false
-  seed: 0
-  drop_last: false
+  shuffle_seed: 0
+  drop_last_indices: false
+  drop_incomplete_batch: false
+  worker_seed: null
   test_mode: false
   num_workers: 2
+  prefetch_factor: null
+  persistent_workers: false
 ckpt_path: null
