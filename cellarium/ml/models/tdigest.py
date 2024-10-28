@@ -63,7 +63,7 @@ class TDigest(CellariumModel):
                 tdigest.update(x_n[nonzero_mask])
         return {}
 
-    def on_epoch_end(self, trainer: pl.Trainer) -> None:
+    def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         # no need to merge if only one process
         if trainer.world_size == 1:
             return
