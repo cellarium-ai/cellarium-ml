@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from typing import Literal
+from typing import Any, Literal
 
 import lightning.pytorch as pl
 import torch
@@ -226,3 +226,15 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
         )
+
+    def state_dict(self) -> dict[str, Any]:
+        assert self.trainer is not None
+        state = {
+            "epoch": self.trainer.current_epoch,
+            "resume_step": self.trainer.global_step,
+        }
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if hasattr(self, "train_dataset"):
+            self.train_dataset.load_state_dict(state_dict)

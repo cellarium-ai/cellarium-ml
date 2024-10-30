@@ -4,7 +4,7 @@
 import math
 import random
 from itertools import islice
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -130,6 +130,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.end_idx = dadc.n_obs if end_idx is None else end_idx
         self.worker_seed = worker_seed
         self.epoch = 0
+        self.resume_step: int | None = None
         self.test_mode = test_mode
 
     def __len__(self) -> int:
@@ -412,6 +413,17 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +------------+-------+-------+--------+
         | worker id  | 0     | 0     | 0      |
         +------------+-------+-------+--------+
+
+
+        Resuming from a checkpoint:
+
+        1. Set epoch to the epoch of the checkpoint. The trainer is responsible for loading the state.
+        2. Increment the epoch. For persistent workers, the epoch is incremented at the end of the iteration.
+           For non-persistent workers, the epoch is incremented by the trainer at the epoch start.
+        3. Set the resume_step to the global step of the checkpoint. The trainer is responsible for loading the state.
+           Use the resume_step to skip the batches that have already been processed. In order to achieve this,
+           shift the worker_id based on the global step and compute the number of epochs and batches that have been
+           processed. After that set the resume_step to None.
         """
         if self.test_mode and isinstance(self.dadc, DistributedAnnDataCollection):
             # clear lru cache
@@ -428,9 +440,19 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             per_replica = math.ceil(n_obs / num_replicas)
         total_size = per_replica * num_replicas
+        batches_per_replica = len(self)
 
         # workers
         worker_id, num_workers = get_worker_info()
+
+        if self.resume_step is not None:
+            # shift worker_id based on global step
+            worker_id = (worker_id - self.resume_step) % num_workers
+            num_epochs_that_stepped, num_batches_that_stepped = divmod(self.resume_step, batches_per_replica)
+            self.resume_step = None
+        else:
+            num_epochs_that_stepped = 0
+            num_batches_that_stepped = 0
 
         # seed workers
         if self.worker_seed is not None:
@@ -467,7 +489,10 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
 
-        if self.iteration_strategy == "same_order":
+        if self.epoch < num_epochs_that_stepped:
+            # self.epoch can be inconsistent with the global step
+            pass
+        elif self.iteration_strategy == "same_order":
             # replica indices
             indices = indices[rank:total_size:num_replicas]
             if len(indices) != per_replica:
@@ -477,8 +502,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 )
 
             # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
-            for batch_indices in islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers):
+            for worker_batch_idx, batch_indices in enumerate(
+                islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers)
+            ):
                 if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
+                    continue
+                current_batch_idx = worker_batch_idx * num_workers + worker_id
+                if current_batch_idx < num_batches_that_stepped:
                     continue
                 yield self[batch_indices]
 
@@ -492,7 +522,6 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 )
 
             # worker indices
-            batches_per_replica = math.ceil(per_replica / float(self.batch_size))
             batches_per_worker = math.ceil(batches_per_replica / float(num_workers))
             per_worker = batches_per_worker * self.batch_size
 
@@ -501,10 +530,24 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             indices = indices[iter_start:iter_end]
 
             # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
-            for batch_indices in chunked_iter(indices, self.batch_size):
+            for worker_batch_idx, batch_indices in enumerate(chunked_iter(indices, self.batch_size)):
                 if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
+                    continue
+                current_batch_idx = worker_batch_idx * num_workers + worker_id
+                if current_batch_idx < num_batches_that_stepped:
                     continue
                 yield self[batch_indices]
 
         # Sets epoch for persistent workers
         self.set_epoch(self.epoch + 1)
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        r"""
+        Loads the state of the dataset from the given state dictionary.
+
+        Args:
+            state_dict:
+                State dictionary containing the state of the dataset.
+        """
+        self.epoch = state_dict["epoch"]
+        self.resume_step = state_dict["resume_step"]
