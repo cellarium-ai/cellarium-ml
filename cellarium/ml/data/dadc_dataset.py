@@ -4,7 +4,7 @@
 import math
 import random
 from itertools import islice
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -130,6 +130,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.end_idx = dadc.n_obs if end_idx is None else end_idx
         self.worker_seed = worker_seed
         self.epoch = 0
+        self.resume_step: int | None = None
         self.test_mode = test_mode
 
     def __len__(self) -> int:
@@ -158,6 +159,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         use a different random ordering for each epoch.
         """
         self.epoch = epoch
+
+    def set_resume_step(self, resume_step: int | None) -> None:
+        r"""
+        Sets the resume step for the iterator. When resuming from a checkpoint, this ensures
+        that the iterator skips the batches that have already been processed.
+        """
+        self.resume_step = resume_step
 
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, dict[str, np.ndarray] | np.ndarray]:
         r"""
@@ -301,11 +309,11 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         Cache efficient:
 
         +------------+---------+---------+
-        | batch idx  | 0       | 2       |
+        | batch idx  | 0       | 1       |
         +============+=========+=========+
         | indices    | (0,1,2) | (3,4,5) |
         +------------+---------+---------+
-        | worker id  | 0       | 0       |
+        | worker id  | 0       | 1       |
         +------------+---------+---------+
 
         **Example 5**::
@@ -412,6 +420,18 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +------------+-------+-------+--------+
         | worker id  | 0     | 0     | 0      |
         +------------+-------+-------+--------+
+
+
+        Resuming from a checkpoint:
+
+        1. For persistent workers the state (:attr:``epoch` and :attr:`resume_step`) is initially set by
+           the :meth:`load_state_dict` method. At the end of the iteration, the :attr:`epoch` is incremented and
+           the :attr:`resume_step` is set to ``None``.
+        2. For non-persistent workers the state is initially set by the :meth:`load_state_dict` method. The
+           :attr:`epoch` is updated by the ``on_train_epoch_start`` hook and the :attr:`resume_step` is set to
+           ``None`` by the ``on_train_epoch_end`` hook.
+        3. If the :attr:`resume_step` is not ``None``, then the worker will skip the batches that have already
+           been processed. The workers are shifted based on the global step.
         """
         if self.test_mode and isinstance(self.dadc, DistributedAnnDataCollection):
             # clear lru cache
@@ -428,9 +448,24 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         else:
             per_replica = math.ceil(n_obs / num_replicas)
         total_size = per_replica * num_replicas
+        batches_per_replica = len(self)
 
         # workers
         worker_id, num_workers = get_worker_info()
+
+        if self.resume_step is not None:
+            num_epochs_that_stepped, num_batches_that_stepped = divmod(self.resume_step, batches_per_replica)
+
+            # self.epoch can be inconsistent with the global step if checkpointed mid-epoch and not adjusted
+            if self.epoch < num_epochs_that_stepped:
+                raise ValueError(
+                    f"Epoch {self.epoch} is less than the number of epochs"
+                    f"that have been processed {num_epochs_that_stepped}."
+                )
+            # shift worker_id based on the global step
+            worker_id = (worker_id - num_batches_that_stepped) % num_workers
+        else:
+            num_batches_that_stepped = 0
 
         # seed workers
         if self.worker_seed is not None:
@@ -477,8 +512,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 )
 
             # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
-            for batch_indices in islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers):
+            for worker_batch_idx, batch_indices in enumerate(
+                islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers)
+            ):
                 if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
+                    continue
+                current_batch_idx = worker_batch_idx * num_workers + worker_id
+                if current_batch_idx < num_batches_that_stepped:
                     continue
                 yield self[batch_indices]
 
@@ -492,7 +532,6 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                 )
 
             # worker indices
-            batches_per_replica = math.ceil(per_replica / float(self.batch_size))
             batches_per_worker = math.ceil(batches_per_replica / float(num_workers))
             per_worker = batches_per_worker * self.batch_size
 
@@ -501,10 +540,27 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             indices = indices[iter_start:iter_end]
 
             # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
-            for batch_indices in chunked_iter(indices, self.batch_size):
+            for worker_batch_idx, batch_indices in enumerate(chunked_iter(indices, self.batch_size)):
                 if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
+                    continue
+                current_batch_idx = worker_batch_idx * num_workers + worker_id
+                if current_batch_idx < num_batches_that_stepped:
                     continue
                 yield self[batch_indices]
 
-        # Sets epoch for persistent workers
+        # Sets epoch and resume_step for persistent workers
         self.set_epoch(self.epoch + 1)
+        self.set_resume_step(None)
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        r"""
+        Loads the state of the dataset from the given state dictionary.
+
+        Args:
+            state_dict:
+                State dictionary containing the state of the dataset.
+        """
+        # trainer.fit_loop.epoch_progress.current.completed
+        self.epoch = state_dict["epoch"]
+        # trainer.fit_loop.epoch_loop.automatic_optimization.optim_progress.optimizer_steps
+        self.resume_step = state_dict["resume_step"]
