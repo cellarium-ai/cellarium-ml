@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from typing import Literal
+import warnings
+from typing import Any, Literal
 
 import lightning.pytorch as pl
 import torch
@@ -226,3 +227,86 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
         )
+
+    def state_dict(self) -> dict[str, Any]:
+        assert self.trainer is not None
+        state = {
+            "iteration_strategy": self.iteration_strategy,
+            "num_workers": self.num_workers,
+            "num_replicas": self.trainer.num_devices,
+            "num_nodes": self.trainer.num_nodes,
+            "batch_size": self.batch_size,
+            "accumulate_grad_batches": self.trainer.accumulate_grad_batches,
+            "shuffle": self.shuffle,
+            "shuffle_seed": self.shuffle_seed,
+            "drop_last_indices": self.drop_last_indices,
+            "drop_incomplete_batch": self.drop_incomplete_batch,
+            "n_train": self.n_train,
+            "worker_seed": self.worker_seed,
+            "epoch": self.trainer.current_epoch,
+            "resume_step": self.trainer.global_step,
+        }
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        assert self.trainer is not None
+        if hasattr(self, "train_dataset"):
+            if state_dict["iteration_strategy"] != self.iteration_strategy:
+                raise ValueError(
+                    "Cannot resume training with a different iteration strategy. "
+                    f"Expected {self.iteration_strategy}, got {state_dict['iteration_strategy']}."
+                )
+            if state_dict["num_workers"] != self.num_workers:
+                raise ValueError(
+                    "Cannot resume training with a different number of workers. "
+                    f"Expected {self.num_workers}, got {state_dict['num_workers']}."
+                )
+            if state_dict["num_replicas"] != self.trainer.num_devices:
+                raise ValueError(
+                    "Cannot resume training with a different number of replicas. "
+                    f"Expected {self.trainer.num_devices}, got {state_dict['num_replicas']}."
+                )
+            if state_dict["num_nodes"] != self.trainer.num_nodes:
+                raise ValueError(
+                    "Cannot resume training with a different number of nodes. "
+                    f"Expected {self.trainer.num_nodes}, got {state_dict['num_nodes']}."
+                )
+            if state_dict["batch_size"] != self.batch_size:
+                raise ValueError(
+                    "Cannot resume training with a different batch size. "
+                    f"Expected {self.batch_size}, got {state_dict['batch_size']}."
+                )
+            if state_dict["accumulate_grad_batches"] != 1:
+                raise ValueError("Training with gradient accumulation is not supported when resuming training.")
+            if state_dict["shuffle"] != self.shuffle:
+                raise ValueError(
+                    "Cannot resume training with a different shuffle value. "
+                    f"Expected {self.shuffle}, got {state_dict['shuffle']}."
+                )
+            if state_dict["shuffle_seed"] != self.shuffle_seed:
+                raise ValueError(
+                    "Cannot resume training with a different shuffle seed. "
+                    f"Expected {self.shuffle_seed}, got {state_dict['shuffle_seed']}."
+                )
+            if state_dict["drop_last_indices"] != self.drop_last_indices:
+                raise ValueError(
+                    "Cannot resume training with a different drop_last_indices value. "
+                    f"Expected {self.drop_last_indices}, got {state_dict['drop_last_indices']}."
+                )
+            if state_dict["drop_incomplete_batch"] != self.drop_incomplete_batch:
+                raise ValueError(
+                    "Cannot resume training with a different drop_incomplete_batch value. "
+                    f"Expected {self.drop_incomplete_batch}, got {state_dict['drop_incomplete_batch']}."
+                )
+            if state_dict["n_train"] != self.n_train:
+                raise ValueError(
+                    "Cannot resume training with a different train size. "
+                    f"Expected {self.n_train}, got {state_dict['n_train']}."
+                )
+            if state_dict["worker_seed"] == self.worker_seed:
+                warnings.warn(
+                    "Resuming training with the same worker seed as the previous run. "
+                    "This may lead to repeated behavior in the workers upon resuming training."
+                )
+
+            self.train_dataset.load_state_dict(state_dict)

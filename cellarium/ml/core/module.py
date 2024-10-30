@@ -349,6 +349,15 @@ class CellariumModule(pl.LightningModule):
         if callable(on_train_epoch_end):
             on_train_epoch_end(self.trainer)
 
+        combined_loader = self.trainer.fit_loop._combined_loader
+        assert combined_loader is not None
+        dataloaders = combined_loader.flattened
+        for dataloader in dataloaders:
+            dataset = dataloader.dataset
+            set_epoch = getattr(dataset, "set_epoch", None)
+            if callable(set_epoch):
+                dataset.resume_step = None
+
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         """
         Calls the ``on_train_batch_end`` method on the module.
@@ -383,3 +392,20 @@ class CellariumModule(pl.LightningModule):
         if not self._cpu_transforms_in_module_pipeline:
             self.trainer.datamodule.collate_fn = self.trainer.datamodule.collate_fn.first_applied  # type: ignore[attr-defined]
             self._cpu_transforms_in_module_pipeline = True
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        fit_loop = self.trainer.fit_loop
+        epoch_loop = fit_loop.epoch_loop
+        batch_progress = epoch_loop.batch_progress
+        if batch_progress.current.completed < batch_progress.current.processed:  # type: ignore[attr-defined]
+            checkpoint["loops"]["fit_loop"]["epoch_loop.batch_progress"]["total"]["completed"] += 1
+            checkpoint["loops"]["fit_loop"]["epoch_loop.batch_progress"]["current"]["completed"] += 1
+            if not epoch_loop._should_accumulate():
+                checkpoint["loops"]["fit_loop"]["epoch_loop.state_dict"]["_batches_that_stepped"] += 1
+
+            if batch_progress.is_last_batch:
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["processed"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["processed"] += 1
+                checkpoint["CellariumAnnDataDataModule"]["epoch"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["completed"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["completed"] += 1
