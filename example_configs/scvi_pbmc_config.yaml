@@ -96,21 +96,18 @@ model:
 
       # probably leave these alone
       n_continuous_cov: 0
-      n_cats_per_cov: [3, 9]  # TODO: we definitely don't want to have to input this... take it from the dataset
+      n_cats_per_cov: null
       dropout_rate: 0.1
       dispersion: gene
       log_variational: true
       gene_likelihood: nb
       latent_distribution: normal
-      # encode_covariates: false
-      batch_representation: one-hot
       use_batch_norm: both
       use_layer_norm: none
       use_size_factor_key: false
       use_observed_lib_size: true
       library_log_means: null
       library_log_vars: null
-      batch_embedding_kwargs: null
   optim_fn: torch.optim.AdamW
   optim_kwargs: 
     lr: 1e-3
@@ -121,7 +118,7 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: gs://yx-data/pbmc_count.h5ad
+      filenames: /Users/sfleming/Desktop/pbmc_count.h5ad
       limits: [31774]
       shard_size: 31774
       last_shard_size: null
@@ -148,11 +145,11 @@ data:
       key: 
         - chemistry
         - condition
-      convert_fn: cellarium.ml.utilities.data.multiple_categories_to_codes
+      convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 512
   shuffle: true
-  seed: 0
-  drop_last: false
+  # seed: 0
+  # drop_last: false
   test_mode: false
   num_workers: 4
 ckpt_path: null

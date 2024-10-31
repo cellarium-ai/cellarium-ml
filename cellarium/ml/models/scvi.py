@@ -90,7 +90,7 @@ class LinearWithBatch(torch.nn.Linear):
 
         Args:
             batch_nb: a tensor of batch representations (could be one-hot) of shape (n, batch_latent_dim)
-            categorical_covariates_nd: a tensor of categorical covariates of shape (n, sum(n_categories_per_covariate))
+            categorical_covariate_np: a tensor of categorical covariates of shape (n, sum(n_categories_per_covariate))
 
         Returns:
             a tensor of shape (n, out_features)
@@ -116,7 +116,7 @@ class LinearWithBatch(torch.nn.Linear):
         Args:
             x_ng: a tensor of shape (n, in_features)
             batch_nb: a tensor of batch indices of shape (n, batch_latent_dim)
-            categorical_covariates_nd: a tensor of categorical covariates of shape (n, sum(n_categories_per_covariate))
+            categorical_covariate_np: a tensor of categorical covariates of shape (n, sum(n_categories_per_covariate))
         """
         return super().forward(x_ng) + self.compute_bias(
             batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np

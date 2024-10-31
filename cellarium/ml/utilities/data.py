@@ -152,20 +152,6 @@ def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
         return np.asarray(x.cat.codes)
 
 
-def multiple_categories_to_codes(x: pd.DataFrame) -> np.ndarray:
-    """
-    Convert a pandas DataFrame of categorical data to a 2d numpy array of codes.
-    Returned array is always a copy.
-
-    Args:
-        x: Pandas DataFrame object.
-
-    Returns:
-        Numpy array, shape (n, n_categorical_columns)
-    """
-    return x.apply(lambda col: col.cat.codes).to_numpy()
-
-
 def get_categories(x: pd.Series) -> np.ndarray:
     """
     Get the categories of a pandas Series object.

@@ -96,7 +96,7 @@ class CheckpointLoader(FileLoader):
     .. code-block:: yaml
 
         model:
-          transorms:
+          transforms:
             - class_path: cellarium.ml.transforms.DivideByScale
               init_args:
                 scale_g:
@@ -204,7 +204,7 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     return field(adata)
 
 
-def batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
+def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
     """
     Compute the number of categories in batch_index_n.
 
@@ -220,6 +220,40 @@ def batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
     if field.key is not None:
         series = dataframe[field.key]
     return len(series.cat.categories)
+
+
+def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
+    """Extract the number of unique categories in each covariate in the "categorical_covariate_index_nd" batch_key.
+
+    Example:
+
+        .. code-block:: yaml
+            categorical_covariate_index_nd:
+                attr: obs
+                key:
+                    - chemistry
+                    - condition
+                convert_fn: cellarium.ml.utilities.data.categories_to_codes
+
+        The field "categorical_covariate_index_nd" indicates that we are specifying categorical covariates from
+        the columnns ["chemistry", "condition"] from adata.obs.
+        We extract those columns from adata.obs and count the number of categories in each.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        List of length (number of keys) containing the number of categories in each field.
+    """
+    field = data.batch_keys["categorical_covariate_index_nd"]
+    assert isinstance(field, AnnDataField)
+    dataframe = getattr(data.dadc[0], field.attr)
+    n_cats_per_cov = []
+    if field.key is not None:
+        for key in field.key:
+            covariate_series = dataframe[key]
+            n_cats_per_cov.append(len(covariate_series.cat.categories))
+    return n_cats_per_cov
 
 
 def compute_var_names_g(
@@ -608,7 +642,8 @@ def scvi(args: ArgsType = None) -> None:
                 "model.model.init_args.var_names_g",
                 compute_var_names_g,
             ),
-            LinkArguments("data", "model.model.init_args.n_batch", batch_index_n_categories),
+            LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+            LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
         ],
     )
     cli(args=args)
