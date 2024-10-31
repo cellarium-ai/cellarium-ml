@@ -245,6 +245,8 @@ def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
     Returns:
         List of length (number of keys) containing the number of categories in each field.
     """
+    if "categorical_covariate_index_nd" not in data.batch_keys:
+        return []
     field = data.batch_keys["categorical_covariate_index_nd"]
     assert isinstance(field, AnnDataField)
     dataframe = getattr(data.dadc[0], field.attr)
