@@ -507,10 +507,15 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         # handle the embedded batch posterior
         # initialize the means as one-hot, std as 1 (after exp)
-        self.batch_representation_mean_bd = torch.nn.Parameter(torch.eye(self.n_batch, self.n_latent_batch))
-        self.batch_representation_std_unconstrained_bd = torch.nn.Parameter(
+        self.batch_representation_mean_bd: torch.nn.Parameter | None = torch.nn.Parameter(
+            torch.eye(self.n_batch, self.n_latent_batch)
+        )
+        self.batch_representation_std_unconstrained_bd: torch.nn.Parameter | None = torch.nn.Parameter(
             torch.zeros(self.n_batch, self.n_latent_batch)
         )
+        if not self.batch_embedded:
+            self.batch_representation_mean_bd = None
+            self.batch_representation_std_unconstrained_bd = None
 
         if not self.use_observed_lib_size:
             if library_log_means is None or library_log_vars is None:
@@ -600,13 +605,15 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         for m in self.modules():
             m.apply(weights_init)
         torch.nn.init.normal_(self.px_r, mean=0.0, std=1.0)
-        if self.batch_representation_mean_bd is not None:
+        if self.batch_representation_mean_bd is not None and self.batch_representation_std_unconstrained_bd is not None:
             assert isinstance(self.n_latent_batch, int)  # mypy
             with torch.no_grad():
                 self.batch_representation_mean_bd.data.copy_(torch.eye(self.n_batch, self.n_latent_batch))
                 self.batch_representation_std_unconstrained_bd.data.fill_(0.0)
 
     def batch_embedding_distribution(self, batch_index_n: torch.Tensor) -> Distribution:
+        assert self.batch_representation_mean_bd is not None
+        assert self.batch_representation_std_unconstrained_bd is not None
         return Normal(
             self.batch_representation_mean_bd[batch_index_n.long(), :],
             self.batch_representation_std_unconstrained_bd[batch_index_n.long(), :].exp() + 1e-5,
@@ -627,6 +634,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             if self.batch_representation_sampled:
                 batch_nb = self.batch_embedding_distribution(batch_index_n=batch_index_n).rsample()
             else:
+                assert self.batch_representation_mean_bd is not None
                 batch_nb = self.batch_representation_mean_bd[batch_index_n.long(), :]
         return batch_nb
 
