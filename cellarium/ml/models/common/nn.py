@@ -6,7 +6,7 @@ import torch
 
 class DressedLayer(torch.nn.Module):
     """
-    Small block comprising a `~torch.nn.Module` with optional batch/layer normalization 
+    Small block comprising a `~torch.nn.Module` with optional batch/layer normalization
     and configurable activation and dropout.
 
     Similar to
@@ -33,9 +33,9 @@ class DressedLayer(torch.nn.Module):
         self,
         layer: torch.nn.Module,
         use_batch_norm: bool = False,
-        batch_norm_kwargs: dict = {'momentum': 0.01, 'eps': 0.001},
+        batch_norm_kwargs: dict = {"momentum": 0.01, "eps": 0.001},
         use_layer_norm: bool = False,
-        layer_norm_kwargs: dict = {'elementwise_affine': False},
+        layer_norm_kwargs: dict = {"elementwise_affine": False},
         activation_fn: torch.nn.Module | None = torch.nn.ReLU,
         dropout_rate: float = 0,
     ):
@@ -72,7 +72,7 @@ class FullyConnectedLinear(torch.nn.Module):
 
     def __init__(
         self,
-        in_features: int, 
+        in_features: int,
         out_features: int,
         n_hidden: list[int],
         dressing_init_kwargs: dict[str, any] = {},

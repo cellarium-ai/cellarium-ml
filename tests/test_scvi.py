@@ -1,9 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
 import math
 import os
-import copy
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -20,14 +20,15 @@ from tests.common import BoringDatasetSCVI
 
 @pytest.mark.parametrize("n_batch", [2, 4], ids=lambda s: f"n_batch_{s}")
 @pytest.mark.parametrize("n_latent_batch", [None, 4], ids=["batch_latent_size_default", "batch_latent_size_4"])
-@pytest.mark.parametrize("batch_embedded,batch_representation_sampled,batch_kl_weight", 
-                         [(False, False, 0), (True, False, 0), (True, True, 0), (True, True, 0.1)], 
-                         ids=["batch_not_embedded", "batch_embedded_not_sampled", 
-                              "batch_embedded_sampled", "batch_embedded_sampled_KL"])
+@pytest.mark.parametrize(
+    "batch_embedded,batch_representation_sampled,batch_kl_weight",
+    [(False, False, 0), (True, False, 0), (True, True, 0), (True, True, 0.1)],
+    ids=["batch_not_embedded", "batch_embedded_not_sampled", "batch_embedded_sampled", "batch_embedded_sampled_KL"],
+)
 def test_load_from_checkpoint_multi_device(
     n_batch: int,
-    n_latent_batch: int | None, 
-    batch_embedded: bool, 
+    n_latent_batch: int | None,
+    batch_embedded: bool,
     batch_representation_sampled: bool,
     batch_kl_weight: float,
     tmp_path: Path,
@@ -39,7 +40,7 @@ def test_load_from_checkpoint_multi_device(
     # dataloader
     train_loader = torch.utils.data.DataLoader(
         BoringDatasetSCVI(
-            data=np.random.poisson(lam=2., size=(n, g)),
+            data=np.random.poisson(lam=2.0, size=(n, g)),
             batch_index_n=np.random.randint(0, n_batch, size=n),
             var_names=np.array(var_names_g),
         ),
@@ -57,36 +58,33 @@ def test_load_from_checkpoint_multi_device(
                 n_latent_batch=n_latent_batch,
                 batch_kl_weight=batch_kl_weight,
                 encoder={
-                    "hidden_layers":
-                    [
+                    "hidden_layers": [
                         {
                             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+                            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
                         },
                     ],
-                    "final_layer":{
+                    "final_layer": {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"batch_to_bias_hidden_layers": []}
+                        "init_args": {"batch_to_bias_hidden_layers": []},
                     },
                 },
                 decoder={
-                    "hidden_layers":
-                    [
+                    "hidden_layers": [
                         {
                             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+                            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
                         },
                     ],
-                    "final_layer":{
+                    "final_layer": {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"batch_to_bias_hidden_layers": []}
+                        "init_args": {"batch_to_bias_hidden_layers": []},
                     },
                     "final_additive_bias": False,
                 },
             )
 
     else:
-
         model = SingleCellVariationalInference(
             var_names_g=var_names_g,
             n_batch=n_batch,
@@ -95,29 +93,27 @@ def test_load_from_checkpoint_multi_device(
             n_latent_batch=n_latent_batch,
             batch_kl_weight=0,
             encoder={
-                "hidden_layers":
-                [
+                "hidden_layers": [
                     {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+                        "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
                     },
                 ],
-                "final_layer":{
+                "final_layer": {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"batch_to_bias_hidden_layers": []}
+                    "init_args": {"batch_to_bias_hidden_layers": []},
                 },
             },
             decoder={
-                "hidden_layers":
-                [
+                "hidden_layers": [
                     {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+                        "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
                     },
                 ],
-                "final_layer":{
+                "final_layer": {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"batch_to_bias_hidden_layers": []}
+                    "init_args": {"batch_to_bias_hidden_layers": []},
                 },
                 "final_additive_bias": False,
             },
@@ -145,7 +141,9 @@ def test_load_from_checkpoint_multi_device(
             return
 
         # load model from checkpoint
-        ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / batch_size / devices)}.ckpt"
+        ckpt_path = (
+            tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / batch_size / devices)}.ckpt"
+        )
         assert ckpt_path.is_file()
         loaded_model: SingleCellVariationalInference = CellariumModule.load_from_checkpoint(ckpt_path).model
         # assert
@@ -154,6 +152,7 @@ def test_load_from_checkpoint_multi_device(
             model.z_encoder.fully_connected.module_list[0].layer.weight,
             loaded_model.z_encoder.fully_connected.module_list[0].layer.weight,
         )
+
 
 linear_encoder_kwargs = {
     "hidden_layers": [],
@@ -190,9 +189,8 @@ standard_kwargs = dict(
 
 
 def test_vae_architectures():
-
     # linear model, no batch injection at all
-    print('linear model, no batch injection at all')
+    print("linear model, no batch injection at all")
     print(standard_kwargs)
     model = SingleCellVariationalInference(**standard_kwargs)
 
@@ -201,10 +199,10 @@ def test_vae_architectures():
     kwargs["encoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
         },
     ]
-    print('batch injection in encoder but not decoder')
+    print("batch injection in encoder but not decoder")
     print(kwargs)
     model = SingleCellVariationalInference(**kwargs)
 
@@ -213,10 +211,10 @@ def test_vae_architectures():
     kwargs["decoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
         },
     ]
-    print('batch injection in decoder but not encoder')
+    print("batch injection in decoder but not encoder")
     print(kwargs)
     model = SingleCellVariationalInference(**kwargs)
 
@@ -225,16 +223,16 @@ def test_vae_architectures():
     kwargs["encoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
         },
     ]
     kwargs["decoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
         },
     ]
-    print('batch injection in both encoder and decoder')
+    print("batch injection in both encoder and decoder")
     print(kwargs)
     model = SingleCellVariationalInference(**kwargs)
 
@@ -243,24 +241,24 @@ def test_vae_architectures():
     kwargs["encoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
         },
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 16, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 16, "batch_to_bias_hidden_layers": []},
         },
     ]
     kwargs["decoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 16, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 16, "batch_to_bias_hidden_layers": []},
         },
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
         },
     ]
-    print('batch injection in both encoder and decoder, 2 hidden layers each')
+    print("batch injection in both encoder and decoder, 2 hidden layers each")
     print(kwargs)
     model = SingleCellVariationalInference(**kwargs)
 
@@ -269,17 +267,17 @@ def test_vae_architectures():
     kwargs["encoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
         },
     ]
     kwargs["decoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
             "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
-            "final_additive_bias": True
+            "final_additive_bias": True,
         },
     ]
-    print('batch injection in both encoder and decoder with decoder final additive bias')
+    print("batch injection in both encoder and decoder with decoder final additive bias")
     print(kwargs)
     model = SingleCellVariationalInference(**kwargs)
 
@@ -291,28 +289,31 @@ def test_vae_architectures():
     kwargs["encoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []}
+            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
         },
     ]
     kwargs["decoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
             "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
-            "final_additive_bias": True
+            "final_additive_bias": True,
         },
     ]
-    print('batch injection in both encoder and decoder with decoder final additive bias with batch embedded and sampled')
+    print(
+        "batch injection in both encoder and decoder with "
+        "decoder final additive bias with batch embedded and sampled"
+    )
     print(kwargs)
     model = SingleCellVariationalInference(**kwargs)
-    
+
     # we are merely testing that the models can be instantiated above
     # here put some data through the last model to make sure it runs
-    print('putting data through the last model')
+    print("putting data through the last model")
     n_batch = 2
     n = 4
     train_loader = torch.utils.data.DataLoader(
         BoringDatasetSCVI(
-            data=np.random.poisson(lam=2., size=(n, len(var_names_g))),
+            data=np.random.poisson(lam=2.0, size=(n, len(var_names_g))),
             batch_index_n=np.random.randint(0, n_batch, size=n),
             var_names=np.array(var_names_g),
         ),
@@ -322,15 +323,15 @@ def test_vae_architectures():
     for batch in train_loader:
         # encoder
         batch_nb = model.batch_representation_from_batch_index(batch["batch_index_n"])
-        print('putting data through encoder')
+        print("putting data through encoder")
         latent = model.z_encoder(x_ng=batch["x_ng"].float(), batch_nb=batch_nb, categorical_covariate_np=None)
         z_nk = latent.sample()
         # decoder
-        print('putting data through decoder')
-        count_distribution = model.decoder(
+        print("putting data through decoder")
+        model.decoder(
             z_nk=z_nk,
-            batch_nb=batch_nb, 
+            batch_nb=batch_nb,
             categorical_covariate_np=None,
-            inverse_overdispersion=model.px_r.exp(), 
+            inverse_overdispersion=model.px_r.exp(),
             library_size_n1=batch["x_ng"].float().sum(dim=-1, keepdim=True),
         )

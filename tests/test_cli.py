@@ -397,11 +397,10 @@ CONFIGS = [
                         "n_batch": None,
                         "encoder": {
                             "hidden_layers": [],
-                            "final_layer":
-                                {
-                                    "class_path": "torch.nn.Linear",
-                                    "init_args": {},
-                                },
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
                             "output_bias": True,
                         },
                         "decoder": {
@@ -411,11 +410,10 @@ CONFIGS = [
                                     "init_args": {"out_features": 128, "batch_to_bias_hidden_layers": []},
                                 }
                             ],
-                            "final_layer":
-                                {
-                                    "class_path": "torch.nn.Linear",
-                                    "init_args": {},
-                                },
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
                             "final_additive_bias": True,
                         },
                     },
@@ -443,7 +441,7 @@ CONFIGS = [
                         "attr": "obs",
                         "key": "dataset_id",
                         "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
-                    }
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
