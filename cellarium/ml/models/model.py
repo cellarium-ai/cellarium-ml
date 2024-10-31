@@ -11,7 +11,6 @@ import numpy as np
 import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
-import lightning.pytorch as pl
 
 
 class CellariumModel(torch.nn.Module, metaclass=ABCMeta):

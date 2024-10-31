@@ -96,7 +96,7 @@ class CheckpointLoader(FileLoader):
     .. code-block:: yaml
 
         model:
-          transorms:
+          transforms:
             - class_path: cellarium.ml.transforms.DivideByScale
               init_args:
                 scale_g:
@@ -204,27 +204,58 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     return field(adata)
 
 
-def nunique_scvi(data: CellariumAnnDataDataModule) -> int:
+def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
     """
-    Compute the number of categories in the target variable.
-
-    E.g. if the target variable is ``obs["cell_type"]`` then this function
-    returns the number of categories in ``obs["cell_type"]``::
-
-        >>> len(data.dadc[0].obs["cell_type"].cat.categories)
+    Compute the number of categories in batch_index_n.
 
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
-        key: Data is pulled from adata.obs[key]
 
     Returns:
-        The number of categories in the target variable.
+        The number of categories in batch_index_n.
     """
     field = data.batch_keys["batch_index_n"]
-    value = getattr(data.dadc[0], field.attr)
+    assert isinstance(field, AnnDataField)
+    dataframe = getattr(data.dadc[0], field.attr)
     if field.key is not None:
-        value = value[field.key]
-    return len(value.cat.categories)
+        series = dataframe[field.key]
+    return len(series.cat.categories)
+
+
+def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
+    """Extract the number of unique categories in each covariate in the "categorical_covariate_index_nd" batch_key.
+
+    Example:
+
+        .. code-block:: yaml
+            categorical_covariate_index_nd:
+                attr: obs
+                key:
+                    - chemistry
+                    - condition
+                convert_fn: cellarium.ml.utilities.data.categories_to_codes
+
+        The field "categorical_covariate_index_nd" indicates that we are specifying categorical covariates from
+        the columnns ["chemistry", "condition"] from adata.obs.
+        We extract those columns from adata.obs and count the number of categories in each.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        List of length (number of keys) containing the number of categories in each field.
+    """
+    if "categorical_covariate_index_nd" not in data.batch_keys:
+        return []
+    field = data.batch_keys["categorical_covariate_index_nd"]
+    assert isinstance(field, AnnDataField)
+    dataframe = getattr(data.dadc[0], field.attr)
+    n_cats_per_cov = []
+    if field.key is not None:
+        for key in field.key:
+            covariate_series = dataframe[key]
+            n_cats_per_cov.append(len(covariate_series.cat.categories))
+    return n_cats_per_cov
 
 
 def compute_var_names_g(
@@ -613,7 +644,8 @@ def scvi(args: ArgsType = None) -> None:
                 "model.model.init_args.var_names_g",
                 compute_var_names_g,
             ),
-            LinkArguments("data", "model.model.init_args.n_batch", nunique_scvi),
+            LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+            LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
         ],
     )
     cli(args=args)

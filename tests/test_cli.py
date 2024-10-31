@@ -1,9 +1,14 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Any
 
 import pytest
 
@@ -396,22 +401,25 @@ CONFIGS = [
                     "init_args": {
                         "n_batch": None,
                         "encoder": {
-                            "layers": [
-                                {
-                                    "class_path": "cellarium.ml.models.common.nn.LinearWithBatch",
-                                    "init_args": {"out_features": 128},
-                                }
-                            ],
+                            "hidden_layers": [],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
                             "output_bias": True,
                         },
                         "decoder": {
-                            "layers": [
+                            "hidden_layers": [
                                 {
-                                    "class_path": "cellarium.ml.models.common.nn.LinearWithBatch",
-                                    "init_args": {"out_features": 128},
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "batch_to_bias_hidden_layers": []},
                                 }
                             ],
-                            "output_bias": True,
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "final_additive_bias": True,
                         },
                     },
                 },
@@ -438,7 +446,7 @@ CONFIGS = [
                         "attr": "obs",
                         "key": "dataset_id",
                         "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
-                    }
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",
