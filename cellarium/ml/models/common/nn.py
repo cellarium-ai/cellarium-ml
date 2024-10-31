@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from typing import Any, Type
+
 import torch
 
 
@@ -36,7 +38,7 @@ class DressedLayer(torch.nn.Module):
         batch_norm_kwargs: dict = {"momentum": 0.01, "eps": 0.001},
         use_layer_norm: bool = False,
         layer_norm_kwargs: dict = {"elementwise_affine": False},
-        activation_fn: torch.nn.Module | None = torch.nn.ReLU,
+        activation_fn: Type[torch.nn.Module] | None = torch.nn.ReLU,
         dropout_rate: float = 0,
     ):
         assert not (use_batch_norm and use_layer_norm), "Cannot use both batch and layer normalization."
@@ -75,11 +77,11 @@ class FullyConnectedLinear(torch.nn.Module):
         in_features: int,
         out_features: int,
         n_hidden: list[int],
-        dressing_init_kwargs: dict[str, any] = {},
+        dressing_init_kwargs: dict[str, Any] = {},
         bias: bool = False,
     ):
         super().__init__()
-        module_list = []
+        module_list = torch.nn.ModuleList()
         layer_size = in_features
         if len(n_hidden) > 0:
             for n_in, n_out in zip([in_features] + n_hidden, n_hidden):
@@ -91,7 +93,6 @@ class FullyConnectedLinear(torch.nn.Module):
                 )
             layer_size = n_out
         module_list.append(torch.nn.Linear(layer_size, out_features, bias=bias))
-        module_list = torch.nn.ModuleList(module_list)
         self.module_list = module_list
         self.out_features = out_features
 
