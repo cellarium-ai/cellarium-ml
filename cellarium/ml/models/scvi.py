@@ -3,8 +3,13 @@
 
 """Flexible modified version of single-cell variational inference (scVI) re-implemented in Cellarium ML."""
 
+from __future__ import annotations
+
 import importlib
-from typing import Any, Literal, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Any, Literal, Sequence
 
 import numpy as np
 import torch
