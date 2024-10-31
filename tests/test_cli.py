@@ -396,22 +396,27 @@ CONFIGS = [
                     "init_args": {
                         "n_batch": None,
                         "encoder": {
-                            "layers": [
+                            "hidden_layers": [],
+                            "final_layer":
                                 {
-                                    "class_path": "cellarium.ml.models.common.nn.LinearWithBatch",
-                                    "init_args": {"out_features": 128},
-                                }
-                            ],
+                                    "class_path": "torch.nn.Linear",
+                                    "init_args": {},
+                                },
                             "output_bias": True,
                         },
                         "decoder": {
-                            "layers": [
+                            "hidden_layers": [
                                 {
-                                    "class_path": "cellarium.ml.models.common.nn.LinearWithBatch",
-                                    "init_args": {"out_features": 128},
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "batch_to_bias_hidden_layers": []},
                                 }
                             ],
-                            "output_bias": True,
+                            "final_layer":
+                                {
+                                    "class_path": "torch.nn.Linear",
+                                    "init_args": {},
+                                },
+                            "final_additive_bias": True,
                         },
                     },
                 },
