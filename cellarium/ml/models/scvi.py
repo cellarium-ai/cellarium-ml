@@ -241,9 +241,15 @@ class EncoderSCVI(torch.nn.Module):
         categorical_covariate_np: torch.Tensor | None,
     ) -> Distribution:
         q_nh = self.fully_connected(x_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
-        q_mean_nk = self.mean_encoder(q_nh, batch_nb) if self.mean_encoder_takes_batch else self.mean_encoder(q_nh)
+        q_mean_nk = (
+            self.mean_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np) 
+            if self.mean_encoder_takes_batch 
+            else self.mean_encoder(q_nh)
+        )
         q_var_nk = (
-            torch.exp(self.var_encoder(q_nh, batch_nb) if self.mean_encoder_takes_batch else self.var_encoder(q_nh))
+            torch.exp(self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np) 
+                      if self.mean_encoder_takes_batch 
+                      else self.var_encoder(q_nh))
             + self.var_eps
         )
         return Normal(q_mean_nk, q_var_nk.sqrt())
@@ -507,24 +513,25 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         # handle the embedded batch posterior
         # initialize the means as one-hot, std as 1 (after exp)
-        self.batch_representation_mean_bd: torch.nn.Parameter | None = torch.nn.Parameter(
-            torch.eye(self.n_batch, self.n_latent_batch)
-        )
-        self.batch_representation_std_unconstrained_bd: torch.nn.Parameter | None = torch.nn.Parameter(
-            torch.zeros(self.n_batch, self.n_latent_batch)
-        )
         if not self.batch_embedded:
-            self.batch_representation_mean_bd = None
-            self.batch_representation_std_unconstrained_bd = None
+            self.batch_representation_mean_bd: torch.nn.Parameter | None  = None
+            self.batch_representation_std_unconstrained_bd: torch.nn.Parameter | None  = None
+        else:
+            self.batch_representation_mean_bd = torch.nn.Parameter(
+                torch.eye(self.n_batch, self.n_latent_batch)
+            )
+            self.batch_representation_std_unconstrained_bd = torch.nn.Parameter(
+                torch.zeros(self.n_batch, self.n_latent_batch)
+            )
 
-        if not self.use_observed_lib_size:
-            if library_log_means is None or library_log_vars is None:
-                raise ValueError(
-                    "If not using observed_lib_size, " "must provide library_log_means and library_log_vars."
-                )
+        # if not self.use_observed_lib_size:
+        #     if library_log_means is None or library_log_vars is None:
+        #         raise ValueError(
+        #             "If not using observed_lib_size, " "must provide library_log_means and library_log_vars."
+        #         )
 
-            self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
-            self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
+        #     self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
+        #     self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(self.n_input))
