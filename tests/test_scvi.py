@@ -16,7 +16,6 @@ import lightning.pytorch as pl
 import numpy as np
 import pytest
 import torch
-from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.models import SingleCellVariationalInference
@@ -131,10 +130,8 @@ def test_load_from_checkpoint_multi_device(
             optim_kwargs={"lr": 1e-3},
         )
         # trainer
-        strategy: str | DDPStrategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
         trainer = pl.Trainer(
             accelerator="cpu",
-            strategy=strategy,
             devices=devices,
             max_epochs=1,
             default_root_dir=tmp_path,
