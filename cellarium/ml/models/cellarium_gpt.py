@@ -731,6 +731,9 @@ class TrainTokenizer(torch.nn.Module):
         metadata_vocab_sizes: dict[str, int],
         ontology_downsample_p: float,
         ontology_infos: dict[str, dict[str, Any]] | None = None,
+        prefix_len: int | None = None,
+        metadata_prompt_tokens: list[str] | None = None,
+        obs_names_rng: bool = False,
     ) -> None:
         super().__init__()
         self.context_len = context_len
@@ -743,6 +746,9 @@ class TrainTokenizer(torch.nn.Module):
             ontology_infos = torch.load("/mnt/disks/dev/repos/cellarium_gpt/ontology_infos.pt")
         self.ontology_infos = ontology_infos
         self.ontology_downsample_p = ontology_downsample_p
+        self.prefix_len = prefix_len
+        self.metadata_prompt_tokens = metadata_prompt_tokens
+        self.obs_names_rng = obs_names_rng
 
     def forward(
         self,
@@ -750,6 +756,7 @@ class TrainTokenizer(torch.nn.Module):
         gene_tokens_n: dict[str, torch.Tensor],
         gene_tokens_ng: dict[str, torch.Tensor],
         gene_id_g: torch.Tensor | None = None,
+        obs_names_n: np.ndarray | None = None,
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
         ### GENE TOKENS ###
         n, g = gene_tokens_ng["gene_value"].shape
@@ -765,7 +772,12 @@ class TrainTokenizer(torch.nn.Module):
             gene_id_g = torch.arange(g, device=device)
         gene_tokens_ng["gene_id"] = gene_id_g.expand(n, g)
 
-        shuffle_idx_ng = torch.argsort(torch.rand((n, g), dtype=torch.float32, device=device), dim=-1)
+        if self.obs_names_rng:
+            rng_n = [torch.Generator(device=device) for _ in range(n)]
+            [rng.manual_seed(int(obs_name)) for rng, obs_name in zip(rng_n, obs_names_n)]
+            shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
+        else:
+            shuffle_idx_ng = torch.argsort(torch.rand((n, g), dtype=torch.float32, device=device), dim=-1)
         shuffle_idx_nc = shuffle_idx_ng[:, :gene_context_len]
 
         for key, gene_token_ng in gene_tokens_ng.items():
@@ -790,12 +802,15 @@ class TrainTokenizer(torch.nn.Module):
         gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
         gene_value_nc = torch.binomial(gene_value_nc, gene_downsample_p_nc)
         total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc)
-        # sample prefix length
-        # prefix_len_weights = [1, max_prefix_len / 2, max_prefix_len / 3, ..., max_prefix_len / max_prefix_len]
-        max_prefix_len = gene_context_len - 1
-        prefix_len_weights = 1 / torch.arange(max_prefix_len + 1, dtype=torch.float32)
-        prefix_len_weights[0] = 1 / 10
-        prefix_len_n = torch.multinomial(prefix_len_weights, n, replacement=True)
+        if self.prefix_len is not None:
+            prefix_len_n = torch.full((n,), self.prefix_len, dtype=torch.float32)
+        else:
+            # sample prefix length
+            # prefix_len_weights = [1, max_prefix_len / 2, max_prefix_len / 3, ..., max_prefix_len / max_prefix_len]
+            max_prefix_len = gene_context_len - 1
+            prefix_len_weights = 1 / torch.arange(max_prefix_len + 1, dtype=torch.float32)
+            prefix_len_weights[0] = 1 / 10
+            prefix_len_n = torch.multinomial(prefix_len_weights, n, replacement=True)
         # create prompt and query masks
         gene_query_mask_nc = torch.arange(gene_context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
         gene_prompt_mask_nc = ~gene_query_mask_nc
@@ -829,10 +844,16 @@ class TrainTokenizer(torch.nn.Module):
                 dtype=torch.int,
             )
         # create metadata query and prompt masks
-        metadata_prefix_len_n = torch.randint(0, m + 1, (n,), device=device)
-        metadata_prefix_mask_nm = torch.arange(m, device=device) < metadata_prefix_len_n[:, None]
-        shuffle_idx_nm = torch.argsort(torch.rand_like(metadata_prefix_mask_nm, dtype=torch.float32), dim=-1)
-        metadata_prompt_mask_nm = torch.gather(metadata_prefix_mask_nm, dim=-1, index=shuffle_idx_nm)
+        if self.metadata_prompt_tokens is not None:
+            metadata_prompt_mask_nm = torch.zeros((n, m), dtype=torch.bool, device=device)
+            for metadata_token_idx, metadata_token in enumerate(metadata_tokens_n):
+                if metadata_token in self.metadata_prompt_tokens:
+                    metadata_prompt_mask_nm[:, metadata_token_idx] = True
+        else:
+            metadata_prefix_len_n = torch.randint(0, m + 1, (n,), device=device)
+            metadata_prefix_mask_nm = torch.arange(m, device=device) < metadata_prefix_len_n[:, None]
+            shuffle_idx_nm = torch.argsort(torch.rand_like(metadata_prefix_mask_nm, dtype=torch.float32), dim=-1)
+            metadata_prompt_mask_nm = torch.gather(metadata_prefix_mask_nm, dim=-1, index=shuffle_idx_nm)
         metadata_query_mask_nm = ~metadata_prompt_mask_nm
         metadata_measured_mask_nm = torch.stack(
             [metadata_token_n >= 0 for metadata_token_n in metadata_tokens_n.values()], dim=1
@@ -844,18 +865,19 @@ class TrainTokenizer(torch.nn.Module):
             metadata_tokens_n[key] = metadata_token_n.clamp(0).int()
         # metadata labels
         metadata_labels_n = {key: metadata_tokens_n[key].clone() for key in metadata_tokens_n}
-        # downsample metadata based on ontology
-        for key, ontology_info in self.ontology_infos.items():
-            if "shortest_distances_matrix" not in ontology_info:
-                continue
-            metadata_token_n = metadata_tokens_n[key]
-            shortest_distances_matrix = ontology_info["shortest_distances_matrix"]
-            ontology_weights = (
-                self.ontology_downsample_p * (1 - self.ontology_downsample_p) ** shortest_distances_matrix
-            )
-            metadata_tokens_n[key] = (
-                torch.multinomial(ontology_weights[metadata_token_n], num_samples=1).squeeze(-1).int()
-            )
+        if self.ontology_downsample_p != 0:
+            # downsample metadata based on ontology
+            for key, ontology_info in self.ontology_infos.items():
+                if "shortest_distances_matrix" not in ontology_info:
+                    continue
+                metadata_token_n = metadata_tokens_n[key]
+                shortest_distances_matrix = ontology_info["shortest_distances_matrix"]
+                ontology_weights = (
+                    self.ontology_downsample_p * (1 - self.ontology_downsample_p) ** shortest_distances_matrix
+                )
+                metadata_tokens_n[key] = (
+                    torch.multinomial(ontology_weights[metadata_token_n], num_samples=1).squeeze(-1).int()
+                )
         # impute mask token for unmeasured metadata
         # mask token is the last token in the vocabulary
         for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
@@ -894,108 +916,6 @@ class TrainTokenizer(torch.nn.Module):
             "prompt_mask_nc": prompt_mask_nc,
             "labels_nc": labels_nc,
             "label_weights_nc": label_weights_nc,
-        }
-
-
-class ValidateTokenizer(torch.nn.Module):
-    """
-    Tokenizer for the Cellarium GPT model.
-
-    Args:
-        context_len:
-            Context length.
-        gene_downsample_fraction:
-            Downsample fraction.
-        min_total_mrna_umis:
-            Minimum total mRNA UMIs.
-        max_total_mrna_umis:
-            Maximum total mRNA UMIs.
-        gene_vocab_sizes:
-            Gene token vocabulary sizes.
-        metadata_vocab_sizes:
-            Metadata token vocabulary sizes.
-        ontology_infos:
-            Ontology information.
-    """
-
-    def __init__(
-        self,
-        context_len: int,
-        gene_downsample_fraction: float,
-        min_total_mrna_umis: int,
-        max_total_mrna_umis: int,
-        gene_vocab_sizes: dict[str, int],
-        metadata_vocab_sizes: dict[str, int],
-        ontology_downsample_p: float,
-        ontology_infos: dict[str, dict[str, Any]] | None = None,
-    ) -> None:
-        super().__init__()
-        self.context_len = context_len
-        self.gene_downsample_fraction = gene_downsample_fraction
-        self.min_total_mrna_umis = min_total_mrna_umis
-        self.max_total_mrna_umis = max_total_mrna_umis
-        self.gene_vocab_sizes = gene_vocab_sizes
-        self.metadata_vocab_sizes = metadata_vocab_sizes
-        if ontology_infos is None:
-            ontology_infos = torch.load("/mnt/disks/dev/repos/cellarium_gpt/ontology_infos.pt")
-        self.ontology_infos = ontology_infos
-        self.ontology_downsample_p = ontology_downsample_p
-
-    def forward(
-        self,
-        metadata_tokens_n: dict[str, torch.Tensor],
-        gene_tokens_n: dict[str, torch.Tensor],
-        gene_tokens_ng: dict[str, torch.Tensor],
-        obs_names_n: np.ndarray,
-        gene_id_g: torch.Tensor | None = None,
-    ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
-        ### GENE TOKENS ###
-        n, g = gene_tokens_ng["gene_value"].shape
-        device = gene_tokens_ng["gene_value"].device
-        m = len(metadata_tokens_n)
-        gene_context_len = self.context_len - m
-
-        ## gene measurement tokens (assay, suspension type, etc.) ##
-        gene_tokens_nc = {key: gene_tokens_n[key][:, None].expand(-1, gene_context_len).int() for key in gene_tokens_n}
-
-        ## gene id ##
-        if gene_id_g is None:
-            gene_id_g = torch.arange(g, device=device)
-        gene_tokens_ng["gene_id"] = gene_id_g.expand(n, g)
-
-        rng_n = [torch.Generator(device=device) for _ in range(n)]
-        [rng.manual_seed(abs(hash(obs_name))) for rng, obs_name in zip(rng_n, obs_names_n)]
-        shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
-        shuffle_idx_nc = shuffle_idx_ng[:, :gene_context_len]
-
-        for key, gene_token_ng in gene_tokens_ng.items():
-            gene_tokens_nc[key] = torch.gather(gene_token_ng, dim=-1, index=shuffle_idx_nc)
-
-        ## gene value ##
-        gene_value_nc = gene_tokens_nc.pop("gene_value")
-        total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis")
-        # downsample gene values
-        max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
-        downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
-        gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
-        gene_tokens_nc["gene_value"] = torch.binomial(gene_value_nc, gene_downsample_p_nc)
-        gene_tokens_nc["total_mrna_umis"] = torch.round(downsampled_total_mrna_umis_nc)
-
-        ### METADATA TOKENS ###
-
-        ## metadata tokens ##
-        # assign token codes based on the ontology info
-        # token values not in the ontology are treated as unmeasured and assigned a code value of -1
-        for key, ontology_info in self.ontology_infos.items():
-            assert self.metadata_vocab_sizes[key] == len(ontology_info["names"])
-            metadata_tokens_n[key] = torch.tensor(
-                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["names"]).codes,
-                dtype=torch.int,
-            )
-
-        return {
-            "gene_tokens_nc": gene_tokens_nc,
-            "metadata_tokens_n": metadata_tokens_n,
         }
 
 
@@ -1196,6 +1116,35 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     def vectorized_token_to_id(self):
         return np.vectorize(lambda x: self.token_to_id[x])
 
+    def predict(
+        self,
+        gene_tokens_nc: dict[str, torch.Tensor],
+        metadata_tokens_n: dict[str, torch.Tensor],
+        prompt_mask_nc: torch.Tensor | None,
+    ) -> dict[str, torch.Tensor]:
+        # embed the gene IDs, values, and total mRNA UMIs
+        embedding_ncd = torch.cat(
+            [
+                self.gene_embedding(gene_tokens_nc),
+                self.metadata_embedding(metadata_tokens_n),
+            ],
+            dim=1,
+        )
+
+        # create attention mask
+        attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
+
+        # transformer blocks
+        hidden_state_ncd = embedding_ncd * self.embeddings_scale
+        hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
+
+        # compute logits
+        logits_nck = {}
+        for key in ["gene_value"] + list(metadata_tokens_n):
+            logits_nck[key] = self.head[key](hidden_state_ncd) * self.output_logits_scale
+
+        return logits_nck
+
     def forward(
         self,
         gene_tokens_nc: dict[str, torch.Tensor],
@@ -1225,136 +1174,14 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         pl_module: pl.LightningModule,
         metadata_tokens_n: dict[str, torch.Tensor],
         gene_tokens_nc: dict[str, torch.Tensor],
+        prompt_mask_nc: torch.Tensor,
+        labels_nc: dict[str, torch.Tensor],
+        label_weights_nc: dict[str, torch.Tensor],
         batch_idx: int,
     ) -> None:
-        loss_dict: dict[str, float] = {}
-        context_len = 4096
-        m = len(metadata_tokens_n)
-        gene_context_len = context_len - m
-        prefix_lens = [0, 1, 3, 10, 30, 100, 300, 1000, 3000]
-        suffix_len = gene_context_len - max(prefix_lens)
+        # prefix_lens = [0, 1, 3, 10, 30, 100, 300, 1000, 3000, 7000]
         # prefix_lens = [0, 1, 10, 50, 500, 1000, 3000]
-
         n = gene_tokens_nc["gene_value"].shape[0]
-        device = gene_tokens_nc["gene_value"].device
-
-        ## gene value ##
-        gene_value_nc = gene_tokens_nc.pop("gene_value")
-        total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis")
-        if "measured_genes_mask" in gene_tokens_nc:
-            measured_genes_mask_nc = gene_tokens_nc.pop("measured_genes_mask")
-        else:
-            measured_genes_mask_nc = None
-        # gene label
-        gene_value_vocab_size = self.gene_vocab_sizes["gene_value"]
-        gene_label_nc = gene_value_nc.clamp(0, gene_value_vocab_size - 1).int()
-
-        metadata_measured_mask_nm = torch.stack(
-            [metadata_token_n >= 0 for metadata_token_n in metadata_tokens_n.values()], dim=1
-        ).bool()
-        # clamp unmeasured tokens to 0
-        for key, metadata_token_n in metadata_tokens_n.items():
-            metadata_tokens_n[key] = metadata_token_n.clamp(0).int()
-        # metadata labels
-        metadata_labels_n = {key: metadata_tokens_n[key].clone() for key in metadata_tokens_n}
-
-        for prefix_len in prefix_lens:
-            prefix_len_n = torch.tensor([prefix_len], device=device)
-            suffix_len_n = torch.tensor([suffix_len], device=device)
-
-            # create prompt and query masks
-            gene_query_mask_nc = torch.arange(gene_context_len, device=device) >= (
-                gene_context_len - suffix_len_n[:, None].expand(n, -1)
-            )
-            gene_prompt_mask_nc = torch.arange(gene_context_len, device=device) < prefix_len_n[:, None].expand(n, -1)
-            if measured_genes_mask_nc is not None:
-                gene_query_mask_nc = gene_query_mask_nc & measured_genes_mask_nc
-                gene_prompt_mask_nc = gene_prompt_mask_nc & measured_genes_mask_nc
-
-            gene_value_nc3 = torch.stack(
-                [
-                    torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(),
-                    gene_query_mask_nc.float(),
-                    torch.log1p(total_mrna_umis_nc),
-                ],
-                dim=2,
-            )
-            gene_tokens_nc["gene_value"] = gene_value_nc3
-
-            for metadata_prompt_label_idx, metadata_prompt_label in enumerate(list(metadata_tokens_n) + [None]):
-                # create metadata query and prompt masks
-                metadata_prompt_mask_nm = torch.zeros((n, m), dtype=torch.bool, device=device)
-                if metadata_prompt_label is not None:
-                    metadata_prompt_mask_nm[:, metadata_prompt_label_idx] = True
-                metadata_query_mask_nm = ~metadata_prompt_mask_nm
-                metadata_query_mask_nm = metadata_query_mask_nm & metadata_measured_mask_nm
-                metadata_prompt_mask_nm = metadata_prompt_mask_nm & metadata_measured_mask_nm
-                # impute mask token for unmeasured metadata
-                # mask token is the last token in the vocabulary
-                masked_metadata_tokens_n = {}
-                for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
-                    masked_metadata_tokens_n[key] = torch.where(
-                        metadata_query_mask_nm[:, i], self.metadata_vocab_sizes[key], metadata_token_n
-                    ).int()
-
-                ### PROMPT MASK ###
-                prompt_mask_nc = torch.cat([gene_prompt_mask_nc, metadata_prompt_mask_nm], dim=1)
-
-                ### LABELS ###
-                block_label_nc = torch.block_diag(
-                    gene_label_nc,
-                    *[metadata_label_n.unsqueeze(-1) for metadata_label_n in metadata_labels_n.values()],
-                )
-                labels_nc = {
-                    key: block_label_nc[n * i : n * (i + 1)]
-                    for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
-                }
-
-                ### LABEL WEIGHTS ###
-                block_label_weight_nc = (
-                    torch.block_diag(
-                        gene_query_mask_nc
-                        / torch.maximum(gene_query_mask_nc.sum(dim=-1, keepdim=True), torch.tensor(1.0)),
-                        *[metadata_query_mask_nm[:, i].unsqueeze(-1).float() for i in range(m)],
-                    )
-                    / n
-                )
-                label_weights_nc = {
-                    key: block_label_weight_nc[n * i : n * (i + 1)]
-                    for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
-                }
-
-                output = self(gene_tokens_nc, masked_metadata_tokens_n, prompt_mask_nc, labels_nc, label_weights_nc)
-                for label in output:
-                    loss_dict[f"{label}/{metadata_prompt_label}/prefix_{prefix_len}"] = output[label].item()
+        loss_dict = self(gene_tokens_nc, metadata_tokens_n, prompt_mask_nc, labels_nc, label_weights_nc)
 
         pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True, batch_size=n)
-
-    def predict(
-        self,
-        gene_tokens_nc: dict[str, torch.Tensor],
-        metadata_tokens_n: dict[str, torch.Tensor],
-        prompt_mask_nc: torch.Tensor | None,
-    ) -> dict[str, torch.Tensor]:
-        # embed the gene IDs, values, and total mRNA UMIs
-        embedding_ncd = torch.cat(
-            [
-                self.gene_embedding(gene_tokens_nc),
-                self.metadata_embedding(metadata_tokens_n),
-            ],
-            dim=1,
-        )
-
-        # create attention mask
-        attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
-
-        # transformer blocks
-        hidden_state_ncd = embedding_ncd * self.embeddings_scale
-        hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
-
-        # compute logits
-        logits_nck = {}
-        for key in ["gene_value"] + list(metadata_tokens_n):
-            logits_nck[key] = self.head[key](hidden_state_ncd) * self.output_logits_scale
-
-        return logits_nck
