@@ -447,11 +447,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         # workers
         worker_id, num_workers = get_worker_info()
 
+        # resume training
         if self.resume_step is not None:
             # shift worker_id based on global step
             worker_id = (worker_id - self.resume_step) % num_workers
             num_epochs_that_stepped, num_batches_that_stepped = divmod(self.resume_step, batches_per_replica)
             self.resume_step = None
+            self.set_epoch(num_epochs_that_stepped)
         else:
             num_epochs_that_stepped = 0
             num_batches_that_stepped = 0
