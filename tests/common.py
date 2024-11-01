@@ -58,3 +58,9 @@ class BoringModel(CellariumModel):
                 kwargs[key] = torch.cat(GatherLayer.apply(value), dim=0)
         self.iter_data.append(kwargs)
         return {}
+
+    def get_extra_state(self) -> dict:
+        return {"iter_data": self.iter_data}
+
+    def set_extra_state(self, state) -> None:
+        self.iter_data = state["iter_data"]
