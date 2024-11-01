@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Callable
 from functools import cached_property
 from typing import Any, Literal
 
@@ -10,9 +9,11 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from cellarium.ml.layers import GeneExpressionEmbedding, MetadataEmbedding, Transformer
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.utilities.layers import create_initializer
+from cellarium.ml.utilities.mup import scale_initializers_by_dimension
 
 try:
     from cerebras.modelzoo.common.utils.model.mup_utils import LRAdjustmentGroup
@@ -22,49 +23,6 @@ except ImportError:
 
     def use_cs() -> bool:
         return False
-
-
-def create_initializer(initializer: dict[str, Any]) -> Callable[[torch.Tensor], None]:
-    initializer_fn = getattr(nn.init, initializer["name"])
-    initializer_kwargs = initializer.copy()
-    del initializer_kwargs["name"]
-    return lambda x: initializer_fn(x, **initializer_kwargs)
-
-
-def scale_initializers_by_dimension(
-    initializers: dict[str, Any] | list[dict[str, Any]],
-    width_scale: float | None = None,
-    depth_scale: float | None = None,
-) -> None:
-    """
-    Scales the std of an initializer or list of initializers by the specified
-    width and depth scalars. Unsupported initializers are ignored and a warning
-    is printed to the user.
-    """
-    if not width_scale:
-        width_scale = 1.0
-    if not depth_scale:
-        depth_scale = 1.0
-    mup_scalar = width_scale * depth_scale
-
-    if not isinstance(initializers, list):
-        initializers = [initializers]
-
-    for initializer in initializers:
-        if "name" not in initializer:
-            raise ValueError("Initializer name must be provided")
-        initializer_name = initializer["name"].lower()
-
-        if initializer_name == "normal_":
-            initializer["std"] = initializer.get("std", 1.0) * mup_scalar
-        elif initializer_name == "trunc_normal_":
-            std = initializer.get("std", 1.0)
-            initializer["std"] = std * mup_scalar
-            initializer["a"] = initializer.get("a", -2 * std) * mup_scalar
-            initializer["b"] = initializer.get("b", 2 * std) * mup_scalar
-            std = None
-        else:
-            raise ValueError(f"Initializer {initializer_name} is not supported for muP")
 
 
 def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
@@ -98,518 +56,6 @@ def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
         diag_mask_cc = torch.eye(c, dtype=torch.bool, device=device)
         attention_mask_ncc = prompt_mask_nc[:, None, :] | diag_mask_cc
         return attention_mask_ncc
-
-
-class MultiHeadAttention(nn.Module):
-    """
-    Multi-head attention.
-
-    Args:
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        use_bias:
-            Whether to use bias in the linear transformations.
-        n_heads:
-            Number of attention heads.
-        dropout_p:
-            Dropout probability.
-        attention_logits_scale:
-            Multiplier for the attention scores.
-        attention_backend:
-            Backend for the attention computation.
-        Wqkv_initializer:
-            Initializer for the query, key, and value linear transformations.
-        Wo_initializer:
-            Initializer for the output linear transformation.
-    """
-
-    backend_map = {
-        "math": SDPBackend.MATH,
-        "flash": SDPBackend.FLASH_ATTENTION,
-        "mem_efficient": SDPBackend.EFFICIENT_ATTENTION,
-    }
-
-    def __init__(
-        self,
-        d_model: int,
-        use_bias: bool,
-        n_heads: int,
-        dropout_p: float,
-        attention_logits_scale: float,
-        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
-        attention_softmax_fp32: bool,
-        Wqkv_initializer: dict[str, Any],
-        Wo_initializer: dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.Wq = nn.Linear(d_model, d_model, bias=use_bias)
-        self.Wk = nn.Linear(d_model, d_model, bias=use_bias)
-        self.Wv = nn.Linear(d_model, d_model, bias=use_bias)
-        self.Wo = nn.Linear(d_model, d_model, bias=use_bias)
-        self.n_heads = n_heads
-        self.dropout_p = dropout_p
-        self.attention_logits_scale = attention_logits_scale
-        self.attention_backend = attention_backend
-        self.attention_softmax_fp32 = attention_softmax_fp32
-        self.Wqkv_initializer = Wqkv_initializer
-        self.Wo_initializer = Wo_initializer
-
-        self._reset_parameters()
-
-    def _reset_parameters(self) -> None:
-        for module in [self.Wq, self.Wk, self.Wv]:
-            create_initializer(self.Wqkv_initializer)(module.weight)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-
-        create_initializer(self.Wo_initializer)(self.Wo.weight)
-        if self.Wo.bias is not None:
-            nn.init.zeros_(self.Wo.bias)
-
-    @staticmethod
-    def split_heads(X_nqd: torch.Tensor, n_heads: int) -> torch.Tensor:
-        """Transposition for parallel computation of multiple attention heads."""
-        X_nqhk = X_nqd.reshape(X_nqd.shape[0], X_nqd.shape[1], n_heads, -1)
-        X_nhqk = X_nqhk.permute(0, 2, 1, 3)
-        return X_nhqk
-
-    @staticmethod
-    def merge_heads(X_nhqk: torch.Tensor) -> torch.Tensor:
-        """Reverse of split_heads."""
-        X_nqhk = X_nhqk.permute(0, 2, 1, 3)
-        X_nqd = X_nqhk.reshape(X_nqhk.shape[0], X_nqhk.shape[1], -1)
-        return X_nqd
-
-    def forward(
-        self,
-        query_ncd: torch.Tensor,
-        key_ncd: torch.Tensor,
-        value_ncd: torch.Tensor,
-        attention_mask_ncc: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Args:
-            query_ncd:
-                Query tensor of shape ``(n, c, d)``.
-            key_ncd:
-                Key tensor of shape ``(n, c, d)``.
-            value_ncd:
-                Value tensor of shape ``(n, c, d)``.
-            attention_mask_ncc:
-                Attention mask tensor of shape ``(n, c, c)``.
-
-        Returns:
-            The output hidden state tensor of shape ``(n, c, d)``.
-        """
-        n_heads = self.n_heads
-        query_ncd = self.Wq(query_ncd)
-        key_ncd = self.Wk(key_ncd)
-        value_ncd = self.Wv(value_ncd)
-        # d = k * h
-        query_nhck = self.split_heads(query_ncd, n_heads)
-        key_nhck = self.split_heads(key_ncd, n_heads)
-        value_nhck = self.split_heads(value_ncd, n_heads)
-
-        scale_factor = self.attention_logits_scale / query_nhck.shape[-1]
-
-        if self.attention_backend == "torch":
-            key_nhck = key_nhck * torch.tensor(scale_factor, dtype=key_nhck.dtype)
-            attention_logits_nhcc = torch.matmul(query_nhck, key_nhck.transpose(-1, -2))
-            neg_inf = torch.tensor(float("-inf"), dtype=torch.float32)
-            attention_bias_ncc = torch.where(attention_mask_ncc, 0, neg_inf).to(attention_logits_nhcc.dtype)
-            attention_logits_nhcc += attention_bias_ncc.unsqueeze(1).expand(attention_logits_nhcc.shape)
-            if self.attention_softmax_fp32 and attention_logits_nhcc.dtype != torch.float32:
-                attention_weights_nhcc = nn.functional.softmax(attention_logits_nhcc.float(), dim=-1).to(
-                    attention_logits_nhcc.dtype
-                )
-            else:
-                attention_weights_nhcc = nn.functional.softmax(attention_logits_nhcc, dim=-1)
-            attention_weights_nhcc = nn.functional.dropout(
-                attention_weights_nhcc, self.dropout_p, training=self.training
-            )
-            output_nhck = torch.matmul(attention_weights_nhcc, value_nhck)
-        else:
-            with sdpa_kernel(self.backend_map[self.attention_backend]):
-                output_nhck = nn.functional.scaled_dot_product_attention(
-                    query_nhck,
-                    key_nhck,
-                    value_nhck,
-                    attn_mask=attention_mask_ncc.unsqueeze(1),
-                    dropout_p=self.dropout_p if self.training else 0.0,
-                    scale=scale_factor,
-                )
-
-        output_ncd = self.merge_heads(output_nhck)
-        return self.Wo(output_ncd)  # _ncd
-
-
-class PositionWiseFFN(nn.Module):
-    """
-    The positionwise feed-forward network.
-
-    Args:
-        d_ffn:
-            Dimensionality of the inner feed-forward layers.
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        use_bias:
-            Whether to use bias in the linear transformations.
-        dense1_initializer:
-            Initializer for the first dense layer.
-        dense2_initializer:
-            Initializer for the second dense layer.
-    """
-
-    def __init__(
-        self,
-        d_ffn: int,
-        d_model: int,
-        use_bias: bool,
-        dense1_initializer: dict[str, Any],
-        dense2_initializer: dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.dense1 = nn.Linear(d_model, d_ffn, bias=use_bias)
-        self.activation = nn.GELU()
-        self.dense2 = nn.Linear(d_ffn, d_model, bias=use_bias)
-        self.dense1_initializer = dense1_initializer
-        self.dense2_initializer = dense2_initializer
-
-        self._reset_parameters()
-
-    def _reset_parameters(self) -> None:
-        create_initializer(self.dense1_initializer)(self.dense1.weight)
-        if self.dense1.bias is not None:
-            nn.init.zeros_(self.dense1.bias)
-
-        create_initializer(self.dense2_initializer)(self.dense2.weight)
-        if self.dense2.bias is not None:
-            nn.init.zeros_(self.dense2.bias)
-
-    def forward(self, hidden_state_ncd: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            hidden_state_ncd: Hidden state tensor of shape ``(n, c, d)``.
-
-        Returns:
-            The output hidden state tensor of shape ``(n, c, d)``.
-        """
-        return self.dense2(self.activation(self.dense1(hidden_state_ncd)))  # _ncd
-
-
-class NormAdd(nn.Module):
-    """
-    Pre-norm layer where the layer normalization is applied before the sublayer.
-
-    Args:
-        norm_shape:
-            The shape of the layer normalization.
-        dropout_p:
-            Dropout probability.
-    """
-
-    def __init__(self, norm_shape: int, dropout_p: float, use_bias: bool) -> None:
-        super().__init__()
-        self.dropout = nn.Dropout(dropout_p)
-        self.ln = nn.LayerNorm(norm_shape, bias=use_bias)
-
-        self._reset_parameters()
-
-    def _reset_parameters(self) -> None:
-        self.ln.reset_parameters()
-
-    def forward(
-        self,
-        hidden_state_ncd: torch.Tensor,
-        sublayer: Callable[[torch.Tensor], torch.Tensor],
-    ) -> torch.Tensor:
-        """
-        Args:
-            hidden_state_ncd:
-                Hidden state tensor of shape ``(n, c, d)``.
-            sublayer:
-                Sublayer function.
-
-        Returns:
-            The output hidden state tensor of shape ``(n, c, d)``.
-        """
-        return hidden_state_ncd + self.dropout(sublayer(self.ln(hidden_state_ncd)))  # _ncd
-
-
-class TransformerBlock(nn.Module):
-    """
-    Transformer block.
-
-    Args:
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        d_ffn:
-            Dimensionality of the inner feed-forward layers.
-        n_heads:
-            Number of attention heads.
-        dropout_p:
-            Dropout probability.
-        attention_logits_scale:
-            Multiplier for the attention scores.
-        use_bias:
-            Whether to use bias in the linear transformations.
-        attention_backend:
-            Backend for the attention computation.
-        Wqkv_initializer:
-            Initializer for the query, key, and value linear transformations.
-        Wo_initializer:
-            Initializer for the output linear transformation.
-        dense1_initializer:
-            Initializer for the first dense layer.
-        dense2_initializer:
-            Initializer for the second dense layer.
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        d_ffn: int,
-        n_heads: int,
-        dropout_p: float,
-        attention_logits_scale: float,
-        use_bias: bool,
-        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
-        attention_softmax_fp32: bool,
-        Wqkv_initializer: dict[str, Any],
-        Wo_initializer: dict[str, Any],
-        dense1_initializer: dict[str, Any],
-        dense2_initializer: dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.attention = MultiHeadAttention(
-            d_model,
-            use_bias,
-            n_heads,
-            dropout_p,
-            attention_logits_scale,
-            attention_backend,
-            attention_softmax_fp32,
-            Wqkv_initializer,
-            Wo_initializer,
-        )
-        self.normadd1 = NormAdd(d_model, dropout_p, use_bias)
-        self.ffn = PositionWiseFFN(
-            d_ffn,
-            d_model,
-            use_bias,
-            dense1_initializer,
-            dense2_initializer,
-        )
-        self.normadd2 = NormAdd(d_model, dropout_p, use_bias)
-
-    def reset_parameters(self) -> None:
-        self.attention._reset_parameters()
-        self.normadd1._reset_parameters()
-        self.ffn._reset_parameters()
-        self.normadd2._reset_parameters()
-
-    def forward(
-        self,
-        hidden_state_ncd: torch.Tensor,
-        attention_mask_ncc: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Args:
-            hidden_state_ncd:
-                Hidden state tensor of shape ``(n, c, d)``.
-            attention_mask_ncc:
-                Attention mask tensor of shape ``(n, c, c)``.
-
-        Returns:
-            The output hidden state tensor of shape ``(n, c, d)``.
-        """
-        hidden_state_ncd = self.normadd1(hidden_state_ncd, lambda X: self.attention(X, X, X, attention_mask_ncc))
-        return self.normadd2(hidden_state_ncd, lambda Y: self.ffn(Y))  # _ncd
-
-
-class Transformer(nn.Module):
-    """
-    Transformer model.
-
-    Args:
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        d_ffn:
-            Dimensionality of the inner feed-forward layers.
-        n_heads:
-            Number of attention heads.
-        n_blocks:
-            Number of transformer blocks.
-        dropout_p:
-            Dropout probability.
-        use_bias:
-            Whether to use bias in the linear transformations.
-        attention_logits_scale:
-            Multiplier for the attention scores.
-        attention_backend:
-            Backend for the attention computation.
-        Wqkv_initializer:
-            Initializer for the query, key, and value linear transformations.
-        Wo_initializer:
-            Initializer for the output linear transformation.
-        dense1_initializer:
-            Initializer for the first dense layer.
-        dense2_initializer:
-            Initializer for the second dense layer.
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        d_ffn: int,
-        n_heads: int,
-        n_blocks: int,
-        dropout_p: float,
-        use_bias: bool,
-        attention_logits_scale: float,
-        attention_backend: Literal["math", "flash", "mem_efficient"],
-        attention_softmax_fp32: bool,
-        Wqkv_initializer: dict[str, Any],
-        Wo_initializer: dict[str, Any],
-        dense1_initializer: dict[str, Any],
-        dense2_initializer: dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.n_blocks = n_blocks
-        self.blocks = nn.ModuleList(
-            [
-                TransformerBlock(
-                    d_model,
-                    d_ffn,
-                    n_heads,
-                    dropout_p,
-                    attention_logits_scale,
-                    use_bias,
-                    attention_backend,
-                    attention_softmax_fp32,
-                    Wqkv_initializer,
-                    Wo_initializer,
-                    dense1_initializer,
-                    dense2_initializer,
-                )
-                for _ in range(n_blocks)
-            ]
-        )
-        self.ln = nn.LayerNorm(d_model, bias=use_bias)
-
-    def forward(
-        self,
-        hidden_state_ncd: torch.Tensor,
-        attention_mask_ncc: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Args:
-            hidden_state_ncd:
-                Hidden state tensor of shape ``(n, c, d)``.
-            attention_mask_ncc:
-                Attention mask tensor of shape ``(n, c, c)``.
-
-        Returns:
-            The output hidden state tensor of shape ``(n, c, d)``.
-        """
-        for block in self.blocks:
-            hidden_state_ncd = block(hidden_state_ncd, attention_mask_ncc)
-
-        return self.ln(hidden_state_ncd)
-
-
-class GeneEmbedding(nn.Module):
-    """
-    Gene embedding.
-
-    Args:
-        categorical_vocab_sizes:
-            Categorical gene token vocabulary sizes.
-        continuous_vocab_sizes:
-            Continuous gene token vocabulary sizes.
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        embeddings_initializer:
-            Initializer for the embeddings.
-    """
-
-    def __init__(
-        self,
-        categorical_vocab_sizes: dict[str, int],
-        continuous_vocab_sizes: dict[str, int],
-        d_model: int,
-        embeddings_initializer: dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.E = nn.ModuleDict()
-        self.E.update({key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()})
-        self.E.update(
-            {key: nn.Linear(vocab_size, d_model, bias=False) for key, vocab_size in continuous_vocab_sizes.items()}
-        )
-        self.embeddings_initializer = embeddings_initializer
-
-        self._reset_parameters()
-
-    def _reset_parameters(self) -> None:
-        for module in self.E.children():
-            create_initializer(self.embeddings_initializer)(module.weight)
-
-    def forward(self, gene_tokens_nc: dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Args:
-            gene_tokens_nc:
-                Dictionary of gene token tensors of shape ``(n, c)``.
-
-        Returns:
-            The gene embedding tensor of shape ``(n, c, d)``.
-        """
-        return sum(self.E[key](gene_token_nc) for key, gene_token_nc in gene_tokens_nc.items())
-
-
-class MetaDataEmbedding(nn.Module):
-    """
-    Metadata embedding.
-
-    Args:
-        categorical_vocab_sizes:
-            Categorical metadata token vocabulary sizes.
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        embeddings_initializer:
-            Initializer for the embeddings.
-    """
-
-    def __init__(
-        self,
-        categorical_vocab_sizes: dict[str, int],
-        d_model: int,
-        embeddings_initializer: dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.E = nn.ModuleDict(
-            {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()}
-        )
-        self.embeddings_initializer = embeddings_initializer
-
-        self._reset_parameters()
-
-    def _reset_parameters(self) -> None:
-        for module in self.E.children():
-            create_initializer(self.embeddings_initializer)(module.weight)
-
-    def forward(self, metadata_tokens_n: dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Args:
-            metadata_token_n:
-                Dictionary of metadata token tensors of shape ``(n,)``.
-
-        Returns:
-            The metadata embedding tensor of shape ``(n, d)``.
-        """
-        return torch.stack(
-            [self.E[key](metadata_token_n) for key, metadata_token_n in metadata_tokens_n.items()],
-            dim=1,
-        )
 
 
 class DummyTokenizer(torch.nn.Module):
@@ -1058,13 +504,13 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         self.gene_categories = gene_categories
 
         gene_value_vocab_size = gene_vocab_sizes.pop("gene_value")
-        self.gene_embedding = GeneEmbedding(
+        self.gene_embedding = GeneExpressionEmbedding(
             categorical_vocab_sizes=gene_vocab_sizes,
             continuous_vocab_sizes={"gene_value": 3},
             d_model=d_model,
             embeddings_initializer=embeddings_initializer,
         )
-        self.metadata_embedding = MetaDataEmbedding(
+        self.metadata_embedding = MetadataEmbedding(
             categorical_vocab_sizes={key: vocab_size + 1 for key, vocab_size in metadata_vocab_sizes.items()},
             d_model=d_model,
             embeddings_initializer=embeddings_initializer,
@@ -1072,10 +518,10 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         self.transformer = Transformer(
             d_model,
             d_ffn,
+            use_bias,
             n_heads,
             n_blocks,
             dropout_p,
-            use_bias,
             attention_logits_scale,
             attention_backend,
             attention_softmax_fp32,
@@ -1177,8 +623,6 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         label_weights_nc: dict[str, torch.Tensor],
         batch_idx: int,
     ) -> None:
-        # prefix_lens = [0, 1, 3, 10, 30, 100, 300, 1000, 3000, 7000]
-        # prefix_lens = [0, 1, 10, 50, 500, 1000, 3000]
         n = gene_tokens_nc["gene_value"].shape[0]
         loss_dict = self(gene_tokens_nc, metadata_tokens_n, prompt_mask_nc, labels_nc, label_weights_nc)
 
