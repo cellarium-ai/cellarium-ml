@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
 
-from cellarium.ml.core.datamodule import CellariumAnnDataDataModule, collate_fn
+from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.core.pipeline import CellariumPipeline
 from cellarium.ml.models import CellariumModel
 from cellarium.ml.utilities.core import FunctionComposer, copy_module
@@ -154,14 +154,7 @@ class CellariumModule(pl.LightningModule):
             self.hparams["is_initialized"] = True
 
         # move the cpu_transforms to the dataloader's collate_fn if the dataloader is going to apply them
-        if self._trainer is not None:
-            if hasattr(self.trainer, "datamodule"):
-                if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
-                    self._cpu_transforms_in_module_pipeline = False
-                    self.trainer.datamodule.collate_fn = FunctionComposer(
-                        first_applied=collate_fn,
-                        second_applied=self.cpu_transforms,
-                    )
+        self.move_cpu_transforms_to_dataloader()
 
     def __repr__(self) -> str:
         if not self._cpu_transforms_in_module_pipeline:
@@ -188,7 +181,8 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[-1]
+        assert isinstance(model := self.pipeline[-1], CellariumModel)
+        return model
 
     @property
     def transforms(self) -> CellariumPipeline:
@@ -196,7 +190,8 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[self._num_cpu_transforms : -1]
+        assert isinstance(transforms := self.pipeline[self._num_cpu_transforms : -1], CellariumPipeline)
+        return transforms
 
     @property
     def cpu_transforms(self) -> CellariumPipeline:
@@ -204,7 +199,8 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline[: self._num_cpu_transforms]
+        assert isinstance(cpu_transforms := self.pipeline[: self._num_cpu_transforms], CellariumPipeline)
+        return cpu_transforms
 
     @property
     def _num_cpu_transforms(self) -> int:
@@ -216,7 +212,11 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is None:
             raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
 
-        return self.pipeline if self._cpu_transforms_in_module_pipeline else self.pipeline[self._num_cpu_transforms :]
+        if self._cpu_transforms_in_module_pipeline:
+            return self.pipeline
+        else:
+            assert isinstance(module_pipeline := self.pipeline[self._num_cpu_transforms :], CellariumPipeline)
+            return module_pipeline
 
     def training_step(  # type: ignore[override]
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor], batch_idx: int
@@ -376,3 +376,30 @@ class CellariumModule(pl.LightningModule):
         on_train_batch_end = getattr(self.model, "on_train_batch_end", None)
         if callable(on_train_batch_end):
             on_train_batch_end(self.trainer)
+
+    def move_cpu_transforms_to_dataloader(self) -> None:
+        if not self._cpu_transforms_in_module_pipeline:
+            warnings.warn(
+                "The CPU transforms are already moved to the dataloader's collate_fn. Skipping the move operation.",
+                UserWarning,
+            )
+            return
+        if self._trainer is not None:
+            if hasattr(self.trainer, "datamodule"):
+                if isinstance(self.trainer.datamodule, CellariumAnnDataDataModule):
+                    self._cpu_transforms_in_module_pipeline = False
+                    self.trainer.datamodule.collate_fn = FunctionComposer(
+                        first_applied=self.trainer.datamodule.collate_fn,
+                        second_applied=self.cpu_transforms,
+                    )
+
+    def setup(self, stage: str) -> None:
+        # move the cpu_transforms to the dataloader's collate_fn if the dataloader is going to apply them
+        if self.pipeline is not None:
+            self.move_cpu_transforms_to_dataloader()
+
+    def teardown(self, stage: str) -> None:
+        # move the cpu_transforms back to the module_pipeline from dataloader's collate_fn
+        if not self._cpu_transforms_in_module_pipeline:
+            self.trainer.datamodule.collate_fn = self.trainer.datamodule.collate_fn.first_applied  # type: ignore[attr-defined]
+            self._cpu_transforms_in_module_pipeline = True
