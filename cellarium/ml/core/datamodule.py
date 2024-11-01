@@ -37,7 +37,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ...     batch_size=5000,
         ...     iteration_strategy="cache_efficient",
         ...     shuffle=True,
-        ...     seed=0,
+        ...     shuffle_seed=0,
         ...     drop_last_indices=True,
         ...     num_workers=4,
         ... )
@@ -61,7 +61,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             and workers. ``cache_efficient`` will try to minimize the amount of anndata files fetched by each worker.
         shuffle:
             If ``True``, the data is reshuffled at every epoch.
-        seed:
+        shuffle_seed:
             Random seed used to shuffle the sampler if :attr:`shuffle=True`.
         drop_last_indices:
             If ``True``, then the sampler will drop the tail of the data
@@ -81,6 +81,12 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             the proportion of the dataset to include in the validation split. If :class:`int`, represents
             the absolute number of validation samples. If ``None``, the value is set to the complement of
             the ``train_size``. If ``train_size`` is also ``None``, it will be set to ``0``.
+        worker_seed:
+            Random seed used to seed the workers. If ``None``, then the workers will not be seeded.
+            The seed of the individual worker is computed based on the ``worker_seed``, global worker id,
+            and the epoch. Note that the this seed affects ``cpu_transforms`` when they are used.
+            When resuming training, the seed should be set to a different value to ensure that the
+            workers are not seeded with the same seed as the previous run.
         test_mode:
             If ``True`` enables tracking of cache and worker informations.
         num_workers:
@@ -102,11 +108,12 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
-        seed: int = 0,
+        shuffle_seed: int = 0,
         drop_last_indices: bool = False,
         drop_incomplete_batch: bool = False,
         train_size: float | int | None = None,
         val_size: float | int | None = None,
+        worker_seed: int | None = None,
         test_mode: bool = False,
         # DataLoader args
         num_workers: int = 0,
@@ -124,9 +131,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.iteration_strategy = iteration_strategy
         self.shuffle = shuffle
-        self.seed = seed
+        self.shuffle_seed = shuffle_seed
         self.drop_last_indices = drop_last_indices
         self.n_train, self.n_val = train_val_split(len(dadc), train_size, val_size)
+        self.worker_seed = worker_seed
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
@@ -151,9 +159,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 batch_size=self.batch_size,
                 iteration_strategy=self.iteration_strategy,
                 shuffle=self.shuffle,
-                seed=self.seed,
+                shuffle_seed=self.shuffle_seed,
                 drop_last_indices=self.drop_last_indices,
                 drop_incomplete_batch=self.drop_incomplete_batch,
+                worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
                 start_idx=0,
                 end_idx=self.n_train,
@@ -166,9 +175,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 batch_size=self.batch_size,
                 iteration_strategy="same_order",
                 shuffle=False,
-                seed=self.seed,
+                shuffle_seed=self.shuffle_seed,
                 drop_last_indices=self.drop_last_indices,
                 drop_incomplete_batch=self.drop_incomplete_batch,
+                worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
                 start_idx=self.n_train,
                 end_idx=self.n_train + self.n_val,
@@ -181,9 +191,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 batch_size=self.batch_size,
                 iteration_strategy=self.iteration_strategy,
                 shuffle=self.shuffle,
-                seed=self.seed,
+                shuffle_seed=self.shuffle_seed,
                 drop_last_indices=self.drop_last_indices,
                 drop_incomplete_batch=self.drop_incomplete_batch,
+                worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
             )
 

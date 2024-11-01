@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import random
 from itertools import islice
 from typing import Literal
 
@@ -56,7 +57,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         ...     batch_size=5000,
         ...     iteration_strategy="cache_efficient",
         ...     shuffle=True,
-        ...     seed=0,
+        ...     shuffle_seed=0,
         ...     drop_last_indices=True,
         ... )
 
@@ -76,7 +77,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             and workers. ``cache_efficient`` will try to minimize the amount of anndata files fetched by each worker.
         shuffle:
             If ``True``, the data is reshuffled at every epoch.
-        seed:
+        shuffle_seed:
             Random seed used to shuffle the sampler if :attr:`shuffle=True`.
         drop_last_indices:
             If ``True``, then the sampler will drop the tail of the data
@@ -91,6 +92,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         end_idx:
             The ending index (exclusive) of the dataset. If ``None``, then the dataset will end at
             the last index (inclusive).
+        worker_seed:
+            Random seed used to seed the workers. If ``None``, then the workers will not be seeded.
+            The seed of the individual worker is computed based on the ``worker_seed``, global worker id,
+            and the epoch. Note that the this seed affects ``cpu_transforms`` when they are used.
+            When resuming training, the seed should be set to a different value to ensure that the
+            workers are not seeded with the same seed as the previous run.
         test_mode:
             If ``True``, then tracking of cache and worker informations will be enabled.
     """
@@ -102,11 +109,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
-        seed: int = 0,
+        shuffle_seed: int = 0,
         drop_last_indices: bool = False,
         drop_incomplete_batch: bool = False,
         start_idx: int | None = None,
         end_idx: int | None = None,
+        worker_seed: int | None = None,
         test_mode: bool = False,
     ) -> None:
         self.dadc = dadc
@@ -117,11 +125,12 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.batch_size = batch_size
         self.iteration_strategy = iteration_strategy
         self.shuffle = shuffle
-        self.seed = seed
+        self.shuffle_seed = shuffle_seed
         self.drop_last_indices = drop_last_indices
         self.drop_incomplete_batch = drop_incomplete_batch
         self.start_idx = 0 if start_idx is None else start_idx
         self.end_idx = dadc.n_obs if end_idx is None else end_idx
+        self.worker_seed = worker_seed
         self.epoch = 0
         self.test_mode = test_mode
 
@@ -425,10 +434,18 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         # workers
         worker_id, num_workers = get_worker_info()
 
+        # seed workers
+        if self.worker_seed is not None:
+            global_worker_id = self.epoch * (num_replicas * num_workers) + rank * num_workers + worker_id
+            current_worker_seed = self.worker_seed + global_worker_id
+            random.seed(current_worker_seed)
+            np.random.seed(current_worker_seed)
+            torch.manual_seed(current_worker_seed)
+
         # indices
         if self.shuffle:
             rng = torch.Generator()
-            rng.manual_seed(self.seed + self.epoch)
+            rng.manual_seed(self.shuffle_seed + self.epoch)
             limits = [idx for idx in self.dadc.limits if idx > self.start_idx and idx < self.end_idx]
             iter_limits = list(zip([self.start_idx] + limits, limits + [self.end_idx]))
             # shuffle shards

@@ -16,9 +16,6 @@ class Log1p(nn.Module):
         y_{ng} = \\log(1 + x_{ng})
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-
     def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         .. note::
