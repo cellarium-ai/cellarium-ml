@@ -126,13 +126,17 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
-            activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
-            if (self.probability_propagation_flag==1):
-                activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+            #activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
+            #if (self.probability_propagation_flag==1):
+                #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
             if self.out_distribution == categorical_distribution.PyroCategorical:
-                pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
+                #pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
+                propagated_logits = self.log_probs(logits=logits_nc)
+                pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
                 #pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
+                activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
+                activation_out = self.probability_propagation(activation_out_gpu=activation_out)
                 pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
@@ -187,3 +191,34 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         """
         propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device))
         return torch.clamp(propagated_p, max=1.0)
+
+    def log_probs(self, logits: torch.Tensor):
+        """
+        logits = torch Tensor of shape nxc
+        step 1: propagated_logits: LSE (L_i) where i belongs to the set of descendents of each column in c and column c
+        step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the 2604 classes c in each row (sum of all logits in each row of n before propagation)
+        step 3: LSE(L_i) - LSE(L_m)
+        """
+        log_probs = self.logsumexp_propagated(logits,dim=0,keepdim=False) - torch.logsumexp(logits,dim=1,keepdim=True)
+        return log_probs
+
+    def logsumexp_propagated(self, logits: torch.Tensor, dim, keepdim=False):
+        desc_matrix = self.target_row_descendent_col_torch_tensor.to(device=logits.device)
+        max_values=[]
+        # Loop through each row in `b` to get the corresponding masked maximum
+        for row in desc_matrix:
+            #masked_a = torch.where(row.to(dtype=torch.bool), logits, float('-inf'))
+            masked_a = logits*row
+            #max_values.append(torch.max(masked_a, dim=1).values)
+            max_values.append(torch.amax(masked_a, dim=1))
+        max_val = torch.stack(max_values)
+        exp_values = torch.exp(logits - max_val.T)
+
+        # Sum the exponentials
+
+        sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
+
+        # Take the log and add back the max
+        log_sum_exp = torch.log(sum_exp) + max_val.T.squeeze(dim) if not keepdim else max_val
+
+        return log_sum_exp
