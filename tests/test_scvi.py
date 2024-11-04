@@ -1,16 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from __future__ import annotations
-
 import copy
 import math
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
-
-if TYPE_CHECKING:
-    from typing import Literal, Sequence
+from typing import Literal, Sequence, TypedDict
 
 import lightning.pytorch as pl
 import numpy as np
