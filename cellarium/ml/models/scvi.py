@@ -17,7 +17,7 @@ from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.distributions import NegativeBinomial
-from cellarium.ml.models.common.nn import DressedLayer, FullyConnectedLinear
+from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -242,14 +242,16 @@ class EncoderSCVI(torch.nn.Module):
     ) -> Distribution:
         q_nh = self.fully_connected(x_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
         q_mean_nk = (
-            self.mean_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np) 
-            if self.mean_encoder_takes_batch 
+            self.mean_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
+            if self.mean_encoder_takes_batch
             else self.mean_encoder(q_nh)
         )
         q_var_nk = (
-            torch.exp(self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np) 
-                      if self.mean_encoder_takes_batch 
-                      else self.var_encoder(q_nh))
+            torch.exp(
+                self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
+                if self.mean_encoder_takes_batch
+                else self.var_encoder(q_nh)
+            )
             + self.var_eps
         )
         return Normal(q_mean_nk, q_var_nk.sqrt())
@@ -440,12 +442,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             ``use_observed_lib_size``.
         use_observed_lib_size: If ``True``, use the observed library size for RNA as the scaling factor in the
             mean of the conditional distribution. (currently must be ``True``)
-        library_log_means: :class:`~numpy.ndarray` of shape ``(1, n_batch)`` of means of the log library sizes that
-            parameterize the prior on library size if ``use_size_factor_key`` is ``False`` and
-            ``use_observed_lib_size`` is ``False``.
-        library_log_vars: :class:`~numpy.ndarray` of shape ``(1, n_batch)`` of variances of the log library sizes
-            that parameterize the prior on library size if ``use_size_factor_key`` is ``False`` and
-            ``use_observed_lib_size`` is ``False``.
     """
 
     def __init__(
@@ -470,8 +466,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         use_size_factor_key: bool = False,
         use_observed_lib_size: bool = True,
-        library_log_means: np.ndarray | None = None,
-        library_log_vars: np.ndarray | None = None,
     ):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -514,24 +508,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # handle the embedded batch posterior
         # initialize the means as one-hot, std as 1 (after exp)
         if not self.batch_embedded:
-            self.batch_representation_mean_bd: torch.nn.Parameter | None  = None
-            self.batch_representation_std_unconstrained_bd: torch.nn.Parameter | None  = None
+            self.batch_representation_mean_bd: torch.nn.Parameter | None = None
+            self.batch_representation_std_unconstrained_bd: torch.nn.Parameter | None = None
         else:
-            self.batch_representation_mean_bd = torch.nn.Parameter(
-                torch.eye(self.n_batch, self.n_latent_batch)
-            )
+            self.batch_representation_mean_bd = torch.nn.Parameter(torch.eye(self.n_batch, self.n_latent_batch))
             self.batch_representation_std_unconstrained_bd = torch.nn.Parameter(
                 torch.zeros(self.n_batch, self.n_latent_batch)
             )
-
-        # if not self.use_observed_lib_size:
-        #     if library_log_means is None or library_log_vars is None:
-        #         raise ValueError(
-        #             "If not using observed_lib_size, " "must provide library_log_means and library_log_vars."
-        #         )
-
-        #     self.register_buffer("library_log_means", torch.from_numpy(library_log_means).float())
-        #     self.register_buffer("library_log_vars", torch.from_numpy(library_log_vars).float())
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(self.n_input))

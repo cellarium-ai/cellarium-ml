@@ -189,8 +189,6 @@ class SCVIKwargs(TypedDict, total=False):
     use_layer_norm: Literal["encoder", "decoder", "none", "both"]
     use_size_factor_key: bool
     use_observed_lib_size: bool
-    library_log_means: np.ndarray | None
-    library_log_vars: np.ndarray | None
 
 
 linear_encoder_kwargs: dict = {
