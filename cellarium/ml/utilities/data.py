@@ -60,7 +60,6 @@ class AnnDataField:
     def __call__(self, adata: AnnData) -> np.ndarray:
         value = attrgetter(self.attr)(adata)
         if self.key is not None:
-            # TODO: could we put something here to accept a list of keys?
             value = value[self.key]
 
         if self.convert_fn is not None:

@@ -3,6 +3,10 @@ seed_everything: true
 trainer:
   accelerator: auto
   strategy: auto
+    # class_path: lightning.pytorch.strategies.DDPStrategy
+    # dict_kwargs:
+    #   broadcast_buffers: false
+    #   find_unused_parameters: true
   devices: auto
   num_nodes: 1
   precision: 32
