@@ -822,7 +822,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 Values are integer membership categorical codes.
 
         Returns:
-            A dictionary with the loss value.
+            A dictionary with the following keys:
+
+            - ``x_ng``: (x_ng is a notational misnomer) Embedding of the input data into the scVI latent space.
         """
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
@@ -831,12 +833,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
-        return self.inference(
+        z_nk = self.inference(
             x_ng=x_ng,
             batch_nb=batch_nb,
             continuous_covariates_nc=continuous_covariates_nc,
             categorical_covariate_np=categorical_covariate_np,
-        )
+        )["z"]
+        return {"x_ng": z_nk}
 
     def reconstruct(
         self,
@@ -924,5 +927,5 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
             output_counts_ng_list.append(counts_ng)
 
-        x_ng = torch.mean(torch.stack(output_counts_ng_list), dim=0)
-        return x_ng
+        x_tilde_ng = torch.mean(torch.stack(output_counts_ng_list), dim=0)
+        return x_tilde_ng
