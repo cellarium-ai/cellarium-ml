@@ -6,10 +6,37 @@ import shutil
 import tempfile
 import urllib.request
 
+import h5py
 from anndata import AnnData, read_h5ad
-from google.cloud.storage import Client
+from google.cloud.storage import Blob, Client
 
 url_schemes = ("http:", "https:", "ftp:")
+
+
+def read_n_cells_h5ad_gcs(
+    filename: str,
+    storage_client: Client | None = None,
+) -> int:
+    r"""
+    Read the number of cells from an ``.h5ad``-formatted hdf5 file from Google Cloud Storage.
+
+    Example::
+
+        >>> n_cells = read_n_cells_h5ad_gcs("gs://dsp-cellarium-cas-public/test-data/test_0.h5ad")
+
+    Args:
+        filename: Path to the data file in Cloud Storage.
+        storage_client: (Optional) Google Cloud Storage client.
+    """
+    blob = _gcs_blob(filename=filename, storage_client=storage_client)
+
+    with blob.open("rb") as f:
+        with h5py.File(f, "r") as h5file:
+            file_id = h5file.id  # h5py File ID
+            obs_group = h5py.h5g.open(file_id, b"obs")
+            key = b"index" if b"index" in obs_group else b"_index"
+            index_dataset = h5py.h5d.open(obs_group, key)
+            return index_dataset.shape[0]  # Access shape directly
 
 
 def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnData:
@@ -19,6 +46,19 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
     Example::
 
         >>> adata = read_h5ad_gcs("gs://dsp-cellarium-cas-public/test-data/test_0.h5ad")
+
+    Args:
+        filename: Path to the data file in Cloud Storage.
+    """
+    blob = _gcs_blob(filename=filename, storage_client=storage_client)
+
+    with blob.open("rb") as f:
+        return read_h5ad(f)
+
+
+def _gcs_blob(filename: str, storage_client: Client | None = None) -> Blob:
+    r"""
+    Return the Google Cloud Storage :class:`~google.cloud.storage.Blob` object based on the filename.
 
     Args:
         filename: Path to the data file in Cloud Storage.
@@ -34,9 +74,7 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
 
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
-
-    with blob.open("rb") as f:
-        return read_h5ad(f)
+    return blob
 
 
 def read_h5ad_url(filename: str) -> AnnData:
@@ -58,6 +96,22 @@ def read_h5ad_url(filename: str) -> AnnData:
         with tempfile.TemporaryFile() as tmp_file:
             shutil.copyfileobj(response, tmp_file)
             return read_h5ad(tmp_file)
+
+
+def read_n_cells_h5ad_local(filename: str) -> AnnData:
+    r"""
+    Read the number of cells from an ``.h5ad``-formatted hdf5 file from the local disk.
+
+    Args:
+        filename: Path to the local data file.
+    """
+    if not filename.startswith("file:"):
+        raise ValueError("The filename must start with 'file:' protocol name.")
+    filename = re.sub(r"^file://?", "", filename)
+
+    with h5py.File(filename, "r") as f:
+        key = "index" if "index" in f["obs"].keys() else "_index"
+        return f[f"/obs/{key}"].shape[0]
 
 
 def read_h5ad_local(filename: str) -> AnnData:
