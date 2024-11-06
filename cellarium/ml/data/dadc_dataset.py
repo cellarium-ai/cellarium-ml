@@ -198,13 +198,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         .. note::
 
             1. For both strategies the amount of anndata files fetched is reduced by
-               shuffling the shards first and then the datapoints within the shards.
+                shuffling the shards first and then the datapoints within the shards.
             2. ``same_order`` strategy will iterate through the dataset in the same order independent
-               of the number of replicas and workers.
+                of the number of replicas and workers.
             3. For ``cache_efficient`` strategy the amount of anndata files fetched is further
-               reduced by assigning to each worker a contiguous chunk of the dataset.
-               The returned iterator is determined by the ``torch.utils.data.get_worker_info()``
-               and ``torch.distributed`` contexts.
+                reduced by assigning to each worker a contiguous chunk of the dataset.
+                The returned iterator is determined by the ``torch.utils.data.get_worker_info()``
+                and ``torch.distributed`` contexts.
 
         **Example 1**::
 
@@ -502,7 +502,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
 
-        if self.iteration_strategy == "same_order":
+        if self.epoch < num_epochs_that_stepped:
+            # self.epoch can be inconsistent with the global step
+            raise ValueError(
+                f"Epoch {self.epoch} is less than the number of epochs"
+                f"that have been processed {num_epochs_that_stepped}."
+            )
+        elif self.iteration_strategy == "same_order":
             # replica indices
             indices = indices[rank:total_size:num_replicas]
             if len(indices) != per_replica:
