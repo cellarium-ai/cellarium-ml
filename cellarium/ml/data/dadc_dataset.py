@@ -192,246 +192,256 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __iter__(self):
         r"""
-        Iterate through the dataset by trying to minimize the amount of anndata files fetched by each worker.
-        Iterated indices are evenly divided between replicas (see :attr:`drop_last_indices`).
+                Iterate through the dataset by trying to minimize the amount of anndata files fetched by each worker.
+                Iterated indices are evenly divided between replicas (see :attr:`drop_last_indices`).
 
-        .. note::
+                .. note::
 
-            1. For both strategies the amount of anndata files fetched is reduced by
-               shuffling the shards first and then the datapoints within the shards.
-            2. ``same_order`` strategy will iterate through the dataset in the same order independent
-               of the number of replicas and workers.
-            3. For ``cache_efficient`` strategy the amount of anndata files fetched is further
-               reduced by assigning to each worker a contiguous chunk of the dataset.
-               The returned iterator is determined by the ``torch.utils.data.get_worker_info()``
-               and ``torch.distributed`` contexts.
+                    1. For both strategies the amount of anndata files fetched is reduced by
+                       shuffling the shards first and then the datapoints within the shards.
+                    2. ``same_order`` strategy will iterate through the dataset in the same order independent
+                       of the number of replicas and workers.
+                    3. For ``cache_efficient`` strategy the amount of anndata files fetched is further
+                       reduced by assigning to each worker a contiguous chunk of the dataset.
+                       The returned iterator is determined by the ``torch.utils.data.get_worker_info()``
+                       and ``torch.distributed`` contexts.
 
-        **Example 1**::
+                **Example 1**::
 
-            indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-            num_replicas=1
-            batch_size=2
-            num_workers=3
+                    indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+                    num_replicas=1
+                    batch_size=2
+                    num_workers=3
 
-        Same order:
+                Same order:
 
-        +------------+-------+-------+-------+-------+-------+---------+
-        | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
-        +============+=======+=======+=======+=======+=======+=========+
-        | indices    | (0,1) | (2,3) | (4,5) | (6,7) | (8,9) | (10,11) |
-        +------------+-------+-------+-------+-------+-------+---------+
-        | worker id  | 0     | 1     | 2     | 0     | 1     | 2       |
-        +------------+-------+-------+-------+-------+-------+---------+
+                +------------+-------+-------+-------+-------+-------+---------+
+                | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
+                +============+=======+=======+=======+=======+=======+=========+
+                | indices    | (0,1) | (2,3) | (4,5) | (6,7) | (8,9) | (10,11) |
+                +------------+-------+-------+-------+-------+-------+---------+
+                | worker id  | 0     | 1     | 2     | 0     | 1     | 2       |
+                +------------+-------+-------+-------+-------+-------+---------+
 
-        Cache efficient:
+                Cache efficient:
 
-        +------------+-------+-------+-------+-------+-------+---------+
-        | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
-        +============+=======+=======+=======+=======+=======+=========+
-        | indices    | (0,1) | (4,5) | (8,9) | (2,3) | (6,7) | (10,11) |
-        +------------+-------+-------+-------+-------+-------+---------+
-        | worker id  | 0     | 1     | 2     | 0     | 1     | 2       |
-        +------------+-------+-------+-------+-------+-------+---------+
-
-
-        **Example 2**::
-
-            indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-            num_replicas=1
-            batch_size=2
-            num_workers=2
-
-        Same order:
-
-        +------------+-------+-------+-------+-------+-------+---------+
-        | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
-        +============+=======+=======+=======+=======+=======+=========+
-        | indices    | (0,1) | (2,3) | (4,5) | (6,7) | (8,9) | (10,)   |
-        +------------+-------+-------+-------+-------+-------+---------+
-        | worker id  | 0     | 1     | 0     | 1     | 0     | 1       |
-        +------------+-------+-------+-------+-------+-------+---------+
-
-        Cache efficient:
-
-        +------------+-------+-------+-------+-------+-------+---------+
-        | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
-        +============+=======+=======+=======+=======+=======+=========+
-        | indices    | (0,1) | (6,7) | (2,3) | (8,9) | (4,5) | (10,)   |
-        +------------+-------+-------+-------+-------+-------+---------+
-        | worker id  | 0     | 1     | 0     | 1     | 0     | 1       |
-        +------------+-------+-------+-------+-------+-------+---------+
-
-        **Example 3**::
-
-            indices=[0, 1, 2, 3, 4, 5, 6, 7]
-            num_replicas=1
-            batch_size=3
-            num_workers=2
-
-        Same order:
-
-        +------------+---------+---------+-------+
-        | batch idx  | 0       | 1       | 2     |
-        +============+=========+=========+=======+
-        | indices    | (0,1,2) | (3,4,5) | (6,7) |
-        +------------+---------+---------+-------+
-        | worker id  | 0       | 1       | 0     |
-        +------------+---------+---------+-------+
-
-        Cache efficient:
-
-        +------------+---------+-------+---------+
-        | batch idx  | 0       | 1     | 2       |
-        +============+=========+=======+=========+
-        | indices    | (0,1,2) | (6,7) | (3,4,5) |
-        +------------+---------+-------+---------+
-        | worker id  | 0       | 1     | 0       |
-        +------------+---------+-------+---------+
-
-        **Example 4**::
-
-            indices=[0, 1, 2, 3, 4, 5, 6, 7]
-            num_replicas=1
-            batch_size=3
-            drop_incomplete_batch=True
-            num_workers=2
-
-        Same order:
-
-        +------------+---------+---------+
-        | batch idx  | 0       | 1       |
-        +============+=========+=========+
-        | indices    | (0,1,2) | (3,4,5) |
-        +------------+---------+---------+
-        | worker id  | 0       | 1       |
-        +------------+---------+---------+
-
-        Cache efficient:
-
-        +------------+---------+---------+
-        | batch idx  | 0       | 1       |
-        +============+=========+=========+
-        | indices    | (0,1,2) | (3,4,5) |
-        +------------+---------+---------+
-        | worker id  | 0       | 1       |
-        +------------+---------+---------+
-
-        **Example 5**::
-
-            indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-            num_replicas=2
-            drop_last_indices=True
-            batch_size=2
-            num_workers=1
-
-        Same order:
-
-        *Replica 1*
-
-        +------------+-------+-------+------+
-        | batch idx  | 0     | 1     | 2    |
-        +============+=======+=======+======+
-        | indices    | (0,2) | (4,6) | (8,) |
-        +------------+-------+-------+------+
-        | worker id  | 0     | 0     | 0    |
-        +------------+-------+-------+------+
-
-        *Replica 2*
-
-        +------------+-------+-------+------+
-        | batch idx  | 0     | 1     | 2    |
-        +============+=======+=======+======+
-        | indices    | (1,3) | (5,7) | (9,) |
-        +------------+-------+-------+------+
-        | worker id  | 0     | 0     | 0    |
-        +------------+-------+-------+------+
-
-        Cache efficient:
-
-        *Replica 1*
-
-        +------------+-------+-------+------+
-        | batch idx  | 0     | 1     | 2    |
-        +============+=======+=======+======+
-        | indices    | (0,1) | (2,3) | (4,) |
-        +------------+-------+-------+------+
-        | worker id  | 0     | 0     | 0    |
-        +------------+-------+-------+------+
-
-        *Replica 2*
-
-        +------------+-------+-------+------+
-        | batch idx  | 0     | 1     | 2    |
-        +============+=======+=======+======+
-        | indices    | (5,6) | (7,8) | (9,) |
-        +------------+-------+-------+------+
-        | worker id  | 0     | 0     | 0    |
-        +------------+-------+-------+------+
+                +------------+-------+-------+-------+-------+-------+---------+
+                | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
+                +============+=======+=======+=======+=======+=======+=========+
+                | indices    | (0,1) | (4,5) | (8,9) | (2,3) | (6,7) | (10,11) |
+                +------------+-------+-------+-------+-------+-------+---------+
+                | worker id  | 0     | 1     | 2     | 0     | 1     | 2       |
+                +------------+-------+-------+-------+-------+-------+---------+
 
 
-        **Example 6**::
+                **Example 2**::
 
-            indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-            num_replicas=2
-            drop_last_indices=False
-            batch_size=2
-            num_workers=1
+                    indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                    num_replicas=1
+                    batch_size=2
+                    num_workers=2
 
-        Same order:
+                Same order:
 
-        *Replica 1*
+                +------------+-------+-------+-------+-------+-------+---------+
+                | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
+                +============+=======+=======+=======+=======+=======+=========+
+                | indices    | (0,1) | (2,3) | (4,5) | (6,7) | (8,9) | (10,)   |
+                +------------+-------+-------+-------+-------+-------+---------+
+                | worker id  | 0     | 1     | 0     | 1     | 0     | 1       |
+                +------------+-------+-------+-------+-------+-------+---------+
 
-        +------------+-------+-------+--------+
-        | batch idx  | 0     | 1     | 2      |
-        +============+=======+=======+========+
-        | indices    | (0,2) | (4,6) | (8,10) |
-        +------------+-------+-------+--------+
-        | worker id  | 0     | 0     | 0      |
-        +------------+-------+-------+--------+
+                Cache efficient:
 
-        *Replica 2*
+                +------------+-------+-------+-------+-------+-------+---------+
+                | batch idx  | 0     | 1     | 2     | 3     | 4     | 5       |
+                +============+=======+=======+=======+=======+=======+=========+
+                | indices    | (0,1) | (6,7) | (2,3) | (8,9) | (4,5) | (10,)   |
+                +------------+-------+-------+-------+-------+-------+---------+
+                | worker id  | 0     | 1     | 0     | 1     | 0     | 1       |
+                +------------+-------+-------+-------+-------+-------+---------+
 
-        +------------+-------+-------+-------+
-        | batch idx  | 0     | 1     | 2     |
-        +============+=======+=======+=======+
-        | indices    | (1,3) | (5,7) | (9,0) |
-        +------------+-------+-------+-------+
-        | worker id  | 0     | 0     | 0     |
-        +------------+-------+-------+-------+
+                **Example 3**::
 
-        Cache efficient:
+                    indices=[0, 1, 2, 3, 4, 5, 6, 7]
+                    num_replicas=1
+                    batch_size=3
+                    num_workers=2
 
-        *Replica 1*
+                Same order:
 
-        +------------+-------+-------+-------+
-        | batch idx  | 0     | 1     | 2     |
-        +============+=======+=======+=======+
-        | indices    | (0,1) | (2,3) | (4,5) |
-        +------------+-------+-------+-------+
-        | worker id  | 0     | 0     | 0     |
-        +------------+-------+-------+-------+
+                +------------+---------+---------+-------+
+                | batch idx  | 0       | 1       | 2     |
+                +============+=========+=========+=======+
+                | indices    | (0,1,2) | (3,4,5) | (6,7) |
+                +------------+---------+---------+-------+
+                | worker id  | 0       | 1       | 0     |
+                +------------+---------+---------+-------+
 
-        *Replica 2*
+                Cache efficient:
 
-        +------------+-------+-------+--------+
-        | batch idx  | 0     | 1     | 2      |
-        +============+=======+=======+========+
-        | indices    | (6,7) | (8,9) | (10,0) |
-        +------------+-------+-------+--------+
-        | worker id  | 0     | 0     | 0      |
-        +------------+-------+-------+--------+
+                +------------+---------+-------+---------+
+                | batch idx  | 0       | 1     | 2       |
+                +============+=========+=======+=========+
+                | indices    | (0,1,2) | (6,7) | (3,4,5) |
+                +------------+---------+-------+---------+
+                | worker id  | 0       | 1     | 0       |
+                +------------+---------+-------+---------+
+
+                **Example 4**::
+
+                    indices=[0, 1, 2, 3, 4, 5, 6, 7]
+                    num_replicas=1
+                    batch_size=3
+                    drop_incomplete_batch=True
+                    num_workers=2
+
+                Same order:
+
+                +------------+---------+---------+
+                | batch idx  | 0       | 1       |
+                +============+=========+=========+
+                | indices    | (0,1,2) | (3,4,5) |
+                +------------+---------+---------+
+                | worker id  | 0       | 1       |
+                +------------+---------+---------+
+
+                Cache efficient:
+
+                +------------+---------+---------+
+                | batch idx  | 0       | 1       |
+                +============+=========+=========+
+                | indices    | (0,1,2) | (3,4,5) |
+                +------------+---------+---------+
+                | worker id  | 0       | 1       |
+                +------------+---------+---------+
+
+                **Example 5**::
+
+                    indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                    num_replicas=2
+                    drop_last_indices=True
+                    batch_size=2
+                    num_workers=1
+
+                Same order:
+
+                *Replica 1*
+
+                +------------+-------+-------+------+
+                | batch idx  | 0     | 1     | 2    |
+                +============+=======+=======+======+
+                | indices    | (0,2) | (4,6) | (8,) |
+                +------------+-------+-------+------+
+                | worker id  | 0     | 0     | 0    |
+                +------------+-------+-------+------+
+
+                *Replica 2*
+
+                +------------+-------+-------+------+
+                | batch idx  | 0     | 1     | 2    |
+                +============+=======+=======+======+
+                | indices    | (1,3) | (5,7) | (9,) |
+                +------------+-------+-------+------+
+                | worker id  | 0     | 0     | 0    |
+                +------------+-------+-------+------+
+
+                Cache efficient:
+
+                *Replica 1*
+
+                +------------+-------+-------+------+
+                | batch idx  | 0     | 1     | 2    |
+                +============+=======+=======+======+
+                | indices    | (0,1) | (2,3) | (4,) |
+                +------------+-------+-------+------+
+                | worker id  | 0     | 0     | 0    |
+                +------------+-------+-------+------+
+
+                *Replica 2*
+
+                +------------+-------+-------+------+
+                | batch idx  | 0     | 1     | 2    |
+                +============+=======+=======+======+
+                | indices    | (5,6) | (7,8) | (9,) |
+                +------------+-------+-------+------+
+                | worker id  | 0     | 0     | 0    |
+                +------------+-------+-------+------+
 
 
-        Resuming from a checkpoint:
+                **Example 6**::
 
-        1. For persistent workers the state (:attr:``epoch` and :attr:`resume_step`) is initially set by
-           the :meth:`load_state_dict` method. At the end of the iteration, the :attr:`epoch` is incremented and
-           the :attr:`resume_step` is set to ``None``.
-        2. For non-persistent workers the state is initially set by the :meth:`load_state_dict` method. The
-           :attr:`epoch` is updated by the ``on_train_epoch_start`` hook and the :attr:`resume_step` is set to
-           ``None`` by the ``on_train_epoch_end`` hook.
-        3. If the :attr:`resume_step` is not ``None``, then the worker will skip the batches that have already
-           been processed. The workers are shifted based on the global step.
+                    indices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                    num_replicas=2
+                    drop_last_indices=False
+                    batch_size=2
+                    num_workers=1
+
+                Same order:
+
+                *Replica 1*
+
+                +------------+-------+-------+--------+
+                | batch idx  | 0     | 1     | 2      |
+                +============+=======+=======+========+
+                | indices    | (0,2) | (4,6) | (8,10) |
+                +------------+-------+-------+--------+
+                | worker id  | 0     | 0     | 0      |
+                +------------+-------+-------+--------+
+
+                *Replica 2*
+
+                +------------+-------+-------+-------+
+                | batch idx  | 0     | 1     | 2     |
+                +============+=======+=======+=======+
+                | indices    | (1,3) | (5,7) | (9,0) |
+                +------------+-------+-------+-------+
+                | worker id  | 0     | 0     | 0     |
+                +------------+-------+-------+-------+
+
+                Cache efficient:
+
+                *Replica 1*
+
+                +------------+-------+-------+-------+
+                | batch idx  | 0     | 1     | 2     |
+                +============+=======+=======+=======+
+                | indices    | (0,1) | (2,3) | (4,5) |
+                +------------+-------+-------+-------+
+                | worker id  | 0     | 0     | 0     |
+                +------------+-------+-------+-------+
+
+                *Replica 2*
+
+                +------------+-------+-------+--------+
+                | batch idx  | 0     | 1     | 2      |
+                +============+=======+=======+========+
+                | indices    | (6,7) | (8,9) | (10,0) |
+                +------------+-------+-------+--------+
+                | worker id  | 0     | 0     | 0      |
+                +------------+-------+-------+--------+
+
+
+                Resuming from a checkpoint:
+
+        <<<<<<< HEAD
+                1. For persistent workers the state (:attr:``epoch` and :attr:`resume_step`) is initially set by
+                   the :meth:`load_state_dict` method. At the end of the iteration, the :attr:`epoch` is incremented and
+                   the :attr:`resume_step` is set to ``None``.
+                2. For non-persistent workers the state is initially set by the :meth:`load_state_dict` method. The
+                   :attr:`epoch` is updated by the ``on_train_epoch_start`` hook and the :attr:`resume_step` is set to
+                   ``None`` by the ``on_train_epoch_end`` hook.
+                3. If the :attr:`resume_step` is not ``None``, then the worker will skip the batches that have already
+                   been processed. The workers are shifted based on the global step.
+        =======
+                1. Set epoch to the epoch of the checkpoint. The trainer is responsible for loading the state.
+                2. Increment the epoch. For persistent workers, the epoch is incremented at the end of the iteration.
+                   For non-persistent workers, the epoch is incremented by the trainer at the epoch start.
+                3. Set the resume_step to the global step of the checkpoint. The trainer is responsible for loading the state.
+                   Use the resume_step to skip the batches that have already been processed. In order to achieve this,
+                   shift the worker_id based on the global step and compute the number of epochs and batches that have been
+                   processed. After that set the resume_step to None.
+        >>>>>>> abd810635e533681099c3d61428aabaa95b231db
         """
         if self.test_mode and isinstance(self.dadc, DistributedAnnDataCollection):
             # clear lru cache
@@ -502,7 +512,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
 
-        if self.iteration_strategy == "same_order":
+        if self.epoch < num_epochs_that_stepped:
+            # self.epoch can be inconsistent with the global step
+            raise ValueError(
+                f"Epoch {self.epoch} is less than the number of epochs"
+                f"that have been processed {num_epochs_that_stepped}."
+            )
+        elif self.iteration_strategy == "same_order":
             # replica indices
             indices = indices[rank:total_size:num_replicas]
             if len(indices) != per_replica:
