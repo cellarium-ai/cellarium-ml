@@ -15,6 +15,7 @@ from operator import attrgetter
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
@@ -208,6 +209,11 @@ def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
     """
     Compute the number of categories in batch_index_n.
 
+    .. note::
+
+            If batch_index_n is comprised of multiple keys, the number of categories is computed
+            as the product of the number of categories in each key.
+
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
 
@@ -216,10 +222,12 @@ def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
     """
     field = data.batch_keys["batch_index_n"]
     assert isinstance(field, AnnDataField)
-    dataframe = getattr(data.dadc[0], field.attr)
-    if field.key is not None:
-        series = dataframe[field.key]
-    return len(series.cat.categories)
+    obs = getattr(data.dadc[0], field.attr)
+    x = obs[field.key]
+    if isinstance(x, pd.DataFrame):
+        return int(x.apply(lambda col: len(col.cat.categories)).product())
+    else:
+        return len(x.cat.categories)
 
 
 def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:

@@ -3,22 +3,21 @@
 
 """Flexible modified version of single-cell variational inference (scVI) re-implemented in Cellarium ML."""
 
-from __future__ import annotations
-
 import importlib
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from typing import Any, Literal, Sequence
+import itertools
+from typing import Any, Literal, Sequence
 
 import numpy as np
+import pandas as pd
 import torch
+from anndata import AnnData
 from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.distributions import NegativeBinomial
 from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
 from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.utilities.data import categories_to_product_codes
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -929,3 +928,54 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         x_tilde_ng = torch.mean(torch.stack(output_counts_ng_list), dim=0)
         return x_tilde_ng
+
+
+def batch_index_to_batch_label(adata: AnnData, batch_keys: list[str]) -> pd.DataFrame:
+    """
+    Convert integer batch index used in the model to a human-readable batch label.
+
+    Args:
+        adata: AnnData object. Can be any individual shard as long as categoricals contain all categories.
+        batch_keys: List of batch keys.
+
+    Returns:
+        DataFrame with columns as batch covariates and an extra column "scvi_batch_code" with the
+        code used in the model.
+    """
+    print("WARNING: The batch_index_to_batch_label lookup for multiple batch_keys is still experimental.")
+    df = _enumerate_categorical_combinations(adata.obs[batch_keys])
+    df["scvi_batch_code"] = categories_to_product_codes(df)
+    return df
+
+
+def _n_cats_per_column(df: pd.DataFrame) -> list[int]:
+    """
+    Return the number of categories for each column in a DataFrame, assuming all columns are categorical.
+    """
+    n_cats_per_col = []
+    for key in df.columns:
+        covariate_series = df[key]
+        n_cats_per_col.append(len(covariate_series.cat.categories))
+    return n_cats_per_col
+
+
+def _enumerate_categorical_combinations(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enumerate all possible combinations of categories in a DataFrame of categorical covariates.
+    """
+    categories_per_column = _n_cats_per_column(df)
+
+    # Generate the range of values for each column based on the number of categories
+    category_ranges = [range(c) for c in categories_per_column]
+
+    # Use itertools.product to get all possible combinations
+    combinations = list(itertools.product(*category_ranges))
+
+    # Convert to DataFrame for easy handling and return
+    enumerated_df = pd.DataFrame(combinations, columns=df.columns)
+    for c in df.columns:
+        lookup = dict(zip(range(len(df[c].cat.categories)), df[c].cat.categories))
+        enumerated_df[c] = enumerated_df[c].map(lookup)
+        enumerated_df[c] = enumerated_df[c].astype("category")
+        enumerated_df[c] = enumerated_df[c].cat.set_categories(df[c].cat.categories)
+    return enumerated_df

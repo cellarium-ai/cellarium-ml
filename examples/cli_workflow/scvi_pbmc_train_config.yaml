@@ -120,7 +120,7 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: /Users/sfleming/Desktop/pbmc_count.h5ad  # gs://yxu-data/pbmc_count.h5ad
+      filenames: /Users/sfleming/Desktop/pbmc_count.h5ad  # download file from gs://yx-data/pbmc_count.h5ad
       limits: [31774]
       shard_size: 31774
       last_shard_size: null
