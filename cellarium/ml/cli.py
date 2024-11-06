@@ -20,7 +20,7 @@ import yaml
 from jsonargparse import Namespace, class_from_function
 from jsonargparse._loaders_dumpers import DefaultLoader
 from jsonargparse._util import import_object
-from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
+from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI, Trainer
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.utils._pytree import tree_map
 
@@ -239,6 +239,7 @@ def lightning_cli_factory(
     model_class_path: str,
     link_arguments: list[LinkArguments] | None = None,
     trainer_defaults: dict[str, Any] | None = None,
+    additional_subcommands: dict[str, set[str]] = {},
 ) -> type[LightningCLI]:
     """
     Factory function for creating a :class:`LightningCLI` with a preset model and custom argument linking.
@@ -272,6 +273,9 @@ def lightning_cli_factory(
             arguments are linked.
         trainer_defaults:
             Default values for the trainer.
+        additional_subcommands:
+            Additional subcommands to add to the CLI. The keys are the subcommand names and the values
+            are the arguments to skip. The keys must correspond to methods in the :class:`CellariumModule`.
 
     Returns:
         A :class:`LightningCLI` class with the given model and argument linking.
@@ -308,6 +312,11 @@ def lightning_cli_factory(
                     "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
                 }
             )
+
+        @staticmethod
+        def subcommands() -> dict[str, set[str]]:
+            """Defines the list of available subcommands and the arguments to skip."""
+            return LightningCLI.subcommands() | additional_subcommands
 
     return NewLightningCLI
 
