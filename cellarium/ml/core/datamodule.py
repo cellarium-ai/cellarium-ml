@@ -3,10 +3,7 @@
 
 from __future__ import annotations
 
-<<<<<<< HEAD
-=======
 import warnings
->>>>>>> a0e93bc868cbfb3cec779e4305cedd7d74b750dd
 from typing import Any, Literal
 
 import lightning.pytorch as pl

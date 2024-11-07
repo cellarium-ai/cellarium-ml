@@ -455,9 +455,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         # workers
         worker_id, num_workers = get_worker_info()
 
-        # resume training
         if self.resume_step is not None:
             num_epochs_that_stepped, num_batches_that_stepped = divmod(self.resume_step, batches_per_replica)
+
             self.set_epoch(num_epochs_that_stepped)
             # shift worker_id based on the global step
             worker_id = (worker_id - num_batches_that_stepped) % num_workers
@@ -499,10 +499,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
 
-        if self.epoch < num_epochs_that_stepped:
-            # self.epoch can be inconsistent with the global step
-            pass
-        elif self.iteration_strategy == "same_order":
+        if self.iteration_strategy == "same_order":
             # replica indices
             indices = indices[rank:total_size:num_replicas]
             if len(indices) != per_replica:
