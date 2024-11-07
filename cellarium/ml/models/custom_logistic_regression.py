@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -126,12 +127,19 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
+            #start_time = time.time()
             #activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
             #if (self.probability_propagation_flag==1):
                 #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+            #propagated_logits = self.log_probs(logits=logits_nc)
+            #end_time = time.time()
+            #print(f"NIMISH PROB PROPAGATION TOOK {end_time - start_time} time")
             if self.out_distribution == categorical_distribution.PyroCategorical:
                 #pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
+                #start_time = time.time()
                 propagated_logits = self.log_probs(logits=logits_nc)
+                #end_time = time.time()
+                #print(f"NIMISH LOGIT PROPAGATION TOOK {end_time - start_time} time")
                 pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
                 #pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
@@ -204,6 +212,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
 
     def logsumexp_propagated(self, logits: torch.Tensor, dim, keepdim=False):
         desc_matrix = self.target_row_descendent_col_torch_tensor.to(device=logits.device, dtype = torch.float)
+        desc_matrix_1 = torch.where(desc_matrix == 0, float('-inf'), desc_matrix)
         # Check for inf values in logits
         # if torch.isinf(logits).any():
         #     if (logits == float('inf')).any():
@@ -211,37 +220,38 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         #     if (logits == float('-inf')).all():
         #         return torch.tensor(float('-inf'))
 
-        max_values = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
+        #max_values = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
+        # with open('logits.pkl','wb') as f:
+        #     pickle.dump(logits,f)
+        # with open('desc.pkl','wb') as f:
+        #     pickle.dump(desc_matrix,f)
+        log_sum_exp_nc = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
+        chunk_size=2
         # Loop through each row in `b` to get the corresponding masked maximum
-        with torch.no_grad():
-            for i,row in enumerate(desc_matrix):
-                masked_a = torch.where(row.to(dtype=torch.bool), logits, float('-inf'))
-            #masked_a = logits*row
-            #max_values.append(torch.max(masked_a, dim=1).values)
-                max_values[:,i] = torch.amax(masked_a, dim=1).T
+
+        for i in range(0,logits.shape[0],chunk_size):
+            #masked_a = torch.where(row.to(dtype=torch.bool), logits, float('-inf'))
+            with torch.no_grad():
+                masked_values_chcc = logits[i:i+chunk_size,:].unsqueeze(1) * desc_matrix_1.unsqueeze(0)
+                #masked_values_chcc = torch.where(masked_values_chcc == 0, float('-inf'), masked_values_chcc)
+            #max_values[:,i] = torch.amax(masked_a, dim=1).T
+                max_values_chc = torch.amax(torch.nan_to_num(masked_values_chcc,float('-inf')), dim=2)
+            # Check for NaNs or Infs
+            if torch.isnan(max_values_chc).any() or torch.isinf(max_values_chc).any():
+                print("NaNs or Infs detected in no_grad_result")
+            exp_values = torch.exp(logits[i:i+chunk_size,:] - max_values_chc)
+            sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
+            log_sum_exp = torch.log(sum_exp) + max_values_chc if not keepdim else max_values_chc
+            log_sum_exp_nc[i:i+chunk_size,:] = log_sum_exp
             #max_values.append(torch.amax(logits*row,dim=1))
                 #max_values[:,i] = torch.amax(logits*row,dim=1).T
         #max_val = torch.stack(max_values)
         #max_values = torch.amax((logits.unsqueeze(1) * desc_matrix.unsqueeze(0)), dim=2)
-        exp_values = torch.exp(logits - max_values)
-        #print(f"NIMISH EXP VALUES ARE {exp_values}")
+        #exp_values = torch.exp(logits - max_values)
         # Sum the exponentials
 
-        sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
+        #sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
         # Take the log and add back the max
-        log_sum_exp = torch.log(sum_exp) + max_values.squeeze(dim) if not keepdim else max_values
-        # if torch.isnan(log_sum_exp).any() or torch.isinf(log_sum_exp).any():
-        #     print("NAN OR INF IN LOG SUM EXP VALUES")
-            #with open('logits.pkl', 'wb') as f:
-            #    pickle.dump(logits.cpu().detach().numpy(), f)
-            # with open('logsumexp.pkl', 'wb') as f:
-            #     pickle.dump(log_sum_exp.cpu().detach().numpy(), f)
-            # print(f"NIMISH MAX VALUES ARE {max_values}")
-            # with open('max_values.pkl', 'wb') as f:
-            #     pickle.dump(max_values.cpu().detach().numpy(), f)
-            # print(f"SUM EXP VALUES ARE {sum_exp}")
-            # with open('sum_exp.pkl', 'wb') as f:
-            #     pickle.dump(sum_exp.cpu().detach().numpy(), f)
-            # sys.exit("exiting afer NAN in logsumexp")
-        #print(f"NIMISH LOG SUM EXP VALUES ARE {log_sum_exp}")
-        return log_sum_exp
+        #log_sum_exp = torch.log(sum_exp) + max_values.squeeze(dim) if not keepdim else max_values
+
+        return log_sum_exp_nc
