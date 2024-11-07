@@ -364,15 +364,6 @@ class CellariumModule(pl.LightningModule):
         if callable(on_train_epoch_end):
             on_train_epoch_end(self.trainer)
 
-        combined_loader = self.trainer.fit_loop._combined_loader
-        assert combined_loader is not None
-        dataloaders = combined_loader.flattened
-        for dataloader in dataloaders:
-            dataset = dataloader.dataset
-            set_epoch = getattr(dataset, "set_epoch", None)
-            if callable(set_epoch):
-                dataset.resume_step = None
-
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         """
         Calls the ``on_train_batch_end`` method on the module.

@@ -198,13 +198,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         .. note::
 
             1. For both strategies the amount of anndata files fetched is reduced by
-                shuffling the shards first and then the datapoints within the shards.
+               shuffling the shards first and then the datapoints within the shards.
             2. ``same_order`` strategy will iterate through the dataset in the same order independent
-                of the number of replicas and workers.
+               of the number of replicas and workers.
             3. For ``cache_efficient`` strategy the amount of anndata files fetched is further
-                reduced by assigning to each worker a contiguous chunk of the dataset.
-                The returned iterator is determined by the ``torch.utils.data.get_worker_info()``
-                and ``torch.distributed`` contexts.
+               reduced by assigning to each worker a contiguous chunk of the dataset.
+               The returned iterator is determined by the ``torch.utils.data.get_worker_info()``
+               and ``torch.distributed`` contexts.
 
         **Example 1**::
 
@@ -422,9 +422,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +------------+-------+-------+--------+
 
 
-        Resuming from a checkpoint:
+        **Resuming from a checkpoint:**
 
-        1. For persistent workers the state (:attr:``epoch` and :attr:`resume_step`) is initially set by
+        1. For persistent workers the state (:attr:`epoch` and :attr:`resume_step`) is initially set by
            the :meth:`load_state_dict` method. At the end of the iteration, the :attr:`epoch` is incremented and
            the :attr:`resume_step` is set to ``None``.
         2. For non-persistent workers the state is initially set by the :meth:`load_state_dict` method. The
