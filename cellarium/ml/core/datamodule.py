@@ -2,10 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-<<<<<<< HEAD
-=======
 import warnings
->>>>>>> main
 from typing import Any, Literal
 
 import lightning.pytorch as pl
