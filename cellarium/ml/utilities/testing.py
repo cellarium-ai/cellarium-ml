@@ -8,6 +8,8 @@ Testing utilities
 This module contains helper functions for testing.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any
 
@@ -207,7 +209,7 @@ def get_coord_data(
                     for param_name, param in module.named_parameters():
                         if param_name.endswith("_unscaled"):
                             # muP
-                            param_name = param_name.removesuffix("_unscaled")
+                            param_name = param_name[: -len("_unscaled")]
                             multiplier = getattr(module, f"{param_name}_multiplier")
                         else:
                             # SP
@@ -234,7 +236,7 @@ def get_coord_data(
                     for param_name, param in module.named_parameters():
                         if param_name.endswith("_unscaled"):
                             # muP
-                            param_name = param_name.removesuffix("_unscaled")
+                            param_name = param_name[: -len("_unscaled")]
                             multiplier = getattr(module, f"{param_name}_multiplier")
                         else:
                             # SP

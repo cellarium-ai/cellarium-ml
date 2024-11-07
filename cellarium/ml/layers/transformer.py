@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from typing import Any, Literal
 
 import torch
@@ -168,7 +170,7 @@ class Transformer(nn.Module):
                 for _ in range(n_blocks)
             ]
         )
-        self.ln = nn.LayerNorm(d_model, use_bias)
+        self.ln = nn.LayerNorm(d_model, bias=use_bias)
 
         self._reset_parameters()
 

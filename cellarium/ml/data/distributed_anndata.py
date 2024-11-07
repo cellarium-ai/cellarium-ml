@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import gc
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager

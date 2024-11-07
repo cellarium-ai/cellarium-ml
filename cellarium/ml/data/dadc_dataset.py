@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 import math
 import random
 from itertools import islice
@@ -456,12 +458,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         if self.resume_step is not None:
             num_epochs_that_stepped, num_batches_that_stepped = divmod(self.resume_step, batches_per_replica)
 
-            # self.epoch can be inconsistent with the global step if checkpointed mid-epoch and not adjusted
-            if self.epoch < num_epochs_that_stepped:
-                raise ValueError(
-                    f"Epoch {self.epoch} is less than the number of epochs"
-                    f"that have been processed {num_epochs_that_stepped}."
-                )
+            self.set_epoch(num_epochs_that_stepped)
             # shift worker_id based on the global step
             worker_id = (worker_id - num_batches_that_stepped) % num_workers
         else:
