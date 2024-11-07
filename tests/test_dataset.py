@@ -313,8 +313,8 @@ def test_iterable_dataset_set_epoch_multi_device(
 @pytest.mark.parametrize(
     "drop_incomplete_batch", [False, True], ids=["no drop incomplete batch", "drop incomplete batch"]
 )
-@pytest.mark.parametrize("persistent_workers", [True, True], ids=["non-persistent workers", "persistent workers"])
-@pytest.mark.parametrize("resume_step", [1, 3, 5])
+@pytest.mark.parametrize("persistent_workers", [False, True], ids=["non-persistent workers", "persistent workers"])
+@pytest.mark.parametrize("resume_step", [1, 4, 5])
 def test_load_from_checkpoint(
     dadc: DistributedAnnDataCollection,
     iteration_strategy: Literal["same_order", "cache_efficient"],
@@ -343,10 +343,10 @@ def test_load_from_checkpoint(
     module1 = CellariumModule(model=BoringModel())
     trainer1 = pl.Trainer(
         accelerator="cpu",
-        max_epochs=2,
+        max_epochs=3,
         logger=False,
         callbacks=[pl.callbacks.ModelCheckpoint(every_n_train_steps=1, save_top_k=-1)],
-        default_root_dir=tmp_path / "run1",
+        default_root_dir=tmp_path,
     )
     trainer1.fit(module1, datamodule1)
 
@@ -365,16 +365,14 @@ def test_load_from_checkpoint(
     module2 = CellariumModule(model=BoringModel())
     trainer2 = pl.Trainer(
         accelerator="cpu",
-        max_epochs=2,
+        max_epochs=3,
         logger=False,
-        default_root_dir=tmp_path / "run2",
-        callbacks=[pl.callbacks.ModelCheckpoint(every_n_train_steps=1, save_top_k=-1)],
     )
     try:
-        ckpt_path = tmp_path / f"run1/checkpoints/epoch=0-step={resume_step}.ckpt"
+        ckpt_path = tmp_path / f"checkpoints/epoch=0-step={resume_step}.ckpt"
         trainer2.fit(module2, datamodule2, ckpt_path=ckpt_path)
     except FileNotFoundError:
-        ckpt_path = tmp_path / f"run1/checkpoints/epoch=1-step={resume_step}.ckpt"
+        ckpt_path = tmp_path / f"checkpoints/epoch=1-step={resume_step}.ckpt"
         trainer2.fit(module2, datamodule2, ckpt_path=ckpt_path)
 
     iter_data1 = collate_fn(module1.model.iter_data)
