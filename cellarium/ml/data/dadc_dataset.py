@@ -502,13 +502,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             # remove tail of data to make it evenly divisible.
             indices = indices[:total_size]
 
-        if self.epoch < num_epochs_that_stepped:
-            # self.epoch can be inconsistent with the global step
-            raise ValueError(
-                f"Epoch {self.epoch} is less than the number of epochs"
-                f"that have been processed {num_epochs_that_stepped}."
-            )
-        elif self.iteration_strategy == "same_order":
+        if self.iteration_strategy == "same_order":
             # replica indices
             indices = indices[rank:total_size:num_replicas]
             if len(indices) != per_replica:
