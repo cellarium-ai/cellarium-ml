@@ -160,6 +160,13 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         """
         self.epoch = epoch
 
+    def set_resume_step(self, resume_step: int | None) -> None:
+        r"""
+        Sets the resume step for the iterator. When resuming from a checkpoint, this ensures
+        that the iterator skips the batches that have already been processed.
+        """
+        self.resume_step = resume_step
+
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, dict[str, np.ndarray] | np.ndarray]:
         r"""
         Returns a dictionary containing the data from the :attr:`dadc` with keys specified by the :attr:`batch_keys`
@@ -302,11 +309,11 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         Cache efficient:
 
         +------------+---------+---------+
-        | batch idx  | 0       | 2       |
+        | batch idx  | 0       | 1       |
         +============+=========+=========+
         | indices    | (0,1,2) | (3,4,5) |
         +------------+---------+---------+
-        | worker id  | 0       | 0       |
+        | worker id  | 0       | 1       |
         +------------+---------+---------+
 
         **Example 5**::
@@ -415,15 +422,16 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         +------------+-------+-------+--------+
 
 
-        Resuming from a checkpoint:
+        **Resuming from a checkpoint:**
 
-        1. Set epoch to the epoch of the checkpoint. The trainer is responsible for loading the state.
-        2. Increment the epoch. For persistent workers, the epoch is incremented at the end of the iteration.
-           For non-persistent workers, the epoch is incremented by the trainer at the epoch start.
-        3. Set the resume_step to the global step of the checkpoint. The trainer is responsible for loading the state.
-           Use the resume_step to skip the batches that have already been processed. In order to achieve this,
-           shift the worker_id based on the global step and compute the number of epochs and batches that have been
-           processed. After that set the resume_step to None.
+        1. For persistent workers the state (:attr:`epoch` and :attr:`resume_step`) is initially set by
+           the :meth:`load_state_dict` method. At the end of the iteration, the :attr:`epoch` is incremented and
+           the :attr:`resume_step` is set to ``None``.
+        2. For non-persistent workers the state is initially set by the :meth:`load_state_dict` method. The
+           :attr:`epoch` is updated by the ``on_train_epoch_start`` hook and the :attr:`resume_step` is set to
+           ``None`` by the ``on_train_epoch_end`` hook.
+        3. If the :attr:`resume_step` is not ``None``, then the worker will skip the batches that have already
+           been processed. The workers are shifted based on the global step.
         """
         if self.test_mode and isinstance(self.dadc, DistributedAnnDataCollection):
             # clear lru cache
@@ -446,12 +454,17 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         worker_id, num_workers = get_worker_info()
 
         if self.resume_step is not None:
-            # shift worker_id based on global step
-            worker_id = (worker_id - self.resume_step) % num_workers
             num_epochs_that_stepped, num_batches_that_stepped = divmod(self.resume_step, batches_per_replica)
-            self.resume_step = None
+
+            # self.epoch can be inconsistent with the global step if checkpointed mid-epoch and not adjusted
+            if self.epoch < num_epochs_that_stepped:
+                raise ValueError(
+                    f"Epoch {self.epoch} is less than the number of epochs"
+                    f"that have been processed {num_epochs_that_stepped}."
+                )
+            # shift worker_id based on the global step
+            worker_id = (worker_id - num_batches_that_stepped) % num_workers
         else:
-            num_epochs_that_stepped = 0
             num_batches_that_stepped = 0
 
         # seed workers
@@ -538,8 +551,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                     continue
                 yield self[batch_indices]
 
-        # Sets epoch for persistent workers
+        # Sets epoch and resume_step for persistent workers
         self.set_epoch(self.epoch + 1)
+        self.set_resume_step(None)
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         r"""
@@ -549,5 +563,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             state_dict:
                 State dictionary containing the state of the dataset.
         """
+        # trainer.fit_loop.epoch_progress.current.completed
         self.epoch = state_dict["epoch"]
+        # trainer.fit_loop.epoch_loop.automatic_optimization.optim_progress.optimizer_steps
         self.resume_step = state_dict["resume_step"]
