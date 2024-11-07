@@ -21,6 +21,7 @@ from contextlib import redirect_stdout
 import tempfile
 import asyncio
 from functools import partial
+import copy
 
 from .cellarium_utils import get_datamodule, batch_from_adata
 from .gene_set_utils import GeneSetRecords, append_random_control_collection, gsea
@@ -85,7 +86,7 @@ def gpt_predict(
         ouput_tensors.append(mat_ng.detach())
         index.extend(batch["obs_names_n"].tolist())
 
-    gpt_data = torch.cat(ouput_tensors, dim=0).cpu().numpy()
+    gpt_data = ouput_tensors if (ouput_tensors == []) else torch.cat(ouput_tensors, dim=0).cpu().numpy()
 
     # ensure the order is correct
     for i, (k, v) in enumerate(zip(adata_out.obs_names, index)):
@@ -1172,8 +1173,9 @@ def compute_fractional_variance_explained(adata, factor_key: str, loadings_key: 
 def compute_mde(
     adata: anndata.AnnData, 
     layer: str = 'lfc',
+    embedding_dimension: int = 2,
     do_row_zscore: bool = True, 
-    do_gene_zscore_preprocessing: bool = True,
+    do_gene_zscore_preprocessing: bool = False,
     spectral_embedding_kwargs: dict = dict(n_components=20, affinity='nearest_neighbors', n_neighbors=7, eigen_solver='arpack'),
     mde_kwargs: dict = dict(device='cuda', embedding_dim=2, n_neighbors=7, repulsive_fraction=5, verbose=True),
     scaling_max_value: float = 10.0,
@@ -1184,6 +1186,7 @@ def compute_mde(
     Args:
         adata: AnnData object
         layer: layer in adata.layers to use
+        embedding_dimension: dimension of the embedding
         do_row_zscore: whether to z-score rows just before computing the spectral embedding, as in [1]
         do_gene_zscore_preprocessing: whether to z-score genes as a preprocessing step (this should be done 
             per batch. if already done in adata.layers[layer], set to False)
@@ -1206,6 +1209,15 @@ def compute_mde(
     except ImportError:
         raise ImportError('scikit-learn must be installed to run compute_mde. do `pip install scikit-learn`')
     
+    # handle embedding dimension
+    if 'n_components' in spectral_embedding_kwargs:
+        print('WARNING: ignoring n_components in spectral_embedding_kwargs and replacing with embedding_dimension')
+    spectral_embedding_kwargs['n_components'] = embedding_dimension
+    
+    if 'embedding_dim' in mde_kwargs:
+        print('WARNING: ignoring embedding_dim in mde_kwargs and replacing with embedding_dimension')
+    mde_kwargs['embedding_dim'] = embedding_dimension
+    
     adata.X = adata.layers[layer].copy()
 
     # z-score each gene (this is the original scaling of the data done in replogle... per batch)
@@ -1224,7 +1236,21 @@ def compute_mde(
 
     # minimal distortion embedding
     pymde.seed(0)
-    mde = pymde.preserve_neighbors(se, **mde_kwargs)
-    embedding = mde.embed(verbose=True)
+
+    # # the old way that produces tight clusters
+    # mde = pymde.preserve_neighbors(se, **mde_kwargs)  # MDE runs on the spectral embedding
+    # embedding = mde.embed(verbose=True)
+
+    # # 2024.11.01: this is a modification to the initialization (probably not in the paper)
+    # mde_kwargs_2d_init = copy.deepcopy(mde_kwargs)
+    # mde_kwargs_2d_init['embedding_dim'] = 2
+    # init_se_mde = pymde.preserve_neighbors(se, **mde_kwargs)  # MDE runs on the spectral embedding
+    # init_embedding = init_se_mde.embed(verbose=True)
+
+    # 2024.11.01: this is more likely to be the paper's actual implementation
+    mde = pymde.preserve_neighbors(x, **mde_kwargs)  # MDE runs on the actual data
+    x_init = torch.tensor(se).contiguous()  # .contiguous() sidesteps a bug
+    # x_init = init_embedding  # part of the modification
+    embedding = mde.embed(X=x_init, verbose=True)  # uses the spectral embedding as initialization
 
     return embedding.detach().cpu().numpy()
