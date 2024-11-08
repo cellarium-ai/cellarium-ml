@@ -128,19 +128,19 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
             #start_time = time.time()
-            #activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
-            #if (self.probability_propagation_flag==1):
-                #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+            activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
+            if (self.probability_propagation_flag==1):
+                activation_out = self.probability_propagation(activation_out_gpu=activation_out)
             #propagated_logits = self.log_probs(logits=logits_nc)
             #end_time = time.time()
             #print(f"NIMISH PROB PROPAGATION TOOK {end_time - start_time} time")
             if self.out_distribution == categorical_distribution.PyroCategorical:
-                #pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
+                pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
                 #start_time = time.time()
-                propagated_logits = self.log_probs(logits=logits_nc)
+                #propagated_logits = self.log_probs(logits=logits_nc)
                 #end_time = time.time()
                 #print(f"NIMISH LOGIT PROPAGATION TOOK {end_time - start_time} time")
-                pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
+                #pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
                 #pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
                 activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
@@ -207,51 +207,78 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the 2604 classes c in each row (sum of all logits in each row of n before propagation)
         step 3: LSE(L_i) - LSE(L_m)
         """
-        log_probs = self.logsumexp_propagated(logits,dim=0,keepdim=False) - torch.logsumexp(logits,dim=1,keepdim=True)
+        compiled_logsumexp = torch.compile(self.logsumexp_propagated)
+        log_probs = compiled_logsumexp(logits,dim=0,keepdim=False) - torch.logsumexp(logits,dim=1,keepdim=True)
+        #log_probs = self.logsumexp_propagated(logits,dim=0,keepdim=False) - torch.logsumexp(logits,dim=1,keepdim=True)
         return log_probs
 
-    def logsumexp_propagated(self, logits: torch.Tensor, dim, keepdim=False):
-        desc_matrix = self.target_row_descendent_col_torch_tensor.to(device=logits.device, dtype = torch.float)
-        desc_matrix_1 = torch.where(desc_matrix == 0, float('-inf'), desc_matrix)
-        # Check for inf values in logits
-        # if torch.isinf(logits).any():
-        #     if (logits == float('inf')).any():
-        #         return torch.tensor(float('inf'))
-        #     if (logits == float('-inf')).all():
-        #         return torch.tensor(float('-inf'))
+    #  OPTION 1
+    # def logsumexp_propagated(self, logits: torch.Tensor, dim, keepdim=False):
+    #     desc_matrix = self.target_row_descendent_col_torch_tensor.to(device=logits.device, dtype = torch.float)
+    #     desc_matrix_1 = torch.where(desc_matrix == 0, float('-inf'), desc_matrix)
 
-        #max_values = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
-        # with open('logits.pkl','wb') as f:
-        #     pickle.dump(logits,f)
-        # with open('desc.pkl','wb') as f:
-        #     pickle.dump(desc_matrix,f)
-        log_sum_exp_nc = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
-        chunk_size=2
-        # Loop through each row in `b` to get the corresponding masked maximum
+    #     #max_values = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
+    #     # with open('logits.pkl','wb') as f:
+    #     #     pickle.dump(logits,f)
+    #     # with open('desc.pkl','wb') as f:
+    #     #     pickle.dump(desc_matrix,f)
+    #     log_sum_exp_nc = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
+    #     chunk_size=2
+    #     # Loop through each row in `b` to get the corresponding masked maximum
 
-        for i in range(0,logits.shape[0],chunk_size):
-            #masked_a = torch.where(row.to(dtype=torch.bool), logits, float('-inf'))
-            with torch.no_grad():
-                masked_values_chcc = logits[i:i+chunk_size,:].unsqueeze(1) * desc_matrix_1.unsqueeze(0)
-                #masked_values_chcc = torch.where(masked_values_chcc == 0, float('-inf'), masked_values_chcc)
-            #max_values[:,i] = torch.amax(masked_a, dim=1).T
-                max_values_chc = torch.amax(torch.nan_to_num(masked_values_chcc,float('-inf')), dim=2)
-            # Check for NaNs or Infs
-            if torch.isnan(max_values_chc).any() or torch.isinf(max_values_chc).any():
-                print("NaNs or Infs detected in no_grad_result")
-            exp_values = torch.exp(logits[i:i+chunk_size,:] - max_values_chc)
-            sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
-            log_sum_exp = torch.log(sum_exp) + max_values_chc if not keepdim else max_values_chc
-            log_sum_exp_nc[i:i+chunk_size,:] = log_sum_exp
-            #max_values.append(torch.amax(logits*row,dim=1))
-                #max_values[:,i] = torch.amax(logits*row,dim=1).T
-        #max_val = torch.stack(max_values)
-        #max_values = torch.amax((logits.unsqueeze(1) * desc_matrix.unsqueeze(0)), dim=2)
-        #exp_values = torch.exp(logits - max_values)
-        # Sum the exponentials
+    #     for i in range(0,logits.shape[0],chunk_size):
+    #         #masked_a = torch.where(row.to(dtype=torch.bool), logits, float('-inf'))
+    #         with torch.no_grad():
+    #             masked_values_chcc = logits[i:i+chunk_size,:].unsqueeze(1) * desc_matrix_1.unsqueeze(0)
+    #             #masked_values_chcc = torch.where(masked_values_chcc == 0, float('-inf'), masked_values_chcc)
+    #         #max_values[:,i] = torch.amax(masked_a, dim=1).T
+    #             max_values_chc = torch.amax(torch.nan_to_num(masked_values_chcc,float('-inf')), dim=2)
+    #         # Check for NaNs or Infs
+    #         if torch.isnan(max_values_chc).any() or torch.isinf(max_values_chc).any():
+    #             print("NaNs or Infs detected in no_grad_result")
+    #         exp_values = torch.exp(logits[i:i+chunk_size,:] - max_values_chc)
+    #         sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
+    #         log_sum_exp = torch.log(sum_exp) + max_values_chc if not keepdim else max_values_chc
+    #         log_sum_exp_nc[i:i+chunk_size,:] = log_sum_exp
+    #         #max_values.append(torch.amax(logits*row,dim=1))
+    #             #max_values[:,i] = torch.amax(logits*row,dim=1).T
+    #     #max_val = torch.stack(max_values)
+    #     #max_values = torch.amax((logits.unsqueeze(1) * desc_matrix.unsqueeze(0)), dim=2)
+    #     #exp_values = torch.exp(logits - max_values)
+    #     # Sum the exponentials
 
-        #sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
-        # Take the log and add back the max
-        #log_sum_exp = torch.log(sum_exp) + max_values.squeeze(dim) if not keepdim else max_values
+    #     #sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
+    #     # Take the log and add back the max
+    #     #log_sum_exp = torch.log(sum_exp) + max_values.squeeze(dim) if not keepdim else max_values
+    #     return log_sum_exp_nc
 
-        return log_sum_exp_nc
+    # OPTION 2
+    # def logsumexp_propagated(self, logits_nc: torch.Tensor, dim, keepdim=False):
+    #     max_values_nc = torch.empty((logits_nc.shape[0], logits_nc.shape[1])).to(device=logits_nc.device)
+    #     desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
+    #     with torch.no_grad():
+    #         for i,row in enumerate(desc_matrix_cc):
+    #             masked_logits_nc = torch.where(row.to(dtype=torch.bool), logits_nc, float('-inf'))
+    #             max_values_nc[:,i] = torch.max(masked_logits_nc, dim=1).values.T
+    #     exp_values_nc = torch.exp(logits_nc - max_values_nc)
+
+    #     # Sum the exponentials using einsum
+    #     sum_exp_nc = torch.einsum("nc,kc->nk", exp_values_nc, desc_matrix_cc)
+    #     #sum_exp_sparse = torch.sparse.mm( exp_values_nc, desc_matrix_cc_sparse.T)
+
+    #     log_sum_exp_nc = torch.log(sum_exp_nc) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
+    #     return log_sum_exp_nc
+
+    # OPTION 3
+    def logsumexp_propagated(self, logits_nc: torch.Tensor, dim, keepdim=False):
+         desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
+         with torch.no_grad():
+            max_values_nc = torch.amax((logits_nc.unsqueeze(1) * desc_matrix_cc.unsqueeze(0)),dim=2)
+         exp_values_nc = torch.exp(logits_nc - max_values_nc)
+         sum_exp_nc = torch.einsum("nc,kc->nk", exp_values_nc, desc_matrix_cc)
+         log_sum_exp_nc = torch.log(sum_exp_nc) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
+         return log_sum_exp_nc
+
+
+
+
