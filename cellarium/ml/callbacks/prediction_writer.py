@@ -57,9 +57,9 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
     """
 
     def __init__(
-        self, 
-        output_dir: Path | str, 
-        prediction_size: int | None = None, 
+        self,
+        output_dir: Path | str,
+        prediction_size: int | None = None,
         key: str = "x_ng",
     ) -> None:
         super().__init__(write_interval="batch")
