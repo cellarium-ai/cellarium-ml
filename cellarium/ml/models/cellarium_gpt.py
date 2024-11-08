@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import create_block_mask
 
 from cellarium.ml.layers import GeneExpressionEmbedding, MetadataEmbedding, Transformer
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
@@ -414,7 +415,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         n_blocks: int,
         dropout_p: float,
         use_bias: bool,
-        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_backend: Literal["flash", "flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
         loss_scales: dict[str, float],
         # tunable hyperparameters
@@ -434,6 +435,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         self.metadata_vocab_sizes = metadata_vocab_sizes.copy()
         self.d_model = d_model
         self.d_ffn = d_ffn
+        self.attention_backend = attention_backend
         self.initializer_range = initializer_range
         default_initializer = {
             "name": "trunc_normal_",
@@ -576,7 +578,15 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         )
 
         # create attention mask
-        attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
+        if self.attention_backend == "flex":
+
+            def prompt_diagonal_mask_mod(b, h, q_idx, kv_idx):
+                return prompt_mask_nc[b, kv_idx] | (q_idx == kv_idx)
+
+            n, c = prompt_mask_nc.shape
+            attention_mask_ncc = create_block_mask(prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c)
+        else:
+            attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
 
         # transformer blocks
         hidden_state_ncd = embedding_ncd * self.embeddings_scale

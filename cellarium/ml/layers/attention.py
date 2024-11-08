@@ -6,6 +6,7 @@ from typing import Any, Literal
 import torch
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention.flex_attention import flex_attention
 
 from cellarium.ml.utilities.layers import create_initializer
 
@@ -16,6 +17,9 @@ except ImportError:
 
     def use_cs() -> bool:
         return False
+
+
+compiled_flex_attention = torch.compile(flex_attention, dynamic=False)
 
 
 class MultiHeadAttention(nn.Module):
@@ -56,7 +60,7 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         dropout_p: float,
         attention_logits_scale: float,
-        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_backend: Literal["flash", "flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
@@ -149,6 +153,15 @@ class MultiHeadAttention(nn.Module):
                 attention_weights_nhcc, self.dropout_p, training=self.training
             )
             output_nhck = torch.matmul(attention_weights_nhcc, value_nhck)
+        elif self.attention_backend == "flex":
+            output_nhck = compiled_flex_attention(
+                query_nhck,
+                key_nhck,
+                value_nhck,
+                block_mask=attention_mask_ncc,
+                scale=scale_factor,
+                # TODO: dropout
+            )
         else:
             with sdpa_kernel(self.backend_map[self.attention_backend]):
                 output_nhck = nn.functional.scaled_dot_product_attention(
