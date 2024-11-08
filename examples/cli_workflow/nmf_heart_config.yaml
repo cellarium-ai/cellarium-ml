@@ -41,7 +41,7 @@ trainer:
   reload_dataloaders_every_n_epochs: 0
   default_root_dir: null
 model:
-  cpu_transforms:
+  cpu_transforms: 
   - class_path: cellarium.ml.transforms.Filter
     init_args:
       filter_list:
@@ -55,14 +55,14 @@ model:
     class_path: cellarium.ml.models.NonNegativeMatrixFactorization
     init_args:
       var_names_g: null
-      var_names_hvg: 
+      var_names_hvg:
         !FileLoader
         file_path: /home/jupyter/data/human_heart_atlas_2000hvg.csv
         loader_fn: pandas.read_csv
         attr: "ensembl_id"
         convert_fn: pandas.Series.to_list
-      k: 15
-      r: 30
+      k_range: [10, 15, 20, 25, 30] # 
+      r: 30 # 100
       full_g: 2889
       density_threshold: 0.25
       local_neighborhood_size: 0.30
@@ -91,7 +91,7 @@ data:
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
       attr: var_names
-  batch_size: 10000 # 4096 # 
+  batch_size: 4096 # 10000 # 1028 # 
   shuffle: true
   seed: 0
   drop_last: true
