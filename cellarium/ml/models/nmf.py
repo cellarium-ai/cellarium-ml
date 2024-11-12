@@ -1,16 +1,18 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
 from typing import Literal
+from collections.abc import Sequence
 
-import lightning.pytorch as pl
-import numpy as np
+import anndata
+import numpy as npa
 import pandas as pd
 
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
+
+import lightning.pytorch as pl
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.transforms import Filter
@@ -20,38 +22,113 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
-# from numba import cuda
+from scipy import sparse
 # from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+
+import tqdm
 
 import warnings
 warnings.filterwarnings("ignore")
 
 
-class Multiply(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, a, X):
-        y_pred = torch.matmul(a, X)
-        
-        # Save the variables needed for backward in the context object
-        ctx.save_for_backward(a, X)
-        
-        return y_pred
+def calculate_rec_error(
+    dataset, # : IterableDistributedAnnDataCollectionDataset,
+    pipeline, # : CellariumPipeline, 
+    maximum_anndata_files_to_download: int = 5,
+) -> anndata.AnnData:
+    """
+    Embed the dataset using the pipeline.
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        # Retrieve saved tensors
-        a, X = ctx.saved_tensors
-        
-        # Compute the gradient of the output w.r.t. a
-        # d(y_pred)/d(a) = X * exp(a)
-        grad_a = grad_output * X * a
-        
-        # No gradients for X as we are not optimizing it
-        grad_X = None
-        
-        return grad_a, grad_X
+    Args:
+        dataset: Dataset.
+        pipeline: Pipeline.
+        maximum_anndata_files_to_download: Maximum number of anndata files to download.
 
+    Returns:
+        reconstruction error
+    """
+    
+    k_range = pipeline[-1].k_range
+    pipeline[-1].get_rec_error=True
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # get the anndata object
+    adatas = [dataset.dadc.adatas[i].adata for i in range(min(maximum_anndata_files_to_download, 
+                                                              len(dataset.dadc.adatas)))]
+    adata = anndata.concat(adatas, axis=0, merge="same")
+    
+    rec_error = np.zeros((len(k_range),1)).astype('float64')
+    for batch in tqdm.tqdm(dataset):
+        
+        batch['x_ng'] = torch.from_numpy(batch['x_ng']).to(device)
+        out = pipeline.predict(batch)
+        rec_error += out['rec_error']
+    
+    return rec_error
+
+def get_embeddding(
+    dataset, # : IterableDistributedAnnDataCollectionDataset,
+    pipeline, # : CellariumPipeline, 
+    obsm_key_added: str = 'X_nmf',
+    maximum_anndata_files_to_download: int = 5,
+    the_best_k=20
+) -> anndata.AnnData:
+    """
+    Embed the dataset using the pipeline.
+
+    Args:
+        dataset: Dataset.
+        pipeline: Pipeline.
+        maximum_anndata_files_to_download: Maximum number of anndata files to download.
+        the_best_k: select the K to get cell embedding.
+
+    Returns:
+        AnnData with cell embeddings in adata.obsm[obsm_key_added]
+    """
+    
+    pipeline[-1].get_rec_error=False
+    pipeline[-1].the_best_k=20
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # get the anndata object
+    adatas = [dataset.dadc.adatas[i].adata for i in range(min(maximum_anndata_files_to_download, 
+                                                              len(dataset.dadc.adatas)))]
+    adata = anndata.concat(adatas, axis=0, merge="same")
+    
+    embedding = []
+    for batch in tqdm.tqdm(dataset):
+        
+        batch['x_ng'] = torch.from_numpy(batch['x_ng']).to(device)
+        out = pipeline.predict(batch)
+        z = out['alpha_nk']
+        embedding += [z.cpu()]
+        
+    adata.obsm[obsm_key_added] = np.asarray(torch.cat(embedding))
+    
+    return adata
+
+def update_consensusD(
+    pipeline,
+    density_threshold = 0.2,
+    local_neighborhood_size = 0.3
+):
+    torch.manual_seed(0)
+    k_range = pipeline[-1].k_range
+    
+    consensus_stat = {}
+    for k in k_range:
+        
+        D_rkg = getattr(pipeline[-1], f"D_{k}_rkg")
+        consensus_output = consensus(D_rkg=D_rkg, k=k, 
+                                     density_threshold=density_threshold,
+                                     local_neighborhood_size=density_threshold)
+        setattr(pipeline[-1], f"D_{k}_kg", consensus_output['consensus_D'])
+        
+        consensus_stat[k] = consensus_output
+        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output['stability'], 4))))
+        
+    return consensus_stat
 
 class KMeans:
     def __init__(self, n_clusters, max_iter=200, tol=1e-4):
@@ -143,14 +220,12 @@ def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=
     
     kmeans = KMeans(n_clusters=k)
     kmeans.fit(D_norm)
-    kmeans_cluster_labels = kmeans.predict(D_norm)
-        
+    kmeans_cluster_labels = kmeans.predict(D_norm)  
     D = pd.DataFrame(D.cpu().numpy())
     kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
     
     silhouette = silhouette_score(D.values, kmeans_cluster_labels, 
                                   metric='euclidean')
-    print("silhouette score: " + str(round(silhouette, 4)))
     
     median_D = D.groupby(kmeans_cluster_labels).median()
     median_D = torch.Tensor(median_D.values)
@@ -181,7 +256,6 @@ def get_final_alpha_wKL(x_ng, D, n_iterations):
             
         alpha_nk_exp = alpha_nk.exp()
         loss = euclidean(torch.matmul(alpha_nk_exp, D), x_ng)
-        # loss = euclidean(Multiply.apply(alpha_nk_exp, D), x_ng)
         loss = loss.mul(2).sqrt()
             
         loss.backward()
