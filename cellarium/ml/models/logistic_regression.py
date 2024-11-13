@@ -48,7 +48,7 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         W_init_scale: float = 1.0,
         seed: int = 0,
         log_metrics: bool = True,
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
     ) -> None:
         super().__init__()
 
@@ -59,7 +59,7 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         #self.y_categories = y_categories
         self.y_categories = read_pkl_from_gcs(y_categories_path)
         self.n_categories = len(self.y_categories)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.seed = seed
         # parameters
@@ -102,7 +102,7 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         Returns:
             A dictionary with the loss value.
         """
-        y_n = y_n.to(self.device)
+        #y_n = y_n.to(self.device)
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         #assert_arrays_equal("y_categories", y_categories, "self.y_categories", self.y_categories)
