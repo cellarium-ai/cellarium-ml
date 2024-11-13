@@ -125,18 +125,22 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0]):
             logits_nc = x_ng @ W_gc + self.b_c
+            compiled_propagated_logits = torch.compile(self.log_probs)
+            propagated_logits = compiled_propagated_logits(logits=logits_nc)
             #activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
             #if (self.probability_propagation_flag==1):
                 #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
             if self.out_distribution == categorical_distribution.PyroCategorical:
-                compiled_propagated_logits = torch.compile(self.log_probs)
-                propagated_logits = compiled_propagated_logits(logits=logits_nc)
+                #compiled_propagated_logits = torch.compile(self.log_probs)
+                #propagated_logits = compiled_propagated_logits(logits=logits_nc)
                 pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
                 #pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
                 activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
                 activation_out = self.probability_propagation(activation_out_gpu=activation_out)
                 pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
+                #pyro.sample("y", self.out_distribution(logits = propagated_logits).to_event(1), obs=y_n)
+                #pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
