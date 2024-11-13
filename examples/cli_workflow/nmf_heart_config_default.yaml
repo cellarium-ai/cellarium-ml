@@ -24,8 +24,8 @@ model:
         loader_fn: pandas.read_csv
         attr: "ensembl_id"
         convert_fn: pandas.Series.to_list
-      k_range: [10, 12, 15, 17, 20, 22, 25, 27, 30, 32, 35, 37, 40, 42, 45, 47, 50, 52, 55]
-      r: 200
+      k_range: [10, 12, 15, 17, 20, 22, 25, 27, 30, 32, 35, 37, 40, 42, 45, 47, 50]
+      r: 100
       full_g: 2889
       density_threshold: 0.25
       local_neighborhood_size: 0.30
@@ -50,7 +50,7 @@ data:
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
       attr: var_names
-  batch_size: 512 # 1028
+  batch_size: 1028
   shuffle: true
   seed: 0
   drop_last: true
