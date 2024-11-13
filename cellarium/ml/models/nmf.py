@@ -5,7 +5,7 @@ from typing import Literal
 from collections.abc import Sequence
 
 import anndata
-import numpy as npa
+import numpy as np
 import pandas as pd
 
 import torch
