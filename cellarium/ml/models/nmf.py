@@ -6,10 +6,8 @@ from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
-
 import torch
 import torch.nn.functional as F
-import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
@@ -33,7 +31,7 @@ def anls_solve(loss) -> torch.Tensor:
 def kl_div(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
     .. math::
-        \ell(x, y) = \sum_{n = 0}^{N - 1} x_n log(\frac{x_n}{y_n}) - x_n + y_n
+        \\ell(x, y) = \\sum_{n = 0}^{N - 1} x_n log(\frac{x_n}{y_n}) - x_n + y_n
 
     Args:
         input (Tensor): tensor of arbitrary shape
@@ -42,15 +40,13 @@ def kl_div(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     Returns:
         Tensor: single element tensor
     """
-    eps = torch.finfo(torch.float32).eps
     return torch.distributions.Poisson(rate=input).log_prob(target).sum()
-    # return target.reshape(-1) @ (target.add(eps).log() - input.add(eps).log()).reshape(-1) - target.sum() + input.sum()
 
 
 def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """The `Euclidean distance
     .. math::
-        \ell(x, y) = \frac{1}{2} \sum_{n = 0}^{N - 1} (x_n - y_n)^2
+        \\ell(x, y) = \frac{1}{2} \\sum_{n = 0}^{N - 1} (x_n - y_n)^2
 
     Args:
         input (Tensor): tensor of arbitrary shape
@@ -59,7 +55,7 @@ def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     Returns:
         Tensor: single element tensor
     """
-    return F.mse_loss(input, target, reduction='sum') * 0.5
+    return F.mse_loss(input, target, reduction="sum") * 0.5
 
 
 class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
@@ -149,10 +145,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         return updated_factors_kg  # , residual_loss
 
-    def solve_alpha(self, alpha_nk: torch.Tensor,
-                    DDT_kk: torch.Tensor,
-                    DXT_kn: torch.Tensor,
-                    n_iterations: int) -> torch.Tensor:
+    def solve_alpha(
+        self, alpha_nk: torch.Tensor, DDT_kk: torch.Tensor, DXT_kn: torch.Tensor, n_iterations: int
+    ) -> torch.Tensor:
         """
         Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
 
@@ -185,9 +180,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         return alpha_nk
 
-    def solve_alpha_wKL(self, alpha_nk: torch.nn.Parameter,
-                        x_ng: torch.Tensor,
-                        n_iterations: int) -> torch.Tensor:
+    def solve_alpha_wKL(self, alpha_nk: torch.Tensor, x_ng: torch.Tensor, n_iterations: int) -> torch.Tensor:
         """
         Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
 
@@ -204,7 +197,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         # mse_loss = torch.nn.MSELoss(reduction="mean")
 
         for _ in range(n_iterations):
-
             optimizer.zero_grad()
 
             # alpha_nk_exp = F.softplus(alpha_nk) #.exp()
@@ -226,7 +218,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             # with torch.no_grad():
             #     alpha_nk.clamp_(min=0)
 
-            # alpha_diff = torch.linalg.norm(F.softplus(alpha_nk) - alpha_buffer) / torch.linalg.norm(F.softplus(alpha_nk))
             alpha_diff = torch.linalg.norm(alpha_nk.exp() - alpha_buffer) / torch.linalg.norm(alpha_nk.exp())
             if alpha_diff <= self._alpha_tol:
                 break
@@ -305,7 +296,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 trainer.strategy, DDPStrategy
             ), "OnePassMeanVarStd requires that the trainer uses the DDP strategy."
             assert (
-                    trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
+                trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
             ), "OnePassMeanVarStd requires that broadcast_buffers is set to False."
 
     @property
@@ -323,9 +314,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         return self.ori_D
 
     def predict(
-            self,
-            x_ng: torch.Tensor,
-            var_names_g: np.ndarray,
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
     ) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Predict the gene expression programs for the given gene counts matrix.
