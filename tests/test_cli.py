@@ -423,6 +423,10 @@ CONFIGS = [
                 "accelerator": "cpu",
                 "devices": devices,
                 "max_epochs": 1,
+                "strategy": {
+                    "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                    "init_args": {"broadcast_buffers": "true"},
+                },
             },
         },
     },

@@ -294,10 +294,11 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         if trainer.world_size > 1:
             assert isinstance(
                 trainer.strategy, DDPStrategy
-            ), "OnePassMeanVarStd requires that the trainer uses the DDP strategy."
+            ), "NonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
             assert (
-                trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
-            ), "OnePassMeanVarStd requires that broadcast_buffers is set to False."
+                trainer.strategy._ddp_kwargs["broadcast_buffers"] is True
+            ), "NonNegativeMatrixFactorization requires that the `broadcast_buffers` parameter of "
+            "lightning.pytorch.strategies.DDPStrategy is set to True."
 
     @property
     def factors_kg(self) -> torch.Tensor:
