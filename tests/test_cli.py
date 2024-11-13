@@ -345,11 +345,13 @@ CONFIGS = [
                 "batch_size": "50",
                 "shuffle": "true",
                 "num_workers": "2",
+                "val_size": "0.1",
             },
             "trainer": {
                 "accelerator": "cpu",
                 "devices": devices,
                 "max_steps": "4",
+                "val_check_interval": "2",
             },
         },
     },

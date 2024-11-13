@@ -18,6 +18,7 @@ import pandas as pd
 import scipy
 import torch
 from anndata import AnnData
+from torch.utils._pytree import tree_map
 
 
 @dataclass
@@ -53,7 +54,7 @@ class AnnDataField:
     """
 
     attr: str
-    key: str | None = None
+    key: list[str] | str | None = None
     convert_fn: Callable[[Any], np.ndarray] | None = None
 
     def __call__(self, adata: AnnData) -> np.ndarray:
@@ -69,7 +70,15 @@ class AnnDataField:
         return value
 
 
-def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | torch.Tensor]:
+def convert_to_tensor(value: np.ndarray) -> np.ndarray | torch.Tensor:
+    if np.issubdtype(value.dtype, np.str_) or np.issubdtype(value.dtype, np.object_):
+        return value
+    return torch.tensor(value, device="cpu")
+
+
+def collate_fn(
+    batch: list[dict[str, dict[str, np.ndarray] | np.ndarray]],
+) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
     """
     Collate function for the ``DataLoader``. This function assumes that the batch is a list of
     dictionaries, where each dictionary has the same keys. If the key ends with ``_g`` or
@@ -86,26 +95,30 @@ def collate_fn(batch: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray | tor
         the batch dimension.
     """
     keys = batch[0].keys()
-    collated_batch: dict[str, np.ndarray | torch.Tensor] = {}
-    if len(batch) > 1:
-        if not all(keys == data.keys() for data in batch[1:]):
-            raise ValueError("All dictionaries in the batch must have the same keys.")
+    collated_batch: dict[str, dict[str, np.ndarray] | np.ndarray] = {}
+    if len(batch) > 1 and not all(keys == data.keys() for data in batch[1:]):
+        raise ValueError("All dictionaries in the batch must have the same keys.")
     for key in keys:
         if key.endswith("_g") or key.endswith("_categories"):
             # Check that all values are the same
             if len(batch) > 1:
-                if not all(np.array_equal(batch[0][key], data[key]) for data in batch[1:]):
+                if not all(np.array_equal(batch[0][key], data[key]) for data in batch[1:]):  # type: ignore[arg-type]
                     raise ValueError(f"All dictionaries in the batch must have the same {key}.")
             # If so, just take the first one
             value = batch[0][key]
+        elif isinstance(batch[0][key], dict):
+            if not (key.endswith("_n") or key.endswith("_ng")):
+                raise ValueError(f"Sub-dictionary '{key}' must have a batch dimension (end with '_n' or '_ng').")
+            subkeys = batch[0][key].keys()  # type: ignore[union-attr]
+            if len(batch) > 1 and not all(subkeys == data[key].keys() for data in batch[1:]):  # type: ignore[union-attr]
+                raise ValueError(f"All '{key}' sub-dictionaries in the batch must have the same subkeys.")
+            value = {subkey: np.concatenate([data[key][subkey] for data in batch], axis=0) for subkey in subkeys}
         else:
             value = np.concatenate([data[key] for data in batch], axis=0)
 
-        if not np.issubdtype(value.dtype, np.str_) and not np.issubdtype(value.dtype, np.object_):
-            collated_batch[key] = torch.tensor(value, device="cpu")
-        else:
-            collated_batch[key] = value
-    return collated_batch
+        collated_batch[key] = value
+
+    return tree_map(convert_to_tensor, collated_batch)
 
 
 def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
@@ -121,18 +134,21 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
     return x.toarray()
 
 
-def categories_to_codes(x: pd.Series) -> np.ndarray:
+def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
     """
-    Convert a pandas Series of categorical data to a numpy array of codes.
+    Convert a pandas Series or DataFrame of categorical data to a numpy array of codes.
     Returned array is always a copy.
 
     Args:
-        x: Pandas Series object.
+        x: Pandas Series object or a pandas DataFrame containing multiple categorical Series.
 
     Returns:
         Numpy array.
     """
-    return np.asarray(x.cat.codes)
+    if isinstance(x, pd.DataFrame):
+        return x.apply(lambda col: col.cat.codes).to_numpy()
+    else:
+        return np.asarray(x.cat.codes)
 
 
 def get_categories(x: pd.Series) -> np.ndarray:

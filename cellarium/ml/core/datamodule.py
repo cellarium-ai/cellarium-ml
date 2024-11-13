@@ -36,8 +36,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         ...     batch_size=5000,
         ...     iteration_strategy="cache_efficient",
         ...     shuffle=True,
-        ...     seed=0,
-        ...     drop_last=True,
+        ...     shuffle_seed=0,
+        ...     drop_last_indices=True,
         ...     num_workers=4,
         ... )
         >>> dm.setup()
@@ -60,13 +60,16 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             and workers. ``cache_efficient`` will try to minimize the amount of anndata files fetched by each worker.
         shuffle:
             If ``True``, the data is reshuffled at every epoch.
-        seed:
+        shuffle_seed:
             Random seed used to shuffle the sampler if :attr:`shuffle=True`.
-        drop_last:
+        drop_last_indices:
             If ``True``, then the sampler will drop the tail of the data
             to make it evenly divisible across the number of replicas. If ``False``,
             the sampler will add extra indices to make the data evenly divisible across
             the replicas.
+        drop_incomplete_batch:
+            If ``True``, the dataloader will drop the incomplete batch if the dataset size is not divisible by
+            the batch size.
         train_size:
             Size of the train split. If :class:`float`, should be between ``0.0`` and ``1.0`` and represent
             the proportion of the dataset to include in the train split. If :class:`int`, represents
@@ -77,27 +80,44 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             the proportion of the dataset to include in the validation split. If :class:`int`, represents
             the absolute number of validation samples. If ``None``, the value is set to the complement of
             the ``train_size``. If ``train_size`` is also ``None``, it will be set to ``0``.
+        worker_seed:
+            Random seed used to seed the workers. If ``None``, then the workers will not be seeded.
+            The seed of the individual worker is computed based on the ``worker_seed``, global worker id,
+            and the epoch. Note that the this seed affects ``cpu_transforms`` when they are used.
+            When resuming training, the seed should be set to a different value to ensure that the
+            workers are not seeded with the same seed as the previous run.
         test_mode:
             If ``True`` enables tracking of cache and worker informations.
         num_workers:
             How many subprocesses to use for data loading. ``0`` means that the data will be loaded in the main process.
+        prefetch_factor:
+            Number of batches loaded in advance by each worker. 2 means there will be a total of 2 * num_workers batches
+            prefetched across all workers. (default value depends on the set value for num_workers. If value of
+            ``num_workers=0`` default is ``None``. Otherwise, if value of ``num_workers > 0`` default is ``2``)
+        persistent_workers:
+            If ``True``, the data loader will not shut down the worker processes after a dataset has been consumed once.
+            This allows to maintain the workers ``Dataset`` instances alive.
     """
 
     def __init__(
         self,
         dadc: DistributedAnnDataCollection | AnnData,
         # IterableDistributedAnnDataCollectionDataset args
-        batch_keys: dict[str, AnnDataField] | None = None,
+        batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField] | None = None,
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
-        seed: int = 0,
-        drop_last: bool = False,
+        shuffle_seed: int = 0,
+        drop_last_indices: bool = False,
+        drop_incomplete_batch: bool = False,
         train_size: float | int | None = None,
         val_size: float | int | None = None,
+        worker_seed: int | None = None,
         test_mode: bool = False,
         # DataLoader args
         num_workers: int = 0,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -110,13 +130,17 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.iteration_strategy = iteration_strategy
         self.shuffle = shuffle
-        self.seed = seed
-        self.drop_last = drop_last
+        self.shuffle_seed = shuffle_seed
+        self.drop_last_indices = drop_last_indices
         self.n_train, self.n_val = train_val_split(len(dadc), train_size, val_size)
+        self.worker_seed = worker_seed
         self.test_mode = test_mode
         # DataLoader args
         self.num_workers = num_workers
         self.collate_fn = collate_fn
+        self.drop_incomplete_batch = drop_incomplete_batch
+        self.prefetch_factor = prefetch_factor
+        self.persistent_workers = persistent_workers
 
     def setup(self, stage: str | None = None) -> None:
         """
@@ -134,20 +158,26 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 batch_size=self.batch_size,
                 iteration_strategy=self.iteration_strategy,
                 shuffle=self.shuffle,
-                seed=self.seed,
-                drop_last=self.drop_last,
+                shuffle_seed=self.shuffle_seed,
+                drop_last_indices=self.drop_last_indices,
+                drop_incomplete_batch=self.drop_incomplete_batch,
+                worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
                 start_idx=0,
                 end_idx=self.n_train,
             )
+
+        if stage in {"fit", "validate"}:
             self.val_dataset = IterableDistributedAnnDataCollectionDataset(
                 dadc=self.dadc,
                 batch_keys=self.batch_keys,
                 batch_size=self.batch_size,
                 iteration_strategy="same_order",
                 shuffle=False,
-                seed=self.seed,
-                drop_last=False,
+                shuffle_seed=self.shuffle_seed,
+                drop_last_indices=self.drop_last_indices,
+                drop_incomplete_batch=self.drop_incomplete_batch,
+                worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
                 start_idx=self.n_train,
                 end_idx=self.n_train + self.n_val,
@@ -160,8 +190,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 batch_size=self.batch_size,
                 iteration_strategy=self.iteration_strategy,
                 shuffle=self.shuffle,
-                seed=self.seed,
-                drop_last=self.drop_last,
+                shuffle_seed=self.shuffle_seed,
+                drop_last_indices=self.drop_last_indices,
+                drop_incomplete_batch=self.drop_incomplete_batch,
+                worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
             )
 
@@ -171,6 +203,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.train_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
         )
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -179,6 +213,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.val_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
@@ -187,4 +223,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.predict_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
         )
