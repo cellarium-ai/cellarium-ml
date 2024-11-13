@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from cellarium.ml.layers.attention import MultiHeadAttention
 from cellarium.ml.layers.ffn import PositionWiseFFN
@@ -31,7 +32,7 @@ class TransformerBlock(nn.Module):
         attention_backend:
             Backend for the attention computation.
         attention_softmax_fp32:
-            Whether to use FP32 for the softmax computation.
+            Whether to use FP32 for the softmax computation when ``torch`` backend is used.
         Wqkv_initializer:
             Initializer for the query, key, and value linear transformations.
         Wo_initializer:
@@ -50,7 +51,7 @@ class TransformerBlock(nn.Module):
         n_heads: int,
         dropout_p: float,
         attention_logits_scale: float,
-        attention_backend: Literal["flash", "flex", "math", "mem_efficient", "torch"],
+        attention_backend: Literal["flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
@@ -84,7 +85,7 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        attention_mask_ncc: torch.Tensor,
+        attention_mask_ncc: torch.Tensor | BlockMask,
     ) -> torch.Tensor:
         """
         Args:
@@ -121,6 +122,8 @@ class Transformer(nn.Module):
             Multiplier for the attention scores.
         attention_backend:
             Backend for the attention computation.
+        attention_softmax_fp32:
+            Whether to use FP32 for the softmax computation when ``torch`` backend is used.
         Wqkv_initializer:
             Initializer for the query, key, and value linear transformations.
         Wo_initializer:
@@ -140,7 +143,7 @@ class Transformer(nn.Module):
         n_blocks: int,
         dropout_p: float,
         attention_logits_scale: float,
-        attention_backend: Literal["flash", "flex", "math", "mem_efficient", "torch"],
+        attention_backend: Literal["flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
@@ -178,7 +181,7 @@ class Transformer(nn.Module):
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        attention_mask_ncc: torch.Tensor,
+        attention_mask_ncc: torch.Tensor | BlockMask,
     ) -> torch.Tensor:
         """
         Args:
