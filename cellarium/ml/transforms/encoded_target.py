@@ -18,7 +18,7 @@ class EncodedTargets(nn.Module):
 
     def __init__(
         self,
-        unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
+        unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
     ) -> None:
         super().__init__()
         self.unique_cell_types_nparray = read_pkl_from_gcs(unique_cell_types_nparray_path)
