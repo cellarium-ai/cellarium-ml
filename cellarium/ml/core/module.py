@@ -341,10 +341,25 @@ class CellariumModule(pl.LightningModule):
 
     def on_train_epoch_end(self) -> None:
         """
+        Calls the ``set_resume_step`` method on the iterable dataset of the given dataloader.
+
+        If the dataset is ``IterableDataset`` and has ``set_resume_step`` method defined, then
+        ``set_resume_step`` must be called at the end of every epoch to ensure that the dataset
+        is in the correct state for resuming training.
+
         Calls the ``on_train_epoch_end`` method on the :attr:`model` attribute.
         If the :attr:`model` attribute has ``on_train_epoch_end`` method defined, then
         ``on_train_epoch_end`` must be called at the end of every epoch.
         """
+        combined_loader = self.trainer.fit_loop._combined_loader
+        assert combined_loader is not None
+        dataloaders = combined_loader.flattened
+        for dataloader in dataloaders:
+            dataset = dataloader.dataset
+            set_resume_step = getattr(dataset, "set_resume_step", None)
+            if callable(set_resume_step):
+                set_resume_step(None)
+
         on_train_epoch_end = getattr(self.model, "on_train_epoch_end", None)
         if callable(on_train_epoch_end):
             on_train_epoch_end(self.trainer)
@@ -383,6 +398,24 @@ class CellariumModule(pl.LightningModule):
         if not self._cpu_transforms_in_module_pipeline:
             self.trainer.datamodule.collate_fn = self.trainer.datamodule.collate_fn.first_applied  # type: ignore[attr-defined]
             self._cpu_transforms_in_module_pipeline = True
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        fit_loop = self.trainer.fit_loop
+        epoch_loop = fit_loop.epoch_loop
+        batch_progress = epoch_loop.batch_progress
+        if batch_progress.current.completed < batch_progress.current.processed:  # type: ignore[attr-defined]
+            # Checkpointing is done before these attributes are updated. So, we need to update them manually.
+            checkpoint["loops"]["fit_loop"]["epoch_loop.batch_progress"]["total"]["completed"] += 1
+            checkpoint["loops"]["fit_loop"]["epoch_loop.batch_progress"]["current"]["completed"] += 1
+            if not epoch_loop._should_accumulate():
+                checkpoint["loops"]["fit_loop"]["epoch_loop.state_dict"]["_batches_that_stepped"] += 1
+
+            if batch_progress.is_last_batch:
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["processed"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["processed"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["completed"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["completed"] += 1
+                checkpoint["CellariumAnnDataDataModule"]["epoch"] += 1
 
     def on_train_end(self) -> None:
         """

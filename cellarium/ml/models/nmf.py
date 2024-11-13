@@ -184,7 +184,7 @@ def cal_reconstruction_error(x, alpha_nk, D_kg):
 def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """The `Euclidean distance
     .. math::
-        \ell(x, y) = \frac{1}{2} \sum_{n = 0}^{N - 1} (x_n - y_n)^2
+        \\ell(x, y) = \frac{1}{2} \\sum_{n = 0}^{N - 1} (x_n - y_n)^2
 
     Args:
         input (Tensor): tensor of arbitrary shape
@@ -640,6 +640,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             ), "OnePassMeanVarStd requires that the trainer uses the DDP strategy."
             assert (
                 trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
+                trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
             ), "OnePassMeanVarStd requires that broadcast_buffers is set to False."
         
     def on_end(self, trainer: pl.Trainer) -> None:
@@ -663,6 +664,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         trainer.save_checkpoint(trainer._default_root_dir + "/consensusNMF_predict.ckpt")
     
     def predict(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
