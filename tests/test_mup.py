@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch import nn
 from torchvision import datasets, transforms
 
-from cellarium.ml.models import MuLinear
+from cellarium.ml.layers import MuLinear
 from cellarium.ml.utilities.testing import assert_slope_equals, get_coord_data
 
 optim_dict = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
