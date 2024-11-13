@@ -23,7 +23,7 @@ The code is organized as follows:
 - ``cellarium/ml/models``: Features Cellarium ML models:
   - Models must subclass ``CellariumModel`` and implement the ``.reset_parameters`` method.
   - The ``.forward`` method should return a dictionary containing the computed loss under the ``loss`` key.
-  - Optionally, hooks such as ``.on_train_start``, ``.on_epoch_end``, and ``.on_batch_end`` can be implemented to be triggered by the ``CellariumModule`` during training phases.
+  - Optionally, hooks such as ``.on_train_start``, ``.on_train_epoch_end``, and ``.on_train_batch_end`` can be implemented to be triggered by the ``CellariumModule`` during training phases.
 - ``cellarium/ml/preprocessing``: Provides pre-processing functions.
 - ``cellarium/ml/transforms``: Contains data transformation modules:
   - Each transform is a subclass of ``torch.nn.Module``.
