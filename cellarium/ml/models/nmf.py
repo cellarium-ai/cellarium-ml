@@ -225,7 +225,7 @@ def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=
     kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
     
     silhouette = silhouette_score(D.values, kmeans_cluster_labels, 
-                                  metric='euclidean')
+                                  metric='cosine')
     
     median_D = D.groupby(kmeans_cluster_labels).median()
     median_D = torch.Tensor(median_D.values)
