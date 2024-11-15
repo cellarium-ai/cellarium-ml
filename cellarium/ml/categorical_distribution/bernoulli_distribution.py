@@ -1,27 +1,3 @@
-# Copyright Contributors to the Cellarium project.
-# SPDX-License-Identifier: BSD-3-Clause
-
-# # Copyright Contributors to the Cellarium project.
-# # SPDX-License-Identifier: BSD-3-Clause
-
-# import torch
-# from pyro.distributions import Bernoulli as PyroBernoulli
-# from torch.distributions.utils import broadcast_all
-
-
-# class CustomPyroBernoulli(PyroBernoulli):
-#     def log_prob(self, value):
-#         # Validate inputs (optional, inherited behavior)
-#         if self._validate_args:
-#             self._validate_sample(value)
-
-#         # Broadcast logits and value to compatible shapes
-#         logits, value = broadcast_all(self.logits, value)
-
-#         # Custom log_prob computation
-#         log_probs = value * logits + (1 - value) * (-logits - torch.logsumexp(torch.stack([logits * 0, -logits], dim=0), dim=0))
-#         return log_probs
-
 import torch
 from pyro.distributions.torch_distribution import TorchDistribution
 from torch.distributions import Bernoulli
