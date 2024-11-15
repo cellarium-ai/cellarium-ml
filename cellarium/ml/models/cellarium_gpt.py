@@ -175,7 +175,7 @@ class TrainTokenizer(torch.nn.Module):
         gene_vocab_sizes: dict[str, int],
         metadata_vocab_sizes: dict[str, int],
         ontology_downsample_p: float,
-        ontology_infos: dict[str, dict[str, Any]] | None = None,
+        ontology_infos_path: str,
         prefix_len: int | None = None,
         metadata_prompt_tokens: list[str] | None = None,
         obs_names_rng: bool = False,
@@ -187,8 +187,7 @@ class TrainTokenizer(torch.nn.Module):
         self.max_total_mrna_umis = max_total_mrna_umis
         self.gene_vocab_sizes = gene_vocab_sizes
         self.metadata_vocab_sizes = metadata_vocab_sizes
-        if ontology_infos is None:
-            ontology_infos = torch.load("/mnt/disks/dev/repos/cellarium_gpt/ontology_infos.pt")
+        ontology_infos = torch.load(ontology_infos_path)
         self.ontology_infos = ontology_infos
         self.ontology_downsample_p = ontology_downsample_p
         self.prefix_len = prefix_len
