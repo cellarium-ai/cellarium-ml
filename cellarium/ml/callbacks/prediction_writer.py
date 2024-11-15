@@ -15,6 +15,7 @@ from cellarium.ml.data.fileio import read_pkl_from_gcs
 
 def write_prediction(
     prediction: torch.Tensor,
+    logits: torch.Tensor,
     ids: np.ndarray,
     cell_type_names: np.ndarray,
     query_ids: np.ndarray,
@@ -27,11 +28,12 @@ def write_prediction(
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    df = pd.DataFrame(prediction.cpu(), columns=columns)
+    #df = pd.DataFrame(prediction.cpu(), columns=columns)
+    df = pd.DataFrame(logits.cpu(), columns=columns)
     df.insert(0,"query_cell_type_names", cell_type_names)
     df.insert(0,"query_cell_id", query_ids)
     df.insert(0, "db_ids", ids)
-    output_path = os.path.join(output_dir, f"batch_{postfix}.csv")
+    output_path = os.path.join(output_dir, f"batch_{postfix}_lp.csv")
     df.to_csv(output_path, header=True, index=False)
 
 
@@ -70,8 +72,10 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
     ) -> None:
         columns = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl")
         pred = prediction["cell_type_probs_nc"]
+        logits = prediction["y_logits_nc"]
         if self.prediction_size is not None:
             pred = pred[:, : self.prediction_size]
+            logits = logits[:,: self.prediction_size]
         y_n = batch['y_n'].cpu().numpy()
         #y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
         y_n_cell_type_ids = np.take(columns,y_n)
@@ -79,6 +83,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         y_n_cell_type_names = np.take(cell_type_names,y_n)
         write_prediction(
             prediction=pred,
+            logits=logits,
             #ids=y_n_cell_type_ids,
             cell_type_names = y_n_cell_type_names,
             ids=batch["obs_names_n"],

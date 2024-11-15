@@ -8,7 +8,7 @@ import pyro.distributions as dist
 import torch
 import torch.nn.functional
 
-from cellarium.ml.categorical_distribution import categorical_distribution
+from cellarium.ml.categorical_distribution import bernoulli_distribution, categorical_distribution
 from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
@@ -50,7 +50,9 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         seed: int = 0,
         probability_propagation_flag: bool = False,
         target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
+        #target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human.pkl',
         y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
+        #y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
@@ -68,7 +70,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         if out_distribution == "Categorical":
             self.out_distribution = getattr(categorical_distribution,'Pyro'+out_distribution)
         else:
-            self.out_distribution = getattr(dist,out_distribution)
+            #self.out_distribution = getattr(dist,out_distribution)
+            self.out_distribution = getattr(bernoulli_distribution,'CustomPyro'+out_distribution)
         #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.seed = seed
@@ -136,11 +139,11 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
                 #pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
-                activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
-                activation_out = self.probability_propagation(activation_out_gpu=activation_out)
-                pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
-                #pyro.sample("y", self.out_distribution(logits = propagated_logits).to_event(1), obs=y_n)
-                #pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
+                #activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
+                #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+                #pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
+                #print(f"NIMISH PROPAGATED LOGITS ARE {propagated_logits}")
+                pyro.sample("y", self.out_distribution(logits = propagated_logits).to_event(1), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
@@ -164,7 +167,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         logits_nc = x_ng @ self.W_gc + self.b_c
         activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
         activation_out = self.probability_propagation(activation_out_gpu=activation_out)
-        return {"y_logits_nc": logits_nc,"cell_type_probs_nc": activation_out}
+        # return {"y_logits_nc": logits_nc,"cell_type_probs_nc": activation_out}
+        compiled_propagated_logits = torch.compile(self.log_probs)
+        propagated_logits = compiled_propagated_logits(logits=logits_nc)
+        return {"y_logits_nc": propagated_logits,"cell_type_probs_nc": activation_out}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:
@@ -186,7 +192,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
 
     def probability_propagation(self,activation_out_gpu:torch.tensor) -> torch.tensor:
         """
-        for each column in activation_out_gpu_clone, col, we get a tensor of 
+        for each column in activation_out_gpu_clone, col, we get a tensor of
         activation_out_gpu[:,[children_indices[col]]],
         then we take the rowwise sume of these columns.
         then we add those values with all rows in 'col' column in activation_out_gpu_clone
@@ -251,7 +257,3 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         sum_exp_nc = torch.einsum("nc,kc->nk", exp_values_nc, desc_matrix_cc)
         log_sum_exp_nc = torch.log(sum_exp_nc) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
         return log_sum_exp_nc
-
-
-
-
