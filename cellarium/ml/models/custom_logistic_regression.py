@@ -267,11 +267,11 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     def bernoulli_log_probs(self, logits_nc: torch.Tensor, dim, keepdim=False):
         desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
         max_values_nc = torch.amax(logits_nc,dim=1)
-        exp_values_nc = torch.exp(logits_nc - max_values_nc)
-        #sum_exp_nc_1 = torch.sum(exp_values_nc, dim=1)
-        sum_exp_nc_2 = torch.einsum("nc,kc->nk", exp_values_nc, desc_matrix_cc)
-        log_sum_exp_nc = torch.log(exp_values_nc - sum_exp_nc_2) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
-        logits_prob_b = log_sum_exp_nc - torch.logsumexp(logits_nc,dim=1,keepdim=True)
+        exp_values_nc = torch.exp(logits_nc.T - max_values_nc)
+        sum_exp_nc_1 = torch.sum(exp_values_nc.T, dim=1)
+        sum_exp_nc_2 = torch.einsum("nc,kc->nk", exp_values_nc.T, desc_matrix_cc)
+        log_sum_exp_nc = torch.log(sum_exp_nc_1 - sum_exp_nc_2.T) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
+        logits_prob_b = log_sum_exp_nc.T - torch.logsumexp(logits_nc,dim=1,keepdim=True)
         return logits_prob_b
 
 
