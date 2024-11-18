@@ -139,11 +139,12 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
                 #pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
             elif self.out_distribution == dist.Bernoulli:
+                logits_complement = self.bernoulli_log_probs(logits_nc=logits_nc, dim=0, keepdim=False)
                 #activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
                 #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
                 #pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
                 #print(f"NIMISH PROPAGATED LOGITS ARE {propagated_logits}")
-                pyro.sample("y", self.out_distribution(logits = propagated_logits).to_event(1), obs=y_n)
+                pyro.sample("y", self.out_distribution(logits = propagated_logits,logits_complement=logits_complement).to_event(1), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
@@ -165,11 +166,15 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         logits_nc = x_ng @ self.W_gc + self.b_c
+        #Option 1
         activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
         activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+        #Option 2
         # return {"y_logits_nc": logits_nc,"cell_type_probs_nc": activation_out}
         compiled_propagated_logits = torch.compile(self.log_probs)
         propagated_logits = compiled_propagated_logits(logits=logits_nc)
+
+        #applying softmax to propagated logits
         return {"y_logits_nc": propagated_logits,"cell_type_probs_nc": activation_out}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
@@ -206,6 +211,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         logits = torch Tensor of shape nxc
         step 1: propagated_logits: LSE (L_i) where i belongs to the set of descendents of each column in c and column c
         step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the 2604 classes c in each row (sum of all logits in each row of n before propagation)
+        log(1-p_k') = log{(sum(p_i) i belongs to set(descendents(k)) + p_k)/sum(p_m), m = total cell types}
         step 3: LSE(L_i) - LSE(L_m)
         """
         log_probs = self.logsumexp_propagated(logits,dim=0,keepdim=False) - torch.logsumexp(logits,dim=1,keepdim=True)
@@ -257,3 +263,16 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         sum_exp_nc = torch.einsum("nc,kc->nk", exp_values_nc, desc_matrix_cc)
         log_sum_exp_nc = torch.log(sum_exp_nc) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
         return log_sum_exp_nc
+
+    def bernoulli_log_probs(self, logits_nc: torch.Tensor, dim, keepdim=False):
+        desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
+        max_values_nc = torch.amax(logits_nc,dim=1)
+        exp_values_nc = torch.exp(logits_nc - max_values_nc)
+        #sum_exp_nc_1 = torch.sum(exp_values_nc, dim=1)
+        sum_exp_nc_2 = torch.einsum("nc,kc->nk", exp_values_nc, desc_matrix_cc)
+        log_sum_exp_nc = torch.log(exp_values_nc - sum_exp_nc_2) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
+        logits_prob_b = log_sum_exp_nc - torch.logsumexp(logits_nc,dim=1,keepdim=True)
+        return logits_prob_b
+
+
+

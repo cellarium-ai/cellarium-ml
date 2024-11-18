@@ -28,8 +28,8 @@ def write_prediction(
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    #df = pd.DataFrame(prediction.cpu(), columns=columns)
-    df = pd.DataFrame(logits.cpu(), columns=columns)
+    df = pd.DataFrame(prediction.cpu(), columns=columns)
+    #df = pd.DataFrame(logits.cpu(), columns=columns)
     df.insert(0,"query_cell_type_names", cell_type_names)
     df.insert(0,"query_cell_id", query_ids)
     df.insert(0, "db_ids", ids)
@@ -76,8 +76,10 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         if self.prediction_size is not None:
             pred = pred[:, : self.prediction_size]
             logits = logits[:,: self.prediction_size]
-        y_n = batch['y_n'].cpu().numpy()
-        #y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
+        #y_n = batch['y_n'].cpu().numpy()
+        y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
+        print(f"NIMISH YN TYPE IS {type(y_n)}")
+        print(f"NIMISH Y_N IS {y_n}")
         y_n_cell_type_ids = np.take(columns,y_n)
         cell_type_names = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/ontology_term_id_to_cell_type_np_array.pkl")
         y_n_cell_type_names = np.take(cell_type_names,y_n)
