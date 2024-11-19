@@ -205,7 +205,7 @@ def append_random_control_collection(
     )
 
 
-def compute_function_on_gene_sets(in_gset: set[str], gene_sets: dict[str, set[str]], function: str = 'iou') -> pd.Series:
+def compute_function_on_gene_sets(in_gset: set[str], gene_sets: dict[str, set[str]], func: str = 'iou') -> pd.Series:
     """
     Given a set of genes and a dictionary of gene sets, compute a function measuring something about the overlap 
     between the input set and each predefined gene set.
@@ -213,7 +213,7 @@ def compute_function_on_gene_sets(in_gset: set[str], gene_sets: dict[str, set[st
     Args:
         in_gset: set of gene names
         gene_sets: dictionary of gene set names to set of gene names (e.g. from gp.get_library(name=...))
-        function: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1']
+        func: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1']
 
     Returns:
         pd.Series with the function value for each gene set
@@ -221,7 +221,7 @@ def compute_function_on_gene_sets(in_gset: set[str], gene_sets: dict[str, set[st
     results = {}
     for name, gset in gene_sets.items():
         intersection = len(in_gset.intersection(gset))
-        match function:
+        match func:
             case 'iou':
                 union = len(in_gset.union(gset))  # few extra ms
                 metric = intersection / union
@@ -239,6 +239,6 @@ def compute_function_on_gene_sets(in_gset: set[str], gene_sets: dict[str, set[st
                 # metric = 2 * (precision * recall) / (precision + recall + 1e-10)
                 metric = 2 * intersection / (len(in_gset) + len(gset))  # same as above
             case _:
-                raise ValueError(f"Unknown function {function}")
+                raise ValueError(f"Unknown function {func}")
         results[name] = metric
-    return pd.Series(results, name=function)
+    return pd.Series(results, name=func)

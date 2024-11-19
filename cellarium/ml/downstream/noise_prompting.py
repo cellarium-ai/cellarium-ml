@@ -1254,3 +1254,49 @@ def compute_mde(
     embedding = mde.embed(X=x_init, verbose=True)  # uses the spectral embedding as initialization
 
     return embedding.detach().cpu().numpy()
+
+
+def compute_knn(adata, k: int, obs_gene_key: str = 'perturbation') -> pd.DataFrame:
+    """
+    Compute the k-nearest neighbors graph from an anndata dataset.
+
+    Args:
+        adata: AnnData object
+        k: number of nearest neighbors
+        obs_gene_key: key in adata.obs to use for gene names
+
+    Returns:
+        DataFrame where each row is an edge of the k-nearest neighbors graph
+    """
+    try:
+        import pymde.preprocess
+    except ImportError:
+        raise ImportError('pymde must be installed to run compute_knn. do `pip install pymde`')
+
+    graph = pymde.preprocess.k_nearest_neighbors(adata.X, k=k)
+    lookup = dict(zip(range(len(adata)), adata.obs[obs_gene_key].values))
+    return pd.DataFrame(graph.edges).map(lambda x: lookup[x])
+
+
+def compute_knn_dict(adata, k: int, obs_gene_key: str = 'perturbation') -> dict:
+    """
+    Compute the k-nearest neighbors graph from an anndata dataset.
+
+    Args:
+        adata: AnnData object
+        k: number of nearest neighbors
+        obs_gene_key: key in adata.obs to use for gene names
+
+    Returns:
+        Dictionary where each key is a node and the value is a list of neighbors
+    """
+    d = {gene: set() for gene in adata.obs[obs_gene_key].unique()}
+    df = compute_knn(adata, k=k, obs_gene_key=obs_gene_key)
+    for r in df.iterrows():
+        gene1 = r[1][0]
+        gene2 = r[1][1]
+        if gene1 == gene2:
+            continue
+        d[gene1].add(gene2)
+        d[gene2].add(gene1)
+    return d
