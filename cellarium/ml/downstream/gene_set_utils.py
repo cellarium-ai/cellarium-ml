@@ -3,6 +3,7 @@
 from gseapy.algorithm import enrichment_score, gsea_pval
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 import io
 
 
@@ -242,3 +243,37 @@ def compute_function_on_gene_sets(in_gset: set[str], gene_sets: dict[str, set[st
                 raise ValueError(f"Unknown function {func}")
         results[name] = metric
     return pd.Series(results, name=func)
+
+
+def compute_top_gene_set_per_gene(neighbor_lookup: dict[str, set[str]], gene_sets: dict[str, set[str]], func: str = 'iou') -> dict[str, str]:
+    """
+    For each gene in neighbor_lookup.keys(), compute the gene set with the highest metric over all the gene sets.
+    Calls compute_function_on_gene_sets()
+
+    Example:
+        import gseapy as gp
+        from cellarium.ml.downstream.noise_prompting import compute_knn_dict
+        gene_sets = gp.get_library('Reactome_2022')
+        neighbor_lookup = compute_knn_dict(adata_tpm, k=3, obs_gene_key='perturbation')
+        best_gene_sets = compute_top_gene_set_per_gene(neighbor_lookup, gene_sets, func='iou')
+
+    Args:
+        neighbor_lookup: dictionary of gene names to set of gene names
+        gene_sets: dictionary of gene set names to set of gene names
+        func: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1']
+
+    Returns:
+        dictionary of gene names to top gene set names
+    """
+
+    best_gene_sets = {}
+
+    for gene in tqdm(neighbor_lookup.keys()):
+        top_gene_set = compute_function_on_gene_sets(
+            in_gset=neighbor_lookup[gene],
+            gene_sets=gene_sets,
+            func=func,
+        ).sort_values(ascending=False).index[0]
+        best_gene_sets |= {gene: top_gene_set}
+
+    best_gene_sets
