@@ -52,8 +52,6 @@ data:
       attr: var_names
   batch_size: 1028
   shuffle: true
-  seed: 0
-  drop_last: true
   test_mode: false
   num_workers: 4
 ckpt_path: null
