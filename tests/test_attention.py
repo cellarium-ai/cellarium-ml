@@ -12,7 +12,8 @@ from tests.common import USE_CUDA
 
 
 @pytest.mark.skipif(not USE_CUDA, reason="requires_cuda")
-def test_attention():
+@pytest.mark.parametrize("mask_type", ["causal", "random"])
+def test_attention(mask_type: Literal["causal", "random"]):
     n = 8
     c = 10
     d_model = 64
@@ -40,19 +41,35 @@ def test_attention():
     outputs = {}
 
     x = torch.randn(n, c, d_model).cuda()
-    causal_mask: torch.Tensor | BlockMask = torch.tril(torch.ones(n, c, c)).bool().cuda()
-    outputs["torch"] = attention(x, x, x, causal_mask)
+    attention_mask: torch.Tensor | BlockMask
+    if mask_type == "random":
+        attention_mask = random_tensor = torch.randint(0, 2, (n, c, c)).bool().cuda()
+    elif mask_type == "causal":
+        attention_mask = torch.tril(torch.ones(n, c, c)).bool().cuda()
+    outputs["torch"] = attention(x, x, x, attention_mask)
 
     for attention_backend in ["flex", "math", "mem_efficient"]:  # type: ignore[assignment]
         attention.attention_backend = attention_backend
         if attention_backend == "flex":
+            if mask_type == "random":
 
-            def causal_mask_mod(b, h, q_idx, kv_idx):
-                return q_idx >= kv_idx
+                def random_mask_mod(b, h, q_idx, kv_idx):
+                    return random_tensor[b, q_idx, kv_idx]
 
-            causal_mask = create_block_mask(causal_mask_mod, B=None, H=None, Q_LEN=c, KV_LEN=c)
+                attention_mask = create_block_mask(random_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c, BLOCK_SIZE=c)
+
+            elif mask_type == "causal":
+
+                def causal_mask_mod(b, h, q_idx, kv_idx):
+                    return q_idx >= kv_idx
+
+                attention_mask = create_block_mask(causal_mask_mod, B=None, H=None, Q_LEN=c, KV_LEN=c, BLOCK_SIZE=c)
+
         else:
-            causal_mask = torch.tril(torch.ones(n, c, c)).bool().cuda()
-        outputs[attention_backend] = attention(x, x, x, causal_mask)
+            if mask_type == "random":
+                attention_mask = random_tensor
+            else:
+                attention_mask = torch.tril(torch.ones(n, c, c)).bool().cuda()
+        outputs[attention_backend] = attention(x, x, x, attention_mask)
         assert outputs[attention_backend].shape == (n, c, d_model)
         assert torch.allclose(outputs[attention_backend], outputs["torch"])
