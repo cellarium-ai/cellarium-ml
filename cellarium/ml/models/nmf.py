@@ -421,7 +421,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             getattr(self, f"full_B_{i}_kg").zero_()
             getattr(self, f"full_D_{i}_kg").uniform_(0.0, 2.0) # TODO: figure out best initialization
 
-    def online_dictionary_learning(self, x_ng: torch.Tensor, factors_kg: torch.Tensor) -> torch.Tensor:
+    def online_dictionary_learning(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor) -> torch.Tensor:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
@@ -430,11 +430,11 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         """
 
         n, g = x_ng.shape
-        r = factors_kg.shape[0]
-        k = factors_kg.shape[1]
+        r = factors_rkg.shape[0]
+        k = factors_rkg.shape[1]
 
         # updata alpha
-        alpha_rnk = torch.zeros((r, n, k), requires_grad=True, device=factors_kg.device)
+        alpha_rnk = torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)
         alpha_rnk = self.solve_alpha_wKL(alpha_rnk, x_ng, 100)
 
         # update D
@@ -448,7 +448,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             setattr(self, f"A_{k}_rkk", A_rkk)
             setattr(self, f"B_{k}_rkg", B_rkg)
 
-            updated_factors_kg = self.dictionary_update_3d(factors_kg, 100)
+            # compiled_dictionary_update_3d = torch.compile(self.dictionary_update_3d)
+            # updated_factors_kg = compiled_dictionary_update_3d(factors_rkg, 100)
+            updated_factors_kg = self.dictionary_update_3d(factors_rkg, 100)
 
         return updated_factors_kg
 
@@ -495,18 +497,18 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         return alpha_rnk.exp().detach()
 
     # @cuda.jit
-    def dictionary_update_3d(self, factors_kg: torch.Tensor, n_iterations: int = 1) -> torch.Tensor:
+    def dictionary_update_3d(self, factors_rkg: torch.Tensor, n_iterations: int = 1) -> torch.Tensor:
         """
         Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
 
         Args:
-            factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
+            factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
             n_iterations: The number of iterations to perform.
         """
 
-        i = factors_kg.shape[1]
-        D_buffer = factors_kg.clone()
-        updated_factors_kg = factors_kg.clone()
+        i = factors_rkg.shape[1]
+        D_buffer = factors_rkg.clone()
+        updated_factors_kg = factors_rkg.clone()
 
         for _ in range(n_iterations):
             for k in range(i):
@@ -565,7 +567,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
             for i in self.k_range:
                 D_rkg = getattr(self, f"D_{i}_rkg")
-                D_rkg = self.online_dictionary_learning(x_ng=x_, factors_kg=D_rkg)
+                D_rkg = self.online_dictionary_learning(x_ng=x_, factors_rkg=D_rkg)
                 setattr(self, f"D_{i}_rkg", D_rkg)
 
         else:
