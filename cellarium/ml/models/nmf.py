@@ -117,7 +117,7 @@ def update_consensusD(
         D_rkg = getattr(pipeline[-1], f"D_{k}_rkg")
         consensus_output = consensus(D_rkg=D_rkg, k=k,
                                      density_threshold=density_threshold,
-                                     local_neighborhood_size=density_threshold)
+                                     local_neighborhood_size=local_neighborhood_size)
         setattr(pipeline[-1], f"D_{k}_kg", consensus_output['consensus_D'])
 
         consensus_stat[k] = consensus_output
