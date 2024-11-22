@@ -1,7 +1,7 @@
-# lightning.pytorch==2.2.1
+# lightning.pytorch==2.4.0
 seed_everything: true
 trainer:
-  accelerator: cpu
+  accelerator: auto
   strategy: auto
     # class_path: lightning.pytorch.strategies.DDPStrategy
     # dict_kwargs:
@@ -16,6 +16,9 @@ trainer:
     init_args:
       logging_interval: step
       log_momentum: false
+  - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
+    init_args:
+      cpu_stats: true
   # - class_path: lightning.pytorch.callbacks.EarlyStopping
   #   init_args:
   #     monitor: train_loss
