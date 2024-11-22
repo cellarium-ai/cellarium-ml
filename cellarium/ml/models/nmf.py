@@ -697,17 +697,17 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             # rf_pred = torch.matmul(alpha_nk, self.D_kg)
             # prediction_error = ((x_ - rf_pred)**2).sum().sum()
 
-            # ## get the final D for full transcrptome
-            # x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
-            # x_ = torch.log1p(x_ng)
-            # A_kk = getattr(self, f"full_A_{k}_kk")
-            # B_kg = getattr(self, f"full_B_{k}_kg")
-            # full_D_kg = getattr(self, f"full_D_{k}_kg")
-            # A, B, D = get_full_D(x_, alpha_nk, A_kk, B_kg, full_D_kg, 100)
+            ## get the final D for full transcrptome
+            x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
+            x_ = torch.log1p(x_ng)
+            A_kk = getattr(self, f"full_A_{k}_kk")
+            B_kg = getattr(self, f"full_B_{k}_kg")
+            full_D_kg = getattr(self, f"full_D_{k}_kg")
+            A, B, D = get_full_D(x_, alpha_nk, A_kk, B_kg, full_D_kg, 100)
 
-            # setattr(self, f"full_A_{k}_kk", A)
-            # setattr(self, f"full_B_{k}_kg", B)
-            # setattr(self, f"full_D_{k}_kg", D)
+            setattr(self, f"full_A_{k}_kk", A)
+            setattr(self, f"full_B_{k}_kg", B)
+            setattr(self, f"full_D_{k}_kg", D)
 
             return {"alpha_nk": alpha_nk} # , "pred_count": rf_pred
 
