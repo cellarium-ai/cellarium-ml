@@ -30,7 +30,6 @@ warnings.filterwarnings("ignore")
 def calculate_rec_error(
     dataset, # : IterableDistributedAnnDataCollectionDataset,
     pipeline, # : CellariumPipeline,
-    maximum_anndata_files_to_download: int = 5,
 ) -> anndata.AnnData:
     """
     Embed the dataset using the pipeline.
@@ -38,20 +37,14 @@ def calculate_rec_error(
     Args:
         dataset: Dataset.
         pipeline: Pipeline.
-        maximum_anndata_files_to_download: Maximum number of anndata files to download.
 
     Returns:
         reconstruction error
     """
 
     k_range = pipeline[-1].k_range
-    pipeline[-1].get_rec_error=True
+    pipeline[-1].get_rec_error = True
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    # get the anndata object
-    adatas = [dataset.dadc.adatas[i].adata for i in range(min(maximum_anndata_files_to_download,
-                                                              len(dataset.dadc.adatas)))]
-    adata = anndata.concat(adatas, axis=0, merge="same")
 
     rec_error = np.zeros((len(k_range),1)).astype('float64')
     for batch in tqdm.tqdm(dataset):
@@ -62,46 +55,40 @@ def calculate_rec_error(
 
     return rec_error
 
-def get_embeddding(
+
+def get_embedding(
     dataset, # : IterableDistributedAnnDataCollectionDataset,
     pipeline, # : CellariumPipeline,
-    obsm_key_added: str = 'X_nmf',
-    maximum_anndata_files_to_download: int = 5,
-    the_best_k=20
-) -> anndata.AnnData:
+    k: int,
+) -> pd.DataFrame:
     """
     Embed the dataset using the pipeline.
 
     Args:
         dataset: Dataset.
         pipeline: Pipeline.
-        maximum_anndata_files_to_download: Maximum number of anndata files to download.
-        the_best_k: select the K to get cell embedding.
+        k: select the K to get cell embedding.
 
     Returns:
-        AnnData with cell embeddings in adata.obsm[obsm_key_added]
+        pd.DataFrame with cell embeddings indexed by adata.obs_names from dataset.
     """
 
-    pipeline[-1].get_rec_error=False
-    pipeline[-1].the_best_k=20
+    pipeline[-1].get_rec_error = False
+    pipeline[-1].the_best_k = k
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # get the anndata object
-    adatas = [dataset.dadc.adatas[i].adata for i in range(min(maximum_anndata_files_to_download,
-                                                              len(dataset.dadc.adatas)))]
-    adata = anndata.concat(adatas, axis=0, merge="same")
-
     embedding = []
+    index = []
     for batch in tqdm.tqdm(dataset):
 
         batch['x_ng'] = torch.from_numpy(batch['x_ng']).to(device)
         out = pipeline.predict(batch)
         z = out['alpha_nk']
         embedding += [z.cpu()]
+        index.extend(batch['obs_names_n'])
 
-    adata.obsm[obsm_key_added] = np.asarray(torch.cat(embedding))
+    return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
 
-    return adata
 
 def update_consensusD(
     pipeline,
@@ -434,7 +421,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             getattr(self, f"full_B_{i}_kg").zero_()
             getattr(self, f"full_D_{i}_kg").uniform_(0.0, 2.0) # TODO: figure out best initialization
 
-    def online_dictionary_learning(self, x_ng: torch.Tensor, factors_kg: torch.Tensor) -> torch.Tensor:
+    def online_dictionary_learning(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor) -> torch.Tensor:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
@@ -443,11 +430,11 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         """
 
         n, g = x_ng.shape
-        r = factors_kg.shape[0]
-        k = factors_kg.shape[1]
+        r = factors_rkg.shape[0]
+        k = factors_rkg.shape[1]
 
         # updata alpha
-        alpha_rnk = torch.zeros((r, n, k), requires_grad=True, device=factors_kg.device)
+        alpha_rnk = torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)
         alpha_rnk = self.solve_alpha_wKL(alpha_rnk, x_ng, 100)
 
         # update D
@@ -461,7 +448,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             setattr(self, f"A_{k}_rkk", A_rkk)
             setattr(self, f"B_{k}_rkg", B_rkg)
 
-            updated_factors_kg = self.dictionary_update_3d(factors_kg, 100)
+            # compiled_dictionary_update_3d = torch.compile(self.dictionary_update_3d)
+            # updated_factors_kg = compiled_dictionary_update_3d(factors_rkg, 100)
+            updated_factors_kg = self.dictionary_update_3d(factors_rkg, 100)
 
         return updated_factors_kg
 
@@ -508,18 +497,18 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         return alpha_rnk.exp().detach()
 
     # @cuda.jit
-    def dictionary_update_3d(self, factors_kg: torch.Tensor, n_iterations: int = 1) -> torch.Tensor:
+    def dictionary_update_3d(self, factors_rkg: torch.Tensor, n_iterations: int = 1) -> torch.Tensor:
         """
         Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
 
         Args:
-            factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
+            factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
             n_iterations: The number of iterations to perform.
         """
 
-        i = factors_kg.shape[1]
-        D_buffer = factors_kg.clone()
-        updated_factors_kg = factors_kg.clone()
+        i = factors_rkg.shape[1]
+        D_buffer = factors_rkg.clone()
+        updated_factors_kg = factors_rkg.clone()
 
         for _ in range(n_iterations):
             for k in range(i):
@@ -578,7 +567,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
             for i in self.k_range:
                 D_rkg = getattr(self, f"D_{i}_rkg")
-                D_rkg = self.online_dictionary_learning(x_ng=x_, factors_kg=D_rkg)
+                D_rkg = self.online_dictionary_learning(x_ng=x_, factors_rkg=D_rkg)
                 setattr(self, f"D_{i}_rkg", D_rkg)
 
         else:
@@ -708,17 +697,17 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             # rf_pred = torch.matmul(alpha_nk, self.D_kg)
             # prediction_error = ((x_ - rf_pred)**2).sum().sum()
 
-            ## get the final D for full transcrptome
-            x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
-            x_ = torch.log1p(x_ng)
-            A_kk = getattr(self, f"full_A_{k}_kk")
-            B_kg = getattr(self, f"full_B_{k}_kg")
-            full_D_kg = getattr(self, f"full_D_{k}_kg")
-            A, B, D = get_full_D(x_, alpha_nk, A_kk, B_kg, full_D_kg, 100)
+            # ## get the final D for full transcrptome
+            # x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
+            # x_ = torch.log1p(x_ng)
+            # A_kk = getattr(self, f"full_A_{k}_kk")
+            # B_kg = getattr(self, f"full_B_{k}_kg")
+            # full_D_kg = getattr(self, f"full_D_{k}_kg")
+            # A, B, D = get_full_D(x_, alpha_nk, A_kk, B_kg, full_D_kg, 100)
 
-            setattr(self, f"full_A_{k}_kk", A)
-            setattr(self, f"full_B_{k}_kg", B)
-            setattr(self, f"full_D_{k}_kg", D)
+            # setattr(self, f"full_A_{k}_kk", A)
+            # setattr(self, f"full_B_{k}_kg", B)
+            # setattr(self, f"full_D_{k}_kg", D)
 
             return {"alpha_nk": alpha_nk} # , "pred_count": rf_pred
 
