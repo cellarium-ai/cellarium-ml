@@ -60,6 +60,7 @@ def get_embedding(
     dataset, # : IterableDistributedAnnDataCollectionDataset,
     pipeline, # : CellariumPipeline,
     k: int,
+    if_get_final_gene_loading: True,
 ) -> pd.DataFrame:
     """
     Embed the dataset using the pipeline.
@@ -72,7 +73,8 @@ def get_embedding(
     Returns:
         pd.DataFrame with cell embeddings indexed by adata.obs_names from dataset.
     """
-
+    
+    pipeline[-1].if_get_full_D = if_get_final_gene_loading
     pipeline[-1].get_rec_error = False
     pipeline[-1].the_best_k = k
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -376,6 +378,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.k_range = k_range
         self.the_best_k = k_range[0] # default and has to be reassigned
         self.get_rec_error = True
+        self.if_get_full_D = False
 
         # self.A_rkk: torch.Tensor
         # self.B_rkg: torch.Tensor
@@ -661,7 +664,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         transform = Filter(self.var_names_hvg)
         x_filtered_ng = transform(x_ng, var_names_g)
-
+        
         ## get the final alpha_nk
         if self.log_variational:
             x_ = torch.log1p(x_filtered_ng['x_ng'])
@@ -669,7 +672,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             std = torch.std(x_filtered_ng['x_ng'], dim=0) + 1e-4
             x_ = x_filtered_ng['x_ng'] / std
             x_ = torch.clamp(x_, min=0.0, max=100.0)
-
 
         if self.get_rec_error:
             rec_error = {}
@@ -692,22 +694,19 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             # with torch.set_grad_enabled(True):
             alpha_nk = get_final_alpha_wKL(x_ng=x_, D=D_kg.to(x_.device), n_iterations=1000)
             # alpha_nk = get_final_alpha(x_ng=x_, D=self.D_kg, n_iterations=1000)
-
-            # Compute prediction error as a frobenius norm
-            # rf_pred = torch.matmul(alpha_nk, self.D_kg)
-            # prediction_error = ((x_ - rf_pred)**2).sum().sum()
-
+            
             ## get the final D for full transcrptome
-            x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
-            x_ = torch.log1p(x_ng)
-            A_kk = getattr(self, f"full_A_{k}_kk")
-            B_kg = getattr(self, f"full_B_{k}_kg")
-            full_D_kg = getattr(self, f"full_D_{k}_kg")
-            A, B, D = get_full_D(x_, alpha_nk, A_kk, B_kg, full_D_kg, 100)
+            if self.if_get_full_D:
+                x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
+                x_ = torch.log1p(x_ng)
+                A_kk = getattr(self, f"full_A_{k}_kk")
+                B_kg = getattr(self, f"full_B_{k}_kg")
+                full_D_kg = getattr(self, f"full_D_{k}_kg")
+                A, B, D = get_full_D(x_, alpha_nk, A_kk, B_kg, full_D_kg, 100)
 
-            setattr(self, f"full_A_{k}_kk", A)
-            setattr(self, f"full_B_{k}_kg", B)
-            setattr(self, f"full_D_{k}_kg", D)
+                setattr(self, f"full_A_{k}_kk", A)
+                setattr(self, f"full_B_{k}_kg", B)
+                setattr(self, f"full_D_{k}_kg", D)
 
             return {"alpha_nk": alpha_nk} # , "pred_count": rf_pred
 
