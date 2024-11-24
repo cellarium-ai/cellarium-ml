@@ -11,7 +11,7 @@ from cellarium.ml.data.fileio import read_pkl_from_gcs
 
 class EncodedTargets(nn.Module):
     """
-    when called, assigns multilabel targets. All parents of the target cell type get assigned as targets. 
+    when called, assigns multilabel targets. All parents of the target cell type get assigned as targets.
     """
 
     def __init__(

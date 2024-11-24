@@ -1,6 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+
+
+
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -16,6 +19,7 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
+pyro.enable_validation(True)
 
 class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     """
@@ -50,9 +54,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         seed: int = 0,
         probability_propagation_flag: bool = False,
         target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
-        #target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human.pkl',
         y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
-        #y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
@@ -61,7 +63,6 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.n_obs = n_obs
         self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
-        #self.y_categories = y_categories
         self.y_categories = read_pkl_from_gcs(y_categories_path)
         self.target_row_descendent_col_torch_tensor = read_pkl_from_gcs(target_row_descendent_col_torch_tensor_path)
         self.n_categories = len(self.y_categories)
@@ -70,9 +71,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         if out_distribution == "Categorical":
             self.out_distribution = getattr(categorical_distribution,'Pyro'+out_distribution)
         else:
-            #self.out_distribution = getattr(dist,out_distribution)
             self.out_distribution = getattr(bernoulli_distribution,'CustomPyro'+out_distribution)
-        #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.seed = seed
         # parameters
@@ -114,10 +113,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         Returns:
             A dictionary with the loss value.
         """
-        #y_n = y_n.to(self.device)
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        #assert_arrays_equal("y_categories", y_categories, "self.y_categories", self.y_categories)
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
         return {"loss": loss}
 
@@ -130,21 +127,15 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             logits_nc = x_ng @ W_gc + self.b_c
             compiled_propagated_logits = torch.compile(self.log_probs)
             propagated_logits = compiled_propagated_logits(logits=logits_nc)
-            #activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
-            #if (self.probability_propagation_flag==1):
-                #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+
             if self.out_distribution == categorical_distribution.PyroCategorical:
-                #compiled_propagated_logits = torch.compile(self.log_probs)
-                #propagated_logits = compiled_propagated_logits(logits=logits_nc)
                 pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
-                #pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
-            elif self.out_distribution == dist.Bernoulli:
-                logits_complement = self.bernoulli_log_probs(logits_nc=logits_nc, dim=0, keepdim=False)
-                #activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
-                #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
-                #pyro.sample("y", self.out_distribution(probs=activation_out).to_event(1), obs=y_n)
-                #print(f"NIMISH PROPAGATED LOGITS ARE {propagated_logits}")
-                pyro.sample("y", self.out_distribution(logits = propagated_logits,logits_complement=logits_complement).to_event(1), obs=y_n)
+            elif self.out_distribution == bernoulli_distribution.CustomPyroBernoulli:
+                logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)
+                pyro.sample("y", self.out_distribution(
+                    log_prob_tensor = propagated_logits,
+                    log1m_prob_tensor=torch.clamp(logits_complement,min=-100),
+                    ).to_event(1), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
@@ -203,76 +194,42 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         then we add those values with all rows in 'col' column in activation_out_gpu_clone
         TRIAL CODE AVAILABLE IN TRIAL.IPYNB - PROBABILITY PROPAGATION CODE TRIAL
         """
-        propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device))
+        propagated_p = torch.einsum(
+            "nc,kc->nk", activation_out_gpu,
+            self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device),
+            )
         return torch.clamp(propagated_p, max=1.0)
 
     def log_probs(self, logits: torch.Tensor):
         """
         logits = torch Tensor of shape nxc
-        step 1: propagated_logits: LSE (L_i) where i belongs to the set of descendents of each column in c and column c
-        step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the 2604 classes c in each row (sum of all logits in each row of n before propagation)
+        step 1: propagated_logits: LSE (L_i) where i belongs to the
+        set of descendents of each column in c and column c
+        step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the
+        2604 classes c in each row (sum of all logits in each row of n before propagation)
         log(1-p_k') = log{(sum(p_i) i belongs to set(descendents(k)) + p_k)/sum(p_m), m = total cell types}
         step 3: LSE(L_i) - LSE(L_m)
         """
-        log_probs = self.logsumexp_propagated(logits,dim=0,keepdim=False) - torch.logsumexp(logits,dim=1,keepdim=True)
+        log_probs = self.logsumexp_propagated(logits) - torch.logsumexp(logits,dim=1,keepdim=True)
         return log_probs
 
-    #  OPTION 1
-    # def logsumexp_propagated(self, logits: torch.Tensor, dim, keepdim=False):
-    #     desc_matrix = self.target_row_descendent_col_torch_tensor.to(device=logits.device, dtype = torch.float)
-    #     desc_matrix_1 = torch.where(desc_matrix == 0, float('-inf'), desc_matrix)
-
-    #     #max_values = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
-    #     log_sum_exp_nc = torch.empty((logits.shape[0], logits.shape[1])).to(device=logits.device)
-    #     chunk_size=2
-    #     # Loop through each row in `b` to get the corresponding masked maximum
-
-    #     for i in range(0,logits.shape[0],chunk_size):
-    #         with torch.no_grad():
-    #             max_values_chc = torch.amax(torch.nan_to_num(masked_values_chcc,float('-inf')), dim=2)
-    #         exp_values = torch.exp(logits[i:i+chunk_size,:] - max_values_chc)
-    #         sum_exp = torch.einsum("nc,kc->nk", exp_values, desc_matrix)
-    #         log_sum_exp = torch.log(sum_exp) + max_values_chc if not keepdim else max_values_chc
-    #         log_sum_exp_nc[i:i+chunk_size,:] = log_sum_exp
-    #     return log_sum_exp_nc
-
-    # OPTION 2
-    # def logsumexp_propagated(self, logits_nc: torch.Tensor, dim, keepdim=False):
-    #     max_values_nc = torch.empty((logits_nc.shape[0], logits_nc.shape[1])).to(device=logits_nc.device)
-    #     desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
-    #     with torch.no_grad():
-    #         for i,row in enumerate(desc_matrix_cc):
-    #             masked_logits_nc = torch.where(row.to(dtype=torch.bool), logits_nc, float('-inf'))
-    #             max_values_nc[:,i] = torch.max(masked_logits_nc, dim=1).values.T
-    #     exp_values_nc = torch.exp(logits_nc - max_values_nc)
-
-    #     # Sum the exponentials using einsum
-    #     sum_exp_nc = torch.einsum("nc,kc->nk", exp_values_nc, desc_matrix_cc)
-    #     #sum_exp_sparse = torch.sparse.mm( exp_values_nc, desc_matrix_cc_sparse.T)
-
-    #     log_sum_exp_nc = torch.log(sum_exp_nc) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
-    #     return log_sum_exp_nc
-
-    # OPTION 3
-    def logsumexp_propagated(self, logits_nc: torch.Tensor, dim, keepdim=False):
+    # OPTION 4
+    def logsumexp_propagated(self,logits_nc):
+        # matrix multiplication for torch where replacement/optimization
         desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
-        desc_matrix_1 = torch.where(desc_matrix_cc == 0, float('-inf'), desc_matrix_cc)
-        with torch.no_grad():
-            max_values_nc = torch.amax(torch.nan_to_num(logits_nc.unsqueeze(1) * desc_matrix_1.unsqueeze(0), nan=float('-inf'), posinf=float('-inf'), neginf=float('-inf')),dim=2)
-        exp_values_nc = torch.exp(logits_nc - max_values_nc)
-        sum_exp_nc = torch.einsum("nc,kc->nk", exp_values_nc, desc_matrix_cc)
-        log_sum_exp_nc = torch.log(sum_exp_nc) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
-        return log_sum_exp_nc
+        temp = torch.where(
+            desc_matrix_cc.T == 0,
+            float('-inf'),
+            logits_nc.unsqueeze(dim=-1)*desc_matrix_cc.T)
+        return temp.logsumexp(dim=1)
 
-    def bernoulli_log_probs(self, logits_nc: torch.Tensor, dim, keepdim=False):
-        desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
-        max_values_nc = torch.amax(logits_nc,dim=1)
-        exp_values_nc = torch.exp(logits_nc.T - max_values_nc)
-        sum_exp_nc_1 = torch.sum(exp_values_nc.T, dim=1)
-        sum_exp_nc_2 = torch.einsum("nc,kc->nk", exp_values_nc.T, desc_matrix_cc)
-        log_sum_exp_nc = torch.log(sum_exp_nc_1 - sum_exp_nc_2.T) + max_values_nc.squeeze(dim) if not keepdim else max_values_nc
-        logits_prob_b = log_sum_exp_nc.T - torch.logsumexp(logits_nc,dim=1,keepdim=True)
-        return logits_prob_b
-
-
-
+    def bernoulli_log_probs(self, propagated_logits: torch.Tensor):
+        LN_HALF = -0.6931471805599453
+        logp_zero_capped = torch.minimum(torch.zeros_like(propagated_logits), propagated_logits)
+        result = torch.where(
+            logp_zero_capped >= LN_HALF,
+            torch.clamp(torch.log(-torch.expm1(logp_zero_capped)),min=-100),  # For logp >= LN_HALF
+            #torch.clamp(torch.log(-torch.expm1(logp_zero_capped)),min=-100),
+            torch.clamp(torch.log1p(-torch.exp(logp_zero_capped)),min=-100)  # For logp < LN_HALF
+        )
+        return result
