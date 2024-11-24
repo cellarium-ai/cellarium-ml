@@ -19,7 +19,6 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
-pyro.enable_validation(True)
 
 class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     """
@@ -53,8 +52,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         out_distribution: str = 'Categorical',
         seed: int = 0,
         probability_propagation_flag: bool = False,
-        target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
+        #target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
+        target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human.pkl',
+        #y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
