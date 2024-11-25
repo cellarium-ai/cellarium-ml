@@ -20,27 +20,22 @@ class CustomPyroBernoulli(TorchDistribution):
             log1m_prob_tensor (torch.Tensor): Logarithm of the complement of probabilities.
             validate_args (bool): Whether to validate input arguments.
         """
-        self.log_prob_tensor = log_prob_tensor
-        self.log1m_prob_tensor = log1m_prob_tensor
-        self.logits = log_prob_tensor - log1m_prob_tensor  # For compatibility, not used directly
         batch_shape = torch.broadcast_shapes(log_prob_tensor.shape, log1m_prob_tensor.shape)
+        self.log_prob_tensor = torch.clamp(log_prob_tensor,max=-1e-7,min=-100) #torch BCELoss clamps to min of -100
+        self.log1m_prob_tensor = torch.clamp(log1m_prob_tensor,min=-100) #torch BCELoss clamps to min of -100
         super().__init__(batch_shape, validate_args=validate_args)
 
     def log_prob(self, value):
         if self._validate_args:
             self._validate_sample(value)
         # Use log_prob_tensor for 1 and log1m_prob_tensor for 0
-        temp = torch.where(value == 1, torch.clamp(self.log_prob_tensor,min=-100,max=100),
-                           torch.clamp(self.log1m_prob_tensor,min=-100,max=100))
-        if torch.isnan(temp).any() or torch.isinf(temp).any():
-            print("NAN OR INF IN TEMP")
-        return torch.where(value == 1, torch.clamp(self.log_prob_tensor,min=-100,max=100),
-                           torch.clamp(self.log1m_prob_tensor,min=-100,max=100))
+        return torch.where(value == 1,
+                           self.log_prob_tensor,
+                           self.log1m_prob_tensor)
 
     def entropy(self):
-        # Compute probabilities from log_prob_tensor and log1m_prob_tensor
         p = self.log_prob_tensor.exp()  # Probability for event = 1
-        p1m = self.log1m_prob_tensor.exp()  # Probability for event = 0 (1-p)
+        p1m = 1-p  # Probability for event = 0 (1-p)
         # Calculate entropy: H = -p * log(p) - (1-p) * log(1-p)
         return -(p * self.log_prob_tensor + p1m * self.log1m_prob_tensor)
 

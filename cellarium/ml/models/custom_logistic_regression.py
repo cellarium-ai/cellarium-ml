@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-
-
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -52,10 +50,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         out_distribution: str = 'Categorical',
         seed: int = 0,
         probability_propagation_flag: bool = False,
-        #target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
-        target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human.pkl',
-        #y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
+        target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
@@ -135,7 +131,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)
                 pyro.sample("y", self.out_distribution(
                     log_prob_tensor = propagated_logits,
-                    log1m_prob_tensor=torch.clamp(logits_complement,min=-100),
+                    log1m_prob_tensor=logits_complement,
                     ).to_event(1), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
@@ -226,11 +222,13 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
 
     def bernoulli_log_probs(self, propagated_logits: torch.Tensor):
         LN_HALF = -0.6931471805599453
-        logp_zero_capped = torch.minimum(torch.zeros_like(propagated_logits), propagated_logits)
+        logp_zero_capped = torch.minimum(
+            torch.zeros_like(propagated_logits),
+            torch.clamp(propagated_logits,max=-1e-7)
+            ) #clamping propagated logits to avoid exact zero values
         result = torch.where(
             logp_zero_capped >= LN_HALF,
-            torch.clamp(torch.log(-torch.expm1(logp_zero_capped)),min=-100),  # For logp >= LN_HALF
-            #torch.clamp(torch.log(-torch.expm1(logp_zero_capped)),min=-100),
-            torch.clamp(torch.log1p(-torch.exp(logp_zero_capped)),min=-100)  # For logp < LN_HALF
+            torch.log(-torch.expm1(logp_zero_capped)),  # For logp >= LN_HALF
+            torch.log1p(-torch.exp(logp_zero_capped))  # For logp < LN_HALF
         )
         return result

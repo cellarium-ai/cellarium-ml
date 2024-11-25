@@ -17,10 +17,8 @@ class EncodedTargets(nn.Module):
     def __init__(
         self,
         multilabel_flag: bool = False,
-        #target_row_ancestors_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_ancestors_col_torch_tensor.pkl',
-        target_row_ancestors_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_ancestors_col_torch_tensor_lrexp_human.pkl',
-        unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
-        #unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
+        target_row_ancestors_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_ancestors_col_torch_tensor.pkl',
+        unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
     ) -> None:
         super().__init__()
         self.multilabel_flag = multilabel_flag
