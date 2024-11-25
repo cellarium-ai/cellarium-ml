@@ -128,6 +128,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             if self.out_distribution == categorical_distribution.PyroCategorical:
                 pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
             elif self.out_distribution == bernoulli_distribution.CustomPyroBernoulli:
+                propagated_logits = torch.clamp(propagated_logits,max=-1e-7)
                 logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)
                 pyro.sample("y", self.out_distribution(
                     log_prob_tensor = propagated_logits,
@@ -224,7 +225,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         LN_HALF = -0.6931471805599453
         logp_zero_capped = torch.minimum(
             torch.zeros_like(propagated_logits),
-            torch.clamp(propagated_logits,max=-1e-7)
+            propagated_logits,
             ) #clamping propagated logits to avoid exact zero values
         result = torch.where(
             logp_zero_capped >= LN_HALF,

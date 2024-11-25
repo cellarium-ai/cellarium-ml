@@ -21,7 +21,7 @@ class CustomPyroBernoulli(TorchDistribution):
             validate_args (bool): Whether to validate input arguments.
         """
         batch_shape = torch.broadcast_shapes(log_prob_tensor.shape, log1m_prob_tensor.shape)
-        self.log_prob_tensor = torch.clamp(log_prob_tensor,max=-1e-7,min=-100) #torch BCELoss clamps to min of -100
+        self.log_prob_tensor = torch.clamp(log_prob_tensor,min=-100) #torch BCELoss clamps to min of -100
         self.log1m_prob_tensor = torch.clamp(log1m_prob_tensor,min=-100) #torch BCELoss clamps to min of -100
         super().__init__(batch_shape, validate_args=validate_args)
 
