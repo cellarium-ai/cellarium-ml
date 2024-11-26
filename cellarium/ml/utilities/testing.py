@@ -11,6 +11,7 @@ This module contains helper functions for testing.
 from collections.abc import Callable
 from typing import Any
 
+import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import torch
@@ -189,7 +190,6 @@ def get_coord_data(
         torch.manual_seed(i)
         for width, lazy_model in models.items():
             model = lazy_model()
-            model.train()
             optim_kwargs: dict[str, Any] = {"lr": lr}
             optimizer = optim_fn(model.parameters(), **optim_kwargs)
             data_iter = iter(train_loader)
@@ -251,5 +251,110 @@ def get_coord_data(
 
                 for handle in remove_hooks:
                     handle.remove()
+
+    return pd.DataFrame(records)
+
+
+def get_coord_data_cerebras(
+    models: dict[int, Callable[[], torch.nn.Module]],
+    train_loader: torch.utils.data.DataLoader,
+    nsteps: int,
+    nseeds: int,
+) -> pd.DataFrame:
+    """
+    Get coordinate data for a model.
+
+    Args:
+        models:
+            A dictionary mapping width to a function that returns a model.
+        train_loader:
+            The training data loader.
+        loss_fn:
+            The loss function.
+        optim_fn:
+            The optimizer class.
+        lr:
+            The learning rate.
+        nsteps:
+            The number of steps to train for.
+        nseeds:
+            The number of seeds to use.
+
+    Returns:
+        A :class:`pandas.DataFrame` containing the coordinate data.
+    """
+    from cellarium.ml.callbacks import GetCoordData
+
+    records: list[dict[str, object]] = []
+    for i in range(nseeds):
+        torch.manual_seed(i)
+        for width, lazy_model in models.items():
+            logger = pl.loggers.CSVLogger("logs")
+            trainer = pl.Trainer(
+                devices=1, max_steps=nsteps, logger=logger, callbacks=[GetCoordData(width_attr="width")]
+            )
+            model = lazy_model()
+            import pdb
+
+            pdb.set_trace()
+            trainer.fit(model, train_loader)
+
+            # for batch_idx in range(nsteps):
+            #     data, target = next(data_iter)
+            #     remove_hooks = []
+            #     prev_param = {}
+            #     for module_name, module in model.named_children():
+            #         # record layer outputs
+            #         remove_hooks.append(
+            #             module.register_forward_hook(record_out_coords(records, width, module_name, batch_idx))  # type: ignore[arg-type]
+            #         )
+            #         # record parameter values
+            #         for param_name, param in module.named_parameters():
+            #             if param_name.endswith("_unscaled"):
+            #                 # muP
+            #                 param_name = param_name.removesuffix("_unscaled")
+            #                 multiplier = getattr(module, f"{param_name}_multiplier")
+            #             else:
+            #                 # SP
+            #                 multiplier = 1.0
+            #             ret = {
+            #                 "width": width,
+            #                 "module": f"{module_name}.{param_name}",
+            #                 "t": batch_idx,
+            #                 "l1": multiplier * l1_norm(param),
+            #                 "type": "param",
+            #             }
+            #             records.append(ret)
+            #             prev_param[f"{module_name}.{param_name}"] = param.detach().clone()
+
+            #     # step
+            #     optimizer.zero_grad()
+            #     output = model(data.view(data.size(0), -1))
+            #     loss = loss_fn(output, target)
+            #     loss.backward()
+            #     optimizer.step()
+
+            #     # record parameter deltas
+            #     for module_name, module in model.named_children():
+            #         for param_name, param in module.named_parameters():
+            #             if param_name.endswith("_unscaled"):
+            #                 # muP
+            #                 param_name = param_name.removesuffix("_unscaled")
+            #                 multiplier = getattr(module, f"{param_name}_multiplier")
+            #             else:
+            #                 # SP
+            #                 multiplier = 1.0
+            #             delta_param = param.detach() - prev_param[f"{module_name}.{param_name}"]
+            #             ret = {
+            #                 "width": width,
+            #                 "module": f"{module_name}.{param_name}.delta",
+            #                 "t": batch_idx,
+            #                 "l1": multiplier * l1_norm(delta_param),
+            #                 "type": "delta",
+            #             }
+            #             records.append(ret)
+
+            #     for handle in remove_hooks:
+            #         handle.remove()
 
     return pd.DataFrame(records)
