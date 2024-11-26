@@ -26,6 +26,9 @@ except ImportError:
         return False
 
 
+torch.set_float32_matmul_precision("high")
+
+
 def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
     """
     Generate a prompt diagonal mask for self-attention.
@@ -187,7 +190,7 @@ class TrainTokenizer(torch.nn.Module):
         self.max_total_mrna_umis = max_total_mrna_umis
         self.gene_vocab_sizes = gene_vocab_sizes
         self.metadata_vocab_sizes = metadata_vocab_sizes
-        ontology_infos = torch.load(ontology_infos_path)
+        ontology_infos = torch.load(ontology_infos_path, weights_only=True)
         self.ontology_infos = ontology_infos
         self.ontology_downsample_p = ontology_downsample_p
         self.prefix_len = prefix_len
