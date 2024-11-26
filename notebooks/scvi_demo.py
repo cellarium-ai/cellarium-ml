@@ -53,9 +53,8 @@ foldername_dict = {
                     1: ["pmbc_results_train",'lightning_logs/version_70/checkpoints/epoch=49-step=2500.ckpt',"../example_configs/scvi_config_pbmc_train.yaml","../data/pbmc_count_train.h5ad",['final_annotation', 'batch'],""],
                     2: ["pmbc_results_test",'',"../example_configs/scvi_config_pbmc_test.yaml","../data/pbmc_count_test.h5ad",['final_annotation', 'batch'],""],
                     3: ["pmbc_results_subset_genes",'',"../example_configs/scvi_config_pbmc_subset_genes.yaml","../data/pbmc_count.h5ad",['final_annotation', 'batch'],""],
-                    #1:  ["cas_50m_homo_sapiens_no_cancer_extract_0",'lightning_logs/version_37/checkpoints/epoch=49-step=1000.ckpt',"../example_configs/scvi_config_cas_50m_homo_sapiens_no_cancer.yaml","../data/cas_50m_homo_sapiens_no_cancer_extract_extract_0.h5ad",['final_annotation', 'batch'],"" ],
                     4 : ["tucker_human_heart_atlas","lightning_logs/version_52/checkpoints/epoch=29-step=16230.ckpt","../example_configs/scvi_config_tucker_heart_atlas.yaml","../data/tucker_human_heart_atlas.h5ad",["Cluster","batch"],"gene_names"],
-                    5 : ["human_heart_atlas","lighFtning_logs/version_53/checkpoints/epoch=39-step=26640.ckpt","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad",["cell_type","batch"],"gene_name-new"], #10 GB
+                    5 : ["human_heart_atlas","lightning_logs/version_53/checkpoints/epoch=39-step=26640.ckpt","../example_configs/scvi_config_human_heart_atlas.yaml","../data/human_heart_atlas.h5ad",["cell_type","batch"],"gene_name-new"], #10 GB
                     6 : ["gut_cell_atlas_raw","lightning_logs/version_51/checkpoints/epoch=39-step=17160.ckpt","../example_configs/scvi_config_gut_cell_atlas_raw.yaml","../data/gut_cell_atlas_raw.h5ad",["category"],""],
                     7 : ["cellxgene_liver","lightning_logs/version_57/checkpoints/epoch=49-step=47100.ckpt","../example_configs/scvi_config_cellxgene_liver.yaml","../data/cellxgene_liver.h5ad",["cell_type"],"feature_name"],
                     8: ["cellxgene_lung","lightning_logs/version_66/checkpoints/epoch=49-step=57150.ckpt","../example_configs/scvi_config_cellxgene_lung.yaml","../data/single_cell_lung_atlas.h5ad",["cell_type","study"],"feature_name"], #too big
@@ -63,8 +62,10 @@ foldername_dict = {
                     10: ["human_pancreas_rna","","../example_configs/scvi_config_human_pancreas_rna.yaml","../data/human_pancreas_rna.h5ad",["cell_type","study"],"var.index"], #no raw data available?
                     11: ["Kidney_muto_rna","lightning_logs/version_71/checkpoints/epoch=49-step=2000.ckpt","../example_configs/scvi_config_Kidney_muto_rna.yaml","../data/Kidney_muto_rna.h5ad",["cell_type_category","author_cell_type"],"feature_name"],
                     12: ["mouse_Liver_rna","","../example_configs/scvi_config_mouse_Liver_rna.yaml","../data/mouse_Liver_rna.h5ad",["cell_type","study"],"var.index"], #no raw data available?
+                    13: ["extract0"]
                     }
 
+#TODO: Warning: perhaps n_cats_per_cov is a problem or the categorical_covariate_index
 foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[0]
 use_test = False
 if use_test:

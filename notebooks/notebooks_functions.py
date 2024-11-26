@@ -2,11 +2,23 @@ import concurrent
 import gc
 import itertools
 import time
+import types
 import warnings
 import datetime
 import re
 import pandas as pd
 import seaborn as sns
+import os, sys
+local_repository= True
+if local_repository:
+    module_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # /opt/project/cellarium-ml/ or /home/lys/Dropbox/PostDoc_Glycomics/cellarium-ml
+    sys.path.insert(1,module_dir)
+    # Set the PYTHONPATH environment variable for subprocess to inherit
+    env = os.environ.copy()
+    env['PYTHONPATH'] = module_dir
+else:
+    # Set the PYTHONPATH environment variable
+    env = os.environ.copy()
 from cellarium.ml.core import CellariumPipeline, CellariumModule
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
@@ -36,11 +48,11 @@ import dataframe_image as dfi
 import anndata as ad
 import rapids_singlecell as rsc
 
+from google.cloud import storage
+from anndata import AnnData, read_h5ad
+
+
 #mpl.use('agg')
-
-
-
-
 
 def subset_adata_by_var(adata,nsamples,filename,var="study"):
 
@@ -1287,8 +1299,6 @@ def plot_scree_plot(adata):
     plt.xlabel('Principal Component')
     plt.ylabel('Variance Explained')
 
-
-
 class Compute_Leiden_clusters():
 
     def __init__(self,adata,gene_set_dict,figpath,color_keys,filepath,overwrite,plot_all,use_cuda):
@@ -1534,7 +1544,6 @@ class Compute_Leiden_clusters():
             gc.collect()
         return datasets_dict
 
-
 def predict_cell_query():
     """Use to transform the dataset: https://scanpy.readthedocs.io/en/stable/generated/scanpy.tl.ingest.html"""
 
@@ -1561,7 +1570,458 @@ def scanpy_scvi(adata_file):
     adata.obsm["og_scvi_latent"] = latent
 
 
+def search_ontology_rdflib(owl_file,term_id):
+    import rdflib
+    from rdflib.namespace import RDFS
 
+    # Load the UBERON ontology file:
+    # In RDF, a graph is constructed from triples, each of which represents an RDF statement that has at least three components:
+    # subject: the entity being annotated
+    # predicate: a relation between the subject and the object
+    # object: another entity or a literal value
+
+    g = rdflib.Graph()
+    g.parse(owl_file, format="xml")
+    print("graph")
+    print(g)
+
+    # Define UBERON namespace, pulling URL
+    uri = "http://purl.obolibrary.org/obo/UBERON_"
+    UBERON = rdflib.Namespace(uri)
+
+
+    # Function to get the label of a UBERON term
+    def get_uberon_label(uberon_id):
+        """
+        rdfs:label a rdf:Property ;
+        rdfs:isDefinedBy <http://www.w3.org/2000/01/rdf-schema#> ;
+        rdfs:label "label" ;
+        rdfs:comment "A human-readable name for the subject." ;
+        rdfs:domain rdfs:Resource ;
+        rdfs:range rdfs:Literal .
+	"""
+        term = UBERON[uberon_id] #just adds the digit part of the uberon term http://purl.obolibrary.org/obo/UBERON_0002107
+        label = list(g.objects(term, RDFS.label)) #[rdflib.term.Literal('liver')]
+        parents = list(g.objects(term, RDFS.subClassOf)) #[rdflib.term.Literal('liver')]
+        parents = [UBERON[uberon_id]]
+        exit()
+
+        if label:
+            return label[0].toPython()
+        else:
+            return None
+
+    # Example queries
+
+    # Get the label of the UBERON term for "heart"
+    heart_label = get_uberon_label("0002107")
+
+
+    exit()
+    print(f"Label for UBERON:0000948 (heart): {heart_label}")
+
+    # Get all subclasses of the "organ" class
+    organ_class = UBERON["0000062"]  # UBERON ID for "organ" 0000062
+    organ_subclasses = list(g.subjects(RDFS.subClassOf, organ_class))
+    organ_labels = [get_uberon_label(str(s).split("_")[-1]) for s in organ_subclasses]
+    print("Organ subclasses:")
+    for label in organ_labels:
+        print(f"- {label}")
+    exit()
+
+def build_coarsened_metadata(cellxgene_census:types.ModuleType,script_dir:str, method="broad",overwrite=False) -> pd.DataFrame:
+    """
+    https://console.cloud.google.com/storage/browser/cellarium-human-primary-data/curriculum/human_all_primary/extract_files;tab=objects?authuser=1&prefix=&forceOnObjectsSortingFiltering=false
+    Args:
+        cellxgene_census:
+        script_dir:
+
+    Returns:
+
+    """
+
+    filepath_coarsened = f"{script_dir}/data/pseudobulk/cell_metadata_coarsened_{method}.pkl"
+    if not os.path.exists(filepath_coarsened) or overwrite:
+        print(f"Building coarsened cell metadata method {method}...")
+        census = cellxgene_census.open_soma(census_version="2024-07-01")
+        overwrite = False
+        filepath = "{}/data/pseudobulk/cell_metadata.pkl".format(script_dir)
+        if not os.path.exists(filepath) or overwrite:
+            print("File {} notfound or overwrite is set to True".format(filepath))
+            # Reads SOMADataFrame as a slice
+            cell_metadata = census["census_data"]["homo_sapiens"].obs.read(
+                value_filter=f"""(is_primary_data == True)""",
+                column_names=["assay", "cell_type", "cell_type_ontology_term_id",
+                              "tissue", "tissue_ontology_term_id", "dataset_id", "donor_id",
+                              "tissue_general", "suspension_type",
+                              "disease", "disease_ontology_term_id",
+                              "development_stage", "development_stage_ontology_term_id",
+                              "raw_sum",
+                              "sex", "soma_joinid"]
+            ).concat().to_pandas()
+            cell_metadata.to_pickle(filepath)
+        else:
+            print("Reading {}".format(filepath))
+            cell_metadata = pd.read_pickle(filepath)
+
+
+
+        #cell_metadata[['cell_type', 'cell_type_ontology_term_id']].drop_duplicates(inplace=True) #TODO: Apparently we might not use this, was just for analyzing
+        cell_metadata['cell_type_unknown'] = cell_metadata['cell_type'] == 'unknown'
+        cell_metadata['cell_type_unknown'].sum() / len(cell_metadata)
+
+
+        if method == "broad":
+            # filepath = "{}/data/pseudobulk/info.pkl".format(script_dir)
+            # overwrite = False
+            # if not os.path.exists(filepath) or overwrite:
+            #     print("File {} notfound or overwrite is set to True".format(filepath))
+            #     info = census["census_info"]["summary"].read().concat().to_pandas()  # read SOMA object, convert to pyarrow object (concat) and then to pandas
+            #     info.to_pickle(filepath)
+            # else:
+            #     print("Reading {}".format(filepath))
+            #     info = pd.read_pickle(filepath)
+            #
+            # filepath = "{}/data/pseudobulk/dataset_df.pkl".format(script_dir)
+            # overwrite = False
+            # if not os.path.exists(filepath) or overwrite:
+            #     print("File {} notfound or overwrite is set to True".format(filepath))
+            #     dataset_df = census["census_info"]["datasets"].read().concat().to_pandas()  # read SOMA object, convert to pyarrow object (concat) and then to pandas
+            #     dataset_df.to_pickle(filepath)
+            # else:
+            #     print("Reading {}".format(filepath))
+            #     dataset_df = pd.read_pickle(filepath)
+
+            donor_cell_type_df1 = (
+                cell_metadata[['dataset_id', 'donor_id', 'cell_type']]
+                .groupby(['dataset_id', 'donor_id'],
+                         observed=True)  # observed= True only show observed values for categorical groupers
+                .agg(lambda s: s.nunique())  # counts the number of rows with the same ["dataset_id","donor_id"] combo
+            ).rename(columns={'cell_type': 'n_unique_cell_types'})
+
+            donor_cell_type_df2 = (
+                cell_metadata[['dataset_id', 'donor_id', 'cell_type_unknown']]
+                .groupby(['dataset_id', 'donor_id'], observed=True)
+                .mean()
+            ).rename(columns={'cell_type_unknown': 'cell_type_unknown_fraction'})
+            donor_cell_type_df = pd.concat([donor_cell_type_df1, donor_cell_type_df2], axis=1)
+
+            num_cell_df = (
+                cell_metadata[['dataset_id', 'donor_id', 'cell_type']]
+                .groupby(['dataset_id', 'donor_id'], observed=True)
+                .count()
+            ).rename(columns={'cell_type': 'n_cells'})
+
+            devstage_coarsener = np.load(f'{script_dir}/data/pseudobulk/devstage_coarsen_map.npy',
+                                         allow_pickle=True).item()
+            devstage_name_lookup = np.load(f'{script_dir}/data/pseudobulk/devstage_name_lookup.npy',
+                                           allow_pickle=True).item()
+
+            cell_metadata['coarse_development_stage_ontology_id'] = cell_metadata[
+                'development_stage_ontology_term_id'].str.replace(':', '_').map(devstage_coarsener)
+            cell_metadata['coarse_development_stage'] = cell_metadata['coarse_development_stage_ontology_id'].map(
+                devstage_name_lookup)
+
+            development_df = (
+                cell_metadata[['dataset_id', 'donor_id', 'development_stage', 'development_stage_ontology_term_id',
+                               'coarse_development_stage', 'coarse_development_stage_ontology_id']]
+                .groupby(['dataset_id', 'donor_id'], observed=True)
+                .agg(lambda s: s.unique().tolist()[0])
+            )
+
+            disease_df = (
+                cell_metadata[['dataset_id', 'donor_id', 'disease', 'disease_ontology_term_id']]
+                .groupby(['dataset_id', 'donor_id'], observed=True)
+                .agg(lambda s: s.unique().tolist()[0])
+            )
+
+            sex_df = (
+                cell_metadata[['dataset_id', 'donor_id', 'sex']]
+                .groupby(['dataset_id', 'donor_id'], observed=True)
+                .agg(lambda s: s.unique().tolist()[0])
+            )
+
+
+            # Highlight: cell development stages
+
+            devstage_coarsener = np.load(f'{script_dir}/data/pseudobulk/devstage_coarsen_map.npy',
+                                         allow_pickle=True).item()
+            devstage_name_lookup = np.load(f'{script_dir}/data/pseudobulk/devstage_name_lookup.npy',
+                                           allow_pickle=True).item()
+
+            cell_metadata['coarse_development_stage_ontology_id'] = cell_metadata[
+                'development_stage_ontology_term_id'].str.replace(':', '_').map(devstage_coarsener)
+            cell_metadata['coarse_development_stage'] = cell_metadata['coarse_development_stage_ontology_id'].map(
+                devstage_name_lookup)
+
+            tissue_coarsener = np.load(f'{script_dir}/data/pseudobulk/tissue_coarsen_map.npy', allow_pickle=True).item()
+            tissue_dist = np.load(f'{script_dir}/data/pseudobulk/tissue_distances_from_root.npy', allow_pickle=True).item()
+            tissue_name_lookup = np.load(f'{script_dir}/data/pseudobulk/tissue_name_lookup.npy', allow_pickle=True).item()
+
+            cell_metadata['tissue_coarse_ontology_id'] = cell_metadata['tissue_ontology_term_id'].str.replace(':', '_').map(tissue_coarsener)
+            cell_metadata['tissue_coarse'] = cell_metadata['tissue_coarse_ontology_id'].map(tissue_name_lookup)
+            cell_metadata['tissue_name_ont_coarsename_coarseont'] = list(zip(
+                cell_metadata['tissue'],
+                cell_metadata['tissue_ontology_term_id'],
+                cell_metadata['tissue_coarse'],
+                cell_metadata['tissue_coarse_ontology_id'],
+            ))
+
+            tissue_df = (
+                cell_metadata[['dataset_id', 'donor_id', 'tissue_name_ont_coarsename_coarseont']]
+                .groupby(['dataset_id', 'donor_id'], observed=True)
+                .agg(lambda s: s.unique().tolist())
+            )
+
+            dfs = [donor_cell_type_df, num_cell_df, tissue_df, development_df, disease_df, sex_df]
+
+            df = pd.concat(dfs, axis=1)
+            df.reset_index()
+            df.to_pickle(filepath_coarsened)
+
+
+        elif method == "ku":
+            tissue_coarsener = pd.read_csv(f"{script_dir}/data/pseudobulk/uberon_ontology_map.tsv",sep="\t",skiprows=1)
+            tissue_coarsener_dict = dict(zip(tissue_coarsener.iloc[:,0],tissue_coarsener.iloc[:,1]))
+            #tissue_coarsener_dict_reverse = dict(zip(tissue_coarsener.iloc[:,1],tissue_coarsener.iloc[:,0]))
+            cell_metadata['tissue_coarse_ontology_id'] = cell_metadata['tissue_ontology_term_id'].map(tissue_coarsener_dict)
+            #cell_metadata.loc[cell_metadata['tissue_coarse_ontology_id'].isna(),"tissue_coarse_ontology_id"] = cell_metadata.loc[cell_metadata['tissue_coarse_ontology_id'].isna(),"tissue_ontology_term_id"].map(tissue_coarsener_dict_reverse)
+
+            cell_coarsener = pd.read_csv(f"{script_dir}/data/pseudobulk/cell_ontology_map.tsv",sep="\t",skiprows=1)
+            cell_coarsener_dict = dict(zip(cell_coarsener.iloc[:, 0], cell_coarsener.iloc[:, 1]))
+
+            cell_metadata['cell_type_coarse_ontology_term_id'] = cell_metadata['cell_type_ontology_term_id'].map(cell_coarsener_dict).replace(['^UBERON','^BFO','^PR'], np.nan, regex=True)
+
+            # tissue_df = (
+            #     cell_metadata[['dataset_id', 'donor_id', 'tissue_coarse_ontology_id']]
+            #     .groupby(['dataset_id', 'donor_id'], observed=True,dropna=True)
+            #     #.agg(lambda s: s.unique().tolist())
+            #     .agg(lambda s: [x for x in s.tolist() if not np.isnan(x)])
+            # )
+            #
+            # cell_type_df = (
+            #     cell_metadata[['dataset_id', 'donor_id', 'cell_type_coarse_ontology_term_id']]
+            #     .groupby(['dataset_id', 'donor_id'], observed=True,dropna=True)
+            #     # .agg(lambda s: s.unique().tolist())
+            #     .agg(lambda s: [x for x in s.tolist() if not np.isnan(x)]) #TODO: Fix
+            # )
+
+            # df = (
+            #     cell_metadata[['dataset_id', 'donor_id', 'cell_type_coarse_ontology_term_id','tissue_coarse_ontology_id','sex','disease', 'disease_ontology_term_id']]
+            #     .groupby(['cell_type_coarse_ontology_term_id','tissue_coarse_ontology_id','sex',"disease_ontology_term_id"], observed=True,dropna=True,as_index=False)
+            #     .agg(lambda s: s.unique().tolist())
+            #     #.agg(lambda s: [x for x in s.tolist() if not np.isnan(x)])
+            # )
+
+            df = cell_metadata #TODO: Delete if the groupby are not used
+            df.to_pickle(filepath_coarsened)
+
+
+
+
+    else:
+        print(f"Reading {filepath_coarsened}")
+        df = pd.read_pickle(filepath_coarsened)
+
+    return df
+
+
+
+def read_h5ad_gcs(filename: str, storage_client: storage.Client | None = None) -> AnnData:
+    r"""
+    Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
+
+    Example::
+
+        >>> adata = read_h5ad_gcs("gs://dsp-cellarium-cas-public/test-data/test_0.h5ad")
+
+    Args:
+        filename: Path to the data file in Cloud Storage.
+    """
+    if not filename.startswith("gs:"):
+        raise ValueError("The filename must start with 'gs:' protocol name.")
+    # parse bucket and blob names from the filename
+
+    filename = re.sub(r"^gs://?", "", filename)
+    bucket_name, blob_name = filename.split("/", 1)
+
+    if storage_client is None:
+        print("Initializing storage")
+        storage_client = storage.Client()
+
+    print("Initializing bucket")
+    bucket = storage_client.bucket(bucket_name)
+    print("Initializing blob")
+    blob = bucket.blob(blob_name)
+
+
+    with blob.open("rb") as f:
+        return sc.read_h5ad(f,backed=None) #backed = "r" / "r+"
+
+        #return read_h5ad(f)
+
+    # with fsspec.open(filename, mode='rb') as f: #SLOWER
+    #     adata = read_h5ad(f)
+    #     return adata
+
+
+def plot_histogram(coarsened_metadata,category,type="Barplot",bucket_size=1000):
+
+    print("Starting bar plot ....")
+    title_dict = {
+        "cell_type_coarse_ontology_term_id":["cell ontology",1,(24,24)],
+        "tissue_coarse_ontology_id":["tissue ontology",2,(24,24)],
+        "sex":["sex",1,(10,10)],
+        "combinations_all":["cell+tissue+sex+disease combinations",10,(30,24)],
+        "combinations_cell_tissue":["cell+tissue combinations",1,(30,24)],
+        "combinations_cell_tissue_disease":["cell+tissue+disease combinations",1,(30,24)],
+             }
+    title,step,size = title_dict[category]
+    value_counts = coarsened_metadata[category].value_counts()  # .to_dict()
+    # Highlight: Finding diversity of cell types within the combos with less than 250 cell counts
+    df = value_counts.rename_axis(category).reset_index(name='counts')
+    df = df[df["counts"] < 250]
+
+    numtissuesonts = len(pd.unique(coarsened_metadata["tissue_coarse_ontology_id"])) # 61 tissues with same ontology term and 232 tissues in cellxgene
+    numcellstypesonts = len(pd.unique(coarsened_metadata["cell_type_coarse_ontology_term_id"])) #135 with the sama cell type ontology term and 229 in annotated cell types
+
+    tissue_uberon_dict = dict(zip(coarsened_metadata["tissue_coarse_ontology_id"].values.tolist(),coarsened_metadata["tissue_general"].values.tolist()))
+    celltype_uberon_dict = dict(zip(coarsened_metadata["cell_type_coarse_ontology_term_id"].values.tolist(),coarsened_metadata["cell_type"].values.tolist()))
+
+
+    if category == "combinations_cell_tissue":
+        df[['cell_type_ont', 'tissue_ont']] = df[category].str.split(',', n=1, expand=True)
+        df = df.groupby("tissue_ont",as_index=False)["cell_type_ont"].apply(np.unique)
+        df["tissue"] = df["tissue_ont"].map(tissue_uberon_dict)
+        df["num_cell_types_ont"] = df.cell_type_ont.map(len)
+
+        df = df.sort_values("num_cell_types_ont",ascending=False)
+        df = df.explode("cell_type_ont")
+
+        df["cell_type"] = df["cell_type_ont"].map(celltype_uberon_dict)
+
+        #df.drop("cell_type_ont",axis=1,inplace=True)
+        df.to_csv("Diversity_df_{}.tsv".format(category),index=False,sep="\t")
+
+    else:
+
+        coarsened_metadata = coarsened_metadata[coarsened_metadata[category].isin(df[category])]
+
+        if category == "tissue_coarse_ontology_id":
+            columns = [category,"tissue","cell_type","cell_type_coarse_ontology_term_id"]
+        else:
+            columns = [category, "tissue", "cell_type", "tissue_coarse_ontology_id"]
+
+        df = pd.merge(coarsened_metadata[columns],df,on=category,how="right")
+        df = df.groupby("tissue_coarse_ontology_id",as_index=False)["cell_type_coarse_ontology_term_id"].apply(np.unique)
+        df["num_cell_types_ont"] = df.cell_type_coarse_ontology_term_id.map(len)
+        df = df.sort_values("num_cell_types_ont",ascending=False)
+        df.drop("cell_type_coarse_ontology_term_id",axis=1,inplace=True)
+        df.to_csv("Diversity_df_{}.tsv".format(category),index=False,sep="\t")
+
+
+
+    value_counts = value_counts.to_dict()
+
+
+
+    fig, [[ax0,ax1],[ax2,ax3]] = plt.subplots(nrows=2,ncols=2,figsize=size)
+    cell_counts = list(value_counts.values())
+    maxval = np.max(cell_counts)
+    minval = np.min(cell_counts)
+
+    #Highlight: Bucket resizing at the beginning
+    start_buckets = [0,250,500,750]
+    end_buckets = [250,500,750,1000]
+    minval=1000
+
+    start_buckets = start_buckets + list(range(minval, maxval, bucket_size)) #TODO: Remove start_buckets
+    end_buckets = end_buckets + list(range(minval + bucket_size, maxval, bucket_size))
+
+    intervals = list(zip(start_buckets, end_buckets))
+
+    # Init dict
+
+    intervals_cumsums = defaultdict(int)
+    intervals_numcombos = defaultdict(int)
+    intervals_tissues = defaultdict(list)
+    intervals_cells = defaultdict(list)
+
+    # cumsum cell counts
+    for key, value in value_counts.items():
+        split = key.split(",")
+        if len(split) > 1:
+            cell, tissue = key.split(",")
+        else:
+            cell = tissue = key
+        for interval in intervals:
+            if interval[0] < value <= interval[1]:
+                intervals_cumsums[interval] += value
+                intervals_numcombos[interval] += 1
+                if interval[1] <= 250:
+                    intervals_tissues[interval].append(tissue)
+                    intervals_cells[interval].append(cell)
+
+
+    intervals_cumsums = {str(key):val for key,val in intervals_cumsums.items() if val != 0}
+    intervals_numcombos = {str(key):val for key,val in intervals_numcombos.items() if val != 0}
+    intervals_tissues = {str(key): Counter(val) for key, val in intervals_tissues.items() if val}
+    intervals_cells = {str(key): Counter(val) for key, val in intervals_cells.items() if val}
+
+
+    positions = list(range(0, len(intervals_cumsums) * step, step)) #step controls the distance between bars
+
+    ax0.bar(positions,intervals_cumsums.values())
+    ax0.set_xticks(positions)
+    ax0.set_xticklabels(intervals_cumsums.keys(),rotation=65)
+    ax0.set_xlabel(title)
+    ax0.set_ylabel("cumsum cell counts")
+    ax0.set_title("Number of cells per interval")
+
+    total_numcombos = sum(intervals_numcombos.values())
+
+    numcombos_perinterval = [ (numcombo/ total_numcombos)*100 for numcombo in intervals_numcombos.values()]
+
+    ax1.bar(positions, numcombos_perinterval)
+    ax1.set_xticks(positions)
+    ax1.set_xticklabels(intervals_numcombos.keys(),rotation=65)
+    ax1.set_xlabel(title)
+    ax1.set_ylabel("cumsum num combinations")
+    ax1.set_title("Number of cell-tissue combos per interval")
+
+
+    #Highlight: Tissue and cell counts within the lowest interval
+    def plot_axes_(intervals_dict,ax,subtitle,ntotal):
+        categories = []
+        subcategories = []
+        percentage = []
+        counts = []
+        colors = []
+        np.random.seed(13)
+        for i, (intervals, counter) in enumerate(intervals_dict.items()):
+            for subcategory, count in counter.items():
+                r = np.round(np.random.rand(), 1)
+                g = np.round(np.random.rand(), 1)
+                b = np.round(np.random.rand(), 1)
+
+                categories.append(intervals)
+                colors.append([r, g, b])
+                subcategories.append(subcategory)
+                percentage.append((float(count)/ntotal)*100)
+                counts.append(count)
+                i += 1
+
+        ax.bar(subcategories, counts, color=colors)
+        ax.set_xticklabels(subcategories, rotation=65)
+        ax.set_title(f"{subtitle}")
+
+    if category in ["combinations_cell_tissue","tissue_coarse_ontology_id"]:
+        plot_axes_(intervals_tissues,ax2,f"Tissues lost in smallest interval (0,250). Total num tissues ontologies: {numtissuesonts}",numtissuesonts)
+    if category in ["combinations_cell_tissue","cell_type_coarse_ontology_term_id"]:
+        plot_axes_(intervals_cells,ax3,f"Cell types lost in smallest interval (0,250). Total num cells types: {numcellstypesonts}",numcellstypesonts)
+
+    fig.suptitle("Cellxgene coarsed dataset by -{}-. Bucket size: {}. Number combinations: {}".format(category,bucket_size,len(value_counts)),fontsize=20)
+    plt.savefig("{}_{}_bucketsize{}.jpg".format(type,category,bucket_size))
 
 
 

@@ -274,7 +274,7 @@ def nunique_scvi(data: CellariumAnnDataDataModule) -> int:
 
 
 def extract_n_cats_per_cov(data:CellariumAnnDataDataModule) -> list:
-    """Extract the number of unique categories in each covariate through the entire dataset
+    """Extract the number of unique categories in each covariate through looking at the entire dataset
     Example:
         The field "categorical_covariate_index_nd" indicates that the covariates the columnns ["chemistry","condition"] from the AnnData are to be used as covariates,
         then we extract those columns from the AnnData and we count the number of unique elements in each of them, under chemistry we find 3 unique categories ['10X', 'v2_10X', 'v3_10X'] and under assay 9 categories ['10X', 'Freytag', 'Oetjen_A', 'Oetjen_P', ..., 'Sun_sample1_CS',
