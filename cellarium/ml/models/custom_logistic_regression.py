@@ -9,7 +9,7 @@ import pyro.distributions as dist
 import torch
 import torch.nn.functional
 
-from cellarium.ml.categorical_distribution import categorical_distribution
+from cellarium.ml.categorical_distribution import bernoulli_distribution, categorical_distribution
 from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
@@ -51,8 +51,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         out_distribution: str = 'Categorical',
         seed: int = 0,
         probability_propagation_flag: bool = False,
-        target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
+        #target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
+        target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human.pkl',
+        #y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
@@ -71,8 +73,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         if out_distribution == "Categorical":
             self.out_distribution = getattr(categorical_distribution,'Pyro'+out_distribution)
         else:
-            self.out_distribution = getattr(dist,out_distribution)
-        #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.out_distribution = getattr(bernoulli_distribution,'CustomPyro'+out_distribution)
 
         self.seed = seed
         # parameters
@@ -114,10 +115,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         Returns:
             A dictionary with the loss value.
         """
-        #y_n = y_n.to(self.device)
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        #assert_arrays_equal("y_categories", y_categories, "self.y_categories", self.y_categories)
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, descendents_nc)
         return {"loss": loss}
 
@@ -128,18 +127,21 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0],dim=-2):
             logits_nc = x_ng @ W_gc + self.b_c
-            activation_out = self.activation_fn(logits_nc.to(dtype=torch.float), dim=1)
-            if (self.probability_propagation_flag==1):
-                activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+            compiled_propagated_logits = torch.compile(self.log_probs)
+            propagated_logits = compiled_propagated_logits(logits=logits_nc)
             if self.out_distribution == categorical_distribution.PyroCategorical:
-                #pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
-                pyro.sample("y", dist.Categorical(probs=activation_out), obs=y_n)
-            elif self.out_distribution == dist.Bernoulli:
+                pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
+            elif self.out_distribution == bernoulli_distribution.CustomPyroBernoulli:
                 #scale = self.get_scale(descendents_nc=descendents_nc) #n,c
                 scale = (descendents_nc+self.alpha)-(descendents_nc*self.alpha)
+                propagated_logits = torch.clamp(propagated_logits,max=-1e-7)
+                logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)
                 with pyro.poutine.scale(scale=scale):
                     with pyro.plate("categories", size=self.n_categories, dim=-1):
-                        pyro.sample("y", self.out_distribution(probs=activation_out), obs=y_n)
+                        pyro.sample("y", self.out_distribution(
+                    log_prob_tensor = propagated_logits,
+                    log1m_prob_tensor=logits_complement,
+                    ), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
@@ -191,5 +193,45 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         then we add those values with all rows in 'col' column in activation_out_gpu_clone
         TRIAL CODE AVAILABLE IN TRIAL.IPYNB - PROBABILITY PROPAGATION CODE TRIAL
         """
-        propagated_p = torch.einsum("nc,kc->nk", activation_out_gpu, self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device))
+        propagated_p = torch.einsum(
+            "nc,kc->nk", activation_out_gpu,
+            self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device),
+            )
         return torch.clamp(propagated_p, max=1.0)
+    
+
+    def log_probs(self, logits: torch.Tensor):
+        """
+        logits = torch Tensor of shape nxc
+        step 1: propagated_logits: LSE (L_i) where i belongs to the
+        set of descendents of each column in c and column c
+        step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the
+        2604 classes c in each row (sum of all logits in each row of n before propagation)
+        log(1-p_k') = log{(sum(p_i) i belongs to set(descendents(k)) + p_k)/sum(p_m), m = total cell types}
+        step 3: LSE(L_i) - LSE(L_m)
+        """
+        log_probs = self.logsumexp_propagated(logits) - torch.logsumexp(logits,dim=1,keepdim=True)
+        return log_probs
+
+    # OPTION 4
+    def logsumexp_propagated(self,logits_nc):
+        # matrix multiplication for torch where replacement/optimization
+        desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
+        temp = torch.where(
+            desc_matrix_cc.T == 0,
+            float('-inf'),
+            logits_nc.unsqueeze(dim=-1)*desc_matrix_cc.T)
+        return temp.logsumexp(dim=1)
+
+    def bernoulli_log_probs(self, propagated_logits: torch.Tensor):
+        LN_HALF = -0.6931471805599453
+        logp_zero_capped = torch.minimum(
+            torch.zeros_like(propagated_logits),
+            propagated_logits,
+            ) #clamping propagated logits to avoid exact zero values
+        result = torch.where(
+            logp_zero_capped >= LN_HALF,
+            torch.log(-torch.expm1(logp_zero_capped)),  # For logp >= LN_HALF
+            torch.log1p(-torch.exp(logp_zero_capped))  # For logp < LN_HALF
+        )
+        return result
