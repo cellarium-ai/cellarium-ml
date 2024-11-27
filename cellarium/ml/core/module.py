@@ -420,17 +420,15 @@ def add_delegate_method(method_name):
 # >>> all_methods = dir(pl.LightningModule)
 # >>> all_hooks = [method for method in all_methods if method.startswith("on_") and not ("checkpoint" in method)]
 # >>> explicitly_implemented_hooks = ["on_train_epoch_start", "on_train_epoch_end"]
+# >>> omit_hooks = ["on_after_batch_transfer", "on_before_batch_transfer", "on_gpu"]
 # >>> passthrough_hooks = [hook for hook in all_hooks if hook not in explicitly_implemented_hooks]
 passthrough_hooks = [
     "on_after_backward",
-    "on_after_batch_transfer",
     "on_before_backward",
-    "on_before_batch_transfer",
     "on_before_optimizer_step",
     "on_before_zero_grad",
     "on_fit_end",
     "on_fit_start",
-    "on_gpu",
     "on_predict_batch_end",
     "on_predict_batch_start",
     "on_predict_end",
