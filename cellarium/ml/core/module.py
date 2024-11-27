@@ -409,7 +409,7 @@ def add_delegate_method(method_name):
     def delegate_method(self, *args, **kwargs):
         method = getattr(self.model, method_name, None)
         if callable(method):
-            method(self.trainer, *args, **kwargs)
+            method(self.trainer)
 
     delegate_method.__name__ = method_name
     delegate_method.__doc__ = f"Delegates the `{method_name}` hook to the model if defined."

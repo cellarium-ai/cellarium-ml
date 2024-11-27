@@ -64,12 +64,13 @@ def training_run_setup(tmp_path: Path, accelerator: str = "cpu") -> dict:
     return {"trainer": trainer, "module": module, "datamodule": datamodule}
 
 
-def test_module_implemented_hooks(training_run_setup: dict) -> None:
+def test_module_implemented_hooks_train(training_run_setup: dict) -> None:
     trainer = training_run_setup["trainer"]
     module = training_run_setup["module"]
     datamodule = training_run_setup["datamodule"]
 
     # ensure hooks are called as expected during fit
+    datamodule.setup(stage="fit")
     trainer.fit(module, datamodule)
     print("hooks called by 2 epoch training run with 2 batches per epoch, in order:")
     print(module.model.hooks_called)
@@ -85,10 +86,20 @@ def test_module_implemented_hooks(training_run_setup: dict) -> None:
     ]
     assert module.model.hooks_called == expected_order_of_hooks
 
+
+def test_module_implemented_hooks_predict(training_run_setup: dict) -> None:
+    trainer = training_run_setup["trainer"]
+    module = training_run_setup["module"]
+    datamodule = training_run_setup["datamodule"]
+
     # ensure hooks are called as expected during predict
-    module.model.reset_parameters()
     datamodule.setup(stage="predict")
     trainer.predict(module, datamodule)
     print("hooks called by 2 batch predict run:")
     print(module.model.hooks_called)
-    assert 0
+    expected_order_of_hooks = [
+        "on_predict_batch_end",
+        "on_predict_batch_end",
+        "on_predict_epoch_end",
+    ]
+    assert module.model.hooks_called == expected_order_of_hooks
