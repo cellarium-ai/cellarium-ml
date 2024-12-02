@@ -1,4 +1,4 @@
-# lightning.pytorch==2.2.1
+# lightning.pytorch==2.4.0
 seed_everything: true
 trainer:
   accelerator: auto
@@ -19,7 +19,9 @@ trainer:
   - class_path: lightning.pytorch.callbacks.ModelCheckpoint
     init_args:
       every_n_train_steps: 2000
-      save_top_k: 1
+  - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
+    init_args:
+      cpu_stats: true
   # - class_path: lightning.pytorch.callbacks.EarlyStopping
   #   init_args:
   #     monitor: train_loss
@@ -166,8 +168,6 @@ data:
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 512
   shuffle: true
-  # seed: 0
-  # drop_last: false
   test_mode: false
   num_workers: 12
   prefetch_factor: null
