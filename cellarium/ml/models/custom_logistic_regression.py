@@ -99,7 +99,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c.data.zero_()
 
     def forward(
-        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, descendents_nc: torch.Tensor, **kwargs
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, descendents_nc: torch.Tensor, mod_nc: torch.Tensor, **kwargs
     ) -> dict[str, torch.Tensor | None]:
         """
         Args:
@@ -117,10 +117,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, descendents_nc)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, descendents_nc, mod_nc)
         return {"loss": loss}
 
-    def model(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor) -> None:
+    def model(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor, mod_nc: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
             dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
@@ -133,7 +133,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
             elif self.out_distribution == bernoulli_distribution.CustomPyroBernoulli:
                 #scale = self.get_scale(descendents_nc=descendents_nc) #n,c
-                scale = (descendents_nc+self.alpha)-(descendents_nc*self.alpha)
+                scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))/(mod_nc)
                 propagated_logits = torch.clamp(propagated_logits,max=-1e-7)
                 logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)
                 with pyro.poutine.scale(scale=scale):
@@ -143,7 +143,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                     log1m_prob_tensor=logits_complement,
                     ), obs=y_n)
 
-    def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor) -> None:
+    def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor, mod_nc: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
     def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
@@ -198,7 +198,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device),
             )
         return torch.clamp(propagated_p, max=1.0)
-    
+
 
     def log_probs(self, logits: torch.Tensor):
         """
