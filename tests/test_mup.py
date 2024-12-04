@@ -40,8 +40,8 @@ def get_coord_data_MLP(
     Coordinate checking for an MLP model.
 
     Args:
-        mup:
-            If ``True``, use the μP MLP model. Otherwise, use the SP MLP model.
+        implementation:
+            Implementation of the model.
         bias:
             If ``True``, use bias in the model.
         nonlin:
@@ -225,7 +225,7 @@ class MLP(pl.LightningModule):
 
 class MuLinearMLP(pl.LightningModule):
     """
-    A Multi-Layer Perceptron (MLP) model with 3 layers in standard parameterization (SP).
+    A Multi-Layer Perceptron (MLP) model with 3 layers in maximal update parameterization (μP).
 
     Args:
         width:
@@ -451,7 +451,6 @@ class CerebrasMLP(pl.LightningModule):
         return self.optim_fn(param_groups, **{})
 
 
-# skip if implementation=="mup_cerebras" and optimizer=="sgd"
 @pytest.mark.parametrize("implementation", ["sp", "mup_mu_linear", "mup_cerebras"])
 @pytest.mark.parametrize("bias", [True, False])
 @pytest.mark.parametrize("nonlin", [F.relu, F.tanh])

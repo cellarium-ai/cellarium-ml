@@ -23,8 +23,8 @@ def record_out_coords_hook(
     Returns a hook to record layer output coordinate size.
 
     Args:
-        records:
-            The list of records to append to.
+        trainer:
+            The pytorch lightnign trainer.
         name:
             The name of the layer.
         t:
