@@ -236,6 +236,8 @@ class MuLinearMLP(pl.LightningModule):
             If ``True``, use bias in the model.
         nonlin:
             Nonlinearity function to use in the model.
+        optimizer:
+            Name of the optimizer to use.
         input_mult:
             Input multiplier.
         output_mult:
