@@ -88,43 +88,43 @@ class PredictTokenizer(torch.nn.Module):
         gene_tokens_nc: dict[str, torch.Tensor],
         gene_prompt_mask_nc: torch.Tensor,
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
-        ### GENE TOKENS ###
 
-        ## gene value ##
-        gene_value_nc = gene_tokens_nc.pop("gene_value")
-        total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis")
+        # step 1. gene tokens
+        gene_value_nc = gene_tokens_nc.pop("gene_value").float()
+        total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis").float()
         device = gene_value_nc.device
-        # downsample gene values
+
+        # step 1.1 downsample gene values (by scaling, to preserve differentiability)
         max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
         downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
         gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
-        gene_value_nc = torch.binomial(gene_value_nc, gene_downsample_p_nc)
-        total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc)
+        gene_value_nc = gene_value_nc * gene_downsample_p_nc
+        total_mrna_umis_nc = downsampled_total_mrna_umis_nc
 
+        # step 1.2 create gene query and prompt masks
         gene_query_mask_nc = ~gene_prompt_mask_nc
         gene_value_nc3 = torch.stack(
             [
-                torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(),
-                gene_query_mask_nc.float(),
+                torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(), # masked values are set to 0
+                gene_query_mask_nc.float(),  # 1 if the gene is queried, 0 if the gene is prompted
                 torch.log1p(total_mrna_umis_nc),
             ],
             dim=2,
         )
         gene_tokens_nc["gene_value"] = gene_value_nc3
 
-        ### METADATA TOKENS ###
-
-        ## metadata tokens ##
-        # assign token codes based on the ontology info
-        # token values not in the ontology are treated as unmeasured and assigned a code value of -1
+        # step 2. metadata tokens
+        #   assign token codes based on the ontology info
+        #   token values not in the ontology are treated as unmeasured and assigned a code value of -1
         for key, ontology_info in self.ontology_infos.items():
-            assert self.metadata_vocab_sizes[key] == len(ontology_info["labels"])
+            assert self.metadata_vocab_sizes[key] == len(ontology_info["names"])
             metadata_tokens_n[key] = torch.tensor(
-                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["labels"]).codes,
+                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["names"]).codes,
                 dtype=torch.int,
             )
-        # create metadata query and prompt masks
-        metadata_prompt_mask_nm = torch.stack([metadata_prompt_masks_n[key] for key in metadata_tokens_n], dim=1)
+        # step 2.1 create metadata query and prompt masks
+        metadata_prompt_mask_nm = torch.stack([
+            metadata_prompt_masks_n[key] for key in self.ontology_infos.keys()], dim=1)
         metadata_query_mask_nm = ~metadata_prompt_mask_nm
 
         # clamp unmeasured tokens to 0
@@ -132,13 +132,13 @@ class PredictTokenizer(torch.nn.Module):
         #     metadata_tokens_n[key] = metadata_token_n.clamp(0).int()
 
         # impute mask token for unmeasured metadata
-        # mask token is the last token in the vocabulary
         for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
+            # for each metadata type, mask token is the last token in the vocabulary
+            mask_token_index = self.metadata_vocab_sizes[key]
             metadata_tokens_n[key] = torch.where(
-                metadata_query_mask_nm[:, i], self.metadata_vocab_sizes[key], metadata_token_n
-            ).int()
+                metadata_query_mask_nm[:, i], mask_token_index, metadata_token_n).int()
 
-        ### PROMPT MASK ###
+        # step 3. generate the full prompt mask
         prompt_mask_nc = torch.cat([gene_prompt_mask_nc, metadata_prompt_mask_nm], dim=1)
 
         return {
@@ -586,7 +586,8 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
                 return prompt_mask_nc[b, kv_idx] | (q_idx == kv_idx)
 
             n, c = prompt_mask_nc.shape
-            attention_mask_ncc = create_block_mask(prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c)
+            attention_mask_ncc = create_block_mask(
+                prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c, BLOCK_SIZE=c, _compile=True)
         else:
             attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
 
