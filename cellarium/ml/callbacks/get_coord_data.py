@@ -1,73 +1,46 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import math
 from collections.abc import Callable
-from operator import attrgetter
 from typing import Any
 
 import lightning.pytorch as pl
 import torch
+from lightning.pytorch.utilities.types import STEP_OUTPUT
+from torch.utils.hooks import RemovableHandle
 
 
 def l1_norm(x: torch.Tensor) -> float:
     return x.detach().abs().mean().item()
 
 
-def record_out_coords(
-    trainer: list[dict], width: int, name: str, batch_idx: int
-) -> Callable[[torch.nn.Module, torch.Tensor, torch.Tensor], None]:
+def record_out_coords_hook(
+    trainer: pl.Trainer, name: str, batch_idx: int, multiplier: float
+) -> Callable[[torch.nn.Module, tuple, torch.Tensor], None]:
     """
     Returns a hook to record layer output coordinate size.
     Args:
         records:
             The list of records to append to.
-        width:
-            The width of the model.
         name:
             The name of the layer.
         t:
             The time step.
+        multiplier:
+            The multiplier.
     Returns:
         A hook to record layer output coordinate size.
     """
 
-    def hook(module: torch.nn.Module, input: torch.Tensor, output: torch.Tensor) -> None:
-        if l1_norm(output) == 0:
-            stats = {f"out.t={batch_idx}/{name}": l1_norm(output)}
-        else:
-            stats = {f"out.t={batch_idx}/{name}": math.log(l1_norm(output), 2)}
+    def hook(module: torch.nn.Module, input: tuple, output: torch.Tensor) -> None:
+        stats = {
+            "l1": l1_norm(output) * multiplier,
+            "module": f"{name}.out",
+            "type": "out",
+            "t": batch_idx,
+        }
         for logger in trainer.loggers:
-            logger.log_metrics(stats, step=width)
-
-    return hook
-
-
-def record_grad_coords(
-    trainer: list[dict], width: int, name: str, batch_idx: int
-) -> Callable[[torch.nn.Module, torch.Tensor, torch.Tensor], None]:
-    """
-    Returns a hook to record layer output coordinate size.
-    Args:
-        records:
-            The list of records to append to.
-        width:
-            The width of the model.
-        name:
-            The name of the layer.
-        t:
-            The time step.
-    Returns:
-        A hook to record layer output coordinate size.
-    """
-
-    def hook(grad: torch.Tensor) -> None:
-        if l1_norm(grad) == 0:
-            stats = {f"grad.t={batch_idx}/{name}": l1_norm(grad)}
-        else:
-            stats = {f"grad.t={batch_idx}/{name}": math.log(l1_norm(grad), 2)}
-        for logger in trainer.loggers:
-            logger.log_metrics(stats, step=width)
+            logger.log_metrics(stats, step=batch_idx)  # type: ignore[arg-type]
 
     return hook
 
@@ -75,10 +48,15 @@ def record_grad_coords(
 class GetCoordData(pl.Callback):
     """
     A callback that logs the loss scale during mixed-precision training.
+
+    Args:
+        layer_name_to_multiplier_name:
+            A dictionary mapping layer names to their corresponding multipliers.
+            If not provided, all layers will have a multiplier of 1.0.
     """
 
-    def __init__(self, width_attr: str) -> None:
-        self.width_attr = width_attr
+    def __init__(self, layer_name_to_multiplier_name: dict[str, str] | None = None) -> None:
+        self.layer_name_to_multiplier_name = layer_name_to_multiplier_name or {}
 
     def on_train_batch_start(
         self,
@@ -87,51 +65,83 @@ class GetCoordData(pl.Callback):
         batch: Any,
         batch_idx: int,
     ) -> None:
-        self.remove_hooks = []
-        width: int = attrgetter(self.width_attr)(pl_module)
+        # Store the hooks to remove them later
+        self.out_hooks: list[RemovableHandle] = []
+        # Create a mapping from modules to names
         module_to_name = {module: name for name, module in pl_module.named_modules()}
+        # Store the initial parameter values before the optimizer step
+        self.on_batch_start_param_values: dict[str, torch.Tensor] = {}
 
-        def add_hook(module):
+        def record_coords_hook(module: torch.nn.Module) -> None:
             if isinstance(module, (torch.nn.Linear, torch.nn.Embedding)):
-                self.remove_hooks.append(
-                    module.register_forward_hook(record_out_coords(trainer, width, module_to_name[module], batch_idx))
+                module_name = module_to_name[module]
+                multiplier_name = self.layer_name_to_multiplier_name.get(module_name, None)
+                if multiplier_name is not None:
+                    multiplier = getattr(pl_module, multiplier_name)
+                else:
+                    multiplier = 1.0
+
+                # out coords
+                self.out_hooks.append(
+                    module.register_forward_hook(record_out_coords_hook(trainer, module_name, batch_idx, multiplier))
                 )
 
-        # for name, module in pl_module.model.named_children():
-        #     # record layer outputs
-        #     if name == "transformer":
-        #         for sub_name, sub_module in module.blocks.named_children():
-        #             self.remove_hooks.append(
-        #                 sub_module.register_forward_hook(
-        #                     record_out_coords(trainer, width, f"transformer.blocks.{sub_name}", batch_idx)
-        #                 )
-        #             )
-        #     else:
-        #         self.remove_hooks.append(
-        #             module.register_forward_hook(record_out_coords(trainer, width, name, batch_idx))
-        #         )  # type: ignore[arg-type]
-        pl_module.apply(add_hook)
+                # param coords
+                for param_name, param in module.named_parameters():
+                    full_param_name = f"{module_name}.{param_name}"
+                    self.on_batch_start_param_values[full_param_name] = param.clone().detach()
+                    param_multiplier = multiplier if param_name == "weight" else 1.0
 
-        # self.param_hooks = []
-        # for param_name, param in pl_module.model.named_parameters():
-        #     self.param_hooks.append(param.register_hook(record_grad_coords(trainer, width, param_name, batch_idx)))
-        #     if l1_norm(param) == 0:
-        #         stats = {f"param.t={batch_idx}/{param_name}": l1_norm(param)}
-        #     else:
-        #         stats = {f"param.t={batch_idx}/{param_name}": math.log(l1_norm(param), 2)}
-        #     for logger in trainer.loggers:
-        #         logger.log_metrics(stats, step=width)
+                    stats = {
+                        "l1": l1_norm(param) * param_multiplier,
+                        "module": full_param_name,
+                        "type": "param",
+                        "t": batch_idx,
+                    }
+                    for logger in trainer.loggers:
+                        logger.log_metrics(stats, step=batch_idx)  # type: ignore[arg-type]
+
+        pl_module.apply(record_coords_hook)
 
     def on_train_batch_end(
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        outputs: list,
+        outputs: STEP_OUTPUT,
         batch: Any,
         batch_idx: int,
     ) -> None:
-        for hook in self.remove_hooks:
+        # Remove the hooks
+        for hook in self.out_hooks:
             hook.remove()
 
-        # for hook in self.param_hooks:
-        #     hook.remove()
+        # Create a mapping from modules to names
+        module_to_name = {module: name for name, module in pl_module.named_modules()}
+
+        def record_coords_hook(module: torch.nn.Module) -> None:
+            if isinstance(module, (torch.nn.Linear, torch.nn.Embedding)):
+                module_name = module_to_name[module]
+                multiplier_name = self.layer_name_to_multiplier_name.get(module_name, None)
+                if multiplier_name is not None:
+                    multiplier = getattr(pl_module, multiplier_name)
+                else:
+                    multiplier = 1.0
+
+                # param delta coords
+                for param_name, param in module.named_parameters():
+                    full_param_name = f"{module_name}.{param_name}"
+                    prev_param_value = self.on_batch_start_param_values[full_param_name]
+                    param_delta = param.detach() - prev_param_value
+                    param_multiplier = multiplier if param_name == "weight" else 1.0
+
+                    stats = {
+                        "l1": (l1_norm(param_delta)) * param_multiplier,
+                        "module": f"{full_param_name}.delta",
+                        "type": "delta",
+                        "t": batch_idx,
+                    }
+                    for logger in trainer.loggers:
+                        logger.log_metrics(stats, step=batch_idx)  # type: ignore[arg-type]
+
+        pl_module.apply(record_coords_hook)
+        self.on_batch_start_param_values = {}

@@ -14,13 +14,13 @@ from torch import nn
 from torchvision import datasets, transforms
 
 from cellarium.ml.layers import MuLinear
-from cellarium.ml.utilities.testing import assert_slope_equals, get_coord_data
+from cellarium.ml.utilities.testing import coord_check_MLP, get_coord_data_mu_linear
 
 optim_dict = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
 
 
 # adapted from https://github.com/microsoft/mup/blob/main/examples/MLP/main.py
-def coord_check_MLP(
+def get_coord_data_MLP_mu_linear(
     mup: bool,
     bias: bool,
     nonlin: Callable[[torch.Tensor], torch.Tensor],
@@ -85,7 +85,7 @@ def coord_check_MLP(
     models = {w: gen(w) for w in widths}
     optim_fn = optim_dict[optim_name]
 
-    return get_coord_data(
+    return get_coord_data_mu_linear(
         models,
         train_loader,
         loss_fn=F.cross_entropy,
@@ -146,7 +146,7 @@ class MLP(nn.Module):
     def reset_parameters(self) -> None:
         fan_in_1 = self.fc_1.weight.shape[1]
         nn.init.normal_(self.fc_1.weight, std=1 / math.sqrt(fan_in_1))  # 1 / sqrt(d)
-        self.fc_1.weight.data /= self.input_mult**0.5
+        self.fc_1.weight.data /= self.input_mult
         fan_in_2 = self.fc_2.weight.shape[1]
         nn.init.normal_(self.fc_2.weight, std=1 / math.sqrt(fan_in_2))  # 1 / sqrt(n)
         nn.init.zeros_(self.fc_3.weight)  # zero readout
@@ -157,7 +157,7 @@ class MLP(nn.Module):
             nn.init.zeros_(self.fc_3.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.nonlin(self.fc_1(x) * self.input_mult**0.5)
+        x = self.nonlin(self.fc_1(x) * self.input_mult)
         x = self.nonlin(self.fc_2(x))
         return self.fc_3(x) * self.output_mult
 
@@ -203,7 +203,7 @@ class MuMLP(nn.Module):
             bias=bias,
             layer="input",
             optimizer=optimizer,
-            weight_init_std=(1 / math.sqrt(3072 * self.input_mult)),
+            weight_init_std=(1 / (math.sqrt(3072) * self.input_mult)),
             base_width=128,
         )
         self.fc_2 = MuLinear(
@@ -226,7 +226,7 @@ class MuMLP(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.nonlin(self.fc_1(x) * self.input_mult**0.5)
+        x = self.nonlin(self.fc_1(x) * self.input_mult)
         x = self.nonlin(self.fc_2(x))
         return self.fc_3(x) * self.output_mult
 
@@ -235,7 +235,7 @@ class MuMLP(nn.Module):
 @pytest.mark.parametrize("nonlin", [F.relu, F.tanh])
 @pytest.mark.parametrize(
     "optimizer,lr,input_mult,output_mult",
-    [("sgd", 0.1, 2**-8, 2**5), ("adam", 0.01, 2**-6, 2**-4), ("adamw", 0.01, 2**-6, 2**-4)],
+    [("sgd", 0.1, 2**-4, 2**5), ("adam", 0.01, 2**-3, 2**-4), ("adamw", 0.01, 2**-3, 2**-4)],
 )
 def test_mup(
     train_loader: torch.utils.data.DataLoader,
@@ -261,7 +261,7 @@ def test_mup(
     nsteps = 3
     nseeds = 5
     widths = [2**i for i in range(7, 14)]
-    df = coord_check_MLP(
+    mup_df = get_coord_data_MLP_mu_linear(
         mup=True,
         bias=bias,
         nonlin=nonlin,
@@ -274,128 +274,20 @@ def test_mup(
         nseeds=nseeds,
         widths=widths,
     )
-    atol = 0.1
-    for t in range(nsteps):
-        df_t = df.loc[df.t == t]
-        for i in range(1, 4):
-            df_i = df_t.loc[df_t.module.str.contains(str(i))]
-            # output scaling: Θ(1)
-            df_out = df_i.loc[df.type == "out"]
-            out = df_out.groupby("width").l1.mean()
-            if any(out):
-                assert_slope_equals(out, 0, loglog=True, atol=atol)
+    coord_check_MLP(mup_df, nsteps, bias, optimizer, atol=0.1)
 
-            # W
-            df_param = df_i.loc[df.type == "param"]
-            W = df_param[df_param.module.str.contains("weight")].groupby("width").l1.mean()
-            if i == 1:
-                # input layer scaling: Θ(1)
-                assert_slope_equals(W, 0, loglog=True, atol=atol)
-            elif i == 2:
-                # hidden layer scaling: Θ(1/sqrt(n))
-                assert_slope_equals(W, -0.5, loglog=True, atol=atol)
-            elif i == 3:
-                # output layer scaling: Θ(1/n)
-                if any(W):
-                    assert_slope_equals(W, -1, loglog=True, atol=atol)
-
-            # b scaling: Θ(1)
-            if bias:
-                b = df_param[df_param.module.str.contains("bias")].groupby("width").l1.mean()
-                if any(b):
-                    assert_slope_equals(b, 0, loglog=True, atol=atol)
-
-            # ∆W
-            df_delta = df_i.loc[df.type == "delta"]
-            dW = df_delta[df_delta.module.str.contains("weight")].groupby("width").l1.mean()
-            if i == 1:
-                # input layer scaling: Θ(1)
-                if any(dW):
-                    assert_slope_equals(dW, 0, loglog=True, atol=atol)
-            elif i == 2:
-                # hidden layer scaling: Θ(1/n)
-                if any(dW):
-                    if optimizer == "adamw":
-                        # additional scaling due weight decay: Θ(1/sqrt(n))
-                        assert_slope_equals(dW, -0.75, loglog=True, atol=0.27)
-                    else:
-                        assert_slope_equals(dW, -1, loglog=True, atol=atol)
-            elif i == 3:
-                # output layer scaling: Θ(1/n)
-                assert_slope_equals(dW, -1, loglog=True, atol=atol)
-
-            # ∆b scaling: Θ(1)
-            if bias:
-                db = df_delta[df_delta.module.str.contains("bias")].groupby("width").l1.mean()
-                if any(db):
-                    assert_slope_equals(db, 0, loglog=True, atol=atol)
-
-    with pytest.raises(AssertionError):
-        df = coord_check_MLP(
-            mup=False,
-            bias=bias,
-            nonlin=nonlin,
-            lr=lr,
-            input_mult=input_mult,
-            output_mult=output_mult,
-            optim_name=optimizer,
-            train_loader=train_loader,
-            nsteps=nsteps,
-            nseeds=nseeds,
-            widths=widths,
-        )
-        atol = 0.2
-        for t in range(nsteps):
-            df_t = df.loc[df.t == t]
-            for i in range(1, 4):
-                df_i = df_t.loc[df_t.module.str.contains(str(i))]
-                # output scaling: Θ(1)
-                df_out = df_i.loc[df.type == "out"]
-                out = df_out.groupby("width").l1.mean()
-                if any(out):
-                    assert_slope_equals(out, 0, loglog=True, atol=atol)
-
-                # W
-                df_param = df_i.loc[df.type == "param"]
-                W = df_param[df_param.module.str.contains("weight")].groupby("width").l1.mean()
-                if i == 1:
-                    # input layer scaling: Θ(1)
-                    assert_slope_equals(W, 0, loglog=True, atol=atol)
-                elif i == 2:
-                    # hidden layer scaling: Θ(1/sqrt(n))
-                    assert_slope_equals(W, -0.5, loglog=True, atol=atol)
-                elif i == 3:
-                    # output layer scaling: Θ(1/n)
-                    if any(W):
-                        assert_slope_equals(W, -1, loglog=True, atol=atol)
-
-                # b scaling: Θ(1)
-                if bias:
-                    b = df_param[df_param.module.str.contains("bias")].groupby("width").l1.mean()
-                    if any(b):
-                        assert_slope_equals(b, 0, loglog=True, atol=0.05)
-
-                # ∆W
-                df_delta = df_i.loc[df.type == "delta"]
-                dW = df_delta[df_delta.module.str.contains("weight")].groupby("width").l1.mean()
-                if i == 1:
-                    # input layer scaling: Θ(1)
-                    if any(dW):
-                        assert_slope_equals(dW, 0, loglog=True, atol=atol)
-                elif i == 2:
-                    # hidden layer scaling: Θ(1/n)
-                    if any(dW):
-                        if optimizer == "adamw":
-                            # additional scaling due weight decay: Θ(1/sqrt(n))
-                            assert_slope_equals(dW, -0.75, loglog=True, atol=0.27)
-                        else:
-                            assert_slope_equals(dW, -1, loglog=True, atol=atol)
-                elif i == 3:
-                    # output layer scaling: Θ(1/n)
-                    assert_slope_equals(dW, -1, loglog=True, atol=atol)
-
-                # ∆b scaling: Θ(1)
-                if bias:
-                    db = df_delta[df_delta.module.str.contains("bias")].groupby("width").l1.mean()
-                    if any(db):
-                        assert_slope_equals(db, 0, loglog=True, atol=atol)
+    sp_df = get_coord_data_MLP_mu_linear(
+        mup=False,
+        bias=bias,
+        nonlin=nonlin,
+        lr=lr,
+        input_mult=input_mult,
+        output_mult=output_mult,
+        optim_name=optimizer,
+        train_loader=train_loader,
+        nsteps=nsteps,
+        nseeds=nseeds,
+        widths=widths,
+    )
+    with pytest.raises(ValueError):
+        coord_check_MLP(sp_df, nsteps, bias, optimizer, atol=0.2)

@@ -5,8 +5,6 @@ import fnmatch
 import re
 from collections.abc import Callable
 
-from torch import nn
-
 
 def convert_glob_to_regex(f: str) -> re.Pattern:
     """
@@ -16,7 +14,7 @@ def convert_glob_to_regex(f: str) -> re.Pattern:
     return re.compile(fnmatch.translate(f))
 
 
-def make_param_filter(param_filter: str | list[str]) -> Callable[[str, nn.Parameter], bool]:
+def make_param_filter(param_filter: str | list[str]) -> Callable[[str], bool]:
     """
     Returns the corresponding filter for parameters for the given `param_filter`.
     Args:
@@ -45,22 +43,33 @@ class LRAdjustmentGroup:
     Stores a callable that returns True if a given model param corresponds
     to the group. Additionally, it stores the scale that should be applied to
     the LR of the model params that correspond to the group.
+
+    Example::
+
+        >>> lr_adjustment_groups = {
+        ...     "embedding": LRAdjustmentGroup("*embedding*weight"),
+        ...     "decoder_attention": LRAdjustmentGroup("*transformer*attention*W*weight"),
+        ...     "decoder_input_ffn": LRAdjustmentGroup("*transformer*ffn.dense1*weight"),
+        ...     "decoder_output_ffn": LRAdjustmentGroup("*transformer*ffn.dense2*weight"),
+        ... }
+
+    Args:
+        param_filter:
+            A string or a list of strings that contains glob expressions
+            used to match whether a given model param name belongs to the group.
+        scale:
+            The scale that should be applied to the LR of this group.
     """
 
     def __init__(
         self,
         param_filter: str | list[str],
-        scale: float | None = 1.0,
+        scale: float = 1.0,
     ) -> None:
-        """
-        param_filter: A string or a list of strings that contains glob expressions
-        used to match whether a given model param name belongs to the group.
-        scale: The scale that should be applied to the LR of this group
-        """
         # Convert the strings into a callable that returns True if a given param
         # name corresponds to the LR group
-        self.param_filter = param_filter
+        self.param_filter = make_param_filter(param_filter)
         self.scale = scale
 
-    def set_scale(self, scale):
+    def set_scale(self, scale: float) -> None:
         self.scale = scale
