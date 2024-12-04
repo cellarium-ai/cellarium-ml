@@ -195,6 +195,7 @@ def get_coord_data_mu_linear(
         torch.manual_seed(i)
         for width, lazy_model in models.items():
             model = lazy_model()
+            model.train()
             optim_kwargs: dict[str, Any] = {"lr": lr}
             optimizer = optim_fn(model.parameters(), **optim_kwargs)
             data_iter = iter(train_loader)
@@ -298,6 +299,8 @@ def get_coord_data_cerebras(
                 logger=logger,
                 callbacks=[GetCoordData(layer_name_to_multiplier_name)],
                 enable_checkpointing=False,
+                enable_model_summary=False,
+                enable_progress_bar=False,
             )
             model = lazy_model()
             trainer.fit(model, train_loader)
@@ -319,14 +322,10 @@ class PandasLogger(Logger):
 
     @property
     def version(self):
-        # Return the experiment version, int or str.
         return ""
 
     @rank_zero_only
     def log_metrics(self, metrics: dict[str, float], step: int | None = None) -> None:
-        # metrics is a dictionary of metric names and values
-        # your code to record metrics goes here
-        # add metrics values at index step
         metric_df = pd.DataFrame(metrics, index=[step])
         self.df = pd.concat([self.df, metric_df])
 

@@ -278,6 +278,7 @@ class MuMLP(pl.LightningModule):
         return loss
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
+        # Group parameters by learning rate adjustment group
         params_groups_dict: dict[str, list[torch.Tensor]] = {}
         for name, param in self.named_parameters():
             for lr_group_name, lr_group in self.lr_adjustment_groups.items():
@@ -286,6 +287,8 @@ class MuMLP(pl.LightningModule):
                     break
             else:
                 params_groups_dict.setdefault("default", []).append(param)
+
+        # Create parameter groups for the optimizer
         param_groups = []
         for lr_group_name, params in params_groups_dict.items():
             group_optim_kwargs = {"lr": self.lr, "eps": self.eps / self.width_mult}
@@ -294,6 +297,9 @@ class MuMLP(pl.LightningModule):
             if lr_group_name != "default":
                 group_optim_kwargs["lr"] *= self.lr_adjustment_groups[lr_group_name].scale
                 if self.optim_fn == torch.optim.AdamW:
+                    # weight_decay is coupled with the learning rate in AdamW
+                    # so we need to decouple it by scaling it inversely with the learning rate
+                    # see https://github.com/microsoft/mup/issues/1
                     group_optim_kwargs["weight_decay"] /= self.lr_adjustment_groups[lr_group_name].scale
             param_groups.append({"params": params, **group_optim_kwargs})
 

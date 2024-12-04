@@ -22,8 +22,7 @@ def scale_initializers_by_dimension(
 ) -> None:
     """
     Scales the std of an initializer or list of initializers by the specified
-    width and depth scalars. Unsupported initializers are ignored and a warning
-    is printed to the user.
+    width and depth scalars.
     """
     if not width_scale:
         width_scale = 1.0

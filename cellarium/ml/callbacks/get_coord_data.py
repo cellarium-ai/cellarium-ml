@@ -19,6 +19,7 @@ def record_out_coords_hook(
 ) -> Callable[[torch.nn.Module, tuple, torch.Tensor], None]:
     """
     Returns a hook to record layer output coordinate size.
+
     Args:
         records:
             The list of records to append to.
@@ -28,26 +29,27 @@ def record_out_coords_hook(
             The time step.
         multiplier:
             The multiplier.
+
     Returns:
         A hook to record layer output coordinate size.
     """
 
     def hook(module: torch.nn.Module, input: tuple, output: torch.Tensor) -> None:
-        stats = {
+        metrics = {
             "l1": l1_norm(output) * multiplier,
             "module": f"{name}.out",
             "type": "out",
             "t": batch_idx,
         }
         for logger in trainer.loggers:
-            logger.log_metrics(stats, step=batch_idx)  # type: ignore[arg-type]
+            logger.log_metrics(metrics, step=batch_idx)  # type: ignore[arg-type]
 
     return hook
 
 
 class GetCoordData(pl.Callback):
     """
-    A callback that logs the loss scale during mixed-precision training.
+    A callback that records the L1 norm of the output and parameter values of each layer in the model.
 
     Args:
         layer_name_to_multiplier_name:
@@ -92,14 +94,14 @@ class GetCoordData(pl.Callback):
                     self.on_batch_start_param_values[full_param_name] = param.clone().detach()
                     param_multiplier = multiplier if param_name == "weight" else 1.0
 
-                    stats = {
+                    metrics = {
                         "l1": l1_norm(param) * param_multiplier,
                         "module": full_param_name,
                         "type": "param",
                         "t": batch_idx,
                     }
                     for logger in trainer.loggers:
-                        logger.log_metrics(stats, step=batch_idx)  # type: ignore[arg-type]
+                        logger.log_metrics(metrics, step=batch_idx)  # type: ignore[arg-type]
 
         pl_module.apply(record_coords_hook)
 
@@ -134,14 +136,14 @@ class GetCoordData(pl.Callback):
                     param_delta = param.detach() - prev_param_value
                     param_multiplier = multiplier if param_name == "weight" else 1.0
 
-                    stats = {
+                    metrics = {
                         "l1": (l1_norm(param_delta)) * param_multiplier,
                         "module": f"{full_param_name}.delta",
                         "type": "delta",
                         "t": batch_idx,
                     }
                     for logger in trainer.loggers:
-                        logger.log_metrics(stats, step=batch_idx)  # type: ignore[arg-type]
+                        logger.log_metrics(metrics, step=batch_idx)  # type: ignore[arg-type]
 
         pl_module.apply(record_coords_hook)
         self.on_batch_start_param_values = {}
