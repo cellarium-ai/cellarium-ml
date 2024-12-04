@@ -9,6 +9,8 @@ import torch
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torch.utils.hooks import RemovableHandle
 
+from cellarium.ml.layers import MuLinear
+
 
 def l1_norm(x: torch.Tensor) -> float:
     return x.detach().abs().mean().item()
@@ -75,7 +77,7 @@ class GetCoordData(pl.Callback):
         self.on_batch_start_param_values: dict[str, torch.Tensor] = {}
 
         def record_coords_hook(module: torch.nn.Module) -> None:
-            if isinstance(module, (torch.nn.Linear, torch.nn.Embedding)):
+            if isinstance(module, (torch.nn.Linear, torch.nn.Embedding, MuLinear)):
                 module_name = module_to_name[module]
                 multiplier_name = self.layer_name_to_multiplier_name.get(module_name, None)
                 if multiplier_name is not None:
@@ -83,16 +85,21 @@ class GetCoordData(pl.Callback):
                 else:
                     multiplier = 1.0
 
-                # out coords
+                # record layer outputs
                 self.out_hooks.append(
                     module.register_forward_hook(record_out_coords_hook(trainer, module_name, batch_idx, multiplier))
                 )
 
-                # param coords
+                # record parameter values
                 for param_name, param in module.named_parameters():
+                    param_multiplier = multiplier if param_name.startswith("weight") else 1.0
+                    if param_name.endswith("_unscaled"):
+                        # muP
+                        param_name = param_name.removesuffix("_unscaled")
+                        param_multiplier *= getattr(module, f"{param_name}_multiplier")
+
                     full_param_name = f"{module_name}.{param_name}"
                     self.on_batch_start_param_values[full_param_name] = param.clone().detach()
-                    param_multiplier = multiplier if param_name == "weight" else 1.0
 
                     metrics = {
                         "l1": l1_norm(param) * param_multiplier,
@@ -121,7 +128,7 @@ class GetCoordData(pl.Callback):
         module_to_name = {module: name for name, module in pl_module.named_modules()}
 
         def record_coords_hook(module: torch.nn.Module) -> None:
-            if isinstance(module, (torch.nn.Linear, torch.nn.Embedding)):
+            if isinstance(module, (torch.nn.Linear, torch.nn.Embedding, MuLinear)):
                 module_name = module_to_name[module]
                 multiplier_name = self.layer_name_to_multiplier_name.get(module_name, None)
                 if multiplier_name is not None:
@@ -129,12 +136,17 @@ class GetCoordData(pl.Callback):
                 else:
                     multiplier = 1.0
 
-                # param delta coords
+                # record parameter deltas
                 for param_name, param in module.named_parameters():
+                    param_multiplier = multiplier if param_name.startswith("weight") else 1.0
+                    if param_name.endswith("_unscaled"):
+                        # muP
+                        param_name = param_name.removesuffix("_unscaled")
+                        param_multiplier *= getattr(module, f"{param_name}_multiplier")
+
                     full_param_name = f"{module_name}.{param_name}"
                     prev_param_value = self.on_batch_start_param_values[full_param_name]
                     param_delta = param.detach() - prev_param_value
-                    param_multiplier = multiplier if param_name == "weight" else 1.0
 
                     metrics = {
                         "l1": (l1_norm(param_delta)) * param_multiplier,

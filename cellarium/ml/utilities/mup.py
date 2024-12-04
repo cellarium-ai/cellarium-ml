@@ -17,9 +17,12 @@ def convert_glob_to_regex(f: str) -> re.Pattern:
 def make_param_filter(param_filter: str | list[str]) -> Callable[[str], bool]:
     """
     Returns the corresponding filter for parameters for the given `param_filter`.
+
     Args:
-        param_filter: Either a string or a list of strings which are glob expressions or a
-        callable which represents the filter itself
+        param_filter:
+            Either a string or a list of strings which are glob expressions or
+            a callable which represents the filter itself
+
     Returns:
         A callable method that when given a parameter will return whether the filter matches it.
     """
