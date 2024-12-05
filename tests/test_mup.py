@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import gc
 import math
 from collections.abc import Callable
 from pathlib import Path
@@ -506,3 +507,4 @@ def test_mup(
             coord_check_MLP(df, nsteps, bias, optimizer, atol=0.2)
     else:
         coord_check_MLP(df, nsteps, bias, optimizer, atol=0.1)
+    gc.collect()
