@@ -37,6 +37,7 @@ ifeq (${TEST_DEVICES}, 2)
 else
 	# default
 	pytest -v tests/dataloader
+endif
 
 test-examples: FORCE
 	cellarium-ml onepass_mean_var_std fit --config examples/cli_workflow/onepass_train_config.yaml
