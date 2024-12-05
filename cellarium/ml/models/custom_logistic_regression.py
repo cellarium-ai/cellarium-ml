@@ -135,7 +135,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 #scale = self.get_scale(descendents_nc=descendents_nc) #n,c
                 scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))/(mod_nc)
                 propagated_logits = torch.clamp(propagated_logits,max=-1e-7)
-                logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)
+                logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)*descendents_nc
                 with pyro.poutine.scale(scale=scale):
                     with pyro.plate("categories", size=self.n_categories, dim=-1):
                         pyro.sample("y", self.out_distribution(
