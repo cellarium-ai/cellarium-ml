@@ -133,7 +133,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
             elif self.out_distribution == bernoulli_distribution.CustomPyroBernoulli:
                 #scale = self.get_scale(descendents_nc=descendents_nc) #n,c
-                scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))/(mod_nc)
+                #scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))/(mod_nc)
+                scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))
                 propagated_logits = torch.clamp(propagated_logits,max=-1e-7)
                 logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)*descendents_nc
                 with pyro.poutine.scale(scale=scale):
@@ -164,7 +165,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
 
         logits_nc = x_ng @ self.W_gc + self.b_c
         activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-        #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+        activation_out = self.probability_propagation(activation_out_gpu=activation_out)
         return {"y_logits_nc": logits_nc,"cell_type_probs_nc": activation_out}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
