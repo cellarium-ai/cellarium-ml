@@ -44,4 +44,4 @@ class EncodedTargets(nn.Module):
         else:
             indices = np.searchsorted(self.unique_cell_types_nparray, y_n)
             return {'y_n':self.target_row_ancestors_col_torch_tensor[indices], 'descendents_nc': self.target_row_descendents_only_col_torch_tensor[indices], 'mod_nc': self.target_row_mod_col_torch_tensor[indices]}
-            #return {'y_n':self.target_row_ancestors_col_torch_tensor[indices], 'descendents_nc': self.target_row_descendents_only_col_torch_tensor[indices], 'y_n_predict': indices} # using for prediction
+            #return {'y_n':self.target_row_ancestors_col_torch_tensor[indices], 'descendents_nc': self.target_row_descendents_only_col_torch_tensor[indices], 'mod_nc': self.target_row_mod_col_torch_tensor[indices], 'y_n_predict': indices} # using for prediction
