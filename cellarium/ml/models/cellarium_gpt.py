@@ -587,7 +587,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
             n, c = prompt_mask_nc.shape
             attention_mask_ncc = create_block_mask(
-                prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c, BLOCK_SIZE=c, _compile=True)
+                prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c, BLOCK_SIZE=c, device=prompt_mask_nc.device, _compile=False)
         else:
             attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
 
