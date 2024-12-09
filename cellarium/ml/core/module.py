@@ -322,9 +322,19 @@ class CellariumModule(pl.LightningModule):
             # Create parameter groups for the optimizer
             param_groups = []
             for lr_group_name, params in lr_group_to_params_mapping.items():
+                # For scaling rules consult Table 8 in https://arxiv.org/abs/2203.03466
+                # There are four scaling factors that need to be considered for mu-Transfer:
+                # a. Scaling of the multiplier. This needs to be handled by the self.model.__init__
+                # b. Scaling of the initializer. This also needs to be handled by the self.model.__init__
+                # c. Scaling of the learning rate. This is handled here based on
+                #    the lr adjustment groups configured by the self.model.__init__
+                # d. Scaling of the gradients or, alternatively, the epsilon. This is handled here.
                 group_optim_kwargs = optim_kwargs.copy()
+                # For Adam and AdamW optimizers, the gradients need to be scaled by the width multiplier
+                # Alternatively, the epsilon can be scaled down by the width multiplier
                 group_optim_kwargs["eps"] /= self.model.width_mult
                 if lr_group_name != "default":
+                    # Scale the learning rate based on the lr adjustment group
                     group_optim_kwargs["lr"] *= self.model.lr_adjustment_groups[lr_group_name].scale
                     if optim_fn == torch.optim.AdamW:
                         # weight_decay is coupled with the learning rate in AdamW
