@@ -24,11 +24,11 @@ def record_out_coords_hook(
 
     Args:
         trainer:
-            The pytorch lightnign trainer.
+            The pytorch lightning trainer.
         name:
             The name of the layer.
-        t:
-            The time step.
+        batch_idx:
+            The batch index.
         multiplier:
             The multiplier.
 
