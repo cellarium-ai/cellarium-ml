@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import warnings
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
@@ -303,7 +304,39 @@ class CellariumModule(pl.LightningModule):
                 warnings.warn("Scheduler is defined but no optimizer is defined.", UserWarning)
             return None
 
-        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
+        if self.model.lr_adjustment_groups:
+            if optim_fn not in (torch.optim.Adam, torch.optim.AdamW):
+                raise ValueError("Learning rate adjustment groups are only supported for Adam and AdamW optimizers.")
+
+            # Group parameters by learning rate adjustment group
+            assert "default" not in self.model.lr_adjustment_groups
+            lr_group_to_params_mapping: dict[str, list[torch.Tensor]] = defaultdict(list)
+            for name, param in self.named_parameters():
+                for lr_group_name, lr_group in self.model.lr_adjustment_groups.items():
+                    if lr_group.param_filter(name):
+                        lr_group_to_params_mapping[lr_group_name].append(param)
+                        break
+                else:
+                    lr_group_to_params_mapping["default"].append(param)
+
+            # Create parameter groups for the optimizer
+            param_groups = []
+            for lr_group_name, params in lr_group_to_params_mapping.items():
+                group_optim_kwargs = optim_kwargs.copy()
+                group_optim_kwargs["eps"] /= self.model.width_mult
+                if lr_group_name != "default":
+                    group_optim_kwargs["lr"] *= self.model.lr_adjustment_groups[lr_group_name].scale
+                    if optim_fn == torch.optim.AdamW:
+                        # weight_decay is coupled with the learning rate in AdamW
+                        # so we need to decouple it by scaling it inversely with the learning rate
+                        # see https://github.com/microsoft/mup/issues/1
+                        group_optim_kwargs["weight_decay"] /= self.model.lr_adjustment_groups[lr_group_name].scale
+                param_groups.append({"params": params, **group_optim_kwargs})
+            optimizer = optim_fn(param_groups)
+        else:
+            optimizer = optim_fn(self.model.parameters(), **optim_kwargs)
+
+        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optimizer}
         if scheduler_fn is not None:
             scheduler = scheduler_fn(optim_config["optimizer"], **scheduler_kwargs)
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
