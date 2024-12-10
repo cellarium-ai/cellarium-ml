@@ -12,6 +12,8 @@ import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
 
+from cellarium.ml.utilities.mup import LRAdjustmentGroup
+
 
 class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
     """
@@ -21,6 +23,8 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
     def __init__(self) -> None:
         super(torch.nn.Module, self).__setattr__("_pyro_params", OrderedDict())
         super().__init__()
+        self.lr_adjustment_groups: dict[str, LRAdjustmentGroup] | None = None
+        self.width_mult: float | None = None
 
     __call__: Callable[..., dict[str, torch.Tensor | None]]
 
