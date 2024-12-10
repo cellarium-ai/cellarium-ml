@@ -11,30 +11,38 @@ import pandas as pd
 import torch
 
 from cellarium.ml.data.fileio import read_pkl_from_gcs
+from cellarium.ml.hop_scoring.hop_score_calculation import calculate_metrics_for_cas_output_in_batches_csv
 
 
 def write_prediction(
     prediction: torch.Tensor,
-    logits: torch.Tensor,
     ids: np.ndarray,
-    cell_type_names: np.ndarray,
     query_ids: np.ndarray,
     output_dir: Path | str,
-    postfix: int | str,
     columns: np.ndarray,
 ) -> None:
     """
     Write prediction to a CSV file.
     """
+    single_batch_df_copy = pd.DataFrame(prediction.cpu(), columns=columns)
+    ground_truth_cl_names = query_ids
+    cell_type_ontology_term_id_array = columns
+    db_id_array = ids
+    co_resource = read_pkl_from_gcs('gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/shared_meta/dev_benchmarking_june_2024_metadata_benchmarking_resource_schema_5-0.pickle')
+    cas_out_csv = calculate_metrics_for_cas_output_in_batches_csv(
+    db_id_array = db_id_array,
+    ground_truth_cl_names=ground_truth_cl_names,
+    single_batch_df_copy=single_batch_df_copy,
+    cell_type_ontology_term_id_array=cell_type_ontology_term_id_array,
+    co_resource=co_resource,
+    num_hops=4,
+    batch_size=20240)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    df = pd.DataFrame(prediction.cpu(), columns=columns)
-    #df = pd.DataFrame(logits.cpu(), columns=columns)
-    df.insert(0,"query_cell_type_names", cell_type_names)
-    df.insert(0,"query_cell_id", query_ids)
-    df.insert(0, "db_ids", ids)
-    output_path = os.path.join(output_dir, f"batch_{postfix}_probs.csv")
-    df.to_csv(output_path, header=True, index=False)
+
+    output_path = "gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/model_predictions/Base_model_regular_lr_no_pp/hop_scores_extract_1_110.csv"
+    cas_out_csv.sort_values(by='query_cell_id', inplace=True)
+    cas_out_csv.to_csv(output_path, header=True, index=False)
 
 
 class PredictionWriter(pl.callbacks.BasePredictionWriter):
@@ -70,27 +78,19 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        #columns = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl")
         columns = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl")
+        columns = np.char.replace(columns,':',"_")
         pred = prediction["cell_type_probs_nc"]
-        logits = prediction["y_logits_nc"]
         if self.prediction_size is not None:
             pred = pred[:, : self.prediction_size]
-            logits = logits[:,: self.prediction_size]
-        #y_n = batch['y_n'].cpu().numpy()
-        y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
+        y_n = batch['y_n'].cpu().numpy()
+        #y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
         y_n_cell_type_ids = np.take(columns,y_n)
-        #cell_type_names = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/ontology_term_id_to_cell_type_np_array.pkl")
-        cell_type_names = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/ontology_term_id_to_cell_type_np_array_lrexp_human.pkl")
-        y_n_cell_type_names = np.take(cell_type_names,y_n)
+
         write_prediction(
             prediction=pred,
-            logits=logits,
-            #ids=y_n_cell_type_ids,
-            cell_type_names = y_n_cell_type_names,
             ids=batch["obs_names_n"],
             query_ids = y_n_cell_type_ids,
             output_dir=self.output_dir,
-            postfix=batch_idx * trainer.world_size + trainer.global_rank,
             columns=columns[0:self.prediction_size],
         )
