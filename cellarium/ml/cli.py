@@ -64,9 +64,10 @@ class FileLoader:
     file_path: str
     loader_fn: Callable[[str], Any] | str
     attr: str | None = None
+    key: str | None = None
     convert_fn: Callable[[Any], Any] | str | None = None
 
-    def __new__(cls, file_path, loader_fn, attr, convert_fn):
+    def __new__(cls, file_path, loader_fn, attr=None, key=None, convert_fn=None):
         if isinstance(loader_fn, str):
             loader_fn = import_object(loader_fn)
         if loader_fn not in cached_loaders:
@@ -76,6 +77,8 @@ class FileLoader:
 
         if attr is not None:
             obj = attrgetter(attr)(obj)
+        if key is not None:
+            obj = obj[key]
 
         if isinstance(convert_fn, str):
             convert_fn = import_object(convert_fn)
@@ -116,10 +119,11 @@ class CheckpointLoader(FileLoader):
 
     file_path: str
     attr: str | None = None
+    key: str | None = None
     convert_fn: Callable[[Any], Any] | str | None = None
 
-    def __new__(cls, file_path, attr, convert_fn):
-        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, convert_fn)
+    def __new__(cls, file_path, attr=None, key=None, convert_fn=None):
+        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, key, convert_fn)
 
 
 def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> FileLoader:
@@ -181,6 +185,19 @@ def compute_n_obs(data: CellariumAnnDataDataModule) -> int:
         The number of observations in the data.
     """
     return data.dadc.n_obs
+
+
+def compute_n_vars(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of observations in the data.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of variables in the data.
+    """
+    return data.dadc.n_vars
 
 
 def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
@@ -593,6 +610,45 @@ def tdigest(args: ArgsType = None) -> None:
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
+        },
+    )
+    cli(args=args)
+
+
+@register_model
+def contrastive_mlp(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.ContrastiveMLP` model.
+
+    This example shows how to perform contrastive learning with a default augmentation
+    strategy for omics data.
+
+    Example run::
+
+        cellarium-ml contrastive_mlp fit \
+            --model.model.init_args.hidden_size 4096 2048 1024 512 \
+            --model.model.init_args.embed_dim 256 \
+            --model.model.init_args.temperature 1.0 \
+            --model.model.init_args.target_count 10000 \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/contrastive \
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.ContrastiveMLP",
+        link_arguments=[
+            LinkArguments("data", "model.model.init_args.n_obs", compute_n_vars),
+        ],
+        trainer_defaults={
+            "max_epochs": 20,
         },
     )
     cli(args=args)

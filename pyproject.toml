@@ -24,6 +24,7 @@ dependencies = [
   "anndata",
   "boltons",
   "braceexpand",
+  "cosine_annealing_warmup @ https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup/tarball/master#egg=cosine_annealing_warmupmatplotlib",
   "crick>=0.0.4",
   "google-cloud-storage",
   "jsonargparse[signatures]==4.27.7",

@@ -102,6 +102,92 @@ CONFIGS = [
         },
     },
     {
+        "model_name": "contrastive_mlp",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "transforms": [{"class_path": "cellarium.ml.transforms.Duplicate"}],
+                "model": {
+                    "class_path": "cellarium.ml.models.ContrastiveMLP",
+                    "init_args": {
+                        "n_obs": "36601",
+                        "embed_dim": "4",
+                        "hidden_size": [8],
+                        "temperature": "1.0",
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                },
+                "batch_size": "5",
+                "num_workers": "1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "1",
+            },
+        },
+    },
+    {
+        "model_name": "contrastive_mlp",
+        "subcommand": "predict",
+        "predict": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.ContrastiveMLP",
+                    "init_args": {
+                        "n_obs": "36601",
+                        "embed_dim": "4",
+                        "hidden_size": [8],
+                        "temperature": "1.0",
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                },
+                "batch_size": "5",
+                "num_workers": "1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "1",
+                "limit_predict_batches": "1",
+            },
+            "return_predictions": "false",
+        },
+    },
+    {
         "model_name": "probabilistic_pca",
         "subcommand": "fit",
         "fit": {
