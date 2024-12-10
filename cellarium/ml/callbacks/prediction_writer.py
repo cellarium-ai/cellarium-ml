@@ -9,6 +9,7 @@ import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import torch
+import multiprocessing
 
 from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.hop_scoring.hop_score_calculation import calculate_metrics_for_cas_output_in_batches_csv
@@ -36,7 +37,7 @@ def write_prediction(
     cell_type_ontology_term_id_array=cell_type_ontology_term_id_array,
     co_resource=co_resource,
     num_hops=4,
-    batch_size=20240)
+    batch_size= int(len(ground_truth_cl_names)/multiprocessing.cpu_count()))
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
