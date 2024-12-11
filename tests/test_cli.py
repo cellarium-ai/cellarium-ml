@@ -391,15 +391,43 @@ CONFIGS = [
         "subcommand": "fit",
         "fit": {
             "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
                 "model": {
                     "class_path": "cellarium.ml.models.NonNegativeMatrixFactorization",
                     "init_args": {
-                        "k": 10,
+                        "k_list": [10],
                         "r": 10,
+                        "full_g": 36601,
                         "algorithm": "mairal",
-                        "local_neighborhood_size": 0.3,
-                        "density_threshold": 0.25,
                         "log_variational": False,
+                        "var_names_hvg": [
+                            "ENSG00000187642",
+                            "ENSG00000078808",
+                            "ENSG00000272106",
+                            "ENSG00000162585",
+                            "ENSG00000272088",
+                            "ENSG00000204624",
+                            "ENSG00000162490",
+                            "ENSG00000177000",
+                            "ENSG00000011021",
+                        ],
                     },
                 },
             },

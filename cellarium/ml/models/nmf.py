@@ -28,8 +28,8 @@ warnings.filterwarnings("ignore")
 
 
 def calculate_rec_error(
-    dataset, # : IterableDistributedAnnDataCollectionDataset,
-    pipeline, # : CellariumPipeline,
+    dataset,  # : IterableDistributedAnnDataCollectionDataset,
+    pipeline,  # : CellariumPipeline,
 ) -> anndata.AnnData:
     """
     Embed the dataset using the pipeline.
@@ -44,23 +44,22 @@ def calculate_rec_error(
 
     k_range = pipeline[-1].k_range
     pipeline[-1].get_rec_error = True
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    rec_error = np.zeros((len(k_range),1)).astype('float64')
+    rec_error = np.zeros((len(k_range), 1)).astype("float64")
     for batch in tqdm.tqdm(dataset):
-
-        batch['x_ng'] = torch.from_numpy(batch['x_ng']).to(device)
+        batch["x_ng"] = torch.from_numpy(batch["x_ng"]).to(device)
         out = pipeline.predict(batch)
-        rec_error += out['rec_error']
+        rec_error += out["rec_error"]
 
     return rec_error
 
 
 def get_embedding(
-    dataset, # : IterableDistributedAnnDataCollectionDataset,
-    pipeline, # : CellariumPipeline,
+    dataset,  # : IterableDistributedAnnDataCollectionDataset,
+    pipeline,  # : CellariumPipeline,
     k: int,
-    if_get_final_gene_loading: True,
+    if_get_final_gene_loading: bool = True,
 ) -> pd.DataFrame:
     """
     Embed the dataset using the pipeline.
@@ -73,78 +72,73 @@ def get_embedding(
     Returns:
         pd.DataFrame with cell embeddings indexed by adata.obs_names from dataset.
     """
-    
+
     pipeline[-1].if_get_full_D = if_get_final_gene_loading
     pipeline[-1].get_rec_error = False
     pipeline[-1].the_best_k = k
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     embedding = []
     index = []
     for batch in tqdm.tqdm(dataset):
-
-        batch['x_ng'] = torch.from_numpy(batch['x_ng']).to(device)
+        batch["x_ng"] = torch.from_numpy(batch["x_ng"]).to(device)
         out = pipeline.predict(batch)
-        z = out['alpha_nk']
+        z = out["alpha_nk"]
         embedding += [z.cpu()]
-        index.extend(batch['obs_names_n'])
+        index.extend(batch["obs_names_n"])
 
     return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
 
 
-def update_consensusD(
-    pipeline,
-    density_threshold = 0.2,
-    local_neighborhood_size = 0.3
-):
+def update_consensusD(pipeline, density_threshold=0.2, local_neighborhood_size=0.3):
     torch.manual_seed(0)
     k_range = pipeline[-1].k_range
 
     consensus_stat = {}
     for k in k_range:
-
         D_rkg = getattr(pipeline[-1], f"D_{k}_rkg")
-        consensus_output = consensus(D_rkg=D_rkg, k=k,
-                                     density_threshold=density_threshold,
-                                     local_neighborhood_size=local_neighborhood_size)
-        setattr(pipeline[-1], f"D_{k}_kg", consensus_output['consensus_D'])
+        consensus_output = consensus(
+            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
+        )
+        setattr(pipeline[-1], f"D_{k}_kg", consensus_output["consensus_D"])
 
         consensus_stat[k] = consensus_output
-        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output['stability'], 4))))
+        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
 
     return consensus_stat
+
 
 class KMeans:
     def __init__(self, n_clusters, max_iter=200, tol=1e-4):
         self.n_clusters = n_clusters
         self.max_iter = max_iter
         self.tol = tol
-        self.centroids = None
+        self.centroids: torch.Tensor | None = None
 
-    def initialize_centroids(self, X):
+    def initialize_centroids(self, x_np: torch.Tensor):
         # KMeans++ initialization
-        indices = [torch.randint(0, X.size(0), (1,)).item()]
-        for _ in range(1, self.n_clusters):
-            dist_sq = torch.min(torch.cdist(X, X[indices]) ** 2, dim=1)[0]
-            probs = dist_sq / torch.sum(dist_sq)
-            cumulative_probs = torch.cumsum(probs, dim=0)
-            r = torch.rand(1).item()
-            next_index = torch.searchsorted(cumulative_probs, r).item()
+        first_random_index = int(torch.randint(0, x_np.shape[0], (1,)).item())
+        indices: list[int] = [first_random_index]
+        for _ in self.n_clusters:
+            square_distance_n = torch.min(torch.cdist(x_np, x_np[indices], p=2) ** 2, dim=1)[0]
+            probs_n = square_distance_n / torch.sum(square_distance_n)
+            next_index = int(torch.multinomial(probs_n, 1).item())
             indices.append(next_index)
-        self.centroids = X[indices]
 
-    def fit(self, X):
+        self.centroids = x_np[indices]
 
+    def fit(self, x_ng: torch.Tensor):
         if self.centroids is None:
-            self.initialize_centroids(X)
+            self.initialize_centroids(x_ng)
+            assert isinstance(self.centroids, torch.Tensor)
 
         for i in range(self.max_iter):
             # Assignment Step: Assign each data point to the nearest centroid
-            distances = torch.cdist(X, self.centroids)
+            distances = torch.cdist(x_ng, self.centroids)
             labels = torch.argmin(distances, dim=1)
 
             # Update Step: Calculate new centroids
-            new_centroids = torch.stack([X[labels == k].mean(dim=0) for k in range(self.n_clusters)])
+            new_centroids = torch.stack([x_ng[labels == k].mean(dim=0) for k in range(self.n_clusters)])
 
             # Check for convergence
             if torch.all(torch.abs(new_centroids - self.centroids) < self.tol):
@@ -154,16 +148,19 @@ class KMeans:
 
         self.labels_ = labels
 
-    def predict(self, X):
-        distances = torch.cdist(X, self.centroids)
+    def predict(self, x_ng: torch.Tensor):
+        assert isinstance(self.centroids, torch.Tensor)
+        distances = torch.cdist(x_ng, self.centroids)
         return torch.argmin(distances, dim=1)
+
 
 def cal_reconstruction_error(x, alpha_nk, D_kg):
     # Compute prediction error as a frobenius norm
     rf_pred = torch.matmul(alpha_nk, D_kg)
-    prediction_error = ((x - rf_pred)**2).sum() # .sum()
+    prediction_error = ((x - rf_pred) ** 2).sum()  # .sum()
 
     return prediction_error
+
 
 def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """The `Euclidean distance
@@ -177,26 +174,26 @@ def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     Returns:
         Tensor: single element tensor
     """
-    return F.mse_loss(input, target, reduction='sum') * 0.5
+    return F.mse_loss(input, target, reduction="sum") * 0.5
+
 
 def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=0.30):
+    r, num_component, g = D_rkg.shape
+    d_norm_mg = F.normalize(D_rkg, dim=2, p=2)
+    d_norm_mg = d_norm_mg.reshape(r * num_component, g)
+    L = int(r * local_neighborhood_size)
 
-    R, num_component, g = D_rkg.shape
-    D = F.normalize(D_rkg, dim=2, p=2)
-    D = D.reshape(R*num_component, g)
-    L = int(R * local_neighborhood_size)
-
-    euc_dist = torch.cdist(D, D, p=2)
-    L_nearest_neigh, _ = torch.topk(euc_dist, L+1, largest=False)
+    euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+    L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
     local_neigh_dist = L_nearest_neigh.sum(1) / L
 
     topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
     topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
-    D = D[local_neigh_dist < density_threshold, :]
+    d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
     # D = pd.DataFrame(D.cpu().numpy())
 
-    D_mean = D.mean(0)
-    D_norm = D - D_mean
+    D_mean = d_norm_mg.mean(0)
+    D_norm = d_norm_mg - D_mean
 
     # kmeans = KMeans(n_clusters=k, n_init=10, random_state=1)
     # kmeans.fit(D_norm)
@@ -205,20 +202,22 @@ def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=
     kmeans = KMeans(n_clusters=k)
     kmeans.fit(D_norm)
     kmeans_cluster_labels = kmeans.predict(D_norm)
-    D = pd.DataFrame(D.cpu().numpy())
+    df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
     kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
 
-    silhouette = silhouette_score(D.values, kmeans_cluster_labels,
-                                  metric='cosine')
+    silhouette = silhouette_score(df_d_norm_mg.values, kmeans_cluster_labels, metric="cosine")
 
-    median_D = D.groupby(kmeans_cluster_labels).median()
+    median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median()
     median_D = torch.Tensor(median_D.values)
     median_D = F.normalize(median_D, dim=1, p=1)
 
-    return {'topk_euc_dist': topk_euc_dist,
-            'local_neigh_dist': local_neigh_dist,
-            'consensus_D': median_D,
-            'stability': silhouette}
+    return {
+        "topk_euc_dist": topk_euc_dist,
+        "local_neigh_dist": local_neigh_dist,
+        "consensus_D": median_D,
+        "stability": silhouette,
+    }
+
 
 def get_final_alpha_wKL(x_ng, D, n_iterations):
     """
@@ -235,7 +234,6 @@ def get_final_alpha_wKL(x_ng, D, n_iterations):
     optimizer = torch.optim.AdamW([alpha_nk], lr=0.01)
 
     for _ in range(n_iterations):
-
         optimizer.zero_grad()
 
         alpha_nk_exp = alpha_nk.exp()
@@ -253,6 +251,7 @@ def get_final_alpha_wKL(x_ng, D, n_iterations):
     alpha = F.normalize(alpha_nk.exp(), dim=1, p=1)
 
     return alpha.detach()
+
 
 def get_final_alpha(x_ng, D, n_iterations):
     """
@@ -274,7 +273,6 @@ def get_final_alpha(x_ng, D, n_iterations):
 
     for _ in range(n_iterations):
         for k in range(k_dimension):
-
             scalar = DDT_kk[k, k]
             a_1k = DDT_kk[k, :]
             b_1g = DXT_kn[k, :]
@@ -292,9 +290,10 @@ def get_final_alpha(x_ng, D, n_iterations):
             break
         alpha_buffer = alpha_nk.clone()
 
-    alpha = F.normalize(alpha_nk, dim=1, p=1)
+    alpha_nk = F.normalize(alpha_nk, dim=1, p=1)
 
     return alpha_nk.detach()
+
 
 def get_full_D(x_ng, alpha_nk, A_kk, B_kg, factors_kg, n_iterations):
     """
@@ -315,7 +314,6 @@ def get_full_D(x_ng, alpha_nk, A_kk, B_kg, factors_kg, n_iterations):
 
     for _ in range(n_iterations):
         for k in range(k_dimension):
-
             scalar = A_kk[k, k]
             a_1k = A_kk[k, :]
             b_1g = B_kg[k, :]
@@ -336,6 +334,7 @@ def get_full_D(x_ng, alpha_nk, A_kk, B_kg, factors_kg, n_iterations):
 
     return A_kk, B_kg, factors_kg
 
+
 def init_weights(m):
     classname = m.__class__.__name__
     if classname.find("BatchNorm") != -1:
@@ -345,9 +344,10 @@ def init_weights(m):
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
 
+
 class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
     """
-    Use the online NMF algorithm of Mairal et al. [1] to factorize the count matrix 
+    Use the online NMF algorithm of Mairal et al. [1] to factorize the count matrix
     into a dictionary of gene expression programs and a matrix of cell program loadings.
 
     **References:**
@@ -356,16 +356,20 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
     Args:
         var_names_g: The variable names schema for the input data validation.
-        k: The number of gene expression programs to infer.
+        k_list: The number of gene expression programs to infer.
         algorithm: The algorithm to use for the online NMF. Currently only "mairal" is supported.
     """
 
-    def __init__(self, var_names_g: Sequence[str], var_names_hvg: Sequence[str],
-                 k_range: list[int], r: int, full_g: int,
-                 density_threshold: float, local_neighborhood_size: float,
-                 log_variational: bool,
-                 mode: str,
-                 algorithm: Literal["mairal"] = "mairal") -> None:
+    def __init__(
+        self,
+        var_names_g: Sequence[str],
+        var_names_hvg: Sequence[str],
+        k_list: list[int],
+        r: int,
+        full_g: int,
+        log_variational: bool,
+        algorithm: Literal["mairal"] = "mairal",
+    ) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.var_names_hvg = np.array(var_names_hvg)
@@ -374,9 +378,8 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.algorithm = algorithm
         self.log_variational = log_variational
         self.full_g = full_g
-        self.mode = mode
-        self.k_range = k_range
-        self.the_best_k = k_range[0] # default and has to be reassigned
+        self.k_list = k_list
+        self.the_best_k = k_list[0]  # default and has to be reassigned
         self.get_rec_error = True
         self.if_get_full_D = False
 
@@ -385,7 +388,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         # self.D_rkg: torch.Tensor
         # self.D_kg: torch.Tensor
 
-        for i in self.k_range:
+        for i in self.k_list:
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
@@ -403,21 +406,19 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self._alpha_tol = 0.005
 
         self.n_nmf = r
-        self.density_threshold = density_threshold
-        self.local_neighborhood_size = local_neighborhood_size
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        for i in self.k_range:
+        for i in self.k_list:
             getattr(self, f"D_{i}_kg").zero_()
             getattr(self, f"A_{i}_rkk").zero_()
             getattr(self, f"B_{i}_rkg").zero_()
-            getattr(self, f"D_{i}_rkg").uniform_(0.0, 2.0) # TODO: figure out best initialization
+            getattr(self, f"D_{i}_rkg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
 
             getattr(self, f"full_A_{i}_kk").zero_()
             getattr(self, f"full_B_{i}_kg").zero_()
-            getattr(self, f"full_D_{i}_kg").uniform_(0.0, 2.0) # TODO: figure out best initialization
+            getattr(self, f"full_D_{i}_kg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
 
     def online_dictionary_learning(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor) -> torch.Tensor:
         """
@@ -453,9 +454,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         return updated_factors_kg
 
     # @cuda.jit
-    def solve_alpha_wKL(self, alpha_rnk: torch.nn.Parameter,
-                        x_ng: torch.Tensor,
-                        n_iterations: int) -> torch.Tensor:
+    def solve_alpha_wKL(self, alpha_rnk: torch.Tensor, x_ng: torch.Tensor, n_iterations: int) -> torch.Tensor:
         """
         Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
 
@@ -464,7 +463,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             n_iterations: The number of iterations to perform.
         """
 
-        r, _, k  = alpha_rnk.shape
+        r, _, k = alpha_rnk.shape
         n, g = x_ng.shape
 
         alpha_buffer = alpha_rnk.exp().clone()
@@ -472,7 +471,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         optimizer = torch.optim.AdamW([alpha_rnk], lr=0.2)
 
         for _ in range(n_iterations):
-
             optimizer.zero_grad()
 
             alpha_rnk_exp = alpha_rnk.exp()
@@ -485,9 +483,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             loss.backward()
             optimizer.step()
 
-            alpha_diff = torch.linalg.norm(
-                alpha_rnk.exp().view(-1, k) - alpha_buffer.view(-1, k)
-            ) / torch.linalg.norm(alpha_rnk.exp().view(-1, k))
+            alpha_diff = torch.linalg.norm(alpha_rnk.exp().view(-1, k) - alpha_buffer.view(-1, k)) / torch.linalg.norm(
+                alpha_rnk.exp().view(-1, k)
+            )
             if alpha_diff <= self._alpha_tol:
                 break
             alpha_buffer = alpha_rnk.exp().clone()
@@ -510,7 +508,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         for _ in range(n_iterations):
             for k in range(i):
-
                 A_rkk = getattr(self, f"A_{i}_rkk")
                 B_rkg = getattr(self, f"B_{i}_rkg")
 
@@ -520,8 +517,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
                 # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
                 u_1g = torch.clamp(
-                    updated_factors_kg[:, k, :].unsqueeze(1)
-                    + (b_1g - torch.bmm(a_1k, updated_factors_kg)) / scalar,
+                    updated_factors_kg[:, k, :].unsqueeze(1) + (b_1g - torch.bmm(a_1k, updated_factors_kg)) / scalar,
                     min=0.0,
                 )
 
@@ -562,8 +558,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.algorithm == "mairal":
-
-            for i in self.k_range:
+            for i in self.k_list:
                 D_rkg = getattr(self, f"D_{i}_rkg")
                 D_rkg = self.online_dictionary_learning(x_ng=x_, factors_rkg=D_rkg)
                 setattr(self, f"D_{i}_rkg", D_rkg)
@@ -584,7 +579,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             "lightning.pytorch.strategies.DDPStrategy is set to True."
 
     def on_end(self, trainer: pl.Trainer) -> None:
-        trainer.save_checkpoint(trainer._default_root_dir + "/NMF.ckpt")
+        trainer.save_checkpoint(trainer.default_root_dir + "/NMF.ckpt")
 
     def predict(
         self,
@@ -598,30 +593,28 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         # assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        transform = Filter(self.var_names_hvg)
+        transform = Filter([str(s) for s in self.var_names_hvg])
         x_filtered_ng = transform(x_ng, var_names_g)
-        
+
         ## get the final alpha_nk
         if self.log_variational:
-            x_ = torch.log1p(x_filtered_ng['x_ng'])
+            x_ = torch.log1p(x_filtered_ng["x_ng"])
         else:
-            std = torch.std(x_filtered_ng['x_ng'], dim=0) + 1e-4
-            x_ = x_filtered_ng['x_ng'] / std
+            std = torch.std(x_filtered_ng["x_ng"], dim=0) + 1e-4
+            x_ = x_filtered_ng["x_ng"] / std
             x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.get_rec_error:
-            rec_error = {}
-            for k in self.k_range:
+            rec_error = []
+            for k in self.k_list:
                 D_kg = getattr(self, f"D_{k}_kg")
 
                 alpha_nk = get_final_alpha_wKL(x_ng=x_, D=D_kg.to(x_.device), n_iterations=1000)
-                rec_error[k] = np.sum(cal_reconstruction_error(x_,
-                                                               alpha_nk.to(x_.device),
-                                                               D_kg.to(x_.device)).cpu().numpy())
+                rec_error.append(
+                    np.sum(cal_reconstruction_error(x_, alpha_nk.to(x_.device), D_kg.to(x_.device)).cpu().numpy())
+                )
 
-            rec_error = pd.DataFrame.from_dict(rec_error, orient='index')
-
-            return {"rec_error": rec_error.values}
+            return {"rec_error": torch.tensor(rec_error)}
 
         else:
             k = self.the_best_k
@@ -630,7 +623,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             # with torch.set_grad_enabled(True):
             alpha_nk = get_final_alpha_wKL(x_ng=x_, D=D_kg.to(x_.device), n_iterations=1000)
             # alpha_nk = get_final_alpha(x_ng=x_, D=self.D_kg, n_iterations=1000)
-            
+
             ## get the final D for full transcrptome
             if self.if_get_full_D:
                 x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
@@ -644,7 +637,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 setattr(self, f"full_B_{k}_kg", B)
                 setattr(self, f"full_D_{k}_kg", D)
 
-            return {"alpha_nk": alpha_nk} # , "pred_count": rf_pred
+            return {"alpha_nk": alpha_nk}  # , "pred_count": rf_pred
 
     @property
     def factors_kg(self) -> torch.Tensor:
