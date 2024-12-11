@@ -406,11 +406,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.density_threshold = density_threshold
         self.local_neighborhood_size = local_neighborhood_size
 
-        if self.mode == 'nmf':
-            self.forward = self.nmf_forward
-        else:
-            self.forward = self.consensus_forward
-
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -545,7 +540,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         return updated_factors_kg
 
-    def nmf_forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng:
@@ -578,48 +573,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         return {}
 
-    def consensus_forward(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-    ) -> dict[str, np.ndarray | torch.Tensor]:
-        """
-        Predict the gene expression programs for the given gene counts matrix.
-        """
-
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        # assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
-
-        transform = Filter(self.var_names_hvg)
-        x_filtered_ng = transform(x_ng, var_names_g)
-
-        ## get the final alpha_nk
-        if self.log_variational:
-            x_ = torch.log1p(x_filtered_ng['x_ng'])
-        else:
-            std = torch.std(x_filtered_ng['x_ng'], dim=0) + 1e-4
-            x_ = x_filtered_ng['x_ng'] / std
-            x_ = torch.clamp(x_, min=0.0, max=100.0)
-
-        # with torch.set_grad_enabled(True):
-        alpha_nk = get_final_alpha_wKL(x_ng=x_, D=self.D_kg, n_iterations=1000)
-        # alpha_nk = get_final_alpha(x_ng=x_, D=self.D_kg, n_iterations=1000)
-
-        # Compute prediction error as a frobenius norm
-        rf_pred = torch.matmul(alpha_nk, self.D_kg)
-        # prediction_error = ((x_ - rf_pred)**2).sum().sum()
-
-        ## get the final D for full transcrptome
-        x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
-        x_ = torch.log1p(x_ng)
-        A, B, D = get_full_D(x_, alpha_nk, self.full_A_kk, self.full_B_kg, self.full_D_kg, 100)
-
-        self.full_A_kk = A
-        self.full_B_kg = B
-        self.full_D_kg = D
-
-        return {"alpha_nk": alpha_nk, "pred_count": rf_pred}
-
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
             assert isinstance(
@@ -631,24 +584,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             "lightning.pytorch.strategies.DDPStrategy is set to True."
 
     def on_end(self, trainer: pl.Trainer) -> None:
-
-        # for k in self.k_range:
-        #     D_rkg = getattr(self, f"D_{k}_rkg")
-        #     D_kg = consensus(D_rkg=D_rkg, k=k,
-        #                      density_threshold=self.density_threshold,
-        #                      local_neighborhood_size=self.local_neighborhood_size)
-        #     setattr(self, f"D_{k}_kg", D_kg)
-
-        if self.mode == 'nmf':
-            trainer.save_checkpoint(trainer._default_root_dir + "/NMF.ckpt")
-        else:
-            trainer.save_checkpoint(trainer._default_root_dir + "/consensusNMF.ckpt")
-
-    def on_prediction_start(self, trainer: pl.Trainer) -> None:
-        self.eval()
-
-    def on_prediction_end(self, trainer: pl.Trainer) -> None:
-        trainer.save_checkpoint(trainer._default_root_dir + "/consensusNMF_predict.ckpt")
+        trainer.save_checkpoint(trainer._default_root_dir + "/NMF.ckpt")
 
     def predict(
         self,
