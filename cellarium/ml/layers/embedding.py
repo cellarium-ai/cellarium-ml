@@ -16,8 +16,8 @@ class GeneExpressionEmbedding(nn.Module):
     Args:
         categorical_vocab_sizes:
             Categorical gene token vocabulary sizes.
-        continuous_vocab_sizes:
-            Continuous gene token vocabulary sizes.
+        continuous_tokens:
+            Continuous gene tokens.
         d_model:
             Dimensionality of the embeddings and hidden states.
         embeddings_initializer:
@@ -27,34 +27,39 @@ class GeneExpressionEmbedding(nn.Module):
     def __init__(
         self,
         categorical_vocab_sizes: dict[str, int],
-        continuous_vocab_sizes: dict[str, int],
+        continuous_tokens: list[str],
         d_model: int,
         embeddings_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
-        self.E = nn.ModuleDict()
-        self.E.update({key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()})
-        self.E.update(
-            {key: nn.Linear(vocab_size, d_model, bias=False) for key, vocab_size in continuous_vocab_sizes.items()}
+        self.embedding_dict = nn.ModuleDict()
+        self.embedding_dict.update(
+            {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()}
         )
+        self.embedding_dict.update({key: nn.Linear(1, d_model, bias=False) for key in continuous_tokens})
+        self.categorical_vocab_sizes = categorical_vocab_sizes
+        self.continuous_tokens = continuous_tokens
         self.embeddings_initializer = embeddings_initializer
 
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
-        for module in self.E.children():
+        for module in self.embedding_dict.children():
             create_initializer(self.embeddings_initializer)(module.weight)
 
-    def forward(self, gene_tokens_nc: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, gene_tokens_dict_ns: dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Args:
-            gene_tokens_nc:
-                Dictionary of gene token tensors of shape ``(n, c)``.
+            gene_tokens_dict_ns:
+                Dictionary of gene token tensors of shape ``(n, s)``.
 
         Returns:
-            The gene embedding tensor of shape ``(n, c, d)``.
+            The gene embedding tensor of shape ``(n, s, d)``.
         """
-        return sum(self.E[key](gene_token_nc) for key, gene_token_nc in gene_tokens_nc.items())
+        return sum(
+            self.embedding_dict[key](gene_token_ns.unsqueeze(-1) if key in self.continuous_tokens else gene_token_ns)
+            for key, gene_token_ns in gene_tokens_dict_ns.items()
+        )
 
 
 class MetadataEmbedding(nn.Module):
@@ -77,7 +82,7 @@ class MetadataEmbedding(nn.Module):
         embeddings_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
-        self.E = nn.ModuleDict(
+        self.embedding_dict = nn.ModuleDict(
             {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()}
         )
         self.embeddings_initializer = embeddings_initializer
@@ -85,19 +90,18 @@ class MetadataEmbedding(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
-        for module in self.E.children():
+        for module in self.embedding_dict.children():
             create_initializer(self.embeddings_initializer)(module.weight)
 
-    def forward(self, metadata_tokens_n: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, metadata_tokens_dict_n: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Args:
-            metadata_token_n:
+            metadata_token_dict_n:
                 Dictionary of metadata token tensors of shape ``(n,)``.
 
         Returns:
-            The metadata embedding tensor of shape ``(n, m, d)``.
+            Dictionary of metadata embedding tensors of shape ``(n, d)``.
         """
-        return torch.stack(
-            [self.E[key](metadata_token_n) for key, metadata_token_n in metadata_tokens_n.items()],
-            dim=1,
-        )
+        return {
+            key: self.embedding_dict[key](metadata_token_n) for key, metadata_token_n in metadata_tokens_dict_n.items()
+        }

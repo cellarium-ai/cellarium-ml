@@ -107,13 +107,15 @@ def collate_fn(
             # If so, just take the first one
             value = batch[0][key]
         elif isinstance(batch[0][key], dict):
-            if not (key.endswith("_n") or key.endswith("_ng")):
-                raise ValueError(f"Sub-dictionary '{key}' must have a batch dimension (end with '_n' or '_ng').")
+            if not key.split("_")[-1].startswith("n"):
+                raise ValueError(f"Sub-dictionary '{key}' must have a batch dimension 'n' as the first dimension.")
             subkeys = batch[0][key].keys()  # type: ignore[union-attr]
             if len(batch) > 1 and not all(subkeys == data[key].keys() for data in batch[1:]):  # type: ignore[union-attr]
                 raise ValueError(f"All '{key}' sub-dictionaries in the batch must have the same subkeys.")
             value = {subkey: np.concatenate([data[key][subkey] for data in batch], axis=0) for subkey in subkeys}
         else:
+            if not key.split("_")[-1].startswith("n"):
+                raise ValueError(f"Value '{key}' must have a batch dimension 'n' as the first dimension.")
             value = np.concatenate([data[key] for data in batch], axis=0)
 
         collated_batch[key] = value
@@ -146,9 +148,9 @@ def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
         Numpy array.
     """
     if isinstance(x, pd.DataFrame):
-        return x.apply(lambda col: col.cat.codes).to_numpy()
+        return x.apply(lambda col: col.cat.codes).to_numpy(dtype=np.int32)
     else:
-        return np.asarray(x.cat.codes)
+        return np.asarray(x.cat.codes, dtype=np.int32)
 
 
 def get_categories(x: pd.Series) -> np.ndarray:
