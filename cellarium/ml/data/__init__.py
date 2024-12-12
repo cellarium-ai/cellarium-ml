@@ -8,6 +8,7 @@ from cellarium.ml.data.distributed_anndata import (
     LazyAnnData,
 )
 from cellarium.ml.data.fileio import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url
+from cellarium.ml.data.pytree_dataset import PyTreeDataset
 from cellarium.ml.data.schema import AnnDataSchema
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "DistributedAnnDataCollectionView",
     "IterableDistributedAnnDataCollectionDataset",
     "LazyAnnData",
+    "PyTreeDataset",
     "read_h5ad_file",
     "read_h5ad_gcs",
     "read_h5ad_local",
