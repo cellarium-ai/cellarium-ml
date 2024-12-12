@@ -112,8 +112,6 @@ def collate_fn(
                 raise ValueError(f"All '{key}' sub-dictionaries in the batch must have the same subkeys.")
             value = {subkey: np.concatenate([data[key][subkey] for data in batch], axis=0) for subkey in subkeys}
         else:
-            if not key.split("_")[-1].startswith("n"):
-                raise ValueError(f"Value '{key}' must have a batch dimension 'n' as the first dimension.")
             value = np.concatenate([data[key] for data in batch], axis=0)
 
         collated_batch[key] = value

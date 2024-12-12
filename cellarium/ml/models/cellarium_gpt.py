@@ -59,7 +59,7 @@ def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
 
 class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     """
-    Cellarium GPT model.
+    CellariumGPT model.
 
     Args:
         gene_vocab_sizes:

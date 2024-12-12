@@ -47,18 +47,18 @@ class GeneExpressionEmbedding(nn.Module):
         for module in self.embedding_dict.children():
             create_initializer(self.embeddings_initializer)(module.weight)
 
-    def forward(self, gene_tokens_dict_ns: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, gene_tokens_nc_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Args:
-            gene_tokens_dict_ns:
-                Dictionary of gene token tensors of shape ``(n, s)``.
+            gene_tokens_nc_dict:
+                Dictionary of gene token tensors of shape ``(n, c)``.
 
         Returns:
-            The gene embedding tensor of shape ``(n, s, d)``.
+            The gene embedding tensor of shape ``(n, c, d)``.
         """
         return sum(
-            self.embedding_dict[key](gene_token_ns.unsqueeze(-1) if key in self.continuous_tokens else gene_token_ns)
-            for key, gene_token_ns in gene_tokens_dict_ns.items()
+            self.embedding_dict[key](gene_token_nc.unsqueeze(-1) if key in self.continuous_tokens else gene_token_nc)
+            for key, gene_token_nc in gene_tokens_nc_dict.items()
         )
 
 
@@ -93,15 +93,16 @@ class MetadataEmbedding(nn.Module):
         for module in self.embedding_dict.children():
             create_initializer(self.embeddings_initializer)(module.weight)
 
-    def forward(self, metadata_tokens_dict_n: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def forward(self, metadata_tokens_nc_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         Args:
-            metadata_token_dict_n:
-                Dictionary of metadata token tensors of shape ``(n,)``.
+            metadata_token_nc_dict:
+                Dictionary of metadata token tensors of shape ``(n, c)``.
 
         Returns:
-            Dictionary of metadata embedding tensors of shape ``(n, d)``.
+            Dictionary of metadata embedding tensors of shape ``(n, c, d)``.
         """
         return {
-            key: self.embedding_dict[key](metadata_token_n) for key, metadata_token_n in metadata_tokens_dict_n.items()
+            key: self.embedding_dict[key](metadata_token_nc)
+            for key, metadata_token_nc in metadata_tokens_nc_dict.items()
         }
