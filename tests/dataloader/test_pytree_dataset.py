@@ -28,7 +28,6 @@ def test_pytree_dataset(batch_size):
     dataset = PyTreeDataset(data)
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        sampler=torch.utils.data.SequentialSampler(dataset),
         batch_size=batch_size,
         collate_fn=collate_fn,
     )
