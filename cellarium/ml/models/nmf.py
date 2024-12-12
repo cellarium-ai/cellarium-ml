@@ -153,27 +153,8 @@ class KMeans:
 
 
 def cal_reconstruction_error(x, alpha_nk, D_kg):
-    # Compute prediction error as a frobenius norm
-    rf_pred = torch.matmul(alpha_nk, D_kg)
-    # prediction_error = ((x - rf_pred) ** 2).sum()  # .sum()
-    prediction_error = F.mse_loss(rf_pred, x, reduction="sum")
-
-    return prediction_error
-
-
-# def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-#     """The `Euclidean distance
-#     .. math::
-#         \\ell(x, y) = \frac{1}{2} \\sum_{n = 0}^{N - 1} (x_n - y_n)^2
-
-#     Args:
-#         input (Tensor): tensor of arbitrary shape
-#         target (Tensor): tensor of the same shape as input
-
-#     Returns:
-#         Tensor: single element tensor
-#     """
-#     return F.mse_loss(input, target, reduction="sum") * 0.5
+    # compute prediction error as the frobenius norm
+    return F.mse_loss(torch.matmul(alpha_nk, D_kg), x, reduction="sum")
 
 
 def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=0.30):
