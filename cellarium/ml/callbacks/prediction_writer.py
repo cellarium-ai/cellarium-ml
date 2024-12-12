@@ -43,7 +43,7 @@ def write_prediction(
         os.makedirs(output_dir, exist_ok=True)
 
     replica_id = os.environ.get("REPLICA_INDEX", 0)
-    output_path = "gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/model_predictions/Model_5_alpha_zero_no_normalization/hop_score_outputs/hop_scores_extract_"+str(postfix)+".csv"
+    output_path = "gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/model_predictions/Model_5_alpha_half_normalized/hop_score_outputs/hop_scores_extract_"+str(postfix)+".csv"
     cas_out_csv.sort_values(by='query_cell_id', inplace=True)
     cas_out_csv.to_csv(output_path, header=True, index=False)
 
