@@ -412,7 +412,7 @@ CONFIGS = [
                 "model": {
                     "class_path": "cellarium.ml.models.NonNegativeMatrixFactorization",
                     "init_args": {
-                        "k_list": [10],
+                        "k_values": [10],
                         "r": 10,
                         "full_g": 36601,
                         "algorithm": "mairal",
