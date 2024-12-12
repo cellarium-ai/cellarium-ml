@@ -40,11 +40,11 @@ def calculate_rec_error(
         reconstruction error
     """
 
-    k_range = pipeline[-1].k_range
+    k_values = pipeline[-1].k_values
     pipeline[-1].get_rec_error = True
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    rec_error = np.zeros((len(k_range), 1)).astype("float64")
+    rec_error = torch.zeros((len(k_values)))
     for batch in tqdm.tqdm(dataset):
         batch["x_ng"] = torch.from_numpy(batch["x_ng"]).to(device)
         out = pipeline.predict(batch)
@@ -90,10 +90,10 @@ def get_embedding(
 
 def update_consensusD(pipeline, density_threshold=0.2, local_neighborhood_size=0.3):
     torch.manual_seed(0)
-    k_range = pipeline[-1].k_range
+    k_values = pipeline[-1].k_values
 
     consensus_stat = {}
-    for k in k_range:
+    for k in k_values:
         D_rkg = getattr(pipeline[-1], f"D_{k}_rkg")
         consensus_output = consensus(
             D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
@@ -117,9 +117,12 @@ class KMeans:
         # KMeans++ initialization
         first_random_index = int(torch.randint(0, x_np.shape[0], (1,)).item())
         indices: list[int] = [first_random_index]
-        for _ in self.n_clusters:
+        for _ in range(1, self.n_clusters):
             square_distance_n = torch.min(torch.cdist(x_np, x_np[indices], p=2) ** 2, dim=1)[0]
             probs_n = square_distance_n / torch.sum(square_distance_n)
+            # cumulative_probs_n = torch.cumsum(probs_n, dim=0)
+            # r = torch.rand(1).item()
+            # next_index = torch.searchsorted(cumulative_probs_n, r).item()
             next_index = int(torch.multinomial(probs_n, 1).item())
             indices.append(next_index)
 
@@ -159,8 +162,8 @@ def cal_reconstruction_error(x, alpha_nk, D_kg):
 
 def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=0.30):
     r, num_component, g = D_rkg.shape
-    d_norm_mg = F.normalize(D_rkg, dim=2, p=2)
-    d_norm_mg = d_norm_mg.reshape(r * num_component, g)
+    d_norm_rkg = F.normalize(D_rkg, dim=2, p=2)
+    d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
     L = int(r * local_neighborhood_size)
 
     euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
@@ -170,6 +173,10 @@ def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=
     topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
     topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
     d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
+
+    # mean centering prevents underflow in distance computations in the kmeans algorithm
+    d_norm_mg_mean = d_norm_mg.mean(0)
+    d_norm_mg = d_norm_mg - d_norm_mg_mean
 
     kmeans = KMeans(n_clusters=k)
     kmeans.fit(d_norm_mg)
@@ -213,20 +220,21 @@ def compute_loadings(
     Returns:
         The computed loadings.
     """
-    n, g = x_ng.shape
+    n, _ = x_ng.shape
     r, k, _ = factors_rkg.shape
-    alpha_unconstrained_rnk = torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)  # TODO: try others
+    alpha_unconstrained_rnk = torch.nn.Parameter(
+        torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)  # TODO: try others
+    )
     alpha_buffer_rnk = alpha_unconstrained_rnk.exp().clone()
 
     optimizer = torch.optim.AdamW([alpha_unconstrained_rnk], lr=learning_rate)
 
-    for _ in range(n_iterations):
+    for i in range(n_iterations):
         optimizer.zero_grad()
-        alpha_rnk = alpha_unconstrained_rnk.exp()
         loss = (
             F.mse_loss(
-                torch.bmm(alpha_rnk, factors_rkg),
-                x_ng.expand([alpha_rnk.shape[0]] + list(x_ng.shape)),
+                torch.bmm(alpha_unconstrained_rnk.exp(), factors_rkg),
+                x_ng.unsqueeze(0),
                 reduction="sum",
             )
             * 0.5
@@ -234,14 +242,16 @@ def compute_loadings(
 
         loss.backward()
         optimizer.step()
+        alpha_rnk = alpha_unconstrained_rnk.exp()
 
-        alpha_diff = torch.linalg.norm(alpha_rnk - alpha_buffer_rnk) / torch.linalg.norm(alpha_rnk)
+        alpha_diff = F.mse_loss(alpha_rnk, alpha_buffer_rnk, reduction="sum") / alpha_rnk.square().sum() / r
         if alpha_diff <= alpha_tol:
+            # print(f'alpha break at iteration {i}')
             break
         alpha_buffer_rnk = alpha_rnk.clone()
 
     if normalize:
-        alpha_rnk = F.normalize(alpha_rnk, dim=1, p=1)
+        alpha_rnk = F.normalize(alpha_rnk, dim=-1, p=1)
 
     return alpha_rnk.detach()
 
@@ -270,7 +280,7 @@ def compute_factors(
     updated_factors_rkg = factors_rkg.clone()
     r, n_factors, g = factors_rkg.shape
 
-    for _ in range(n_iterations):
+    for i in range(n_iterations):
         for k in range(n_factors):
             scalar = A_rkk[:, k, k].view(r, 1, 1)
             a_r1k = A_rkk[:, k, :].unsqueeze(1)
@@ -282,16 +292,18 @@ def compute_factors(
                 min=0.0,
             )
 
-            u_1g_reshape = u_r1g.squeeze(1)
-            u_1g_reshape = torch.linalg.norm(u_1g_reshape, dim=1)
-
-            updated_factors_r1g = u_r1g / torch.clamp(u_1g_reshape.view(r, 1, 1), min=1.0)
+            updated_factors_r1g = u_r1g / torch.clamp(
+                torch.linalg.vector_norm(u_r1g, ord=2, dim=-1, keepdim=True), min=1.0
+            )
             updated_factors_rkg[:, k, :] = updated_factors_r1g.squeeze(1)
 
-        D_diff = torch.linalg.norm(
-            updated_factors_rkg.view(-1, g) - factors_buffer_rkg.view(-1, g)
-        ) / torch.linalg.norm(updated_factors_rkg.view(-1, g))
+        D_diff = (
+            F.mse_loss(updated_factors_rkg, factors_buffer_rkg, reduction="sum")
+            / updated_factors_rkg.square().sum()
+            / r
+        )
         if D_diff <= D_tol:
+            # print(f'D break at iteration {i}')
             break
         factors_buffer_rkg = updated_factors_rkg.clone()
 
@@ -319,7 +331,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
     Args:
         var_names_g: The variable names schema for the input data validation.
-        k_list: The number of gene expression programs to infer.
+        k_values: The number of gene expression programs to infer.
         algorithm: The algorithm to use for the online NMF. Currently only "mairal" is supported.
     """
 
@@ -327,7 +339,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self,
         var_names_g: Sequence[str],
         var_names_hvg: Sequence[str],
-        k_list: list[int],
+        k_values: list[int],
         r: int,
         full_g: int,
         log_variational: bool,
@@ -341,12 +353,12 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.algorithm = algorithm
         self.log_variational = log_variational
         self.full_g = full_g
-        self.k_list = k_list
-        self.the_best_k = k_list[0]  # default and has to be reassigned
+        self.k_values = k_values
+        self.the_best_k = k_values[0]  # default and has to be reassigned
         self.get_rec_error = True
         self.if_get_full_D = False
 
-        for i in self.k_list:
+        for i in self.k_values:
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
@@ -357,15 +369,15 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             self.register_buffer(f"full_B_{i}_kg", torch.empty(i, full_g))
             self.register_buffer(f"full_D_{i}_kg", torch.empty(i, full_g))
 
-        self._D_tol = 0.005
-        self._alpha_tol = 0.005
+        self._D_tol = 5e-5
+        self._alpha_tol = 5e-5
 
         self.n_nmf = r
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        for i in self.k_list:
+        for i in self.k_values:
             getattr(self, f"D_{i}_kg").zero_()
             getattr(self, f"A_{i}_rkk").zero_()
             getattr(self, f"B_{i}_rkg").zero_()
@@ -397,20 +409,25 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         )
         return alpha_rnk
 
-    def _compute_factors(self, factors_rkg: torch.Tensor, n_iterations: int = 1) -> torch.Tensor:
+    def _compute_factors(
+        self,
+        factors_rkg: torch.Tensor,
+        A_rkk: torch.Tensor,
+        B_rkg: torch.Tensor,
+        n_iterations: int = 1,
+    ) -> torch.Tensor:
         """
         Run compute_factors.
 
         Args:
             factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+            A_rkk: Mairal's matrix A.
+            B_rkg: Mairal's matrix B.
             n_iterations: The number of iterations to perform.
 
         Returns:
             The updated dictionary.
         """
-        k = factors_rkg.shape[1]
-        A_rkk = getattr(self, f"A_{k}_rkk")
-        B_rkg = getattr(self, f"B_{k}_rkg")
         factors_rkg = compute_factors(
             A_rkk=A_rkk,
             B_rkg=B_rkg,
@@ -452,7 +469,12 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             setattr(self, f"B_{k}_rkg", B_rkg)
 
             # update D, Mairal Algorithm 1 step 7
-            updated_factors_rkg = self._compute_factors(factors_rkg, 100)
+            updated_factors_rkg = self._compute_factors(
+                factors_rkg=factors_rkg,
+                A_rkk=A_rkk,
+                B_rkg=B_rkg,
+                n_iterations=100,
+            )
 
         return updated_factors_rkg
 
@@ -478,7 +500,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.algorithm == "mairal":
-            for i in self.k_list:
+            for i in self.k_values:
                 D_rkg = getattr(self, f"D_{i}_rkg")
                 D_rkg = self.online_dictionary_learning(x_ng=x_, factors_rkg=D_rkg)
                 setattr(self, f"D_{i}_rkg", D_rkg)
@@ -526,7 +548,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         if self.get_rec_error:
             rec_error = []
-            for k in self.k_list:
+            for k in self.k_values:
                 D_kg = getattr(self, f"D_{k}_kg")
 
                 alpha_nk = compute_loadings(
@@ -585,4 +607,4 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         Inferred gene expression programs (i.e. "factors").
         """
         prefix = "full_" if all_genes else ""
-        return {k: getattr(self, f"{prefix}D_{k}_kg") for k in self.k_list}
+        return {k: getattr(self, f"{prefix}D_{k}_kg") for k in self.k_values}
