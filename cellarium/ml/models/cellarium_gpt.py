@@ -26,7 +26,7 @@ except ImportError:
         return False
 
 
-torch.set_float32_matmul_precision("high")
+torch.set_float32_matmul_precision("highest")
 
 
 def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
@@ -564,6 +564,11 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     def vectorized_token_to_id(self):
         return np.vectorize(lambda x: self.token_to_id[x])
 
+    def set_attention_backend(self, attention_backend: str) -> None:
+        self.attention_backend = attention_backend
+        for block in self.transformer.blocks:
+            block.attention.attention_backend = attention_backend
+    
     def predict(
         self,
         gene_tokens_nc: dict[str, torch.Tensor],
