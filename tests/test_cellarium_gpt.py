@@ -1,43 +1,44 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import math
 import os
 from pathlib import Path
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from torch.utils._pytree import tree_flatten, tree_unflatten
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.data import DistributedAnnDataCollection, read_h5ad_file
+from cellarium.ml.data import PyTreeDataset, read_h5ad_file
 from cellarium.ml.models import CellariumGPT
-from cellarium.ml.utilities.data import AnnDataField, categories_to_codes, collate_fn
+from cellarium.ml.utilities.data import categories_to_codes, collate_fn
 
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
     adata = read_h5ad_file("https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad")
     n = adata.n_obs
-    s = 4
-    c = 5
+    s = 4  # number of subsampled genes
+    c = 5  # context size
     batch_size = 2
     devices = int(os.environ.get("TEST_DEVICES", "1"))
-    prompt_mask_nc = np.random.choice([True, False], size=(batch_size, c), p=[0.5, 0.5])
+    prompt_mask_nc = np.random.choice([True, False], size=(n, c), p=[0.5, 0.5])
     query_mask_nc = (~prompt_mask_nc).astype(np.float32)
     X = adata.X[:, :s].toarray()
+
     cell_type = categories_to_codes(adata.obs["cell_type"])[:, None]
     data = {
         "gene_token_nc_dict": {
             "gene_id": np.broadcast_to(np.arange(c), (n, c)),
-            "gene_value": np.concatenate([X, np.zeros((n, 1))], axis=1),
+            "gene_value": np.concatenate([X, np.zeros((n, 1), dtype=np.float32)], axis=1),
             "gene_query_mask": query_mask_nc,
             "total_mrna_umis": np.broadcast_to(
                 np.asarray(adata.obs["total_mrna_umis"], dtype=np.float32)[:, None], (n, c)
             ),
         },
         "gene_token_mask_nc": (np.broadcast_to(np.arange(c), (n, c)) < s).astype(np.float32),
-        "metadata_token_nc_dict": {"cell_type": np.broadcast_to(cell_type, (n, c))},
+        "metadata_token_nc_dict": {
+            "cell_type": np.broadcast_to(cell_type, (n, c)),
+        },
         "metadata_token_mask_nc_dict": {
             "cell_type": (np.broadcast_to(np.arange(c), (n, c)) == s).astype(np.float32),
         },
@@ -51,23 +52,19 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
             "cell_type": (np.broadcast_to(np.arange(c), (n, c)) == s).astype(np.float32),
         },
     }
-    flattened_data, tree_spec = tree_flatten(data)
-    # dict_data = {str(i): arg for i, arg in enumerate(flattened_args)}
-    dataset = torch.utils.data.StackDataset(*flattened_data)
+    dataset = PyTreeDataset(data)
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        sampler=torch.utils.data.BatchSampler(
-            torch.utils.data.SequentialSampler(dataset), batch_size=batch_size, drop_last=False
-        ),
+        batch_size=batch_size,
         num_workers=0,
         collate_fn=collate_fn,
     )
     # model
     model = CellariumGPT(
-        gene_vocab_sizes={"gene_id": s, "gene_value": 100},
+        gene_vocab_sizes={"gene_id": c, "gene_value": 100},
         metadata_vocab_sizes={"cell_type": adata.obs["cell_type"].cat.categories.size},
-        d_model=2,
-        d_ffn=4,
+        d_model=3,
+        d_ffn=6,
         n_heads=1,
         n_blocks=1,
         dropout_p=0,
@@ -84,21 +81,23 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     trainer = pl.Trainer(
         accelerator="cpu",
         devices=devices,
-        max_steps=n,
+        max_steps=2,
         default_root_dir=tmp_path,
     )
     # fit
-    trainer.fit(module, datamodule)
+    trainer.fit(module, dataloader)
 
     # run tests only for rank 0
     if trainer.global_rank != 0:
         return
 
     # load model from checkpoint
-    ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
+    ckpt_path = tmp_path / "lightning_logs/version_0/checkpoints/epoch=0-step=2.ckpt"
     assert ckpt_path.is_file()
     loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
     assert isinstance(loaded_model, CellariumGPT)
     # assert
-    # assert np.array_equal(model.var_names_g, loaded_model.var_names_g)
-    # np.testing.assert_allclose(model.feature_ids, loaded_model.feature_ids)
+    assert model.attention_backend == loaded_model.attention_backend
+    assert model.embeddings_scale == loaded_model.embeddings_scale
+    assert model.attention_logits_scale == loaded_model.attention_logits_scale
+    assert model.output_logits_scale == loaded_model.output_logits_scale

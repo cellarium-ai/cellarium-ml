@@ -22,9 +22,6 @@ except ImportError:
         return False
 
 
-torch.set_float32_matmul_precision("high")
-
-
 def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
     """
     Generate a prompt diagonal mask for self-attention.
@@ -66,9 +63,11 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
     Args:
         gene_vocab_sizes:
-            Gene token vocabulary sizes.
+            Gene token vocabulary sizes. Must include "gene_value" and "gene_id". Additionally, it can include
+            experimental conditions, such as "assay" and "suspension_type".
         metadata_vocab_sizes:
-            Metadata token vocabulary sizes.
+            Metadata token vocabulary sizes. This can include metadata tokens such as "cell_type", "tissue",
+            "sex", "development_stage", and "disease".
         d_model:
             Dimensionality of the embeddings and hidden states.
         d_ffn:
@@ -158,7 +157,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         self.attention_logits_scale = attention_logits_scale
         self.output_logits_scale = output_logits_scale
 
-        # Handle muP scaling
+        # Handle muP scaling for Adam and AdamW optimizers
         if mup_base_d_model:
             d_model_width_mult = d_model / mup_base_d_model
             scale_initializers_by_dimension(
@@ -350,19 +349,21 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
         batch_idx: int,
-        gene_token_ns_dict: dict[str, torch.Tensor],
-        gene_prompt_mask_ns: torch.Tensor,
-        metadata_token_n_dict: dict[str, torch.Tensor],
-        metadata_prompt_mask_n_dict: dict[str, torch.Tensor],
+        gene_token_nc_dict: dict[str, torch.Tensor],
+        gene_token_mask_nc: torch.Tensor,
+        metadata_token_nc_dict: dict[str, torch.Tensor],
+        metadata_token_mask_nc_dict: dict[str, torch.Tensor],
+        prompt_mask_nc: torch.Tensor,
         labels_nc: dict[str, torch.Tensor],
         label_weights_nc: dict[str, torch.Tensor],
     ) -> None:
-        n = gene_prompt_mask_ns.shape[0]
+        n = prompt_mask_nc.shape[0]
         loss_dict = self.forward(
-            gene_token_ns_dict=gene_token_ns_dict,
-            gene_prompt_mask_ns=gene_prompt_mask_ns,
-            metadata_token_n_dict=metadata_token_n_dict,
-            metadata_prompt_mask_n_dict=metadata_prompt_mask_n_dict,
+            gene_token_nc_dict=gene_token_nc_dict,
+            gene_token_mask_nc=gene_token_mask_nc,
+            metadata_token_nc_dict=metadata_token_nc_dict,
+            metadata_token_mask_nc_dict=metadata_token_mask_nc_dict,
+            prompt_mask_nc=prompt_mask_nc,
             label_nc_dict=labels_nc,
             label_weight_nc_dict=label_weights_nc,
         )
