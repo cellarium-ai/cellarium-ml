@@ -165,7 +165,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
 
         logits_nc = x_ng @ self.W_gc + self.b_c
         activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-        #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+        activation_out = self.probability_propagation(activation_out_gpu=activation_out)
         return {"y_logits_nc": logits_nc,"cell_type_probs_nc": activation_out}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
