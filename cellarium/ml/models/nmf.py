@@ -202,9 +202,9 @@ def compute_loadings(
     x_ng: torch.Tensor,
     factors_rkg: torch.Tensor,
     n_iterations: int,
-    learning_rate: float = 0.01,
-    normalize: bool = False,
-    alpha_tol: float = 0.005,
+    learning_rate: float = 0.2,
+    normalize: bool = True,
+    alpha_tol: float = 5e-5,
 ) -> torch.Tensor:
     """
     Algorithm 1 step 4 from Mairal et al. [1] for computing the loadings.
@@ -344,6 +344,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         full_g: int,
         log_variational: bool,
         algorithm: Literal["mairal"] = "mairal",
+        transformed_data_mean: float = 1.0,
     ) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -357,6 +358,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.the_best_k = k_values[0]  # default and has to be reassigned
         self.get_rec_error = True
         self.if_get_full_D = False
+        self.transformed_data_mean = transformed_data_mean
 
         for i in self.k_values:
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
@@ -381,11 +383,14 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             getattr(self, f"D_{i}_kg").zero_()
             getattr(self, f"A_{i}_rkk").zero_()
             getattr(self, f"B_{i}_rkg").zero_()
-            getattr(self, f"D_{i}_rkg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
+            # getattr(self, f"D_{i}_rkg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
+            getattr(self, f"D_{i}_rkg").uniform_(0.0, np.sqrt(self.transformed_data_mean / i))
 
             getattr(self, f"full_A_{i}_kk").zero_()
             getattr(self, f"full_B_{i}_kg").zero_()
             getattr(self, f"full_D_{i}_kg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
+            # getattr(self, f"full_D_{i}_kg").uniform_(0.0, 1.5)
+            # getattr(self, f"full_D_{i}_kg").zero_()
 
     def _compute_loadings(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor, n_iterations: int) -> torch.Tensor:
         """
@@ -404,7 +409,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             factors_rkg=factors_rkg,
             n_iterations=n_iterations,
             learning_rate=0.2,
-            normalize=False,
+            normalize=True,
             alpha_tol=self._alpha_tol,
         )
         return alpha_rnk
@@ -495,8 +500,8 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         if self.log_variational:
             x_ = torch.log1p(x_ng)
         else:
-            std = torch.std(x_ng, dim=0) + 1e-4
-            x_ = x_ng / std
+            std_g = torch.std(x_ng, dim=0) + 1e-4
+            x_ = x_ng / std_g
             x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.algorithm == "mairal":
@@ -536,14 +541,14 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         # assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         transform = Filter([str(s) for s in self.var_names_hvg])
-        x_filtered_ng = transform(x_ng, var_names_g)
+        x_filtered_ng = transform(x_ng, var_names_g)["x_ng"]
 
-        ## get the final alpha_nk
+        # get the final alpha_nk
         if self.log_variational:
-            x_ = torch.log1p(x_filtered_ng["x_ng"])
+            x_ = torch.log1p(x_filtered_ng)
         else:
-            std = torch.std(x_filtered_ng["x_ng"], dim=0) + 1e-4
-            x_ = x_filtered_ng["x_ng"] / std
+            std_g = torch.std(x_filtered_ng, dim=0) + 1e-4
+            x_ = x_filtered_ng / std_g
             x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.get_rec_error:
@@ -564,20 +569,29 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         else:
             k = self.the_best_k
-            D_kg = getattr(self, f"D_{k}_kg")
+            # TODO if update_consensusD has not been called, then D_{k}_kg is not updated
+            # but if it is, then you would want to use that
+            D_rkg = getattr(self, f"D_{k}_rkg")
 
             # compute loadings, Mairal Algorithm 1 step 4
-            alpha_nk = compute_loadings(
+            # alpha_nk = compute_loadings(
+            #     x_ng=x_,
+            #     factors_rkg=D_kg.to(x_.device).unsqueeze(0),
+            #     n_iterations=1000,
+            # ).squeeze(0)
+            alpha_rnk = compute_loadings(
                 x_ng=x_,
-                factors_rkg=D_kg.to(x_.device).unsqueeze(0),
+                factors_rkg=D_rkg,
                 n_iterations=1000,
-            ).squeeze(0)
+                normalize=False,
+            )
+            alpha_nk = alpha_rnk.squeeze(0)
 
             # update A and B, Mairal Algorithm 1 step 5 and 6
             A_kk: torch.Tensor = getattr(self, f"full_A_{k}_kk")
             B_kg: torch.Tensor = getattr(self, f"full_B_{k}_kg")
             A = A_kk + torch.matmul(alpha_nk.T, alpha_nk) / x_ng.shape[0]
-            B = B_kg + torch.matmul(alpha_nk.T, x_).T / x_ng.shape[0]
+            B = B_kg + torch.matmul(alpha_nk.T, x_) / x_ng.shape[0]
             setattr(self, f"full_A_{k}_kk", A)
             setattr(self, f"full_B_{k}_kg", B)
 
@@ -602,9 +616,10 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             return {"alpha_nk": alpha_nk}
 
     @property
-    def factors_kg(self, all_genes: bool = True) -> dict[int, torch.Tensor]:
+    def factors_kg(self, all_genes: bool = False) -> dict[int, torch.Tensor]:
         """
         Inferred gene expression programs (i.e. "factors").
+        TODO: the all_genes argument does not work like this
         """
         prefix = "full_" if all_genes else ""
         return {k: getattr(self, f"{prefix}D_{k}_kg") for k in self.k_values}
