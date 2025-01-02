@@ -9,7 +9,7 @@ from typing import Any
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
+from lightning.pytorch.utilities.types import STEP_OUTPUT, LRSchedulerConfigType, OptimizerLRSchedulerConfig
 
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.core.pipeline import CellariumPipeline
@@ -346,10 +346,12 @@ class CellariumModule(pl.LightningModule):
         else:
             optimizer = optim_fn(self.model.parameters(), **optim_kwargs)
 
-        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optimizer}
         if scheduler_fn is not None:
-            scheduler = scheduler_fn(optim_config["optimizer"], **scheduler_kwargs)
-            optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
+            scheduler = scheduler_fn(optimizer, **scheduler_kwargs)
+        else:
+            scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
+        lr_scheduler: LRSchedulerConfigType = {"scheduler": scheduler, "interval": "step"}
+        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
         return optim_config
 
     def on_train_epoch_start(self) -> None:
