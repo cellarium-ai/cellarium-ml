@@ -54,6 +54,8 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         prediction_size:
             The size of the prediction. If ``None``, the entire prediction will be
             written. If not ``None``, only the first ``prediction_size`` columns will be written.
+        key:
+            PredictionWriter will write this key from the output of `predict()`.
     """
 
     def __init__(
