@@ -9,7 +9,7 @@ from typing import Any
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.core.pipeline import CellariumPipeline
