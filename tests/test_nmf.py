@@ -262,47 +262,52 @@ def test_nmf_against_sklearn_multi_device(
         truth_loadings_nk = alpha_uncorrelated_nk
 
     # assert that the cellarium factors match truth as much as the sklearn factors do
-    pairwise_cellarium_factor_similarity_kk = pairwise_cosine_similarity_cdist(
-        cellarium_factors_kg, truth_factors_kg
-    )
+    pairwise_cellarium_factor_similarity_kk = pairwise_cosine_similarity_cdist(cellarium_factors_kg, truth_factors_kg)
     total_cellarium_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
         pairwise_cellarium_factor_similarity_kk
     )
-    print(f"pairwise_cellarium_factor_similarity_kk:"
-          f"\n{pairwise_cellarium_factor_similarity_kk[row_indices, :][:, col_indices]}")
-    print(f"total mean cellarium similarity: {total_cellarium_similarity}")
-    pairwise_sklearn_factor_similarity_kk = pairwise_cosine_similarity_cdist(
-        sklearn_factors_kg, truth_factors_kg
+    print(
+        f"pairwise_cellarium_factor_similarity_kk:"
+        f"\n{pairwise_cellarium_factor_similarity_kk[row_indices, :][:, col_indices]}"
     )
+    print(f"total mean cellarium similarity: {total_cellarium_similarity}")
+    pairwise_sklearn_factor_similarity_kk = pairwise_cosine_similarity_cdist(sklearn_factors_kg, truth_factors_kg)
     total_sklearn_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
         pairwise_sklearn_factor_similarity_kk
     )
-    print(f"pairwise_sklearn_factor_similarity_kk:"
-          f"\n{pairwise_sklearn_factor_similarity_kk[row_indices, :][:, col_indices]}")
+    print(
+        f"pairwise_sklearn_factor_similarity_kk:"
+        f"\n{pairwise_sklearn_factor_similarity_kk[row_indices, :][:, col_indices]}"
+    )
     print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert total_sklearn_similarity - total_cellarium_similarity <= 0.03, \
-        "cellarium factors are substantially less similar to truth than sklearn factors"
+    assert (
+        total_sklearn_similarity - total_cellarium_similarity <= 0.03
+    ), "cellarium factors are substantially less similar to truth than sklearn factors"
     assert total_cellarium_similarity > 0.7, "cellarium factors are not very similar to truth"
 
     # assert that the cellarium loadings match truth as much as the sklearn loadings do
     pairwise_cellarium_loading_similarity_nn = pairwise_cosine_similarity_cdist(
-        cellarium_loadings_nk, truth_loadings_nk,
+        cellarium_loadings_nk,
+        truth_loadings_nk,
     )
     total_cellarium_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
         pairwise_cellarium_loading_similarity_nn
     )
-    print(f"pairwise_cellarium_loading_similarity_nn:\n"
-          f"{pairwise_cellarium_loading_similarity_nn[row_indices, :][:, col_indices]}")
-    print(f"total mean cellarium similarity: {total_cellarium_similarity}")
-    pairwise_sklearn_loading_similarity_nn = pairwise_cosine_similarity_cdist(
-        sklearn_loadings_nk, truth_loadings_nk
+    print(
+        f"pairwise_cellarium_loading_similarity_nn:\n"
+        f"{pairwise_cellarium_loading_similarity_nn[row_indices, :][:, col_indices]}"
     )
+    print(f"total mean cellarium similarity: {total_cellarium_similarity}")
+    pairwise_sklearn_loading_similarity_nn = pairwise_cosine_similarity_cdist(sklearn_loadings_nk, truth_loadings_nk)
     total_sklearn_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
         pairwise_sklearn_loading_similarity_nn
     )
-    print(f"pairwise_sklearn_loading_similarity_nn:"
-          f"\n{pairwise_sklearn_loading_similarity_nn[row_indices, :][:, col_indices]}")
+    print(
+        f"pairwise_sklearn_loading_similarity_nn:"
+        f"\n{pairwise_sklearn_loading_similarity_nn[row_indices, :][:, col_indices]}"
+    )
     print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert total_sklearn_similarity - total_cellarium_similarity <= 0.025, \
-        "cellarium loadings are substantially less similar to truth than sklearn loadings"
+    assert (
+        total_sklearn_similarity - total_cellarium_similarity <= 0.025
+    ), "cellarium loadings are substantially less similar to truth than sklearn loadings"
     assert total_similarity > 0.92, "cellarium loadings are not very similar to truth"
