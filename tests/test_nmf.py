@@ -145,11 +145,43 @@ def run_cellarium_nmf(
     return cellarium_nmf
 
 
-def get_cellarium_target(x_ng: torch.Tensor) -> torch.Tensor:
+def get_cellarium_normalized_data(x_ng: torch.Tensor) -> torch.Tensor:
     std_g = torch.std(x_ng, dim=0) + 1e-4
     x_ng = x_ng / std_g
     x_ng = torch.clamp(x_ng, min=0.0, max=100.0)
     return x_ng
+
+
+def pairwise_cosine_similarity_cdist(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
+    # Normalize each tensor along the g dimension
+    tensor1_norm_kg = tensor1_kg / tensor1_kg.norm(dim=1, keepdim=True)
+    tensor2_norm_kg = tensor2_kg / tensor2_kg.norm(dim=1, keepdim=True)
+
+    # Compute squared Euclidean distance
+    squared_euclidean_dist_kk = torch.cdist(tensor1_norm_kg, tensor2_norm_kg, p=2) ** 2
+
+    # Convert to cosine similarity
+    cosine_similarity_matrix_kk = 1 - squared_euclidean_dist_kk / 2
+    return cosine_similarity_matrix_kk
+
+
+def similarity_matrix_assign_rows_to_columns(
+    similarity_kk: torch.Tensor,
+) -> tuple[torch.Tensor, np.ndarray, np.ndarray]:
+    assert similarity_kk.shape[0] == similarity_kk.shape[1], "Similarity matrix must be square"
+    assert similarity_kk.shape[0] > 0, "Similarity matrix must have at least one row and column"
+
+    from scipy.optimize import linear_sum_assignment
+
+    cost_kk = -similarity_kk
+
+    # Solve the assignment problem
+    row_indices, col_indices = linear_sum_assignment(cost_kk)
+
+    # Compute the total mean similarity
+    total_similarity = similarity_kk[row_indices, col_indices].sum() / similarity_kk.shape[0]
+
+    return total_similarity, np.asarray(row_indices), np.asarray(col_indices)
 
 
 @pytest.mark.parametrize(
@@ -165,7 +197,7 @@ def test_nmf_against_sklearn_multi_device(
 ):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     x_ng = x_nmf_ng[data]
-    x_ng = get_cellarium_target(x_ng)
+    x_ng = get_cellarium_normalized_data(x_ng)
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
 
     # cellarium nmf fit
@@ -174,43 +206,103 @@ def test_nmf_against_sklearn_multi_device(
     cellarium_nmf.if_get_full_D = False  # hacking around strange code design
     cellarium_loadings_nk = cellarium_nmf.predict(x_ng, var_names_g=var_names_g)["alpha_nk"]
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
-    # cellarium_factors_kg = cellarium_nmf.factors_kg[simulated_k]
     cellarium_factors_kg = getattr(cellarium_nmf, f"D_{simulated_k}_rkg").squeeze(0)
-    print(f"cellarium_loadings_nk: {cellarium_loadings_nk}")
-    print(f"cellarium_factors_kg: {cellarium_factors_kg}")
 
     # sklearn nmf fit
-    sklearn_nmf = NMF(n_components=simulated_k, init="random", solver="cd", beta_loss="frobenius", max_iter=10000)
-    sklearn_loadings_nk = torch.from_numpy(sklearn_nmf.fit_transform(x_ng))
-    sklearn_factors_kg = torch.from_numpy(sklearn_nmf.components_)
+    sklearn_nmf = NMF(
+        n_components=simulated_k,
+        init="random",
+        solver="cd",
+        beta_loss="frobenius",
+        max_iter=10000,
+        random_state=0,
+    )
+    sklearn_loadings_nk = torch.from_numpy(sklearn_nmf.fit_transform(x_ng)).float()
+    sklearn_factors_kg = torch.from_numpy(sklearn_nmf.components_).float()
 
-    # fraction of variance explained by each method
+    # assert that fraction of variance explained by each method is similar
     frobenius_norm_data = torch.norm(x_ng, "fro")
     sklearn_reconstruction_ng = torch.matmul(sklearn_loadings_nk, sklearn_factors_kg)
     cellarium_reconstruction_ng = torch.matmul(cellarium_loadings_nk, cellarium_factors_kg)
-    print(f"x_ng: {x_ng}")
-    print(f"sklearn_reconstruction_ng: {sklearn_reconstruction_ng}")
-    print(f"cellarium_reconstruction_ng: {cellarium_reconstruction_ng}")
+    print(f"x_ng:\n{x_ng}")
+    print(f"sklearn_reconstruction_ng:\n{sklearn_reconstruction_ng}")
+    print(f"cellarium_reconstruction_ng:\n{cellarium_reconstruction_ng}")
     frobenius_norm_sklearn_residual = torch.norm(x_ng - sklearn_reconstruction_ng, "fro")
     frobenius_norm_cellarium_residual = torch.norm(x_ng - cellarium_reconstruction_ng, "fro")
     explained_variance_ratio_sklearn = 1 - (frobenius_norm_sklearn_residual**2) / (frobenius_norm_data**2)
     explained_variance_ratio_cellarium = 1 - (frobenius_norm_cellarium_residual**2) / (frobenius_norm_data**2)
     print(f"explained_variance_ratio_sklearn: {explained_variance_ratio_sklearn}")
     print(f"explained_variance_ratio_cellarium: {explained_variance_ratio_cellarium}")
-    assert 0
-    # np.testing.assert_allclose(expected_total_var, actual_total_var, rtol=1e-3)
 
-    # # variance explained by each PC
-    # expected_explained_var = L_g[:k]
-    # actual_explained_var = ppca.L_k
-    # np.testing.assert_allclose(expected_explained_var, actual_explained_var, rtol=1e-3)
+    # assert that the factors are similar
+    pairwise_factor_similarity_kk = pairwise_cosine_similarity_cdist(cellarium_factors_kg, sklearn_factors_kg)
+    total_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(pairwise_factor_similarity_kk)
+    print(f"pairwise_factor_similarity_kk:\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}")
+    print(f"total mean similarity: {total_similarity}")
+    assert total_similarity > 0.9
 
-    # # absolute cosine similarity between expected and actual PCs
-    # abs_cos_sim = torch.abs(
-    #     torch.nn.functional.cosine_similarity(
-    #         ppca.U_gk,
-    #         torch.as_tensor(U_gg[:, :k]),
-    #         dim=0,
-    #     )
-    # )
-    # np.testing.assert_allclose(np.ones(k), abs_cos_sim, rtol=1e-3)
+    # assert that the loadings are similar
+    pairwise_loading_similarity_nn = pairwise_cosine_similarity_cdist(
+        cellarium_loadings_nk,
+        sklearn_loadings_nk,
+    )
+    total_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_loading_similarity_nn
+    )
+    print(f"pairwise_loading_similarity_nn:\n{pairwise_loading_similarity_nn[row_indices, :][:, col_indices]}")
+    print(f"total mean similarity: {total_similarity}")
+    assert total_similarity > 0.9
+
+    # truth
+    if data.split("_")[-1] == "correlated":
+        truth_factors_kg = d_correlated_kg
+        truth_loadings_nk = alpha_correlated_nk
+    else:
+        truth_factors_kg = d_uncorrelated_kg
+        truth_loadings_nk = alpha_uncorrelated_nk
+
+    # assert that the cellarium factors match truth as much as the sklearn factors do
+    pairwise_cellarium_factor_similarity_kk = pairwise_cosine_similarity_cdist(
+        cellarium_factors_kg, truth_factors_kg
+    )
+    total_cellarium_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_cellarium_factor_similarity_kk
+    )
+    print(f"pairwise_cellarium_factor_similarity_kk:"
+          f"\n{pairwise_cellarium_factor_similarity_kk[row_indices, :][:, col_indices]}")
+    print(f"total mean cellarium similarity: {total_cellarium_similarity}")
+    pairwise_sklearn_factor_similarity_kk = pairwise_cosine_similarity_cdist(
+        sklearn_factors_kg, truth_factors_kg
+    )
+    total_sklearn_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_sklearn_factor_similarity_kk
+    )
+    print(f"pairwise_sklearn_factor_similarity_kk:"
+          f"\n{pairwise_sklearn_factor_similarity_kk[row_indices, :][:, col_indices]}")
+    print(f"total mean sklearn similarity: {total_sklearn_similarity}")
+    assert total_sklearn_similarity - total_cellarium_similarity <= 0.03, \
+        "cellarium factors are substantially less similar to truth than sklearn factors"
+    assert total_cellarium_similarity > 0.7, "cellarium factors are not very similar to truth"
+
+    # assert that the cellarium loadings match truth as much as the sklearn loadings do
+    pairwise_cellarium_loading_similarity_nn = pairwise_cosine_similarity_cdist(
+        cellarium_loadings_nk, truth_loadings_nk,
+    )
+    total_cellarium_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_cellarium_loading_similarity_nn
+    )
+    print(f"pairwise_cellarium_loading_similarity_nn:\n"
+          f"{pairwise_cellarium_loading_similarity_nn[row_indices, :][:, col_indices]}")
+    print(f"total mean cellarium similarity: {total_cellarium_similarity}")
+    pairwise_sklearn_loading_similarity_nn = pairwise_cosine_similarity_cdist(
+        sklearn_loadings_nk, truth_loadings_nk
+    )
+    total_sklearn_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_sklearn_loading_similarity_nn
+    )
+    print(f"pairwise_sklearn_loading_similarity_nn:"
+          f"\n{pairwise_sklearn_loading_similarity_nn[row_indices, :][:, col_indices]}")
+    print(f"total mean sklearn similarity: {total_sklearn_similarity}")
+    assert total_sklearn_similarity - total_cellarium_similarity <= 0.025, \
+        "cellarium loadings are substantially less similar to truth than sklearn loadings"
+    assert total_similarity > 0.92, "cellarium loadings are not very similar to truth"
