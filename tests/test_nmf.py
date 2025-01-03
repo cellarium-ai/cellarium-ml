@@ -132,11 +132,16 @@ def run_cellarium_nmf(
     )
 
     # trainer
+    if devices == 2:
+        strategy = pl.strategies.DDPStrategy(broadcast_buffers=True)
+    else:
+        strategy = "auto"
     trainer = pl.Trainer(
         barebones=False,
         accelerator="cpu",
         devices=devices,
         max_epochs=50,
+        strategy=strategy,
     )
 
     # fit
