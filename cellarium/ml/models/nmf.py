@@ -203,7 +203,7 @@ def compute_loadings(
     factors_rkg: torch.Tensor,
     n_iterations: int,
     learning_rate: float = 0.2,
-    normalize: bool = True,
+    normalize: bool = False,
     alpha_tol: float = 5e-5,
 ) -> torch.Tensor:
     """
@@ -372,7 +372,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             self.register_buffer(f"full_D_{i}_kg", torch.empty(i, full_g))
 
         self._D_tol = 5e-5
-        self._alpha_tol = 5e-5
+        self._alpha_tol = 2e-5
 
         self.n_nmf = r
 
@@ -409,7 +409,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             factors_rkg=factors_rkg,
             n_iterations=n_iterations,
             learning_rate=0.2,
-            normalize=True,
+            normalize=False,
             alpha_tol=self._alpha_tol,
         )
         return alpha_rnk
