@@ -47,7 +47,7 @@ from sklearn.decomposition import NMF
 import dataframe_image as dfi
 import anndata as ad
 import rapids_singlecell as rsc
-
+from _collections import defaultdict
 from google.cloud import storage
 from anndata import AnnData, read_h5ad
 
@@ -466,6 +466,10 @@ class ComputeUMAP():
 
             adata_transformed.layers['raw'] = adata.X.copy()
 
+
+        plt.show()
+        exit()
+
         adata_transformed.write(filepath)
 
         return adata_transformed
@@ -476,8 +480,11 @@ class ComputeUMAP():
         print(f"UMAP of {self.basis} ...")
 
         sc.set_figure_params(fontsize=14, vector_friendly=True)
-        sc.pp.neighbors(adata, use_rep=self.rep, n_neighbors=15, metric='euclidean', knn=True,
-                        method="umap")  # X_scvi #X_raw
+
+
+
+        sc.pp.neighbors(adata, use_rep=self.rep, n_neighbors=15, metric='euclidean', knn=True,method="umap")  # X_scvi #X_raw
+
         sc.pp.pca(adata, svd_solver="auto")
 
         sc.tl.umap(adata)
@@ -498,7 +505,7 @@ class ComputeUMAP():
 
             adata.layers['raw'] = adata.X.copy()
 
-        adata.write(filepath)
+        #adata.write(filepath) #TODO: fix?
 
         return adata
 
@@ -1570,9 +1577,62 @@ def scanpy_scvi(adata_file):
     adata.obsm["og_scvi_latent"] = latent
 
 
-def search_ontology_rdflib(owl_file,term_id):
+def get_cell_ontology_label(term_id, ontology_file_path):
+    """
+    Retrieve the label for a given Cell Ontology (CL) term using RDFLib.
+
+    Parameters:
+    term_id (str): The Cell Ontology term ID (e.g., 'CL:4023064')
+    ontology_file_path (str): Full path to the Cell Ontology .owl file
+
+    Returns:
+    str: The label of the term, or None if not found
+    """
+    import rdflib
+
+    try:
+        # Create a new graph
+        graph = rdflib.Graph()
+
+        # Load the ontology file
+        graph.parse(ontology_file_path, format='xml')
+
+        # Define namespaces
+        rdf = rdflib.namespace.RDF
+        rdfs = rdflib.namespace.RDFS
+        owl = rdflib.namespace.OWL
+        oboInOwl = rdflib.Namespace('http://www.geneontology.org/formats/oboInOwl#')
+
+        # Construct the full URI for the term
+        term_uri = rdflib.URIRef(f'http://purl.obolibrary.org/obo/{term_id.replace(":", "_")}')
+
+        # Query for the label
+        labels = list(graph.objects(term_uri, rdfs.label))
+        print("Labels: {}".format(labels))
+
+        # Return the first label if found
+        return labels[0] if labels else None
+
+    except Exception as e:
+        print(f"Error retrieving label: {e}")
+        return None
+
+
+def search_cell_ontology_rdflib(owl_graph, term_id, return_children=False):
+    """
+
+    Args:
+        owl_graph: Parsed owl file using  rdflib.Graph().parse(owl_file_path, format="xml")
+        term_id: UBERON ontology term such UBERON:0000955
+        return_children: whether to resturn the children terms associated to the term_id
+
+    Returns:
+        label: str or dict of human readable terms, i.e brain
+
+    """
     import rdflib
     from rdflib.namespace import RDFS
+    print("Finding readable cell ontology term")
 
     # Load the UBERON ontology file:
     # In RDF, a graph is constructed from triples, each of which represents an RDF statement that has at least three components:
@@ -1580,16 +1640,79 @@ def search_ontology_rdflib(owl_file,term_id):
     # predicate: a relation between the subject and the object
     # object: another entity or a literal value
 
-    g = rdflib.Graph()
-    g.parse(owl_file, format="xml")
-    print("graph")
-    print(g)
+    # g = rdflib.Graph()
+    # g.parse(owl_file, format="xml")
+    # # Define Cell ontology namespace, pulling URL
+    # uri = 'http://www.geneontology.org/formats/oboInOwl#'
+    # CellOntologies = rdflib.Namespace(uri)
+    # print("Done loading graph")
+
+    # Construct the full URI for the term
+    ontology_uri = rdflib.URIRef(f'http://purl.obolibrary.org/obo/{term_id.replace(":", "_")}')
+
+    # Function to get the label of a CELL ONTOLOGY term
+    def get_cell_ontology_label(cellonto_id):
+        """
+        rdfs:label a rdf:Property ;
+        rdfs:isDefinedBy <http://www.w3.org/2000/01/rdf-schema#> ;
+        rdfs:label "label" ;
+        rdfs:comment "A human-readable name for the subject." ;
+        rdfs:domain rdfs:Resource ;
+        rdfs:range rdfs:Literal .
+	"""
+        #term = term_uri[cellonto_id]  # just adds the digit part of the uberon term http://purl.obolibrary.org/obo/UBERON_0002107
+        label = list(owl_graph.objects(ontology_uri, RDFS.label))  # [rdflib.term.Literal('liver')]
+        parents = list(owl_graph.objects(ontology_uri, RDFS.subClassOf))  # [rdflib.term.Literal('liver')]
+        if label:
+            return label[0].toPython()
+        else:
+            return None
+
+    # Example queries
+
+    # Get the label of the UBERON term for "heart"
+
+    label = get_cell_ontology_label(term_id.replace("CL:", ""))
+
+    print(f"Found label for {term_id}: {label}")
+    if return_children:
+        # Get all subclasses of the "organ" class
+        organ_class = ontology_uri[term_id.replace("CL:", "")]  # UBERON ID for "organ" 0000062
+        print("Example : {}".format(organ_class))
+        organ_class = ontology_uri[term_id.replace("CL:", "")]  # UBERON ID for "organ" 0000062
+        print("Given : {}".format(organ_class))
+        organ_subclasses = list(owl_graph.subjects(RDFS.subClassOf, organ_class))
+        organ_labels = [get_cell_ontology_label(str(s).split("_")[-1]) for s in organ_subclasses]
+        return {"main": label, "children": organ_labels}
+    else:
+        return label
+
+
+def search_uberon_rdflib(owl_graph,term_id,return_children=False):
+    """
+
+    Args:
+        owl_graph: Parsed owl file using  rdflib.Graph().parse(owl_file_path, format="xml")
+        term_id: UBERON ontology term such UBERON:0000955
+        return_children: whether to resturn the children terms associated to the term_id
+
+    Returns:
+        label: str or dict of human readable terms, i.e brain
+
+    """
+    import rdflib
+    from rdflib.namespace import RDFS
+    print("Finding readable Uberon term")
+
+    # Load the UBERON ontology file:
+
+    # g = rdflib.Graph()
+    # g.parse(owl_file, format="xml")
 
     # Define UBERON namespace, pulling URL
     uri = "http://purl.obolibrary.org/obo/UBERON_"
     UBERON = rdflib.Namespace(uri)
-
-
+    print("Done loading graph")
     # Function to get the label of a UBERON term
     def get_uberon_label(uberon_id):
         """
@@ -1601,11 +1724,9 @@ def search_ontology_rdflib(owl_file,term_id):
         rdfs:range rdfs:Literal .
 	"""
         term = UBERON[uberon_id] #just adds the digit part of the uberon term http://purl.obolibrary.org/obo/UBERON_0002107
-        label = list(g.objects(term, RDFS.label)) #[rdflib.term.Literal('liver')]
-        parents = list(g.objects(term, RDFS.subClassOf)) #[rdflib.term.Literal('liver')]
+        label = list(owl_graph.objects(term, RDFS.label)) #[rdflib.term.Literal('liver')]
+        parents = list(owl_graph.objects(term, RDFS.subClassOf)) #[rdflib.term.Literal('liver')]
         parents = [UBERON[uberon_id]]
-        exit()
-
         if label:
             return label[0].toPython()
         else:
@@ -1614,20 +1735,21 @@ def search_ontology_rdflib(owl_file,term_id):
     # Example queries
 
     # Get the label of the UBERON term for "heart"
-    heart_label = get_uberon_label("0002107")
 
+    label = get_uberon_label(term_id.replace("UBERON:",""))
 
-    exit()
-    print(f"Label for UBERON:0000948 (heart): {heart_label}")
-
-    # Get all subclasses of the "organ" class
-    organ_class = UBERON["0000062"]  # UBERON ID for "organ" 0000062
-    organ_subclasses = list(g.subjects(RDFS.subClassOf, organ_class))
-    organ_labels = [get_uberon_label(str(s).split("_")[-1]) for s in organ_subclasses]
-    print("Organ subclasses:")
-    for label in organ_labels:
-        print(f"- {label}")
-    exit()
+    print(f"Found label for {term_id}: {label}")
+    if return_children:
+        # Get all subclasses of the "organ" class
+        organ_class = UBERON[term_id.replace("UBERON:","")]  # UBERON ID for "organ" 0000062
+        print("Example : {}".format(organ_class))
+        organ_class = UBERON[term_id.replace("UBERON:","")]  # UBERON ID for "organ" 0000062
+        print("Given : {}".format(organ_class))
+        organ_subclasses = list(owl_graph.subjects(RDFS.subClassOf, organ_class))
+        organ_labels = [get_uberon_label(str(s).split("_")[-1]) for s in organ_subclasses]
+        return {"main":label,"children":organ_labels}
+    else:
+        return label
 
 def build_coarsened_metadata(cellxgene_census:types.ModuleType,script_dir:str, method="broad",overwrite=False) -> pd.DataFrame:
     """
@@ -1751,8 +1873,7 @@ def build_coarsened_metadata(cellxgene_census:types.ModuleType,script_dir:str, m
 
             cell_metadata['coarse_development_stage_ontology_id'] = cell_metadata[
                 'development_stage_ontology_term_id'].str.replace(':', '_').map(devstage_coarsener)
-            cell_metadata['coarse_development_stage'] = cell_metadata['coarse_development_stage_ontology_id'].map(
-                devstage_name_lookup)
+            cell_metadata['coarse_development_stage'] = cell_metadata['coarse_development_stage_ontology_id'].map(devstage_name_lookup)
 
             tissue_coarsener = np.load(f'{script_dir}/data/pseudobulk/tissue_coarsen_map.npy', allow_pickle=True).item()
             tissue_dist = np.load(f'{script_dir}/data/pseudobulk/tissue_distances_from_root.npy', allow_pickle=True).item()
@@ -1781,13 +1902,13 @@ def build_coarsened_metadata(cellxgene_census:types.ModuleType,script_dir:str, m
 
 
         elif method == "ku":
-            tissue_coarsener = pd.read_csv(f"{script_dir}/data/pseudobulk/uberon_ontology_map.tsv",sep="\t",skiprows=1)
+            tissue_coarsener = pd.read_csv(f"{script_dir}/data/common_files/uberon_ontology_map.tsv",sep="\t",skiprows=1)
             tissue_coarsener_dict = dict(zip(tissue_coarsener.iloc[:,0],tissue_coarsener.iloc[:,1]))
             #tissue_coarsener_dict_reverse = dict(zip(tissue_coarsener.iloc[:,1],tissue_coarsener.iloc[:,0]))
             cell_metadata['tissue_coarse_ontology_id'] = cell_metadata['tissue_ontology_term_id'].map(tissue_coarsener_dict)
             #cell_metadata.loc[cell_metadata['tissue_coarse_ontology_id'].isna(),"tissue_coarse_ontology_id"] = cell_metadata.loc[cell_metadata['tissue_coarse_ontology_id'].isna(),"tissue_ontology_term_id"].map(tissue_coarsener_dict_reverse)
 
-            cell_coarsener = pd.read_csv(f"{script_dir}/data/pseudobulk/cell_ontology_map.tsv",sep="\t",skiprows=1)
+            cell_coarsener = pd.read_csv(f"{script_dir}/data/common_files/cell_ontology_map.tsv",sep="\t",skiprows=1)
             cell_coarsener_dict = dict(zip(cell_coarsener.iloc[:, 0], cell_coarsener.iloc[:, 1]))
 
             cell_metadata['cell_type_coarse_ontology_term_id'] = cell_metadata['cell_type_ontology_term_id'].map(cell_coarsener_dict).replace(['^UBERON','^BFO','^PR'], np.nan, regex=True)
@@ -1825,8 +1946,6 @@ def build_coarsened_metadata(cellxgene_census:types.ModuleType,script_dir:str, m
 
     return df
 
-
-
 def read_h5ad_gcs(filename: str, storage_client: storage.Client | None = None) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
@@ -1863,7 +1982,6 @@ def read_h5ad_gcs(filename: str, storage_client: storage.Client | None = None) -
     # with fsspec.open(filename, mode='rb') as f: #SLOWER
     #     adata = read_h5ad(f)
     #     return adata
-
 
 def plot_histogram(coarsened_metadata,category,type="Barplot",bucket_size=1000):
 

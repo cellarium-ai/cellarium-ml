@@ -5,8 +5,8 @@ print("sucessfully running R script")
 inputs <- commandArgs(trailingOnly = TRUE)
 inputpath <- inputs[1]
 outputpath <- inputs[2]
-#filepath <- "/home/lys/Dropbox/PostDoc_Glycomics/Laedingr/laedingr/src/laedingr/data/common_files/Glycoenzymes.xlsx"
-inputpath <- "/home/lys/Dropbox/PostDoc_Glycomics/cellarium-ml/data/coarsed/ensembl_ids.xlsx"
+#inputpath <- "/home/lys/Dropbox/PostDoc_Glycomics/cellarium-ml/data/pseudobulk/ensembl_ids.xlsx"
+#outputpath <- "/home/lys/Dropbox/PostDoc_Glycomics/cellarium-ml/data/pseudobulk/ensembl_hgcn_ids.tsv"
 ensembsIDS <- read_excel(inputpath)
 ensembl_list <- ensembsIDS$ensembl
 

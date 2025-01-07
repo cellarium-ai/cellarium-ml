@@ -1,8 +1,6 @@
-import re
 import os
 import scanpy as sc
 import sys
-import torch
 import subprocess
 local_repository= True
 if local_repository:
