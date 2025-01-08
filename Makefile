@@ -25,10 +25,10 @@ typecheck: FORCE
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)
-	pytest -v -k multi_device --ignore=tests/dataloader --ignore=tests/test_mup.py
+	pytest -v -k multi_device --ignore=tests/dataloader
 else
 	# default
-	pytest -v --ignore=tests/dataloader
+	pytest -v --ignore=tests/dataloader --ignore=tests/test_mup.py
 endif
 
 test-dataloader: FORCE
