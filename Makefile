@@ -28,7 +28,7 @@ ifeq (${TEST_DEVICES}, 2)
 	pytest -v -k multi_device --ignore=tests/dataloader
 else
 	# default
-	pytest -v --ignore=tests/dataloader --ignore=tests/test_ppca.py
+	pytest -v --ignore=tests/dataloader
 endif
 
 test-dataloader: FORCE

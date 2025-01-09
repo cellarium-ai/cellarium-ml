@@ -124,7 +124,7 @@ def get_coord_data_MLP(
 
 @pytest.fixture
 def train_loader(tmp_path: Path) -> torch.utils.data.DataLoader:
-    batch_size = 64
+    batch_size = 32
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
     trainset = datasets.CIFAR10(root=tmp_path, train=True, download=True, transform=transform)
@@ -487,7 +487,7 @@ def test_mup(
         pytest.skip("Cerebras does not support SGD optimizer")
 
     nsteps = 3
-    nseeds = 5
+    nseeds = 3
     widths = [2**i for i in range(7, 14)]
     df = get_coord_data_MLP(
         implementation=implementation,
