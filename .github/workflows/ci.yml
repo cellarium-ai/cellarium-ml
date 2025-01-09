@@ -92,12 +92,6 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install .[test]
-    - name: Check System Resources
-      run: |
-        free -h
-        df -h
-        lscpu
-        nvidia-smi || echo "No GPU available"
     - name: Test with pytest
       run: make test
 
