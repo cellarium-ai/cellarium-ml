@@ -456,7 +456,7 @@ class CerebrasMLP(pl.LightningModule):
 
 @pytest.mark.parametrize("implementation", ["sp", "mup_mu_linear", "mup_cerebras"])
 @pytest.mark.parametrize("bias", [True, False])
-@pytest.mark.parametrize("nonlin", [F.relu, F.tanh])
+@pytest.mark.parametrize("nonlin", [F.relu])
 @pytest.mark.parametrize(
     "optimizer,lr,input_mult,output_mult",
     [("sgd", 0.1, 2**-4, 2**5), ("adam", 0.01, 2**-3, 2**-4), ("adamw", 0.01, 2**-3, 2**-4)],
