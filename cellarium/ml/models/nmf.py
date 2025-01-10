@@ -499,12 +499,12 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
-            assert isinstance(
-                trainer.strategy, DDPStrategy
-            ), "NonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
-            assert (
-                trainer.strategy._ddp_kwargs["broadcast_buffers"] is True
-            ), "NonNegativeMatrixFactorization requires that the `broadcast_buffers` parameter of "
+            assert isinstance(trainer.strategy, DDPStrategy), (
+                "NonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
+            )
+            assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is True, (
+                "NonNegativeMatrixFactorization requires that the `broadcast_buffers` parameter of "
+            )
             "lightning.pytorch.strategies.DDPStrategy is set to True."
 
     def on_end(self, trainer: pl.Trainer) -> None:

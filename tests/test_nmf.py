@@ -281,9 +281,9 @@ def test_nmf_against_sklearn_multi_device(
         f"\n{pairwise_sklearn_factor_similarity_kk[row_indices, :][:, col_indices]}"
     )
     print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert (
-        total_sklearn_similarity - total_cellarium_similarity <= 0.03
-    ), "cellarium factors are substantially less similar to truth than sklearn factors"
+    assert total_sklearn_similarity - total_cellarium_similarity <= 0.03, (
+        "cellarium factors are substantially less similar to truth than sklearn factors"
+    )
     assert total_cellarium_similarity > 0.7, "cellarium factors are not very similar to truth"
 
     # assert that the cellarium loadings match truth as much as the sklearn loadings do
@@ -308,7 +308,7 @@ def test_nmf_against_sklearn_multi_device(
         f"\n{pairwise_sklearn_loading_similarity_nn[row_indices, :][:, col_indices]}"
     )
     print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert (
-        total_sklearn_similarity - total_cellarium_similarity <= 0.025
-    ), "cellarium loadings are substantially less similar to truth than sklearn loadings"
+    assert total_sklearn_similarity - total_cellarium_similarity <= 0.025, (
+        "cellarium loadings are substantially less similar to truth than sklearn loadings"
+    )
     assert total_similarity > 0.92, "cellarium loadings are not very similar to truth"
