@@ -110,7 +110,7 @@ def test_init_dat(dat: DistributedAnnDataCollection):
 @pytest.mark.parametrize("last_shard_size", [1, 2, 3, None])
 def test_init_shard_size(adatas_path: Path, num_shards: int, last_shard_size: int | None):
     shard_size = 2
-    filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards-1:03}}}.h5ad"))
+    filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards - 1:03}}}.h5ad"))
     dadc = DistributedAnnDataCollection(
         filenames,
         shard_size=shard_size,

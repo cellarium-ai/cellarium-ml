@@ -29,9 +29,9 @@ class VarianceMonitor(pl.Callback):
             AssertionError: If ``pl_module.model`` is not a ``ProbabilisticPCA`` instance.
             MisconfigurationException: If ``Trainer`` has no ``logger``.
         """
-        assert isinstance(
-            pl_module.model, ProbabilisticPCA
-        ), "VarianceMonitor callback should only be used in conjunction with ProbabilisticPCA"
+        assert isinstance(pl_module.model, ProbabilisticPCA), (
+            "VarianceMonitor callback should only be used in conjunction with ProbabilisticPCA"
+        )
 
         if not trainer.loggers:
             raise pl.utilities.exceptions.MisconfigurationException(
