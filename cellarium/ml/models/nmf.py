@@ -88,24 +88,6 @@ def get_embedding(
     return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
 
 
-def update_consensusD(pipeline, density_threshold=0.2, local_neighborhood_size=0.3):
-    torch.manual_seed(0)
-    k_values = pipeline[-1].k_values
-
-    consensus_stat = {}
-    for k in k_values:
-        D_rkg = getattr(pipeline[-1], f"D_{k}_rkg")
-        consensus_output = consensus(
-            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
-        )
-        setattr(pipeline[-1], f"D_{k}_kg", consensus_output["consensus_D"])
-
-        consensus_stat[k] = consensus_output
-        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
-
-    return consensus_stat
-
-
 class KMeans:
     def __init__(self, n_clusters, max_iter=200, tol=1e-4):
         self.n_clusters = n_clusters
@@ -368,8 +350,8 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             self._dummy_param = torch.nn.Parameter(torch.empty(()))
 
             self.register_buffer(f"full_A_{i}_kk", torch.empty(i, i))
-            self.register_buffer(f"full_B_{i}_kg", torch.empty(i, full_g))
-            self.register_buffer(f"full_D_{i}_kg", torch.empty(i, full_g))
+            self.register_buffer(f"full_B_{i}_kg", torch.empty(i, g))
+            self.register_buffer(f"full_D_{i}_kg", torch.empty(i, g))
 
         self._D_tol = 5e-5
         self._alpha_tol = 2e-5
@@ -571,7 +553,8 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             k = self.the_best_k
             # TODO if update_consensusD has not been called, then D_{k}_kg is not updated
             # but if it is, then you would want to use that
-            D_rkg = getattr(self, f"D_{k}_rkg")
+            # D_rkg = getattr(self, f"D_{k}_rkg")
+            D_kg = getattr(self, f"D_{k}_kg")
 
             # compute loadings, Mairal Algorithm 1 step 4
             # alpha_nk = compute_loadings(
@@ -579,13 +562,12 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             #     factors_rkg=D_kg.to(x_.device).unsqueeze(0),
             #     n_iterations=1000,
             # ).squeeze(0)
-            alpha_rnk = compute_loadings(
+            alpha_nk = compute_loadings(
                 x_ng=x_,
-                factors_rkg=D_rkg,
+                factors_rkg=D_kg.to(x_.device).unsqueeze(0),
                 n_iterations=1000,
                 normalize=False,
-            )
-            alpha_nk = alpha_rnk.squeeze(0)
+            ).squeeze(0)
 
             # update A and B, Mairal Algorithm 1 step 5 and 6
             A_kk: torch.Tensor = getattr(self, f"full_A_{k}_kk")
@@ -616,10 +598,27 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             return {"alpha_nk": alpha_nk}
 
     @property
-    def factors_kg(self, all_genes: bool = False) -> dict[int, torch.Tensor]:
+    def factors_kg(self) -> dict[int, torch.Tensor]:
         """
-        Inferred gene expression programs (i.e. "factors").
-        TODO: the all_genes argument does not work like this
+        Inferred consensus gene expression programs (i.e. "factors") defined on the highly variable genes
+        used to train the model.
         """
-        prefix = "full_" if all_genes else ""
-        return {k: getattr(self, f"{prefix}D_{k}_kg") for k in self.k_values}
+        return {k: getattr(self, f"D_{k}_kg") for k in self.k_values}
+
+
+def update_consensusD(nmf_model: NonNegativeMatrixFactorization, density_threshold=0.2, local_neighborhood_size=0.3):
+    torch.manual_seed(0)
+    k_values = nmf_model[-1].k_values
+
+    consensus_stat = {}
+    for k in k_values:
+        D_rkg = getattr(nmf_model[-1], f"D_{k}_rkg")
+        consensus_output = consensus(
+            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
+        )
+        setattr(nmf_model[-1], f"D_{k}_kg", consensus_output["consensus_D"])
+
+        consensus_stat[k] = consensus_output
+        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
+
+    return consensus_stat
