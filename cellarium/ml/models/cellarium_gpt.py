@@ -270,6 +270,19 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         embedding_type_nc: torch.Tensor,
         prompt_mask_nc: torch.Tensor,
     ) -> dict[str, np.ndarray | torch.Tensor]:
+        """
+        Args:
+            token_value_nc_dict:
+                Dictionary of token value tensors of shape ``(n, c)``.
+            embedding_type_nc:
+                Embedding type tensor of shape ``(n, c)``. Embedding type uses the bit representation to indicate which
+                tokens are present in the embedding element-wise. Digit positions (from the right) in the binary value
+                correspond to the token index in the input dict. A value of 1 indicates that the token is included,
+                while a 0 means that the token is excluded.
+
+        Returns:
+            Dictionary of logits tensors of shape ``(n, c, k)``.
+        """
         # Create embeddings
         embedding_ncd = self.token_embedding(token_value_nc_dict, embedding_type_nc)
 
@@ -302,18 +315,6 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         label_nc_dict: dict[str, torch.Tensor],
         label_weight_nc_dict: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        """
-        Args:
-            token_value_nc_dict:
-                Dictionary of token tensors of shape ``(n, c)``. The dictionary must include "gene_id",
-                "gene_value", "gene_query_mask", "total_mrna_umis", and metadata tokens such as "assay",
-                "suspension_type", "cell_type", "tissue", "sex", "development_stage", and "disease".
-            embedding_type_nc:
-                Token type tensor of shape ``(n, c)``. Token type uses the bit representation to indicate which
-                tokens are present in the input tensor element-wise. Digit positions (from the right) in the binary
-                value correspond to the token index in the input tensor. A value of 1 indicates that the token is
-                included, while a 0 means that the token is not included.
-        """
         logits_nck_dict = self.predict(
             token_value_nc_dict=token_value_nc_dict,
             embedding_type_nc=embedding_type_nc,
