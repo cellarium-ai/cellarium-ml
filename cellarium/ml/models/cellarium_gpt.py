@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from cellarium.ml.layers import GeneExpressionEmbedding, MetadataEmbedding, MultiHeadReadout, Transformer
+from cellarium.ml.layers import MultiHeadReadout, TokenEmbedding, Transformer
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.layers import scale_initializers_by_dimension
 from cellarium.ml.utilities.mup import LRAdjustmentGroup
@@ -129,6 +129,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         # Vocab sizes
         self.gene_vocab_sizes = gene_vocab_sizes
         self.metadata_vocab_sizes = metadata_vocab_sizes
+        self.token_types = {"gene": 0} | {key: i + 1 for i, key in enumerate(metadata_vocab_sizes)}
 
         # Initializers
         self.initializer_range = initializer_range
@@ -199,15 +200,11 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
         gene_categorical_vocab_sizes = gene_vocab_sizes.copy()
         gene_value_vocab_size = gene_categorical_vocab_sizes.pop("gene_value")
-        self.gene_embedding = GeneExpressionEmbedding(
-            categorical_vocab_sizes=gene_categorical_vocab_sizes,
+        self.token_embedding = TokenEmbedding(
+            categorical_vocab_sizes=gene_categorical_vocab_sizes
+            # Add 1 to the vocab size for the metadata embeddings to account for the mask token
+            | {key: vocab_size + 1 for key, vocab_size in metadata_vocab_sizes.items()},
             continuous_tokens=["gene_value", "gene_query_mask", "total_mrna_umis"],
-            d_model=d_model,
-            embeddings_initializer=embeddings_initializer,
-        )
-        # Add 1 to the vocab size for the metadata embeddings to account for the mask token
-        self.metadata_embedding = MetadataEmbedding(
-            categorical_vocab_sizes={key: vocab_size + 1 for key, vocab_size in metadata_vocab_sizes.items()},
             d_model=d_model,
             embeddings_initializer=embeddings_initializer,
         )
@@ -270,20 +267,12 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
     def predict(
         self,
-        gene_token_nc_dict: dict[str, torch.Tensor],
-        gene_token_mask_nc: torch.Tensor,
-        metadata_token_nc_dict: dict[str, torch.Tensor],
-        metadata_token_mask_nc_dict: dict[str, torch.Tensor],
+        token_nc_dict: dict[str, torch.Tensor],
+        token_type_nc: torch.Tensor,
         prompt_mask_nc: torch.Tensor,
     ) -> dict[str, np.ndarray | torch.Tensor]:
         # Create embeddings
-        gene_embedding_ncd = self.gene_embedding(gene_token_nc_dict) * gene_token_mask_nc.unsqueeze(-1)
-        metadata_embedding_ncd_dict = self.metadata_embedding(metadata_token_nc_dict)
-        metadata_embedding_ncd = sum(
-            metadata_embedding_ncd_dict[key] * metadata_token_mask_nc_dict[key].unsqueeze(-1)
-            for key in metadata_token_nc_dict
-        )
-        embedding_ncd = gene_embedding_ncd + metadata_embedding_ncd
+        embedding_ncd = self.token_embedding(token_nc_dict, token_type_nc)
 
         # Create attention mask
         attention_mask_ncc: torch.Tensor | BlockMask
@@ -308,19 +297,15 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
     def forward(
         self,
-        gene_token_nc_dict: dict[str, torch.Tensor],
-        gene_token_mask_nc: torch.Tensor,
-        metadata_token_nc_dict: dict[str, torch.Tensor],
-        metadata_token_mask_nc_dict: dict[str, torch.Tensor],
+        token_nc_dict: dict[str, torch.Tensor],
+        token_type_nc: torch.Tensor,
         prompt_mask_nc: torch.Tensor,
         label_nc_dict: dict[str, torch.Tensor],
         label_weight_nc_dict: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         logits_nck_dict = self.predict(
-            gene_token_nc_dict=gene_token_nc_dict,
-            gene_token_mask_nc=gene_token_mask_nc,
-            metadata_token_nc_dict=metadata_token_nc_dict,
-            metadata_token_mask_nc_dict=metadata_token_mask_nc_dict,
+            token_nc_dict=token_nc_dict,
+            token_type_nc=token_type_nc,
             prompt_mask_nc=prompt_mask_nc,
         )
 
@@ -349,23 +334,19 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
         batch_idx: int,
-        gene_token_nc_dict: dict[str, torch.Tensor],
-        gene_token_mask_nc: torch.Tensor,
-        metadata_token_nc_dict: dict[str, torch.Tensor],
-        metadata_token_mask_nc_dict: dict[str, torch.Tensor],
+        token_nc_dict: dict[str, torch.Tensor],
+        token_type_nc: torch.Tensor,
         prompt_mask_nc: torch.Tensor,
-        labels_nc: dict[str, torch.Tensor],
-        label_weights_nc: dict[str, torch.Tensor],
+        label_nc_dict: dict[str, torch.Tensor],
+        label_weight_nc_dict: dict[str, torch.Tensor],
     ) -> None:
         n = prompt_mask_nc.shape[0]
         loss_dict = self.forward(
-            gene_token_nc_dict=gene_token_nc_dict,
-            gene_token_mask_nc=gene_token_mask_nc,
-            metadata_token_nc_dict=metadata_token_nc_dict,
-            metadata_token_mask_nc_dict=metadata_token_mask_nc_dict,
+            token_nc_dict=token_nc_dict,
+            token_type_nc=token_type_nc,
             prompt_mask_nc=prompt_mask_nc,
-            label_nc_dict=labels_nc,
-            label_weight_nc_dict=label_weights_nc,
+            label_nc_dict=label_nc_dict,
+            label_weight_nc_dict=label_weight_nc_dict,
         )
 
         pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True, batch_size=n)

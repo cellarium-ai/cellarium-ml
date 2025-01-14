@@ -9,15 +9,15 @@ from torch import nn
 from cellarium.ml.utilities.layers import create_initializer
 
 
-class GeneExpressionEmbedding(nn.Module):
+class TokenEmbedding(nn.Module):
     """
-    Gene embedding.
+    Gene and metadata tokens embedding.
 
     Args:
         categorical_vocab_sizes:
-            Categorical gene token vocabulary sizes.
+            Categorical token vocabulary sizes.
         continuous_tokens:
-            Continuous gene tokens.
+            Continuous tokens.
         d_model:
             Dimensionality of the embeddings and hidden states.
         embeddings_initializer:
@@ -47,62 +47,22 @@ class GeneExpressionEmbedding(nn.Module):
         for module in self.embedding_dict.children():
             create_initializer(self.embeddings_initializer)(module.weight)
 
-    def forward(self, gene_tokens_nc_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, token_nc_dict: dict[str, torch.Tensor], token_type_nc: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         Args:
-            gene_tokens_nc_dict:
-                Dictionary of gene token tensors of shape ``(n, c)``.
+            token_nc_dict:
+                Dictionary of token tensors of shape ``(n, c)``.
+            token_type_nc:
+                Token type tensor of shape ``(n, c)``. Token type uses the bit representation to indicate which
+                tokens are present in the input tensor element-wise. For example, if the input tensor has 3 tokens,
+                the token type tensor should be a 3-bit binary number. The token type tensor is used to select
+                the embeddings for the tokens in the input tensor.
 
         Returns:
-            The gene embedding tensor of shape ``(n, c, d)``.
+            Dictionary of embedding tensor of shape ``(n, c, d)``.
         """
         return sum(
-            self.embedding_dict[key](gene_token_nc.unsqueeze(-1) if key in self.continuous_tokens else gene_token_nc)
-            for key, gene_token_nc in gene_tokens_nc_dict.items()
+            self.embedding_dict[key](token_nc.unsqueeze(-1) if key in self.continuous_tokens else token_nc)
+            * (token_type_nc >> i & 1).unsqueeze(-1)
+            for i, (key, token_nc) in enumerate(token_nc_dict.items())
         )
-
-
-class MetadataEmbedding(nn.Module):
-    """
-    Metadata embedding.
-
-    Args:
-        categorical_vocab_sizes:
-            Categorical metadata token vocabulary sizes.
-        d_model:
-            Dimensionality of the embeddings and hidden states.
-        initializer:
-            Initializer for the embeddings.
-    """
-
-    def __init__(
-        self,
-        categorical_vocab_sizes: dict[str, int],
-        d_model: int,
-        embeddings_initializer: dict[str, Any],
-    ) -> None:
-        super().__init__()
-        self.embedding_dict = nn.ModuleDict(
-            {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()}
-        )
-        self.embeddings_initializer = embeddings_initializer
-
-        self._reset_parameters()
-
-    def _reset_parameters(self) -> None:
-        for module in self.embedding_dict.children():
-            create_initializer(self.embeddings_initializer)(module.weight)
-
-    def forward(self, metadata_tokens_nc_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """
-        Args:
-            metadata_token_nc_dict:
-                Dictionary of metadata token tensors of shape ``(n, c)``.
-
-        Returns:
-            Dictionary of metadata embedding tensors of shape ``(n, c, d)``.
-        """
-        return {
-            key: self.embedding_dict[key](metadata_token_nc)
-            for key, metadata_token_nc in metadata_tokens_nc_dict.items()
-        }

@@ -23,25 +23,23 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     prompt_mask_nc = np.random.choice([True, False], size=(n, c), p=[0.5, 0.5])
     query_mask_nc = (~prompt_mask_nc).astype(np.float32)
+    token_type_nc = np.full((n, c), fill_value=15, dtype=np.int64)  # 0111 to select gene tokens
+    token_type_nc[:, s:] = 16  # 1000 to select cell type token
     X = adata.X[:, :s].toarray()
 
     cell_type = categories_to_codes(adata.obs["cell_type"])[:, None]
     data = {
-        "gene_token_nc_dict": {
+        "token_nc_dict": {
             "gene_id": np.broadcast_to(np.arange(c), (n, c)),
             "gene_value": np.concatenate([X, np.zeros((n, 1), dtype=np.float32)], axis=1),
             "gene_query_mask": query_mask_nc,
             "total_mrna_umis": np.broadcast_to(
                 np.asarray(adata.obs["total_mrna_umis"], dtype=np.float32)[:, None], (n, c)
             ),
-        },
-        "gene_token_mask_nc": (np.broadcast_to(np.arange(c), (n, c)) < s).astype(np.float32),
-        "metadata_token_nc_dict": {
             "cell_type": np.broadcast_to(cell_type, (n, c)),
         },
-        "metadata_token_mask_nc_dict": {
-            "cell_type": (np.broadcast_to(np.arange(c), (n, c)) == s).astype(np.float32),
-        },
+        # use random numbers between 0 and 31
+        "token_type_nc": token_type_nc,
         "prompt_mask_nc": prompt_mask_nc,
         "label_nc_dict": {
             "gene_value": np.concatenate([X, np.zeros((n, 1))], axis=1),
