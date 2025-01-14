@@ -29,7 +29,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
 
     cell_type = categories_to_codes(adata.obs["cell_type"])[:, None]
     data = {
-        "token_nc_dict": {
+        "token_value_nc_dict": {
             "gene_id": np.broadcast_to(np.arange(c), (n, c)),
             "gene_value": np.concatenate([X, np.zeros((n, 1), dtype=np.float32)], axis=1),
             "gene_query_mask": query_mask_nc,
@@ -38,7 +38,6 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
             ),
             "cell_type": np.broadcast_to(cell_type, (n, c)),
         },
-        # use random numbers between 0 and 31
         "embedding_type_nc": embedding_type_nc,
         "prompt_mask_nc": prompt_mask_nc,
         "label_nc_dict": {
