@@ -129,7 +129,6 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         # Vocab sizes
         self.gene_vocab_sizes = gene_vocab_sizes
         self.metadata_vocab_sizes = metadata_vocab_sizes
-        self.token_types = {"gene": 0} | {key: i + 1 for i, key in enumerate(metadata_vocab_sizes)}
 
         # Initializers
         self.initializer_range = initializer_range
@@ -199,10 +198,10 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
             )
 
         gene_categorical_vocab_sizes = gene_vocab_sizes.copy()
-        gene_value_vocab_size = gene_categorical_vocab_sizes.pop("gene_value")
+        gene_value_vocab_size = gene_categorical_vocab_sizes.pop("gene_value")  # used for the readout head
         self.token_embedding = TokenEmbedding(
             categorical_vocab_sizes=gene_categorical_vocab_sizes
-            # Add 1 to the vocab size for the metadata embeddings to account for the mask token
+            # Add 1 to the vocab size for the metadata tokens to account for the mask token
             | {key: vocab_size + 1 for key, vocab_size in metadata_vocab_sizes.items()},
             continuous_tokens=["gene_value", "gene_query_mask", "total_mrna_umis"],
             d_model=d_model,
@@ -303,6 +302,18 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         label_nc_dict: dict[str, torch.Tensor],
         label_weight_nc_dict: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
+        """
+        Args:
+            token_nc_dict:
+                Dictionary of token tensors of shape ``(n, c)``. The dictionary must include "gene_id",
+                "gene_value", "gene_query_mask", "total_mrna_umis", and metadata tokens such as "assay",
+                "suspension_type", "cell_type", "tissue", "sex", "development_stage", and "disease".
+            token_type_nc:
+                Token type tensor of shape ``(n, c)``. Token type uses the bit representation to indicate which
+                tokens are present in the input tensor element-wise. Digit positions (from the right) in the binary
+                value correspond to the token index in the input tensor. A value of 1 indicates that the token is
+                included, while a 0 means that the token is not included.
+        """
         logits_nck_dict = self.predict(
             token_nc_dict=token_nc_dict,
             token_type_nc=token_type_nc,
