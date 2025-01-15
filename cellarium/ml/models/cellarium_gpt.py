@@ -123,12 +123,8 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         # muP (maximal update parameterization) parameters
         mup_base_d_model: int | None = None,
         mup_base_d_ffn: int | None = None,
-        # float32 matmul precision
-        float32_matmul_precision: Literal["medium", "high", "highest"] = "high",
     ) -> None:
         super().__init__()
-        # Set float32 matrix multiplication precision globally
-        torch.set_float32_matmul_precision(float32_matmul_precision)
 
         # Vocab sizes
         self.gene_vocab_sizes = gene_vocab_sizes
