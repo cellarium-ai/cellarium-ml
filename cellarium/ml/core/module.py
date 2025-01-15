@@ -329,6 +329,16 @@ class CellariumModule(pl.LightningModule):
             optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
         return optim_config
 
+    def configure_gradient_clipping(
+            self,
+            optimizer,
+            optimizer_idx: int | None = None,
+            gradient_clip_val: int | float | None = None,
+            gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        assert gradient_clip_algorithm in ("norm", None), gradient_clip_algorithm
+        self.trainer.strategy.model.clip_grad_norm_(gradient_clip_val)
+
     def on_train_epoch_start(self) -> None:
         """
         Calls the ``set_epoch`` method on the iterable dataset of the given dataloader.

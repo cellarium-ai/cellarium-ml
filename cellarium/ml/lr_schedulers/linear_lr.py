@@ -34,6 +34,8 @@ class LinearLR(LambdaLR):
         super().__init__(optimizer, self._lr_lambda, last_epoch)
 
     def _lr_lambda(self, current_step: int) -> float:
+        # offset = 252858
+        # lr_cycle, current_step = divmod(current_step, offset)
         if current_step < self.num_warmup_steps:
             return float(current_step) / float(max(1, self.num_warmup_steps))
         return max(

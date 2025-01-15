@@ -25,6 +25,7 @@ except ImportError:
     def use_cs() -> bool:
         return False
 
+torch.set_float32_matmul_precision("high")
 
 def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
     """
@@ -115,9 +116,9 @@ class PredictTokenizer(torch.nn.Module):
         # assign token codes based on the ontology info
         # token values not in the ontology are treated as unmeasured and assigned a code value of -1
         for key, ontology_info in self.ontology_infos.items():
-            assert self.metadata_vocab_sizes[key] == len(ontology_info["labels"])
+            assert self.metadata_vocab_sizes[key] == len(ontology_info["names"])
             metadata_tokens_n[key] = torch.tensor(
-                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["labels"]).codes,
+                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["names"]).codes,
                 dtype=torch.int,
             )
         # create metadata query and prompt masks
@@ -187,7 +188,7 @@ class TrainTokenizer(torch.nn.Module):
         self.max_total_mrna_umis = max_total_mrna_umis
         self.gene_vocab_sizes = gene_vocab_sizes
         self.metadata_vocab_sizes = metadata_vocab_sizes
-        ontology_infos = torch.load(ontology_infos_path)
+        ontology_infos = torch.load(ontology_infos_path, weights_only=True)
         self.ontology_infos = ontology_infos
         self.ontology_downsample_p = ontology_downsample_p
         self.prefix_len = prefix_len
@@ -552,6 +553,11 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+
+    def set_attention_backend(self, attention_backend: str) -> None:
+        self.attention_backend = attention_backend
+        for block in self.transformer.blocks:
+            block.attention.attention_backend = attention_backend
 
     @cached_property
     def token_to_id(self) -> dict[str, int]:
