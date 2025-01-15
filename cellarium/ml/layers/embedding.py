@@ -47,22 +47,23 @@ class TokenEmbedding(nn.Module):
         for module in self.embedding_dict.children():
             create_initializer(self.embeddings_initializer)(module.weight)
 
-    def forward(self, token_value_nc_dict: dict[str, torch.Tensor], embedding_type_nc: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        token_value_nc_dict: dict[str, torch.Tensor],
+        token_mask_nc_dict: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
         """
         Args:
             token_value_nc_dict:
                 Dictionary of token value tensors of shape ``(n, c)``.
-            embedding_type_nc:
-                Embedding type tensor of shape ``(n, c)``. Embedding type uses the bit representation to indicate which
-                tokens are present in the embedding element-wise. Digit positions (from the right) in the binary value
-                correspond to the token index in the input dict. A value of 1 indicates that the token is included,
-                while a 0 means that the token is excluded.
+            token_mask_nc_dict:
+                Dictionary of token mask tensors of shape ``(n, c)``.
 
         Returns:
             Embedding tensor of shape ``(n, c, d)``.
         """
         return sum(
             self.embedding_dict[key](token_value_nc.unsqueeze(-1) if key in self.continuous_tokens else token_value_nc)
-            * (embedding_type_nc >> i & 1).unsqueeze(-1)
+            * token_mask_nc_dict[key].unsqueeze(-1)
             for i, (key, token_value_nc) in enumerate(token_value_nc_dict.items())
         )
