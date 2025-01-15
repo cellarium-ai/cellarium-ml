@@ -109,7 +109,7 @@ def get_highly_variable_genes(
             n_top_genes = len(dispersion_norm)
         disp_cut_off = dispersion_norm[n_top_genes - 1]
         gene_subset = np.nan_to_num(df["dispersions_norm"].values) >= disp_cut_off
-        logging.debug(f"the {n_top_genes} top genes correspond to a " f"normalized dispersion cutoff of {disp_cut_off}")
+        logging.debug(f"the {n_top_genes} top genes correspond to a normalized dispersion cutoff of {disp_cut_off}")
     else:
         dispersion_norm[np.isnan(dispersion_norm)] = 0  # similar to Seurat
         gene_subset = np.logical_and.reduce(

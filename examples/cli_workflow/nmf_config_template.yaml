@@ -24,13 +24,10 @@ model:
         loader_fn: pandas.read_csv
         attr: "ensembl_id"
         convert_fn: pandas.Series.to_list
-      k_range: ${k_range}
+      k_values: ${k_values}
       r: ${num_repeats}
       full_g: ${n_genes_total}
-      density_threshold: 0.25
-      local_neighborhood_size: 0.30
       log_variational: false
-      mode: nmf
       algorithm: mairal
   is_initialized: false
 data:

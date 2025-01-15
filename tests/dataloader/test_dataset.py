@@ -67,7 +67,7 @@ def dadc(tmp_path: Path, obs: pd.DataFrame, request: pytest.FixtureRequest) -> D
         sliced_adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))
 
     # distributed anndata
-    filenames = str(os.path.join(tmp_path, f"adata.{{000..00{len(limits)-1}}}.h5ad"))
+    filenames = str(os.path.join(tmp_path, f"adata.{{000..00{len(limits) - 1}}}.h5ad"))
 
     dadc = DistributedAnnDataCollection(
         filenames,

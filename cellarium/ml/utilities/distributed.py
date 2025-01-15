@@ -57,7 +57,7 @@ def get_rank_and_num_replicas() -> tuple[int, int]:
             num_replicas = 1
             rank = 0
     if rank >= num_replicas or rank < 0:
-        raise ValueError(f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas-1}]")
+        raise ValueError(f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]")
     return rank, num_replicas
 
 

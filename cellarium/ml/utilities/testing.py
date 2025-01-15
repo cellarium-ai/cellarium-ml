@@ -96,7 +96,7 @@ def assert_arrays_equal(
         ValueError: If the arrays are not equal.
     """
     if not np.array_equal(a1, a2):
-        raise ValueError(f"`{a1_name}` must match `{a2_name}`. " f"Got {a1} != {a2}")
+        raise ValueError(f"`{a1_name}` must match `{a2_name}`. Got {a1} != {a2}")
 
 
 def assert_slope_equals(data: pd.Series, slope: float, loglog: bool = False, atol: float = 1e-4) -> None:
