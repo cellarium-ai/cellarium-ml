@@ -22,6 +22,9 @@ except ImportError:
         return False
 
 
+torch.set_float32_matmul_precision("high")
+
+
 def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
     """
     Generate a prompt diagonal mask for self-attention.
@@ -267,24 +270,21 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     def predict(
         self,
         token_value_nc_dict: dict[str, torch.Tensor],
-        embedding_type_nc: torch.Tensor,
+        token_mask_nc_dict: dict[str, torch.Tensor],
         prompt_mask_nc: torch.Tensor,
     ) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Args:
             token_value_nc_dict:
                 Dictionary of token value tensors of shape ``(n, c)``.
-            embedding_type_nc:
-                Embedding type tensor of shape ``(n, c)``. Embedding type uses the bit representation to indicate which
-                tokens are present in the embedding element-wise. Digit positions (from the right) in the binary value
-                correspond to the token index in the input dict. A value of 1 indicates that the token is included,
-                while a 0 means that the token is excluded.
+            token_mask_nc_dict:
+                Dictionary of token mask tensors of shape ``(n, c)``.
 
         Returns:
             Dictionary of logits tensors of shape ``(n, c, k)``.
         """
         # Create embeddings
-        embedding_ncd = self.token_embedding(token_value_nc_dict, embedding_type_nc)
+        embedding_ncd = self.token_embedding(token_value_nc_dict, token_mask_nc_dict)
 
         # Create attention mask
         attention_mask_ncc: torch.Tensor | BlockMask
@@ -310,14 +310,14 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     def forward(
         self,
         token_value_nc_dict: dict[str, torch.Tensor],
-        embedding_type_nc: torch.Tensor,
+        token_mask_nc_dict: dict[str, torch.Tensor],
         prompt_mask_nc: torch.Tensor,
         label_nc_dict: dict[str, torch.Tensor],
         label_weight_nc_dict: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         logits_nck_dict = self.predict(
             token_value_nc_dict=token_value_nc_dict,
-            embedding_type_nc=embedding_type_nc,
+            token_mask_nc_dict=token_mask_nc_dict,
             prompt_mask_nc=prompt_mask_nc,
         )
 
@@ -347,7 +347,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         pl_module: pl.LightningModule,
         batch_idx: int,
         token_value_nc_dict: dict[str, torch.Tensor],
-        embedding_type_nc: torch.Tensor,
+        token_mask_nc_dict: dict[str, torch.Tensor],
         prompt_mask_nc: torch.Tensor,
         label_nc_dict: dict[str, torch.Tensor],
         label_weight_nc_dict: dict[str, torch.Tensor],
@@ -355,7 +355,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         n = prompt_mask_nc.shape[0]
         loss_dict = self.forward(
             token_value_nc_dict=token_value_nc_dict,
-            embedding_type_nc=embedding_type_nc,
+            token_mask_nc_dict=token_mask_nc_dict,
             prompt_mask_nc=prompt_mask_nc,
             label_nc_dict=label_nc_dict,
             label_weight_nc_dict=label_weight_nc_dict,
