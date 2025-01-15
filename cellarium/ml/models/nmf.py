@@ -592,7 +592,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                     factors_rkg=full_D_kg.unsqueeze(0),
                     n_iterations=100,
                     D_tol=self._D_tol,
-                )
+                ).squeeze(0)
                 setattr(self, f"full_D_{k}_kg", D)
 
             return {"alpha_nk": alpha_nk}
@@ -608,15 +608,15 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
 def update_consensusD(nmf_model: NonNegativeMatrixFactorization, density_threshold=0.2, local_neighborhood_size=0.3):
     torch.manual_seed(0)
-    k_values = nmf_model[-1].k_values
+    k_values = nmf_model.k_values
 
     consensus_stat = {}
     for k in k_values:
-        D_rkg = getattr(nmf_model[-1], f"D_{k}_rkg")
+        D_rkg = getattr(nmf_model, f"D_{k}_rkg")
         consensus_output = consensus(
             D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
         )
-        setattr(nmf_model[-1], f"D_{k}_kg", consensus_output["consensus_D"])
+        setattr(nmf_model, f"D_{k}_kg", consensus_output["consensus_D"])
 
         consensus_stat[k] = consensus_output
         print("silhouette score of k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
