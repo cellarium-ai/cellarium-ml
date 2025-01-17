@@ -3,8 +3,8 @@
    :width: 180
    :align: center
 
-**Cellarium ML: a machine learning library for distributed single-cell data analysis**
-======================================================================================
+**Cellarium ML: a machine learning framework for single-cell biology**
+======================================================================
 
 Cellarium ML is a PyTorch Lightning-based library for distributed single-cell data analysis.
 It provides tools for training deep learning models on large-scale single-cell datasets,
@@ -98,8 +98,11 @@ To run the tests:
 
 .. code-block:: bash
 
-   make test                  # runs single-device tests
-   TEST_DEVICES=2 make test   # runs multi-device tests
+   make test-examples                   # runs single-device cli example tests
+   make test-dataloader                 # runs single-device dataloader related tests
+   TEST_DEVICES=2 make test-dataloader  # runs multi-device dataloader related test
+   make test                            # runs single-device (all other) tests
+   TEST_DEVICES=2 make test             # runs multi-device (all other) tests
 
 To format the code automatically:
 
