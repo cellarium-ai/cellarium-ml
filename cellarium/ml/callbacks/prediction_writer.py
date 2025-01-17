@@ -85,7 +85,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         prediction_size: int | None = None,
         key: str = "x_ng",
         gzip: bool = True,
-        max_threadpool_workers: int = 4,
+        max_threadpool_workers: int = 8,
     ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
