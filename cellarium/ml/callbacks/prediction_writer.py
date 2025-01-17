@@ -187,6 +187,4 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         if self.sufficient_disk_space_exists is None:
             self.sufficient_disk_space_exists = self.check_disk_space(num_files=trainer.num_predict_batches[0])
             if self.sufficient_disk_space_exists is False:
-                raise RuntimeError(
-                    f"Insufficient disk space at {self.output_dir} to write all predictions"
-                )
+                raise RuntimeError(f"Insufficient disk space at {self.output_dir} to write all predictions")
