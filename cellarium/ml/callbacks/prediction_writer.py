@@ -5,6 +5,7 @@ import os
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Queue
 
 import lightning.pytorch as pl
 import numpy as np
@@ -55,6 +56,30 @@ def write_prediction(
         executor.submit(_write_csv, df, output_path)
 
 
+class BoundedThreadPoolExecutor(ThreadPoolExecutor):
+    """ThreadPoolExecutor with a bounded queue for task submissions.
+    This class is used to prevent the queue from growing indefinitely when tasks are submitted,
+    which can lead to an out-of-memory error.
+    """
+
+    def __init__(self, max_workers: int, max_queue_size: int):
+        # Use a bounded queue for task submissions
+        self._queue: Queue = Queue(max_queue_size)
+        super().__init__(max_workers=max_workers)
+
+    def submit(self, fn, /, *args, **kwargs):
+        # Block if the queue is full to prevent task overload
+        self._queue.put(None)
+        future = super().submit(fn, *args, **kwargs)
+
+        # When the task completes, remove a marker from the queue
+        def done_callback(_):
+            self._queue.get()
+
+        future.add_done_callback(done_callback)
+        return future
+
+
 class PredictionWriter(pl.callbacks.BasePredictionWriter):
     """
     Write predictions to a CSV file. The CSV file will have the same number of rows as the
@@ -91,7 +116,10 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         self.output_dir = output_dir
         self.prediction_size = prediction_size
         self.key = key
-        self.executor = ThreadPoolExecutor(max_workers=max_threadpool_workers)
+        self.executor = BoundedThreadPoolExecutor(
+            max_workers=max_threadpool_workers,
+            max_queue_size=max_threadpool_workers * 2,
+        )
         self.gzip = gzip
 
     def __del__(self):
