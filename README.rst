@@ -3,8 +3,8 @@
    :width: 180
    :align: center
 
-**Cellarium ML: a machine learning library for distributed single-cell data analysis**
-======================================================================================
+**Cellarium ML: a machine learning framework for single-cell biology**
+======================================================================
 
 Cellarium ML is a PyTorch Lightning-based library for distributed single-cell data analysis.
 It provides tools for training deep learning models on large-scale single-cell datasets,
