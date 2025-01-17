@@ -405,29 +405,41 @@ def correlations_plots(summary_df,figpath):
     # exit()
 
 
-def histogram_plot(summary_df,figpath):
+def histogram_plot(summary_df:pd.DataFrame,figpath:str):
+    """
+    NOTES:
+        https://www.geeksforgeeks.org/logarithmic-scaling-in-data-visualization-with-seaborn/
 
+    Args:
+        summary_df pd.DataFrame:
+        figpath str:
+
+    Returns:
+
+    """
 
     gene_names = summary_df["hgnc"].unique()
 
 
     nrows, ncols, nrows_idx, ncols_idx, width_ratios = NF.calculate_dimensions_plot(gene_names, max_rows=6,include_colorbars=False)
-    fig, axs = plt.subplots(nrows=nrows, ncols=ncols, figsize=(70, 20), layout="constrained")
+    fig, axs = plt.subplots(nrows=nrows, ncols=ncols, figsize=(70, 15), layout="constrained")
     max_val,min_val = summary_df["mean"].max(), summary_df["mean"].min()
     axs = axs.ravel()
 
-    def plot_parallel(ax,gene,summary_df):
+    #def plot_parallel(ax,gene,summary_df):
 
-    #for ax, gene in zip(axs, gene_names):
+    for ax, gene in zip(axs, gene_names):
         expr_mean = summary_df[summary_df["hgnc"] == gene]
         expr_mean =expr_mean["mean"].values
-        sns.histplot(expr_mean, bins=10, ax = ax, kde=True, color="blue")
-        ax.set_xlim((min_val,max_val))
+        non_zeroes = (expr_mean != 0)
+        expr_mean = expr_mean[non_zeroes]
+        sns.histplot(expr_mean, bins=10, ax = ax, kde=True, color="blue",log_scale=True)
+        ax.set_xlim((np.log10(min_val),np.log10(max_val)))
         ax.set_title(gene)
 
-    results = Parallel(n_jobs=-2)(
-        delayed(functools.partial(plot_parallel, summary_df=summary_df))((ax, gene_name)) for ax, gene_name in
-        zip(axs, gene_names))
+    # results = Parallel(n_jobs=-2)(
+    #     delayed(functools.partial(plot_parallel, summary_df=summary_df))((ax, gene_name)) for ax, gene_name in
+    #     zip(axs, gene_names))
     print(f"saved at {figpath}/Histograms/")
     plt.savefig(f"{figpath}/Histograms/histogram_expression.jpg")
 
@@ -675,8 +687,8 @@ def analysis_mean_coarsed_adata(plot_type=""):
     summary_df = summary_df[summary_df["total_num_cells"] > 250]
     summary_df["ratio_cells"] = np.log(summary_df["total_num_cells"])*10 #neperian logarithn
     #summary_df["ratio_cells"] = summary_df["num_cells"]
-
-    figpath=f"{script_dir}/notebooks/figures/cellxgene10x"
+    tissue = "Intestine"
+    figpath=f"{script_dir}/notebooks/figures/cellxgene10x/{tissue}"
 
     if plot_type == "cell_counts_vs_mean_std_plots":
         cell_counts_vs_mean_std_plots(summary_df,figpath)
@@ -687,7 +699,7 @@ def analysis_mean_coarsed_adata(plot_type=""):
     elif plot_type == "correlation_matrix":
         correlation_matrix(results.mean_glyco,figpath)
     elif plot_type == "histogram":
-        histogram_plot(results.summary_df,figpath)
+        histogram_plot(results.summary_df,figpath + "DimReduction")
 
     #TODO: gene expression /correlations
 
@@ -698,7 +710,7 @@ if __name__ == "__main__":
     #
     # analyze_census_cellxgene_metadata(build=True, plot=False)
     #analysis_mean_coarsed_adata(plot_type="correlation_matrix")
-    analysis_mean_coarsed_adata(plot_type="umap")
+    analysis_mean_coarsed_adata(plot_type="histogram")
     exit()
 
     adata1path = "/home/lys/Dropbox/PostDoc_Glycomics/cellarium-ml/data/coarsed_glyco/UBERON:0000002_CL:0008007.h5ad"
