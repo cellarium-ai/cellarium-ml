@@ -130,7 +130,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
 
     def check_disk_space(self, num_files: int | float) -> bool | None:
         """Check if there is enough disk space to write all predictions.
-        
+
         Args:
             num_files:
                 The total number of files to be written (num_predict_batches).
