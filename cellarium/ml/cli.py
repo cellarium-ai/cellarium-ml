@@ -309,6 +309,13 @@ def lightning_cli_factory(
                 }
             )
 
+        def predict(self, *args, **kwargs):
+            """Not well documented, but defining this here overrides the default predict subcommand.
+            This method injects return_predictions=False into the kwargs to prevent the predictions from
+            being returned, which prevents memory overflow when writing predictions to a file."""
+            kwargs["return_predictions"] = False
+            self.trainer.predict(*args, **kwargs)
+
     return NewLightningCLI
 
 
