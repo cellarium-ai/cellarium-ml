@@ -134,7 +134,7 @@ class CellariumGPTTrainTokenizer(torch.nn.Module):
         gene_token_nj_dict["total_mrna_umis"] = torch.log1p(total_mrna_umis_nj)
 
         gene_token_value_nc_dict = {
-            key: torch.cat([gene_token_nj, torch.zeros((n, m), device=device)], dim=1)
+            key: torch.cat([gene_token_nj, torch.zeros((n, m), device=device, dtype=gene_token_nj.dtype)], dim=1)
             for key, gene_token_nj in gene_token_nj_dict.items()
         }
         gene_token_mask_nc = torch.cat(
@@ -175,7 +175,8 @@ class CellariumGPTTrainTokenizer(torch.nn.Module):
         ).bool()
         metadata_query_mask_nm = metadata_query_mask_nm & metadata_measured_mask_nm
         metadata_prompt_mask_nm = metadata_prompt_mask_nm & metadata_measured_mask_nm
-        # clamp unmeasured tokens to 0
+        # clamp unmeasured tokens to 0 in order to avoid error during embedding
+        # the value of unmeasured tokens doesn't matter since they will be masked out by the attention mask
         for key, metadata_token_n in metadata_token_n_dict.items():
             metadata_token_n_dict[key] = metadata_token_n.clamp(0).int()
         # metadata labels
@@ -256,4 +257,111 @@ class CellariumGPTTrainTokenizer(torch.nn.Module):
             "prompt_mask_nc": prompt_mask_nc,
             "label_nc_dict": label_nc_dict,
             "label_weight_nc_dict": label_weight_nc_dict,
+        }
+
+
+class CellariumGPTPredictTokenizer(torch.nn.Module):
+    def __init__(
+        self,
+        max_total_mrna_umis: int,
+        gene_vocab_sizes: dict[str, int],
+        metadata_vocab_sizes: dict[str, int],
+        ontology_infos_path: str,
+    ) -> None:
+        super().__init__()
+        self.max_total_mrna_umis = max_total_mrna_umis
+        self.gene_vocab_sizes = gene_vocab_sizes
+        self.metadata_vocab_sizes = metadata_vocab_sizes
+        self.ontology_infos = torch.load(ontology_infos_path, weights_only=True)
+
+    def forward(
+        self,
+        gene_token_nj_dict: dict[str, torch.Tensor],  # set query genes to neg value?
+        metadata_token_n_dict: dict[str, torch.Tensor],  # set query metadata to -1?
+    ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
+        ### GENE TOKENS ###
+
+        ## gene value ##
+        gene_value_nj = gene_token_nj_dict.pop("gene_value")
+        total_mrna_umis_nj = gene_token_nj_dict.pop("total_mrna_umis")
+        device = gene_value_nj.device
+        n, j = gene_value_nj.shape
+        m = len(metadata_token_n_dict)
+        # downsample library size to max_total_mrna_umis
+        max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
+        downsampled_total_mrna_umis_nj = torch.minimum(total_mrna_umis_nj, max_total_mrna_umis).float()
+        gene_downsample_p_nj = downsampled_total_mrna_umis_nj / total_mrna_umis_nj
+        gene_value_nj = torch.binomial(gene_value_nj, gene_downsample_p_nj)
+
+        gene_prompt_mask_nj = gene_value_nj >= 0
+        gene_query_mask_nj = ~gene_prompt_mask_nj
+        gene_token_nj_dict["gene_value"] = torch.log1p(gene_value_nj) * gene_prompt_mask_nj.float()
+        gene_token_nj_dict["gene_query_mask"] = gene_query_mask_nj.float()
+        gene_token_nj_dict["total_mrna_umis"] = torch.log1p(downsampled_total_mrna_umis_nj)
+
+        gene_token_value_nc_dict = {
+            key: torch.cat([gene_token_nj, torch.zeros((n, m), device=device, dtype=gene_token_nj.dtype)], dim=1)
+            for key, gene_token_nj in gene_token_nj_dict.items()
+        }
+        gene_token_mask_nc = torch.cat(
+            [torch.ones((n, j), dtype=torch.bool, device=device), torch.zeros((n, m), dtype=torch.bool, device=device)],
+            dim=1,
+        )
+        gene_token_mask_nc_dict = {key: gene_token_mask_nc for key in gene_token_nj_dict}
+
+        ### METADATA TOKENS ###
+
+        ## metadata tokens ##
+        # assign token codes based on the ontology info
+        # token values not in the ontology are treated as unmeasured and assigned a code value of -1
+        for key, ontology_info in self.ontology_infos.items():
+            assert self.metadata_vocab_sizes[key] == len(ontology_info["names"])
+            metadata_token_n_dict[key] = torch.tensor(
+                pd.Categorical(metadata_token_n_dict[key], categories=ontology_info["names"]).codes,
+                dtype=torch.int,
+            )
+        # create metadata query and prompt masks
+        metadata_prompt_mask_nm = torch.stack(
+            [metadata_token_n >= 0 for metadata_token_n in metadata_token_n_dict.values()], dim=1
+        ).bool()
+        metadata_query_mask_nm = ~metadata_prompt_mask_nm
+
+        # impute mask token for unmeasured metadata
+        # mask token is the last token in the vocabulary
+        for i, (key, metadata_token_n) in enumerate(metadata_token_n_dict.items()):
+            metadata_token_n_dict[key] = torch.where(
+                metadata_query_mask_nm[:, i], self.metadata_vocab_sizes[key], metadata_token_n
+            ).int()
+
+        block_metadata_token_nm = torch.block_diag(
+            *[metadata_token_n_dict[key].unsqueeze(-1) for key in metadata_token_n_dict],
+        )
+        metadata_token_value_nc_dict = {
+            key: torch.cat(
+                [torch.zeros((n, j), dtype=torch.int, device=device), block_metadata_token_nm[n * i : n * (i + 1)]],
+                dim=1,
+            )
+            for i, key in enumerate(metadata_token_n_dict)
+        }
+        block_metadata_token_mask_nm = torch.block_diag(
+            *[torch.ones((n, 1), dtype=torch.bool, device=device) for _ in metadata_token_n_dict],
+        )
+        metadata_token_mask_nc_dict = {
+            key: torch.cat(
+                [
+                    torch.zeros((n, j), dtype=torch.bool, device=device),
+                    block_metadata_token_mask_nm[n * i : n * (i + 1)],
+                ],
+                dim=1,
+            )
+            for i, key in enumerate(metadata_token_n_dict)
+        }
+
+        ### PROMPT MASK ###
+        prompt_mask_nc = torch.cat([gene_prompt_mask_nj, metadata_prompt_mask_nm], dim=1)
+
+        return {
+            "token_value_nc_dict": gene_token_value_nc_dict | metadata_token_value_nc_dict,
+            "token_mask_nc_dict": gene_token_mask_nc_dict | metadata_token_mask_nc_dict,
+            "prompt_mask_nc": prompt_mask_nc,
         }
