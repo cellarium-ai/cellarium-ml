@@ -930,7 +930,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             categorical_covariate_np=categorical_covariate_np,
         )
 
-        output_counts_sum_np = 0
+        output_counts_sum_np: int | torch.Tensor = 0
         gid_list = self.get_glyco_gene_list()
         # get the genes in the order of the glyco gene list
         gene_inds = [np.where(var_names_g == gid)[0][0] for gid in gid_list]
