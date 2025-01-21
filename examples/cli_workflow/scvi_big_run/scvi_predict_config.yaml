@@ -17,7 +17,7 @@ trainer:
       output_dir: /home/sfleming/cellarium-ml/examples/cli_workflow/scvi_big_run/predictions
       prediction_size: null
   fast_dev_run: false
-  max_epochs: 50
+  max_epochs: 1
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -54,7 +54,7 @@ model:
       init_args:
         filter_list:
           !FileLoader
-          file_path: /home/sfleming/cellarium-ml/examples/cli_workflow/scvi_big_run/hvg.txt
+          file_path: /home/sfleming/cellarium-ml/examples/cli_workflow/scvi_big_run/hvg_plus_glyco_genes_20241216.txt
           loader_fn: pandas.read_csv
           attr: "ensembl_id"
           convert_fn: pandas.Series.to_list
@@ -156,12 +156,13 @@ data:
         - suspension_type
         - assay
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
-  batch_size: 512
-  shuffle: true
+  batch_size: 4096
+  shuffle: false
   # seed: 0
   # drop_last: false
   test_mode: false
-  num_workers: 12
+  num_workers: 8
   prefetch_factor: null
   persistent_workers: true
-ckpt_path: /home/sfleming/cellarium-ml/examples/cli_workflow/scvi_big_run/lightning_logs/version_5/checkpoints/epoch=7-step=646000.ckpt
+ckpt_path: /home/sfleming/cellarium-ml/examples/cli_workflow/scvi_big_run/lightning_logs/version_17/checkpoints/epoch=2-step=250000.ckpt
+return_predictions: false

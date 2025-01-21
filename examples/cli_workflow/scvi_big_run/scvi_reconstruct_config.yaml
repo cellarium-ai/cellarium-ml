@@ -1,4 +1,4 @@
-# lightning.pytorch==2.4.0
+# lightning.pytorch==2.2.1
 seed_everything: true
 trainer:
   accelerator: auto
@@ -12,25 +12,12 @@ trainer:
   precision: 32
   logger: null
   callbacks: 
-  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+  - class_path: cellarium.ml.callbacks.PredictionWriter
     init_args:
-      logging_interval: step
-      log_momentum: false
-  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
-    init_args:
-      every_n_train_steps: 50000
-      # every_n_epochs: 1
-  - class_path: lightning.pytorch.callbacks.DeviceStatsMonitor
-    init_args:
-      cpu_stats: true
-  # - class_path: lightning.pytorch.callbacks.EarlyStopping
-  #   init_args:
-  #     monitor: train_loss
-  #     min_delta: 0.0
-  #     patience: 45
-  #     mode: min
+      output_dir: /home/sfleming/cellarium-ml/examples/cli_workflow/scvi_big_run/glyco_reconstructions
+      prediction_size: null
   fast_dev_run: false
-  max_epochs: 3
+  max_epochs: 50
   min_epochs: null
   max_steps: -1
   min_steps: null
@@ -155,6 +142,8 @@ data:
     x_ng:
       attr: X
       convert_fn: cellarium.ml.utilities.data.densify
+    obs_names_n:
+      attr: obs_names
     var_names_g:
       attr: var_names
     batch_index_n:
@@ -167,10 +156,13 @@ data:
         - suspension_type
         - assay
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
-  batch_size: 512
-  shuffle: true
+  batch_size: 4096
+  shuffle: false
+  # seed: 0
+  # drop_last: false
   test_mode: false
   num_workers: 8
   prefetch_factor: null
   persistent_workers: true
-ckpt_path: null
+ckpt_path: /home/sfleming/cellarium-ml/examples/cli_workflow/scvi_big_run/lightning_logs/version_17/checkpoints/epoch=2-step=250000.ckpt
+return_predictions: false
