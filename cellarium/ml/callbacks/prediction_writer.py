@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
-import shutil
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -128,27 +127,6 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         """Ensure the executor shuts down on object deletion."""
         self.executor.shutdown(wait=True)
 
-    def check_disk_space(self, num_files: int | float) -> bool | None:
-        """Check if there is enough disk space to write all predictions.
-
-        Args:
-            num_files:
-                The total number of files to be written (num_predict_batches).
-
-        Returns:
-            bool | None:
-                True if there is enough disk space to write all predictions, False otherwise.
-                None if the first output file does not exist yet.
-        """
-        first_file_path = os.path.join(self.output_dir, "batch_0.csv" + (".gz" if self.gzip else ""))
-        if not os.path.isfile(first_file_path):
-            return None
-        first_file_size = os.path.getsize(first_file_path)  # single file in bytes
-        total_required_space = first_file_size * num_files  # total required space in bytes
-        usage = shutil.disk_usage(self.output_dir)
-        available_space = usage.free  # free space in bytes
-        return total_required_space <= available_space
-
     def write_on_batch_end(
         self,
         trainer: pl.Trainer,
@@ -182,9 +160,3 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
             gzip=self.gzip,
             executor=self.executor,
         )
-
-        # check output directory for sufficient disk space once
-        if self.sufficient_disk_space_exists is None:
-            self.sufficient_disk_space_exists = self.check_disk_space(num_files=trainer.num_predict_batches[0])
-            if self.sufficient_disk_space_exists is False:
-                raise RuntimeError(f"Insufficient disk space at {self.output_dir} to write all predictions")
