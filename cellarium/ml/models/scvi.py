@@ -826,6 +826,17 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             - ``x_ng``: (x_ng is a notational misnomer) Embedding of the input data into the scVI latent space.
         """
 
+        # uncomment the below to reconstruct
+        # return self.reconstruct(
+        #     x_ng=x_ng,
+        #     var_names_g=var_names_g,
+        #     batch_index_n=batch_index_n,
+        #     continuous_covariates_nc=continuous_covariates_nc,
+        #     categorical_covariate_index_nd=categorical_covariate_index_nd,
+        #     transform_batch="mean",
+        #     sample=False,
+        # )
+
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
@@ -840,6 +851,21 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )["z"]
         return {"x_ng": z_nk}
 
+    def get_glyco_gene_list(self) -> list[str]:
+        """Return ordered list of genes from glyco gene file, checking which are present in model."""
+        if getattr(self, "glyco_gene_set", None) is None:
+            df = pd.read_csv("/home/sfleming/cellarium-ml/data/glyco_df_20241216.tsv", sep="\t")
+            self.glyco_gene_list = df["ensembl_gene_id"].values.tolist()
+            i = 0
+            for gid in self.glyco_gene_list:
+                if gid not in self.var_names_g:
+                    print(f"WARNING: {gid} not in var_names_g")
+                    i += 1
+            if i > 0:
+                print(f"WARNING: {i} genes in glyco_gene_list not in var_names_g")
+        return self.glyco_gene_list
+
+    @torch.no_grad()
     def reconstruct(
         self,
         x_ng: torch.Tensor,
@@ -887,7 +913,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                         'transform_batch must be an integer or the string "mean" which '
                         "will project counts into each batch and compute the mean"
                     )
-                for i in range(self.n_batch):
+                for i in range(self.n_batch)[:10]:
                     transformed_batch_index_n_list.append(torch.ones_like(batch_index_n) * i)
             else:
                 if transform_batch >= self.n_batch:
@@ -904,7 +930,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             categorical_covariate_np=categorical_covariate_np,
         )
 
-        output_counts_ng_list = []
+        output_counts_sum_np = 0
+        gid_list = self.get_glyco_gene_list()
+        # get the genes in the order of the glyco gene list
+        gene_inds = [np.where(var_names_g == gid)[0][0] for gid in gid_list]
 
         # go through each output batch projection (just one unless transform_batch == "mean")
         for transformed_batch_index_n in transformed_batch_index_n_list:
@@ -923,11 +952,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 counts_ng = generative_outputs["px"].sample()
             else:
                 counts_ng = generative_outputs["px"].mean
+            counts_np = counts_ng[:, gene_inds]
+            output_counts_sum_np += counts_np
 
-            output_counts_ng_list.append(counts_ng)
-
-        x_tilde_ng = torch.mean(torch.stack(output_counts_ng_list), dim=0)
-        return x_tilde_ng
+        x_tilde_np = output_counts_sum_np / len(transformed_batch_index_n_list)
+        return {"x_ng": x_tilde_np}
 
 
 def batch_index_to_batch_label(adata: AnnData, batch_keys: list[str]) -> pd.DataFrame:
