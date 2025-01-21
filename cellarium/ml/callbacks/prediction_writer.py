@@ -121,7 +121,6 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
             max_queue_size=max_threadpool_workers * 2,
         )
         self.gzip = gzip
-        self.sufficient_disk_space_exists: bool | None = None
 
     def __del__(self):
         """Ensure the executor shuts down on object deletion."""
