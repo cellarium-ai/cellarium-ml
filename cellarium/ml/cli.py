@@ -637,7 +637,6 @@ def main(args: ArgsType = None) -> None:
     if model_name not in REGISTERED_MODELS:
         raise ValueError(f"'model_name' must be one of {list(REGISTERED_MODELS.keys())}. Got '{model_name}'")
     model_cli = REGISTERED_MODELS[model_name]
-
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="Transforming to str index.")
         warnings.filterwarnings("ignore", message="LightningCLI's args parameter is intended to run from within Python")
