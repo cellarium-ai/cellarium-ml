@@ -291,6 +291,19 @@ def lightning_cli_factory(
             # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
             pass
 
+        def before_instantiate_classes(self):
+            # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
+            if self.subcommand == "predict":
+                return_predictions: bool = self.config["predict"]["return_predictions"]
+                if return_predictions:
+                    warnings.warn(
+                        "The `return_predictions` argument should be set to 'false' when running predict to avoid OOM. "
+                        "This can be set at indent level 0 in the config file. Example:\n"
+                        "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
+                        UserWarning,
+                    )
+            return super().before_instantiate_classes()
+
         def instantiate_classes(self) -> None:
             with torch.device("meta"):
                 # skip the initialization of model parameters
@@ -624,21 +637,6 @@ def main(args: ArgsType = None) -> None:
     if model_name not in REGISTERED_MODELS:
         raise ValueError(f"'model_name' must be one of {list(REGISTERED_MODELS.keys())}. Got '{model_name}'")
     model_cli = REGISTERED_MODELS[model_name]
-
-    # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
-    if isinstance(args, list):
-        subcommand = args[0]
-        return_predictions = None  # will always issue UserWarning
-    else:
-        subcommand = args.get("subcommand", None)
-        return_predictions = args.get("predict", {}).get("return_predictions", None)
-    if (subcommand == "predict") and (return_predictions != "false"):
-        warnings.warn(
-            "The `return_predictions` argument should be set to 'false' when running predict to avoid OOM. "
-            "This can be set at indent level 0 in the config file. Example:\n"
-            "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
-            UserWarning,
-        )
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="Transforming to str index.")
