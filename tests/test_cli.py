@@ -685,11 +685,12 @@ def test_return_predictions_userwarning(tmp_path: Path):
         },
     }
 
-    with pytest.warns(UserWarning):
+    match_str = r"`return_predictions` argument should"
+
+    with pytest.warns(UserWarning, match=match_str):
         main(copy.deepcopy(config))  # running main modifies the config dict
 
     config["predict"]["return_predictions"] = "false"
-    match_str = r"`return_predictions` argument should"
     with pytest.warns(UserWarning, match=match_str) as record:
         warnings.warn("we need one warning: " + match_str, UserWarning)
         main(copy.deepcopy(config))
@@ -746,14 +747,13 @@ def test_return_predictions_userwarning(tmp_path: Path):
     with open(config_file_path := tmp_path / "config.yaml", "w") as f:
         f.write(config_file_text.replace("RETURN_PREDICTIONS_VALUE", "true"))
 
-    with pytest.warns(UserWarning):
+    with pytest.warns(UserWarning, match=match_str):
         main(["geneformer", "predict", "--config", str(config_file_path)])
 
     # there should be no warning with return_predictions=false
     with open(config_file_path, "w") as f:
         f.write(config_file_text.replace("RETURN_PREDICTIONS_VALUE", "false"))
 
-    match_str = r"`return_predictions` argument should"
     with pytest.warns(UserWarning, match=match_str) as record:
         warnings.warn("we need one warning: " + match_str, UserWarning)
         main(["geneformer", "predict", "--config", str(config_file_path)])
