@@ -3,6 +3,7 @@
 
 import gc
 import math
+import urllib.error
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +13,7 @@ import pandas as pd
 import pytest
 import torch
 import torch.nn.functional as F
+from tenacity import retry, stop_after_attempt, wait_fixed
 from torch import nn
 from torchvision import datasets, transforms
 
@@ -122,12 +124,20 @@ def get_coord_data_MLP(
     )
 
 
+@retry(
+    stop=stop_after_attempt(3),  # retry up to 3 times
+    wait=wait_fixed(10),  # wait 10 seconds between retries
+    retry=(lambda exc: isinstance(exc, urllib.error.URLError)),  # retry on URLError
+)
+def cifar_dataset(path: Path, transform) -> datasets.CIFAR10:
+    return datasets.CIFAR10(root=path, train=True, download=True, transform=transform)
+
+
 @pytest.fixture
 def train_loader(tmp_path: Path) -> torch.utils.data.DataLoader:
     batch_size = 64
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-
-    trainset = datasets.CIFAR10(root=tmp_path, train=True, download=True, transform=transform)
+    trainset = cifar_dataset(tmp_path, transform)
     return torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
 
 
