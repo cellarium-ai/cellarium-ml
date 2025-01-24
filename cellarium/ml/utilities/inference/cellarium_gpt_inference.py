@@ -1,14 +1,41 @@
 import os
+import logging
+import warnings
 import torch
+import pymde
+import igraph as ig
+import leidenalg
 import numpy as np
 import typing as t
 import scanpy as sc
 import pandas as pd
 from scanpy import AnnData
 from tqdm.notebook import tqdm
-
+from functools import cached_property
 from cellarium.ml import CellariumModule, CellariumPipeline
 from cellarium.ml.models.cellarium_gpt import PredictTokenizer
+
+import matplotlib.pyplot as plt
+import plotly.express as px
+import plotly.graph_objects as go
+import colorcet as cc
+
+from scipy.stats import linregress
+from scipy.linalg import eigh
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Set the logging level
+
+# Create a handler
+handler = logging.StreamHandler()
+
+# Create and set a formatter
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+
+# Add the handler to the logger
+logger.addHandler(handler)
 
 
 def load_gene_info_table(gene_info_tsv_path: str, included_gene_ids: list[str]) -> t.Tuple[pd.DataFrame, dict, dict]:
@@ -117,8 +144,7 @@ class CellariumGPTInferenceContext:
 
         gene_ontology_infos["assay_ontology_term_id"] = dict()
         gene_ontology_infos["assay_ontology_term_id"]["names"] = list(adata.obs['assay_ontology_term_id'].cat.categories)
-        # just because we are lazy
-        gene_ontology_infos["assay_ontology_term_id"]["labels"] = list(adata.obs['assay_ontology_term_id'].cat.categories)
+        gene_ontology_infos["assay_ontology_term_id"]["labels"] = list(adata.obs['assay'].cat.categories)
 
         gene_ontology_infos["suspension_type"] = dict()
         gene_ontology_infos["suspension_type"]["names"] = list(adata.obs['suspension_type'].cat.categories)
@@ -255,6 +281,106 @@ class CellariumGPTInferenceContext:
 
         return tokenizer_output, context_indices
 
+    def generate_gene_tokens_by_metadata(
+        self,
+        assay: str,
+        suspension_type: str,
+        prompt_metadata_dict: dict,
+        total_mrna_umis: int,
+        query_gene_ids: list[list],
+        perturb_gene_ids: list[str] | None,
+    ) -> t.Tuple[dict, dict]:
+        
+        """
+            
+        .. note::
+        If `perturb_gene_ids` is None, there will be only a single cell in the generated tokens.
+        If `perturb_gene_ids` is not None, there first cell will be unperturbed, and the subsequent
+            cells will have the genes in `perturb_gene_ids` set to 0, in order.
+
+        .. note::
+        The first token is reversed for perturbation. The first cell is always control unperturbed (which
+        will be the only cell if `perturb_gene_ids` is None). In that cell, the first token is arbitrarily
+        set to the gene corresponding to index 0 in the gene ID dictionary and is marked to be queried.
+        Please ignore that. More generally, use `context_indices` to determine the indices of the actual
+        query genes in the generated context.
+        
+        """
+
+        METADATA_KEYS = [
+            "cell_type",
+            "tissue",
+            "development_stage",
+            "disease",
+            "sex",
+        ]
+
+        # Use the first label as the default value (actual value does not matter)
+        default_metadata_dict = {
+            metadata_key: self.metadata_ontology_infos[metadata_key]["labels"][0]
+            for metadata_key in METADATA_KEYS
+        }
+
+        # True if provided, False otherwise    
+        metadata_prompt_masks_dict = {
+            metadata_key: metadata_key in prompt_metadata_dict
+            for metadata_key in METADATA_KEYS
+        }
+
+        # Generate a complete metadata dictionary, including default values for missing keys
+        metadata_dict = {
+            metadata_key: prompt_metadata_dict.get(metadata_key, default_metadata_dict[metadata_key])
+            for metadata_key in METADATA_KEYS
+        }
+        metadata_dict |= {
+            "assay": assay,
+            "suspension_type": suspension_type,
+            "total_mrna_umis": total_mrna_umis
+        }
+
+        # Augment metadata dictionary with ontology term IDs
+        metadata_dict |= {
+            f"{metadata_key}_ontology_term_id": self.metadata_ontology_infos[metadata_key]["names"][
+                self.metadata_ontology_infos[metadata_key]["labels"].index(metadata_dict[metadata_key])]
+            for metadata_key in METADATA_KEYS
+        }
+        metadata_dict |= {
+            "assay_ontology_term_id": self.gene_ontology_infos["assay_ontology_term_id"]["names"][
+                self.gene_ontology_infos["assay_ontology_term_id"]["labels"].index(assay)]
+        }
+
+        if perturb_gene_ids is None:
+            n_cells = 1
+        else:
+            n_cells = len(perturb_gene_ids) + 1
+
+        # Generate a placeholder AnnData. There is always only gene at the prompt, which will
+        # be replaced with the gene to be perturbed. If no perturbation is required, the gene
+        # will be set to the first gene in the gene ID dictionary.
+        obs_df = pd.DataFrame({key: [value] * n_cells for key, value in metadata_dict.items()})
+        var_df = pd.DataFrame(index=[self.model_var_names[0]])
+        pert_adata = sc.AnnData(X=np.zeros((n_cells, 1)), obs=obs_df, var=var_df)
+
+        # Tokenize
+        tokens_dict, context_indices = self.generate_tokens_from_adata(
+            adata=pert_adata,
+            obs_index=None,
+            query_var_names=query_gene_ids,
+            metadata_prompt_masks_dict=metadata_prompt_masks_dict
+        )
+
+        # The first cell is control unperturbed, so we will ensure that the first gene is marked as queried  (not perturbed)
+        tokens_dict['prompt_mask_nc'][0, 0] = False
+        tokens_dict['gene_tokens_nc']['gene_value'][0, context_indices['prompt_genes'], 1] = 1  # Queried
+
+        # In subsequent cells, prompt genes are set to 0 sequentially
+        if perturb_gene_ids is not None:
+            assert all(gene_id in self.var_name_to_index_map for gene_id in perturb_gene_ids)
+            tokens_dict['gene_tokens_nc']['gene_id'] = tokens_dict['gene_tokens_nc']['gene_id'].clone()
+            tokens_dict['gene_tokens_nc']['gene_id'][1:, 0] = torch.tensor([
+                self.var_name_to_index_map[var_name] for var_name in perturb_gene_ids])
+
+        return tokens_dict, context_indices, pert_adata, metadata_prompt_masks_dict
 
     def get_marginal_mean_std(
             self,
@@ -262,7 +388,7 @@ class CellariumGPTInferenceContext:
             query_var_names: list[str],
             query_total_mrna_umis: float | None = None,
             prompt_gene_values_g: torch.Tensor | None = None,
-            metadata_prompt_masks_dict: dict[str, bool] | None = None,
+            metadata_prompt_masks_dict: dict[str, bool] | None = None
         ) -> t.Tuple[torch.Tensor, torch.Tensor]:
     
         assert len(adata) == 1, "Only a single cell is allowed"
@@ -314,6 +440,123 @@ class CellariumGPTInferenceContext:
         gene_marginal_std_q = torch.clamp(gene_mom_2_q - gene_mom_1_q.pow(2), 0.).sqrt()
 
         return gene_marginal_means_q, gene_marginal_std_q
+
+    def get_marginal_mean_std_from_tokens(
+            self,
+            tokens_dict: dict,
+            context_indices: dict,
+            use_logsumexp: bool = True,
+            max_counts: int | None = None,
+            verbose: bool = False,
+        ) -> t.Tuple[torch.Tensor, torch.Tensor]:
+    
+        # convert to cuda
+        if verbose:
+            logger.info("Transferring the tokens to the device ...")
+
+        tokens_dict = self.gpt_pipeline.transfer_batch_to_device(tokens_dict, self.device, 0)
+
+        if verbose:
+            logger.info("Done.")
+        
+        # get model predictions
+        if verbose:
+            logger.info("Predicting ...")
+
+        logits_dict = self.gpt_pipeline.model.predict(
+            gene_tokens_nc=tokens_dict["gene_tokens_nc"],
+            metadata_tokens_n=tokens_dict["metadata_tokens_n"],
+            prompt_mask_nc=tokens_dict["prompt_mask_nc"],
+            predict_keys=['gene_value']
+        )
+
+        if verbose:
+            logger.info("Done.")
+
+        # note: we use `q` to denote query genes
+        if verbose:
+            logger.info("Calculating marginal mean and std ...")
+        
+        if verbose:
+            logger.info("Obtaining gene logits ...")
+
+        query_gene_indices = torch.tensor(context_indices['query_genes'], device=self.device, dtype=torch.int64)
+
+        if max_counts is None:
+            gene_logits_nqk = logits_dict['gene_value'][:, query_gene_indices, :]
+            max_counts = gene_logits_nqk.shape[-1]
+        else:
+            assert max_counts > 0
+            gene_logits_nqk = logits_dict['gene_value'][:, query_gene_indices, :max_counts]
+
+        if verbose:
+            logger.info("Done.")
+
+        if verbose:
+            logger.info("Normalizing gene logits ...")
+
+        gene_logits_nqk = gene_logits_nqk - torch.logsumexp(gene_logits_nqk, dim=-1, keepdim=True)
+
+        if verbose:
+            logger.info("Done.")
+
+        if use_logsumexp:
+            log_counts_1_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).log()
+            log_counts_2_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).pow(2).log()
+            gene_mom_1_nq = torch.logsumexp(gene_logits_nqk + log_counts_1_k[None, None, :], dim=-1).exp()
+            gene_mom_2_nq = torch.logsumexp(gene_logits_nqk + log_counts_2_k[None, None, :], dim=-1).exp()
+            gene_marginal_means_nq = gene_mom_1_nq
+            gene_marginal_std_nq = torch.clamp(gene_mom_2_nq - gene_mom_1_nq.pow(2), 0.).sqrt()
+        else:
+            gene_probs_nqk = torch.exp(gene_logits_nqk)
+            counts_1_k = torch.arange(0, max_counts, device=gene_logits_nqk.device)
+            counts_2_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).pow(2)
+            gene_mom_1_nq = (gene_probs_nqk * counts_1_k[None, None, :]).sum(dim=-1)
+            gene_mom_2_nq = (gene_probs_nqk * counts_2_k[None, None, :]).sum(dim=-1)
+            gene_marginal_means_nq = gene_mom_1_nq
+            gene_marginal_std_nq = torch.clamp(gene_mom_2_nq - gene_mom_1_nq.pow(2), 0.).sqrt()
+
+        if verbose:
+            logger.info("Done.")
+
+        return gene_marginal_means_nq, gene_marginal_std_nq
+
+    def get_marginal_mean_std_multi_cell(
+            self,
+            adata: sc.AnnData,
+            query_var_names: list[str],
+            query_total_mrna_umis: float | None = None,
+            metadata_prompt_masks_dict: dict[str, bool] | None = None,
+            use_logsumexp: bool = True,
+            max_counts: int | None = None,
+            verbose: bool = False,
+        ) -> t.Tuple[torch.Tensor, torch.Tensor]:
+    
+        if metadata_prompt_masks_dict is None:
+            metadata_prompt_masks_dict = self.DEFAULT_METADATA_PROMPT_MASKS_DICT
+
+        if verbose:
+            logger.info("Tokenizing the AnnData ...")
+
+        tokens_dict, context_indices = self.generate_tokens_from_adata(
+            adata=adata,
+            obs_index=None,
+            query_var_names=query_var_names,
+            query_total_mrna_umis=query_total_mrna_umis,
+            metadata_prompt_masks_dict=metadata_prompt_masks_dict,
+        )
+
+        if verbose:
+            logger.info("Done.")
+
+        return self.get_marginal_mean_std_from_tokens(
+            tokens_dict=tokens_dict,
+            context_indices=context_indices,
+            use_logsumexp=use_logsumexp,
+            max_counts=max_counts,
+            verbose=verbose,
+        )
+
 
     def predict_metadata_chunked(self, adata: sc.AnnData, chunk_size: int = 128) -> dict[str, np.ndarray]:
         metadata_prediction_chunks_dict = []
@@ -473,3 +716,446 @@ class CellariumGPTInferenceContext:
             'query_marginal_mean_q': query_marginal_mean_q,
             'query_marginal_std_q': query_marginal_std_q,
         }
+
+
+class JacobianContext:
+    def __init__(
+            self,
+            adata_obs: pd.DataFrame,
+            gene_info_tsv_path: str,
+            jacobian_point: str,
+            query_var_names: list[str],
+            prompt_var_names: list[str],
+            jacobian_qp: np.ndarray,
+            prompt_empirical_mean_p: np.ndarray,
+            query_empirical_mean_q: np.ndarray,
+            prompt_marginal_mean_p: np.ndarray,
+            prompt_marginal_std_p: np.ndarray,
+            query_marginal_mean_q: np.ndarray,
+            query_marginal_std_q: np.ndarray,
+            verbose: bool = True):
+        
+        self.verbose = verbose
+
+        n_query_vars = len(query_var_names)
+        n_prompt_vars = len(prompt_var_names)
+
+        assert jacobian_qp.shape == (n_query_vars, n_prompt_vars)
+        assert prompt_empirical_mean_p.shape == (n_prompt_vars,)
+        assert prompt_marginal_mean_p.shape == (n_prompt_vars,)
+        assert prompt_marginal_std_p.shape == (n_prompt_vars,)
+        assert query_empirical_mean_q.shape == (n_query_vars,)
+        assert query_marginal_mean_q.shape == (n_query_vars,)
+        assert query_marginal_std_q.shape == (n_query_vars,)
+
+        self.adata_obs = adata_obs
+        self.jacobian_point = jacobian_point
+        self.query_var_names = query_var_names
+        self.prompt_var_names = prompt_var_names
+        self.jacobian_qp = jacobian_qp
+        self.prompt_empirical_mean_p = prompt_empirical_mean_p
+        self.query_empirical_mean_q = query_empirical_mean_q
+        self.prompt_marginal_mean_p = prompt_marginal_mean_p
+        self.prompt_marginal_std_p = prompt_marginal_std_p
+        self.query_marginal_mean_q = query_marginal_mean_q
+        self.query_marginal_std_q = query_marginal_std_q
+
+        self.gene_info_df, self.gene_symbol_to_gene_id_map, self.gene_id_to_gene_symbol_map = \
+            load_gene_info_table(gene_info_tsv_path, query_var_names + prompt_var_names)
+
+        self.processed = False
+
+    @property
+    def cell_type(self) -> str:
+        return self.adata_obs['cell_type'].values[0]
+    
+    @property
+    def tissue(self) -> str:
+        return self.adata_obs['tissue'].values[0]
+
+    @property
+    def disease(self) -> str:
+        return self.adata_obs['disease'].values[0]
+
+    @property
+    def development_stage(self) -> str:
+        return self.adata_obs['development_stage'].values[0]
+
+    @property
+    def sex(self) -> str:
+        return self.adata_obs['sex'].values[0]
+
+    @property
+    def total_mrna_umis(self) -> float:
+        return self.adata_obs['total_mrna_umis'].values[0]
+
+    @property
+    def query_gene_symbols(self) -> list[str]:
+        return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.query_var_names]
+    
+    @property
+    def prompt_gene_symbols(self) -> list[str]:
+        return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.prompt_var_names]
+    
+    @cached_property
+    def query_gene_id_to_idx_map(self) -> dict[str, int]:
+        assert self.processed, "Must process before accessing"
+        return {gene_id: idx for idx, gene_id in enumerate(self.query_var_names)}
+    
+    @staticmethod
+    def from_old_jacobian_pt_dump(
+            jacobian_pt_path: str,
+            adata_path: str,
+            gene_info_tsv_path: str) -> 'JacobianContext':
+        
+        # suppres FutureWarning in a context manager
+        with warnings.catch_warnings():
+            warnings.simplefilter(action='ignore', category=FutureWarning)
+            adata = sc.read_h5ad(adata_path)
+            old_jac_dict = torch.load(jacobian_pt_path)
+
+        # make a metacell
+        X_meta_g = np.asarray(adata.X.sum(0))
+
+        # set total mrna umis to the mean of the dataset
+        target_total_mrna_umis = adata.obs['total_mrna_umis'].mean()
+        X_meta_g = X_meta_g * target_total_mrna_umis / X_meta_g.sum()
+
+        # make a metacell anndata
+        adata_meta = adata[0, :].copy()
+        adata_meta.X = X_meta_g
+        adata_meta.obs['total_mrna_umis'] = [target_total_mrna_umis]
+
+        prompt_empirical_mean_p = adata_meta[0, old_jac_dict['prompt_var_names']].X.flatten()
+        query_empirical_mean_q = adata_meta[0, old_jac_dict['query_var_names']].X.flatten()
+
+        return JacobianContext(
+            adata_obs=adata_meta.obs,
+            gene_info_tsv_path=gene_info_tsv_path,
+            jacobian_point=old_jac_dict['jacobian_point'],
+            query_var_names=old_jac_dict['query_var_names'],
+            prompt_var_names=old_jac_dict['prompt_var_names'],
+            jacobian_qp=old_jac_dict['jacobian_qg'].cpu().numpy(),
+            prompt_empirical_mean_p=prompt_empirical_mean_p,
+            query_empirical_mean_q=query_empirical_mean_q,
+            prompt_marginal_mean_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_means_q'].cpu().numpy(),
+            prompt_marginal_std_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_std_q'].cpu().numpy(),
+            query_marginal_mean_q=old_jac_dict['query_marginal_dict']['gene_marginal_means_q'].cpu().numpy(),
+            query_marginal_std_q=old_jac_dict['query_marginal_dict']['gene_marginal_std_q'].cpu().numpy(),
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"JacobianContext({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
+            f"n_umi={self.total_mrna_umis:.2f})"
+        )
+
+    __repr__ = __str__
+
+    def process(
+            self,
+            jacobian_normalization_strategy: t.Literal["mean", "std"] = "mean",
+            feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "mean",
+            min_prompt_gene_tpm: float = 10.,
+            min_query_gene_tpm: float = 10.,
+            query_response_amp_min_pct: float | None = None,
+            feature_max_value: float = 10.,
+            eps: float = 1e-8,
+        ) -> None:
+
+        assert not self.processed, "Already processed -- please create a new instance"
+        if jacobian_normalization_strategy == "mean":
+            z_p = self.prompt_marginal_mean_p
+            z_q = self.query_marginal_mean_q
+        elif jacobian_normalization_strategy == "std":
+            z_p = self.prompt_marginal_std_p
+            z_q = self.query_marginal_std_q
+        else:
+            raise ValueError("Invalid Jacobian normalization strategy")
+
+        # linear proportional activation
+        self.z_qp = self.jacobian_qp * (z_p[None, :] + eps) / (z_q[:, None] + eps)
+
+        if self.verbose:
+            logger.info(f"Maximum value of z_qp: {np.max(self.z_qp):.3f}")
+            logger.info(f"Minimum value of z_qp: {np.min(self.z_qp):.3f}")
+
+        self.mask_q = (1e6 * self.query_marginal_mean_q / self.total_mrna_umis) >= min_query_gene_tpm
+        self.mask_p = (1e6 * self.prompt_marginal_mean_p / self.total_mrna_umis) >= min_prompt_gene_tpm
+
+        logger.info(f"Number of query genes after TPM filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
+        logger.info(f"Number of prompt genes after TPM filtering: {np.sum(self.mask_p)} / {len(self.mask_p)}")
+        
+        if query_response_amp_min_pct is not None:
+            z_norm_q = np.linalg.norm(self.z_qp, axis=-1)
+            z_norm_thresh = np.percentile(z_norm_q, query_response_amp_min_pct)
+            self.mask_q = self.mask_q & (z_norm_q >= z_norm_thresh)
+            logger.info(f"Number of query genes after z-norm filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
+            
+        # apply the mask to everything else
+        self.prompt_var_names = [self.prompt_var_names[i] for i in range(len(self.prompt_var_names)) if self.mask_p[i]]
+        self.prompt_empirical_mean_p = self.prompt_empirical_mean_p[self.mask_p]
+        self.prompt_marginal_mean_p = self.prompt_marginal_mean_p[self.mask_p]
+        self.prompt_marginal_std_p = self.prompt_marginal_std_p[self.mask_p]
+
+        self.query_var_names = [self.query_var_names[i] for i in range(len(self.query_var_names)) if self.mask_q[i]]
+        self.query_empirical_mean_q = self.query_empirical_mean_q[self.mask_q]
+        self.query_marginal_mean_q = self.query_marginal_mean_q[self.mask_q]
+        self.query_marginal_std_q = self.query_marginal_std_q[self.mask_q]
+
+        # apply the mask to z_qp
+        self.z_qp = self.z_qp[self.mask_q, :][:, self.mask_p]
+
+        if feature_normalization_strategy == "prompt_z_score":
+            self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=0, keepdims=True)) / (
+                np.sqrt(self.z_qp.shape[0]) * (eps + np.std(self.z_qp, axis=0, keepdims=True)))
+        elif feature_normalization_strategy == "query_z_score":
+            self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=1, keepdims=True)) / (
+                np.sqrt(self.z_qp.shape[1]) * (eps + np.std(self.z_qp, axis=1, keepdims=True)))
+        elif feature_normalization_strategy == "l2":
+            self.z_qp = self.z_qp / (eps + np.linalg.norm(self.z_qp, axis=-1, keepdims=True))
+        else:
+            raise ValueError("Invalid feature normalization strategy")
+
+        # clip features
+        self.z_qp[np.isnan(self.z_qp)] = 0.
+        self.z_qp[np.isinf(self.z_qp)] = 0.
+        self.z_qp = np.clip(self.z_qp, -feature_max_value, feature_max_value)
+
+        self.processed = True
+
+        # adj
+        self.a_qq = None
+        
+        # leiden
+        self.leiden_membership = None
+        
+        # spectral analysis
+        self.eigs = None
+        self.spectral_dim = None
+
+
+    def compute_adjacency_matrix(
+            self,
+            adjacency_strategy: str = t.Literal[
+                "shifted_correlation", "unsigned_correlation", "positive_correlation", "binary"],
+            n_neighbors: int | None = 50,
+            self_loop: bool = False,
+            **kwargs) -> None:
+
+        if adjacency_strategy == "shifted_correlation":
+            assert "beta" in kwargs, "Must provide beta for shifted correlation"
+            beta = kwargs["beta"]
+            a_qq = np.power(0.5 * (1 + np.dot(self.z_qp, self.z_qp.T)), beta)
+        elif adjacency_strategy == "unsigned_correlation":
+            assert "beta" in kwargs, "Must provide beta for unsigned correlation"
+            beta = kwargs["beta"]
+            a_qq = np.power(np.abs(np.dot(self.z_qp, self.z_qp.T)), beta)
+        elif adjacency_strategy == "positive_correlation":
+            assert "beta" in kwargs, "Must provide beta for positive correlation"
+            beta = kwargs["beta"]
+            a_qq = np.power(np.maximum(0, np.dot(self.z_qp, self.z_qp.T)), beta)
+        elif adjacency_strategy == "positive_correlation_binary":
+            assert n_neighbors is None, "n_neighbors must be None for binary adjacency"
+            assert "tau" in kwargs, "Must provide correlation threshold for binary adjacency"
+            tau = kwargs["tau"]
+            a_qq = (np.maximum(0, np.dot(self.z_qp, self.z_qp.T)) > tau).astype(float)
+        else:
+            raise ValueError("Invalid adjacency strategy")
+
+        assert np.isclose(a_qq, a_qq.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
+
+        if n_neighbors is not None:
+            assert n_neighbors > 0, "n_neighbors must be positive"
+            t_qq = np.argsort(a_qq, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
+
+            # make a mask for the top n_neighbors
+            _a_qq = np.zeros_like(a_qq)
+            for q in range(a_qq.shape[0]):
+                _a_qq[q, t_qq[q]] = a_qq[q, t_qq[q]]
+                _a_qq[t_qq[q], q] = a_qq[t_qq[q], q]
+        else:
+            _a_qq = a_qq
+        a_qq = _a_qq
+        
+        if not self_loop:
+            np.fill_diagonal(a_qq, 0)
+
+        self.a_qq = a_qq
+
+    def _compute_igraph_from_adjacency(self, directed: bool = False) -> ig.Graph:
+        assert self.a_qq is not None, "Must compute adjacency matrix first"
+        sources, targets = self.a_qq.nonzero()
+        weights = self.a_qq[sources, targets]
+        g = ig.Graph(directed=directed)
+        g.add_vertices(self.a_qq.shape[0])  # this adds adjacency.shape[0] vertices
+        g.add_edges(list(zip(sources, targets)))
+        g.es["weight"] = weights
+        return g
+
+    def compute_leiden_communites(
+            self,
+            resolution: float = 3.0,
+            min_community_size: int = 2,
+        ):
+
+        g = self._compute_igraph_from_adjacency()
+        
+        leiden_partition = leidenalg.find_partition(
+            g, leidenalg.RBConfigurationVertexPartition, resolution_parameter=resolution)
+        
+        self.leiden_membership = np.array(leiden_partition.membership)
+        
+        # remove small communities
+        n_leiden = len(np.unique(self.leiden_membership))
+        sizes = np.array([np.sum(self.leiden_membership == i) for i in range(n_leiden)])
+        for i_leiden in range(n_leiden):
+            if sizes[i_leiden] < min_community_size:
+                self.leiden_membership[self.leiden_membership == i_leiden] = -1
+    
+    def compute_spectral_dimension(
+            self,
+            offset: int = 2,
+            n_lambda_for_estimation: int = 5) -> float:
+        assert self.a_qq is not None, "Must compute adjacency matrix first"
+        
+        # calculate normalized laplacian and its eigenvalues
+        norm_q = 1. / (1e-9 + np.sqrt(self.a_qq.sum(0)))
+        lap_qq = np.eye(self.a_qq.shape[0]) - norm_q[:, None] * norm_q[None, :] * self.a_qq
+        eigs = eigh(lap_qq.astype(np.float64), eigvals_only=True)
+        eigs[0] = 0
+        eigs = np.clip(eigs, 0, np.inf)  # roundoff error guardrail
+        self.eigs = eigs
+
+        n_lambda = np.cumsum(eigs)
+        n_lambda = n_lambda / n_lambda[-1]
+        first_nonzero = np.where(eigs > 0)[0][0] + offset
+        xx = np.log(eigs[first_nonzero:first_nonzero + n_lambda_for_estimation])
+        yy = np.log(n_lambda[first_nonzero:first_nonzero + n_lambda_for_estimation])
+
+        lin = linregress(xx, yy)
+        slope, intercept = lin.slope, lin.intercept
+ 
+        # save a few thigs for later
+        self.spectral_dim = 2 * linregress(xx, yy).slope
+        self.eigs = eigs
+        self.n_lambda = n_lambda
+        self.log_eigs_asymptotic = xx
+        self.log_n_lambda_asymptotic = yy
+        self.spectral_dim_slope = slope
+        self.spectral_dim_intercept = intercept
+
+    def make_mde_embedding(
+            self,
+            n_neighbors: int = 7,
+            repulsive_fraction: int = 5,
+            attractive_penalty: pymde.functions.function.Function = pymde.penalties.Log1p,
+            repulsive_penalty: pymde.functions.function.Function = pymde.penalties.InvPower,
+            device: torch.device = torch.device("cpu"),
+            max_iter: int = 500,
+            verbose: bool = True,
+        ):
+        
+        mde = pymde.preserve_neighbors(
+            self.z_qp,
+            device=device,
+            verbose=verbose,
+            n_neighbors=n_neighbors,
+            repulsive_fraction=repulsive_fraction,
+            attractive_penalty=attractive_penalty,
+            repulsive_penalty=repulsive_penalty)
+
+        self.embedding_q2 = mde.embed(verbose=verbose, max_iter=max_iter).cpu().numpy()
+
+    def plot_mde_embedding(
+            self,
+            marker_size: int = 2,
+            highlight_marker_size: int = 4,
+            width: int = 800,
+            height: int = 800,
+            highlight_gene_sets: dict[str, t.Tuple[list[str], list[str], str]] | None = None,
+        ) -> go.Figure:
+
+        assert self.embedding_q2 is not None, "Must compute MDE embedding first"
+        assert self.leiden_membership is not None, "Must compute Leiden communities first"
+
+        plot_title = f"""{self.cell_type}<br>{self.tissue}<br>{self.disease}"""
+        
+        # Create a color map for the memberships
+        memberships_q = self.leiden_membership
+        unique_memberships = np.unique(memberships_q)
+
+        # Convert memberships to strings for categorical mapping
+        unique_memberships_str = unique_memberships.astype(str)
+
+        # Create the color map with string keys
+        colormap = {str(label): cc.glasbey[i % len(cc.glasbey)] for i, label in enumerate(unique_memberships)}
+
+        # Create a DataFrame for Plotly
+        df = pd.DataFrame({
+            'x': self.embedding_q2[:, 0],
+            'y': self.embedding_q2[:, 1],
+            'label': self.query_gene_symbols,
+            'membership': memberships_q.astype(str)  # Convert to string
+        })
+
+        # Create the scatter plot
+        fig = px.scatter(
+            df,
+            x='x',
+            y='y',
+            hover_name='label',
+            title=plot_title,
+            color='membership',
+            color_discrete_map=colormap
+        )
+
+        # Update marker size
+        fig.update_traces(marker=dict(size=marker_size))  # Adjust the size as needed
+
+        if highlight_gene_sets is not None:
+            for gene_set_name, (gene_ids, gene_symbols, color) in highlight_gene_sets.items():
+                query_gene_indices = [self.query_gene_id_to_idx_map[gene_id] for gene_id in gene_ids]
+
+                # show a scatter plot and color the markers in red
+                fig.add_scatter(
+                    x=self.embedding_q2[query_gene_indices, 0],
+                    y=self.embedding_q2[query_gene_indices, 1],
+                    mode='markers',
+                    marker=dict(color=color, size=highlight_marker_size),
+                    text=gene_symbols,
+                    showlegend=True,
+                    name=gene_set_name
+                )
+
+        # Update layout to decrease the width of the plot
+        fig.update_layout(
+            width=width,  # Adjust the width as needed
+            height=height,
+            plot_bgcolor='white',
+            xaxis=dict(
+                showgrid=False,
+                showticklabels=False,
+                title='MDE_1'
+            ),
+            yaxis=dict(
+                showgrid=False,
+                showticklabels=False,
+                title='MDE_2'
+            )
+        )
+
+        return fig
+
+    def plot_spectral_dimension(self, ax: plt.Axes) -> None:
+        assert self.eigs is not None, "Must compute spectral dimension first"
+        ax.scatter(self.log_eigs_asymptotic, self.log_n_lambda_asymptotic)
+        ax.plot(
+            self.log_eigs_asymptotic,
+            self.spectral_dim_slope * self.log_eigs_asymptotic + self.spectral_dim_intercept,
+            color='red',
+            label=f"$d_S$ = {self.spectral_dim:.2f}")
+        ax.set_xlabel("ln $\lambda$")
+        ax.set_ylabel("ln N($\lambda$)")
+        ax.set_title(self.cell_type)
+        ax.legend()
