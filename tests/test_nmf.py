@@ -12,6 +12,7 @@ from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.models import NonNegativeMatrixFactorization
+from cellarium.ml.models.nmf import update_consensusD
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDataset
 
@@ -26,7 +27,6 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-@pytest.fixture(scope="module")
 def d_uncorrelated_kg() -> torch.Tensor:
     """Gene programs for NMF which are uncorrelated."""
     torch.manual_seed(0)
@@ -35,6 +35,10 @@ def d_uncorrelated_kg() -> torch.Tensor:
 
 
 @pytest.fixture(scope="module")
+def fixture_d_uncorrelated_kg() -> torch.Tensor:
+    return d_uncorrelated_kg()
+
+
 def d_correlated_kg() -> torch.Tensor:
     """Gene programs for NMF which are somewhat correlated (some genes always off for example)."""
     torch.manual_seed(0)
@@ -44,6 +48,10 @@ def d_correlated_kg() -> torch.Tensor:
 
 
 @pytest.fixture(scope="module")
+def fixture_d_correlated_kg() -> torch.Tensor:
+    return d_correlated_kg()
+
+
 def alpha_uncorrelated_nk() -> torch.Tensor:
     """Cell loadings for NMF which are uncorrelated."""
     torch.manual_seed(0)
@@ -52,6 +60,10 @@ def alpha_uncorrelated_nk() -> torch.Tensor:
 
 
 @pytest.fixture(scope="module")
+def fixture_alpha_uncorrelated_nk() -> torch.Tensor:
+    return alpha_uncorrelated_nk()
+
+
 def alpha_correlated_nk() -> torch.Tensor:
     """Cell loadings for NMF which are correlated within celltype blocks."""
     torch.manual_seed(0)
@@ -63,8 +75,11 @@ def alpha_correlated_nk() -> torch.Tensor:
     )
     return alpha_nk
 
-
 @pytest.fixture(scope="module")
+def fixture_alpha_correlated_nk() -> torch.Tensor:
+    return alpha_correlated_nk()
+
+
 def x_uncorrelated_mean_nmf_ng(alpha_uncorrelated_nk, d_uncorrelated_kg) -> torch.Tensor:
     """Data created by a sparse NMF process with no correlation between the underlying factors."""
     x_ng = alpha_uncorrelated_nk @ d_uncorrelated_kg
@@ -73,6 +88,10 @@ def x_uncorrelated_mean_nmf_ng(alpha_uncorrelated_nk, d_uncorrelated_kg) -> torc
 
 
 @pytest.fixture(scope="module")
+def fixture_x_uncorrelated_mean_nmf_ng(fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg) -> torch.Tensor:
+    return x_uncorrelated_mean_nmf_ng(fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg)
+
+
 def x_correlated_mean_nmf_ng(alpha_correlated_nk, d_correlated_kg) -> torch.Tensor:
     """Data created by a sparse NMF process where the underlying factors are
     drawn from the same dirichlet distribution."""
@@ -82,13 +101,19 @@ def x_correlated_mean_nmf_ng(alpha_correlated_nk, d_correlated_kg) -> torch.Tens
 
 
 @pytest.fixture(scope="module")
-def x_nmf_ng(x_uncorrelated_mean_nmf_ng, x_correlated_mean_nmf_ng) -> dict[str, torch.Tensor]:
+def fixture_x_correlated_mean_nmf_ng(fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg) -> torch.Tensor:
+    return x_correlated_mean_nmf_ng(fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg)
+
+
+@pytest.fixture(scope="module")
+def x_nmf_ng(fixture_x_uncorrelated_mean_nmf_ng, fixture_x_correlated_mean_nmf_ng) -> dict[str, torch.Tensor]:
     """Data created by an NMF process with gaussian/poisson sampling noise
     and (no) correlation between the underlying factors and loadings."""
     torch.manual_seed(0)
     sigma = 0.6
     out = {}
-    for name, mean_ng in zip(["uncorrelated", "correlated"], [x_uncorrelated_mean_nmf_ng, x_correlated_mean_nmf_ng]):
+    for name, mean_ng in zip(["uncorrelated", "correlated"], 
+                             [fixture_x_uncorrelated_mean_nmf_ng, fixture_x_correlated_mean_nmf_ng]):
         # gaussian noise but clamped to be non-negative
         noise = sigma * torch.randn_like(mean_ng)
         out[f"gaussian_{name}"] = torch.clamp(mean_ng + noise, min=0.0)
@@ -122,7 +147,7 @@ def run_cellarium_nmf(
     cellarium_nmf = NonNegativeMatrixFactorization(
         var_names_g=var_names_g.tolist(),
         var_names_hvg=var_names_g.tolist(),
-        k_values=[simulated_k],
+        k_values=[k],
         r=1,
         full_g=g,
         log_variational=False,
@@ -136,7 +161,7 @@ def run_cellarium_nmf(
         barebones=False,
         accelerator="cpu",
         devices=devices,
-        max_epochs=50,
+        max_epochs=1,
         strategy="auto" if devices == 1 else pl.strategies.DDPStrategy(broadcast_buffers=True),
     )
 
@@ -185,26 +210,18 @@ def similarity_matrix_assign_rows_to_columns(
     return total_similarity, np.asarray(row_indices), np.asarray(col_indices)
 
 
-@pytest.mark.parametrize(
-    "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
-)
-def test_nmf_against_sklearn_multi_device(
-    x_nmf_ng: dict[str, torch.Tensor],
-    data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
-    d_correlated_kg: torch.Tensor,
-    d_uncorrelated_kg: torch.Tensor,
-    alpha_correlated_nk: torch.Tensor,
-    alpha_uncorrelated_nk: torch.Tensor,
-):
+def run_nmf_and_sklearn_multi_device(
+    x_ng: torch.Tensor,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     devices = int(os.environ.get("TEST_DEVICES", "1"))
-    x_ng = x_nmf_ng[data]
-    x_ng = get_cellarium_normalized_data(x_ng)
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
 
     # cellarium nmf fit
     cellarium_nmf = run_cellarium_nmf(x_ng, var_names_g=var_names_g, k=simulated_k, devices=devices)
+    cellarium_nmf.the_best_k = simulated_k  # hacking around strange code design
     cellarium_nmf.get_rec_error = False  # hacking around strange code design
     cellarium_nmf.if_get_full_D = False  # hacking around strange code design
+    update_consensusD(nmf_model=cellarium_nmf)  # again sort of strange to need to do this
     cellarium_loadings_nk = cellarium_nmf.predict(x_ng, var_names_g=var_names_g)["alpha_nk"]
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
     cellarium_factors_kg = getattr(cellarium_nmf, f"D_{simulated_k}_rkg").squeeze(0)
@@ -215,11 +232,70 @@ def test_nmf_against_sklearn_multi_device(
         init="random",
         solver="cd",
         beta_loss="frobenius",
+        # solver="mu",
+        # beta_loss="kullback-leibler",
         max_iter=10000,
         random_state=0,
     )
     sklearn_loadings_nk = torch.from_numpy(sklearn_nmf.fit_transform(x_ng)).float()
     sklearn_factors_kg = torch.from_numpy(sklearn_nmf.components_).float()
+
+    # sklearn nmf fit
+    sklearn_nmf2 = NMF(
+        n_components=simulated_k,
+        init="random",
+        solver="cd",
+        beta_loss="frobenius",
+        # solver="mu",
+        # beta_loss="kullback-leibler",
+        max_iter=10000,
+        random_state=1,
+    )
+    sklearn_loadings2_nk = torch.from_numpy(sklearn_nmf2.fit_transform(x_ng)).float()
+    sklearn_factors2_kg = torch.from_numpy(sklearn_nmf2.components_).float()
+
+    loadings = {
+        "cellarium": cellarium_loadings_nk,
+        "sklearn1": sklearn_loadings_nk,
+        "sklearn2": sklearn_loadings2_nk,
+    }
+    factors = {
+        "cellarium": cellarium_factors_kg,
+        "sklearn1": sklearn_factors_kg,
+        "sklearn2": sklearn_factors2_kg,
+    }
+
+    return loadings, factors
+
+
+@pytest.mark.parametrize(
+    "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
+)
+def test_nmf_against_sklearn_multi_device(
+    x_nmf_ng: dict[str, torch.Tensor],
+    data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
+    fixture_d_correlated_kg: torch.Tensor,
+    fixture_d_uncorrelated_kg: torch.Tensor,
+    fixture_alpha_correlated_nk: torch.Tensor,
+    fixture_alpha_uncorrelated_nk: torch.Tensor,
+):
+    # run both methods
+    x_ng = x_nmf_ng[data]
+    x_ng = get_cellarium_normalized_data(x_ng)
+    loadings, factors = run_nmf_and_sklearn_multi_device(
+        x_ng,
+    )
+    cellarium_loadings_nk = loadings["cellarium"]
+    cellarium_factors_kg = factors["cellarium"]
+    sklearn_loadings_nk = loadings["sklearn1"]
+    sklearn_factors_kg = factors["sklearn1"]
+    # sklearn_loadings2_nk = loadings["sklearn2"]
+    # sklearn_factors2_kg = factors["sklearn2"]
+
+    d_correlated_kg = fixture_d_correlated_kg
+    d_uncorrelated_kg = fixture_d_uncorrelated_kg
+    alpha_correlated_nk = fixture_alpha_correlated_nk
+    alpha_uncorrelated_nk = fixture_alpha_uncorrelated_nk
 
     # assert that fraction of variance explained by each method is similar
     frobenius_norm_data = torch.norm(x_ng, "fro")
@@ -240,7 +316,7 @@ def test_nmf_against_sklearn_multi_device(
     total_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(pairwise_factor_similarity_kk)
     print(f"pairwise_factor_similarity_kk:\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}")
     print(f"total mean similarity: {total_similarity}")
-    assert total_similarity > 0.9
+    # assert total_similarity > 0.9, f"factors are not very similar: {total_similarity}"
 
     # assert that the loadings are similar
     pairwise_loading_similarity_nn = pairwise_cosine_similarity_cdist(
@@ -252,7 +328,7 @@ def test_nmf_against_sklearn_multi_device(
     )
     print(f"pairwise_loading_similarity_nn:\n{pairwise_loading_similarity_nn[row_indices, :][:, col_indices]}")
     print(f"total mean similarity: {total_similarity}")
-    assert total_similarity > 0.9
+    # assert total_similarity > 0.9, f"loadings are not very similar: {total_similarity}"
 
     # truth
     if data.split("_")[-1] == "correlated":
@@ -281,10 +357,10 @@ def test_nmf_against_sklearn_multi_device(
         f"\n{pairwise_sklearn_factor_similarity_kk[row_indices, :][:, col_indices]}"
     )
     print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert total_sklearn_similarity - total_cellarium_similarity <= 0.03, (
-        "cellarium factors are substantially less similar to truth than sklearn factors"
-    )
-    assert total_cellarium_similarity > 0.7, "cellarium factors are not very similar to truth"
+    # assert total_sklearn_similarity - total_cellarium_similarity <= 0.03, (
+    #     "cellarium factors are substantially less similar to truth than sklearn factors"
+    # )
+    # assert total_cellarium_similarity > 0.7, "cellarium factors are not very similar to truth"
 
     # assert that the cellarium loadings match truth as much as the sklearn loadings do
     pairwise_cellarium_loading_similarity_nn = pairwise_cosine_similarity_cdist(
@@ -308,7 +384,9 @@ def test_nmf_against_sklearn_multi_device(
         f"\n{pairwise_sklearn_loading_similarity_nn[row_indices, :][:, col_indices]}"
     )
     print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert total_sklearn_similarity - total_cellarium_similarity <= 0.025, (
-        "cellarium loadings are substantially less similar to truth than sklearn loadings"
-    )
-    assert total_similarity > 0.92, "cellarium loadings are not very similar to truth"
+    # assert total_sklearn_similarity - total_cellarium_similarity <= 0.025, (
+    #     "cellarium loadings are substantially less similar to truth than sklearn loadings"
+    # )
+    # assert total_similarity > 0.92, "cellarium loadings are not very similar to truth"
+
+    assert 0
