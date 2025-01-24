@@ -574,6 +574,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         gene_tokens_nc: dict[str, torch.Tensor],
         metadata_tokens_n: dict[str, torch.Tensor],
         prompt_mask_nc: torch.Tensor | None,
+        predict_keys: list[str] | None = None,
     ) -> dict[str, torch.Tensor]:
         # embed the gene IDs, values, and total mRNA UMIs
         embedding_ncd = torch.cat(
@@ -602,7 +603,9 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
         # compute logits
         logits_nck = {}
-        for key in ["gene_value"] + list(metadata_tokens_n):
+        if predict_keys is None:
+            predict_keys = ["gene_value"] + list(metadata_tokens_n)
+        for key in predict_keys:
             logits_nck[key] = self.head[key](hidden_state_ncd) * self.output_logits_scale
 
         return logits_nck
