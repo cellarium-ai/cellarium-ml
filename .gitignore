@@ -16,3 +16,4 @@ notebooks/.ipynb_checkpoints/
 output/
 *.csv
 *.h5ad
+*.csv.gz
