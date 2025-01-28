@@ -127,6 +127,7 @@ def run_cellarium_nmf(
     x_ng: torch.Tensor,
     var_names_g: np.ndarray,
     k: int,
+    seed: int,
     devices,
 ) -> NonNegativeMatrixFactorization:
     n, g = x_ng.shape
@@ -166,9 +167,27 @@ def run_cellarium_nmf(
     )
 
     # fit
+    torch.manual_seed(seed)
     trainer.fit(module, train_dataloaders=train_loader)
 
     return cellarium_nmf
+
+
+def run_sklearn_nmf(x_norm_ng: torch.Tensor, k: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    # sklearn nmf fit
+    sklearn_nmf = NMF(
+        n_components=k,
+        init="random",
+        solver="cd",
+        beta_loss="frobenius",
+        # solver="mu",
+        # beta_loss="kullback-leibler",
+        max_iter=10000,
+        random_state=seed,
+    )
+    sklearn_loadings_nk = torch.from_numpy(sklearn_nmf.fit_transform(x_norm_ng)).float()
+    sklearn_factors_kg = torch.from_numpy(sklearn_nmf.components_).float()
+    return sklearn_loadings_nk, sklearn_factors_kg
 
 
 def get_cellarium_normalized_data(x_ng: torch.Tensor) -> torch.Tensor:
@@ -212,57 +231,35 @@ def similarity_matrix_assign_rows_to_columns(
 
 def run_nmf_and_sklearn_multi_device(
     x_ng: torch.Tensor,
+    seed: int = 0,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
 
     # cellarium nmf fit
-    cellarium_nmf = run_cellarium_nmf(x_ng, var_names_g=var_names_g, k=simulated_k, devices=devices)
+    cellarium_nmf = run_cellarium_nmf(x_ng, var_names_g=var_names_g, k=simulated_k, devices=devices, seed=seed)
     cellarium_nmf.the_best_k = simulated_k  # hacking around strange code design
     cellarium_nmf.get_rec_error = False  # hacking around strange code design
     cellarium_nmf.if_get_full_D = False  # hacking around strange code design
     update_consensusD(nmf_model=cellarium_nmf)  # again sort of strange to need to do this
     cellarium_loadings_nk = cellarium_nmf.predict(x_ng, var_names_g=var_names_g)["alpha_nk"]
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
-    cellarium_factors_kg = getattr(cellarium_nmf, f"D_{simulated_k}_rkg").squeeze(0)
+    cellarium_factors_kg = getattr(cellarium_nmf, f"D_{simulated_k}_kg").squeeze(0)
 
     # sklearn nmf fit
-    sklearn_nmf = NMF(
-        n_components=simulated_k,
-        init="random",
-        solver="cd",
-        beta_loss="frobenius",
-        # solver="mu",
-        # beta_loss="kullback-leibler",
-        max_iter=10000,
-        random_state=0,
+    sklearn_loadings_nk, sklearn_factors_kg = run_sklearn_nmf(
+        x_norm_ng=get_cellarium_normalized_data(x_ng), 
+        k=simulated_k, 
+        seed=seed,
     )
-    sklearn_loadings_nk = torch.from_numpy(sklearn_nmf.fit_transform(x_ng)).float()
-    sklearn_factors_kg = torch.from_numpy(sklearn_nmf.components_).float()
-
-    # sklearn nmf fit
-    sklearn_nmf2 = NMF(
-        n_components=simulated_k,
-        init="random",
-        solver="cd",
-        beta_loss="frobenius",
-        # solver="mu",
-        # beta_loss="kullback-leibler",
-        max_iter=10000,
-        random_state=1,
-    )
-    sklearn_loadings2_nk = torch.from_numpy(sklearn_nmf2.fit_transform(x_ng)).float()
-    sklearn_factors2_kg = torch.from_numpy(sklearn_nmf2.components_).float()
 
     loadings = {
         "cellarium": cellarium_loadings_nk,
-        "sklearn1": sklearn_loadings_nk,
-        "sklearn2": sklearn_loadings2_nk,
+        "sklearn": sklearn_loadings_nk,
     }
     factors = {
         "cellarium": cellarium_factors_kg,
-        "sklearn1": sklearn_factors_kg,
-        "sklearn2": sklearn_factors2_kg,
+        "sklearn": sklearn_factors_kg,
     }
 
     return loadings, factors
@@ -281,14 +278,14 @@ def test_nmf_against_sklearn_multi_device(
 ):
     # run both methods
     x_ng = x_nmf_ng[data]
-    x_ng = get_cellarium_normalized_data(x_ng)
     loadings, factors = run_nmf_and_sklearn_multi_device(
         x_ng,
     )
+    x_norm_ng = get_cellarium_normalized_data(x_ng)
     cellarium_loadings_nk = loadings["cellarium"]
     cellarium_factors_kg = factors["cellarium"]
-    sklearn_loadings_nk = loadings["sklearn1"]
-    sklearn_factors_kg = factors["sklearn1"]
+    sklearn_loadings_nk = loadings["sklearn"]
+    sklearn_factors_kg = factors["sklearn"]
     # sklearn_loadings2_nk = loadings["sklearn2"]
     # sklearn_factors2_kg = factors["sklearn2"]
 
@@ -298,14 +295,14 @@ def test_nmf_against_sklearn_multi_device(
     alpha_uncorrelated_nk = fixture_alpha_uncorrelated_nk
 
     # assert that fraction of variance explained by each method is similar
-    frobenius_norm_data = torch.norm(x_ng, "fro")
+    frobenius_norm_data = torch.norm(x_norm_ng, "fro")
     sklearn_reconstruction_ng = torch.matmul(sklearn_loadings_nk, sklearn_factors_kg)
     cellarium_reconstruction_ng = torch.matmul(cellarium_loadings_nk, cellarium_factors_kg)
-    print(f"x_ng:\n{x_ng}")
+    print(f"x_norm_ng:\n{x_norm_ng}")
     print(f"sklearn_reconstruction_ng:\n{sklearn_reconstruction_ng}")
     print(f"cellarium_reconstruction_ng:\n{cellarium_reconstruction_ng}")
-    frobenius_norm_sklearn_residual = torch.norm(x_ng - sklearn_reconstruction_ng, "fro")
-    frobenius_norm_cellarium_residual = torch.norm(x_ng - cellarium_reconstruction_ng, "fro")
+    frobenius_norm_sklearn_residual = torch.norm(x_norm_ng - sklearn_reconstruction_ng, "fro")
+    frobenius_norm_cellarium_residual = torch.norm(x_norm_ng - cellarium_reconstruction_ng, "fro")
     explained_variance_ratio_sklearn = 1 - (frobenius_norm_sklearn_residual**2) / (frobenius_norm_data**2)
     explained_variance_ratio_cellarium = 1 - (frobenius_norm_cellarium_residual**2) / (frobenius_norm_data**2)
     print(f"explained_variance_ratio_sklearn: {explained_variance_ratio_sklearn}")
