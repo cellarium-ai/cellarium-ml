@@ -717,18 +717,14 @@ class CellariumGPTInferenceContext:
             'query_marginal_std_q': query_marginal_std_q,
         }
 
-
-class JacobianContext:
+class GeneNetworkAnalysisBase:
     def __init__(
             self,
             adata_obs: pd.DataFrame,
             gene_info_tsv_path: str,
-            jacobian_point: str,
             query_var_names: list[str],
             prompt_var_names: list[str],
-            jacobian_qp: np.ndarray,
-            prompt_empirical_mean_p: np.ndarray,
-            query_empirical_mean_q: np.ndarray,
+            response_qp: np.ndarray,
             prompt_marginal_mean_p: np.ndarray,
             prompt_marginal_std_p: np.ndarray,
             query_marginal_mean_q: np.ndarray,
@@ -740,21 +736,16 @@ class JacobianContext:
         n_query_vars = len(query_var_names)
         n_prompt_vars = len(prompt_var_names)
 
-        assert jacobian_qp.shape == (n_query_vars, n_prompt_vars)
-        assert prompt_empirical_mean_p.shape == (n_prompt_vars,)
+        assert response_qp.shape == (n_query_vars, n_prompt_vars)
         assert prompt_marginal_mean_p.shape == (n_prompt_vars,)
         assert prompt_marginal_std_p.shape == (n_prompt_vars,)
-        assert query_empirical_mean_q.shape == (n_query_vars,)
         assert query_marginal_mean_q.shape == (n_query_vars,)
         assert query_marginal_std_q.shape == (n_query_vars,)
 
         self.adata_obs = adata_obs
-        self.jacobian_point = jacobian_point
         self.query_var_names = query_var_names
         self.prompt_var_names = prompt_var_names
-        self.jacobian_qp = jacobian_qp
-        self.prompt_empirical_mean_p = prompt_empirical_mean_p
-        self.query_empirical_mean_q = query_empirical_mean_q
+        self.response_qp = response_qp
         self.prompt_marginal_mean_p = prompt_marginal_mean_p
         self.prompt_marginal_std_p = prompt_marginal_std_p
         self.query_marginal_mean_q = query_marginal_mean_q
@@ -802,51 +793,9 @@ class JacobianContext:
         assert self.processed, "Must process before accessing"
         return {gene_id: idx for idx, gene_id in enumerate(self.query_var_names)}
     
-    @staticmethod
-    def from_old_jacobian_pt_dump(
-            jacobian_pt_path: str,
-            adata_path: str,
-            gene_info_tsv_path: str) -> 'JacobianContext':
-        
-        # suppres FutureWarning in a context manager
-        with warnings.catch_warnings():
-            warnings.simplefilter(action='ignore', category=FutureWarning)
-            adata = sc.read_h5ad(adata_path)
-            old_jac_dict = torch.load(jacobian_pt_path)
-
-        # make a metacell
-        X_meta_g = np.asarray(adata.X.sum(0))
-
-        # set total mrna umis to the mean of the dataset
-        target_total_mrna_umis = adata.obs['total_mrna_umis'].mean()
-        X_meta_g = X_meta_g * target_total_mrna_umis / X_meta_g.sum()
-
-        # make a metacell anndata
-        adata_meta = adata[0, :].copy()
-        adata_meta.X = X_meta_g
-        adata_meta.obs['total_mrna_umis'] = [target_total_mrna_umis]
-
-        prompt_empirical_mean_p = adata_meta[0, old_jac_dict['prompt_var_names']].X.flatten()
-        query_empirical_mean_q = adata_meta[0, old_jac_dict['query_var_names']].X.flatten()
-
-        return JacobianContext(
-            adata_obs=adata_meta.obs,
-            gene_info_tsv_path=gene_info_tsv_path,
-            jacobian_point=old_jac_dict['jacobian_point'],
-            query_var_names=old_jac_dict['query_var_names'],
-            prompt_var_names=old_jac_dict['prompt_var_names'],
-            jacobian_qp=old_jac_dict['jacobian_qg'].cpu().numpy(),
-            prompt_empirical_mean_p=prompt_empirical_mean_p,
-            query_empirical_mean_q=query_empirical_mean_q,
-            prompt_marginal_mean_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_means_q'].cpu().numpy(),
-            prompt_marginal_std_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_std_q'].cpu().numpy(),
-            query_marginal_mean_q=old_jac_dict['query_marginal_dict']['gene_marginal_means_q'].cpu().numpy(),
-            query_marginal_std_q=old_jac_dict['query_marginal_dict']['gene_marginal_std_q'].cpu().numpy(),
-        )
-
     def __str__(self) -> str:
         return (
-            f"JacobianContext({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
+            f"GeneNetworkAnalysisBase({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
             f"n_umi={self.total_mrna_umis:.2f})"
         )
 
@@ -854,8 +803,8 @@ class JacobianContext:
 
     def process(
             self,
-            jacobian_normalization_strategy: t.Literal["mean", "std"] = "mean",
-            feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "mean",
+            response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+            feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
             min_prompt_gene_tpm: float = 10.,
             min_query_gene_tpm: float = 10.,
             query_response_amp_min_pct: float | None = None,
@@ -864,17 +813,20 @@ class JacobianContext:
         ) -> None:
 
         assert not self.processed, "Already processed -- please create a new instance"
-        if jacobian_normalization_strategy == "mean":
+        if response_normalization_strategy == "mean":
             z_p = self.prompt_marginal_mean_p
             z_q = self.query_marginal_mean_q
-        elif jacobian_normalization_strategy == "std":
+        elif response_normalization_strategy == "std":
             z_p = self.prompt_marginal_std_p
             z_q = self.query_marginal_std_q
+        elif response_normalization_strategy == "none":
+            z_p = np.ones_like(self.prompt_marginal_mean_p)
+            z_q = np.ones_like(self.query_marginal_mean_q)
         else:
             raise ValueError("Invalid Jacobian normalization strategy")
 
         # linear proportional activation
-        self.z_qp = self.jacobian_qp * (z_p[None, :] + eps) / (z_q[:, None] + eps)
+        self.z_qp = self.response_qp * (z_p[None, :] + eps) / (z_q[:, None] + eps)
 
         if self.verbose:
             logger.info(f"Maximum value of z_qp: {np.max(self.z_qp):.3f}")
@@ -894,12 +846,12 @@ class JacobianContext:
             
         # apply the mask to everything else
         self.prompt_var_names = [self.prompt_var_names[i] for i in range(len(self.prompt_var_names)) if self.mask_p[i]]
-        self.prompt_empirical_mean_p = self.prompt_empirical_mean_p[self.mask_p]
+        # self.prompt_empirical_mean_p = self.prompt_empirical_mean_p[self.mask_p]
         self.prompt_marginal_mean_p = self.prompt_marginal_mean_p[self.mask_p]
         self.prompt_marginal_std_p = self.prompt_marginal_std_p[self.mask_p]
 
         self.query_var_names = [self.query_var_names[i] for i in range(len(self.query_var_names)) if self.mask_q[i]]
-        self.query_empirical_mean_q = self.query_empirical_mean_q[self.mask_q]
+        # self.query_empirical_mean_q = self.query_empirical_mean_q[self.mask_q]
         self.query_marginal_mean_q = self.query_marginal_mean_q[self.mask_q]
         self.query_marginal_std_q = self.query_marginal_std_q[self.mask_q]
 
@@ -1054,6 +1006,7 @@ class JacobianContext:
             device: torch.device = torch.device("cpu"),
             max_iter: int = 500,
             verbose: bool = True,
+            **kwargs
         ):
         
         mde = pymde.preserve_neighbors(
@@ -1063,7 +1016,8 @@ class JacobianContext:
             n_neighbors=n_neighbors,
             repulsive_fraction=repulsive_fraction,
             attractive_penalty=attractive_penalty,
-            repulsive_penalty=repulsive_penalty)
+            repulsive_penalty=repulsive_penalty,
+            **kwargs)
 
         self.embedding_q2 = mde.embed(verbose=verbose, max_iter=max_iter).cpu().numpy()
 
@@ -1159,3 +1113,93 @@ class JacobianContext:
         ax.set_ylabel("ln N($\lambda$)")
         ax.set_title(self.cell_type)
         ax.legend()
+
+
+class JacobianContext(GeneNetworkAnalysisBase):
+    def __init__(
+            self,
+            adata_obs: pd.DataFrame,
+            gene_info_tsv_path: str,
+            jacobian_point: str,
+            query_var_names: list[str],
+            prompt_var_names: list[str],
+            jacobian_qp: np.ndarray,
+            prompt_empirical_mean_p: np.ndarray,
+            query_empirical_mean_q: np.ndarray,
+            prompt_marginal_mean_p: np.ndarray,
+            prompt_marginal_std_p: np.ndarray,
+            query_marginal_mean_q: np.ndarray,
+            query_marginal_std_q: np.ndarray,
+            verbose: bool = True):
+
+        super().__init__(
+            adata_obs=adata_obs,
+            gene_info_tsv_path=gene_info_tsv_path,
+            query_var_names=query_var_names,
+            prompt_var_names=prompt_var_names,
+            response_qp=jacobian_qp,
+            prompt_marginal_mean_p=prompt_marginal_mean_p,
+            prompt_marginal_std_p=prompt_marginal_std_p,
+            query_marginal_mean_q=query_marginal_mean_q,
+            query_marginal_std_q=query_marginal_std_q,
+            verbose=verbose)
+        
+        n_query_vars = len(query_var_names)
+        n_prompt_vars = len(prompt_var_names)
+
+        assert prompt_empirical_mean_p.shape == (n_prompt_vars,)
+        assert query_empirical_mean_q.shape == (n_query_vars,)
+
+        self.jacobian_point = jacobian_point
+        self.prompt_empirical_mean_p = prompt_empirical_mean_p
+        self.query_empirical_mean_q = query_empirical_mean_q
+    
+    @staticmethod
+    def from_old_jacobian_pt_dump(
+            jacobian_pt_path: str,
+            adata_path: str,
+            gene_info_tsv_path: str) -> 'JacobianContext':
+        
+        # suppres FutureWarning in a context manager
+        with warnings.catch_warnings():
+            warnings.simplefilter(action='ignore', category=FutureWarning)
+            adata = sc.read_h5ad(adata_path)
+            old_jac_dict = torch.load(jacobian_pt_path)
+
+        # make a metacell
+        X_meta_g = np.asarray(adata.X.sum(0))
+
+        # set total mrna umis to the mean of the dataset
+        target_total_mrna_umis = adata.obs['total_mrna_umis'].mean()
+        X_meta_g = X_meta_g * target_total_mrna_umis / X_meta_g.sum()
+
+        # make a metacell anndata
+        adata_meta = adata[0, :].copy()
+        adata_meta.X = X_meta_g
+        adata_meta.obs['total_mrna_umis'] = [target_total_mrna_umis]
+
+        prompt_empirical_mean_p = adata_meta[0, old_jac_dict['prompt_var_names']].X.flatten()
+        query_empirical_mean_q = adata_meta[0, old_jac_dict['query_var_names']].X.flatten()
+
+        return JacobianContext(
+            adata_obs=adata_meta.obs,
+            gene_info_tsv_path=gene_info_tsv_path,
+            jacobian_point=old_jac_dict['jacobian_point'],
+            query_var_names=old_jac_dict['query_var_names'],
+            prompt_var_names=old_jac_dict['prompt_var_names'],
+            jacobian_qp=old_jac_dict['jacobian_qg'].cpu().numpy(),
+            prompt_empirical_mean_p=prompt_empirical_mean_p,
+            query_empirical_mean_q=query_empirical_mean_q,
+            prompt_marginal_mean_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_means_q'].cpu().numpy(),
+            prompt_marginal_std_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_std_q'].cpu().numpy(),
+            query_marginal_mean_q=old_jac_dict['query_marginal_dict']['gene_marginal_means_q'].cpu().numpy(),
+            query_marginal_std_q=old_jac_dict['query_marginal_dict']['gene_marginal_std_q'].cpu().numpy(),
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"JacobianContext({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
+            f"n_umi={self.total_mrna_umis:.2f})"
+        )
+
+    __repr__ = __str__
