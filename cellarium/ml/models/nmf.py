@@ -289,9 +289,10 @@ def compute_factors(
             )
             updated_factors_rkg[:, k, :] = updated_factors_r1g.squeeze(1)
 
-        D_max_diff = F.mse_loss(updated_factors_rkg, factors_buffer_rkg, reduction="none").sum(
-            dim=[-2, -1]
-        ) / updated_factors_rkg.square().sum(dim=[-2, -1])
+        D_max_diff = (
+            F.mse_loss(updated_factors_rkg, factors_buffer_rkg, reduction="none").sum(dim=[-2, -1])
+            / updated_factors_rkg.square().sum(dim=[-2, -1])
+        ).max()
         if D_max_diff <= D_tol:
             print(f"D break at iteration {i}: {D_max_diff}")
             break
