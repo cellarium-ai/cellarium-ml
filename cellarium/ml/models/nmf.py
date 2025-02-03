@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import tqdm
 from lightning.pytorch.strategies import DDPStrategy
 from sklearn.metrics import silhouette_score
+from torch.utils.data import IterableDataset
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.transforms import Filter
@@ -26,8 +27,8 @@ warnings.filterwarnings("ignore")
 
 
 def calculate_rec_error(
-    dataset,  # : IterableDistributedAnnDataCollectionDataset,
-    pipeline,  # : CellariumPipeline,
+    dataset: IterableDataset,
+    pipeline,  #: "CellariumPipeline",
 ) -> anndata.AnnData:
     """
     Embed the dataset using the pipeline.
@@ -54,13 +55,12 @@ def calculate_rec_error(
 
 
 def get_embedding(
-    dataset,  # : IterableDistributedAnnDataCollectionDataset,
-    pipeline,  # : CellariumPipeline,
+    dataset: IterableDataset,
+    pipeline,  #: "CellariumPipeline",
     k: int,
     if_get_final_gene_loading: bool = True,
 ) -> pd.DataFrame:
-    """
-    Embed the dataset using the pipeline.
+    """Helper function to embed the dataset using the pipeline.
 
     Args:
         dataset: Dataset.
@@ -137,40 +137,47 @@ class KMeans:
         return torch.argmin(distances, dim=1)
 
 
-def cal_reconstruction_error(x, alpha_nk, D_kg):
+def nmf_frobenius_loss(x: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: torch.Tensor):
     # compute prediction error as the frobenius norm
-    return F.mse_loss(torch.matmul(alpha_nk, D_kg), x, reduction="sum")
+    return F.mse_loss(torch.matmul(loadings_nk, factors_kg), x, reduction="sum")
 
 
-def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=0.30):
+def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neighborhood_size: float):
     r, num_component, g = D_rkg.shape
     d_norm_rkg = F.normalize(D_rkg, dim=2, p=2)
     d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
-    L = int(r * local_neighborhood_size)
 
-    euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
-    L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
-    local_neigh_dist = L_nearest_neigh.sum(1) / L
+    if r > 1:
+        L = int(r * local_neighborhood_size)
+        euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+        L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
+        local_neigh_dist = L_nearest_neigh.sum(1) / L
 
-    topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
-    topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
-    d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
+        topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
+        topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
+        d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
 
-    # mean centering prevents underflow in distance computations in the kmeans algorithm
-    d_norm_mg_mean = d_norm_mg.mean(0)
-    d_norm_mg = d_norm_mg - d_norm_mg_mean
+        # mean centering prevents underflow in distance computations in the kmeans algorithm
+        d_norm_mg_mean = d_norm_mg.mean(0)
+        d_norm_mg = d_norm_mg - d_norm_mg_mean
 
-    kmeans = KMeans(n_clusters=k)
-    kmeans.fit(d_norm_mg)
-    kmeans_cluster_labels = kmeans.predict(d_norm_mg)
-    df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
-    kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
+        kmeans = KMeans(n_clusters=k)
+        kmeans.fit(d_norm_mg)
+        kmeans_cluster_labels = kmeans.predict(d_norm_mg)
+        df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
+        kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
 
-    silhouette = silhouette_score(df_d_norm_mg.values, kmeans_cluster_labels, metric="cosine")
+        silhouette = silhouette_score(df_d_norm_mg.values, kmeans_cluster_labels, metric="cosine")
 
-    median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median()
-    median_D = torch.Tensor(median_D.values)
-    median_D = F.normalize(median_D, dim=1, p=1)
+        median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median()
+        median_D = torch.Tensor(median_D.values)
+        median_D = F.normalize(median_D, dim=1, p=1)
+
+    else:
+        topk_euc_dist = None
+        local_neigh_dist = None
+        median_D = F.normalize(d_norm_mg, dim=1, p=1)
+        silhouette = 1.0
 
     return {
         "topk_euc_dist": topk_euc_dist,
@@ -207,9 +214,10 @@ def compute_loadings(
     alpha_unconstrained_rnk = torch.nn.Parameter(
         torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)  # TODO: try others
     )
-    alpha_buffer_rnk = alpha_unconstrained_rnk.exp().clone()
+    alpha_init_rnk = alpha_unconstrained_rnk.exp().clone()
+    alpha_buffer_rnk = alpha_init_rnk.clone()
 
-    optimizer = torch.optim.AdamW([alpha_unconstrained_rnk], lr=learning_rate)
+    optimizer = torch.optim.Adam([alpha_unconstrained_rnk], lr=learning_rate)
 
     for i in range(n_iterations):
         optimizer.zero_grad()
@@ -226,9 +234,11 @@ def compute_loadings(
         optimizer.step()
         alpha_rnk = alpha_unconstrained_rnk.exp()
 
-        alpha_diff = F.mse_loss(alpha_rnk, alpha_buffer_rnk, reduction="sum") / alpha_rnk.square().sum() / r
-        if alpha_diff <= alpha_tol:
-            # print(f'alpha break at iteration {i}')
+        alpha_max_diff = (
+            F.mse_loss(alpha_rnk, alpha_buffer_rnk, reduction="none").sum(dim=[-2, -1])
+            / alpha_init_rnk.square().sum(dim=[-2, -1])
+        ).max()
+        if alpha_max_diff <= alpha_tol:
             break
         alpha_buffer_rnk = alpha_rnk.clone()
 
@@ -243,7 +253,7 @@ def compute_factors(
     B_rkg: torch.Tensor,
     factors_rkg: torch.Tensor,
     n_iterations: int,
-    D_tol: float = 0.005,
+    D_tol: float = 2e-5,
 ) -> torch.Tensor:
     """
     Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
@@ -279,13 +289,11 @@ def compute_factors(
             )
             updated_factors_rkg[:, k, :] = updated_factors_r1g.squeeze(1)
 
-        D_diff = (
-            F.mse_loss(updated_factors_rkg, factors_buffer_rkg, reduction="sum")
-            / updated_factors_rkg.square().sum()
-            / r
-        )
-        if D_diff <= D_tol:
-            # print(f'D break at iteration {i}')
+        D_max_diff = F.mse_loss(updated_factors_rkg, factors_buffer_rkg, reduction="none").sum(
+            dim=[-2, -1]
+        ) / updated_factors_rkg.square().sum(dim=[-2, -1])
+        if D_max_diff <= D_tol:
+            print(f"D break at iteration {i}: {D_max_diff}")
             break
         factors_buffer_rkg = updated_factors_rkg.clone()
 
@@ -300,6 +308,32 @@ def init_weights(m):
     elif classname.find("Linear") != -1:
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
+
+
+class NMFInit:
+    @staticmethod
+    def __call__(x: torch.Tensor, transformed_data_mean: float, k: int) -> None:
+        """Modify the values of x in place as a way to initialize a dictionary factor matrix for NMF."""
+        pass
+
+
+class NMFInitSklearnRandom(NMFInit):
+    @staticmethod
+    def __call__(x: torch.Tensor, transformed_data_mean: float, k: int) -> None:
+        """Modify the values of x in place according to the sklearn NMF init random recipe."""
+        # https://github.com/scikit-learn/scikit-learn/blob/
+        # 99bf3d8e4eed5ba5db19a1869482a238b6223ffd/sklearn/decomposition/_nmf.py#L304-L315
+        factor = np.sqrt(transformed_data_mean / k)
+        x.normal_(0.0, factor).abs_()
+
+
+class NMFInitUniformRandom(NMFInit):
+    @staticmethod
+    def __call__(x: torch.Tensor, transformed_data_mean: float, k: int) -> None:
+        """Modify the values of x in place according to a Joshua Welch NMF init random recipe."""
+        # https://www.nature.com/articles/s41587-021-00867-x#Sec10
+        # algorithm 1 step 2
+        x.uniform_(0.0, 2.0)
 
 
 class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
@@ -326,6 +360,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         full_g: int,
         log_variational: bool,
         algorithm: Literal["mairal"] = "mairal",
+        init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: float = 1.0,
     ) -> None:
         super().__init__()
@@ -341,6 +376,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.get_rec_error = True
         self.if_get_full_D = False
         self.transformed_data_mean = transformed_data_mean
+        self.init = init
 
         for i in self.k_values:
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
@@ -353,26 +389,32 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             self.register_buffer(f"full_B_{i}_kg", torch.empty(i, g))
             self.register_buffer(f"full_D_{i}_kg", torch.empty(i, g))
 
-        self._D_tol = 5e-5
-        self._alpha_tol = 2e-5
+        self._D_tol = 2e-5
+        self._alpha_tol = 1e-5
 
         self.n_nmf = r
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        match self.init:
+            case "sklearn_random":
+                init_fn: NMFInit = NMFInitSklearnRandom()
+            case "uniform_random":
+                init_fn = NMFInitUniformRandom()
+            case _:
+                raise ValueError(f"Unknown initialization method: {self.init}")
+
         for i in self.k_values:
             getattr(self, f"D_{i}_kg").zero_()
+
             getattr(self, f"A_{i}_rkk").zero_()
             getattr(self, f"B_{i}_rkg").zero_()
-            # getattr(self, f"D_{i}_rkg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
-            getattr(self, f"D_{i}_rkg").uniform_(0.0, np.sqrt(self.transformed_data_mean / i))
+            init_fn(getattr(self, f"D_{i}_rkg"), self.transformed_data_mean, i)
 
             getattr(self, f"full_A_{i}_kk").zero_()
             getattr(self, f"full_B_{i}_kg").zero_()
-            getattr(self, f"full_D_{i}_kg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
-            # getattr(self, f"full_D_{i}_kg").uniform_(0.0, 1.5)
-            # getattr(self, f"full_D_{i}_kg").zero_()
+            init_fn(getattr(self, f"full_D_{i}_kg"), self.transformed_data_mean, i)
 
     def _compute_loadings(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor, n_iterations: int) -> torch.Tensor:
         """
@@ -443,7 +485,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         alpha_rnk = self._compute_loadings(
             x_ng=x_ng,
             factors_rkg=factors_rkg,
-            n_iterations=100,
+            n_iterations=1000,
         )
 
         with torch.no_grad():
@@ -460,7 +502,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 factors_rkg=factors_rkg,
                 A_rkk=A_rkk,
                 B_rkg=B_rkg,
-                n_iterations=100,
+                n_iterations=1000,
             )
 
         return updated_factors_rkg
@@ -542,9 +584,10 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                     x_ng=x_,
                     factors_rkg=D_kg.to(x_.device).unsqueeze(0),
                     n_iterations=1000,
+                    alpha_tol=self._alpha_tol,
                 ).squeeze(0)
                 rec_error.append(
-                    np.sum(cal_reconstruction_error(x_, alpha_nk.to(x_.device), D_kg.to(x_.device)).cpu().numpy())
+                    np.sum(nmf_frobenius_loss(x_, alpha_nk.to(x_.device), D_kg.to(x_.device)).cpu().numpy())
                 )
 
             return {"rec_error": torch.tensor(rec_error)}
@@ -565,7 +608,8 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             alpha_nk = compute_loadings(
                 x_ng=x_,
                 factors_rkg=D_kg.to(x_.device).unsqueeze(0),
-                n_iterations=1000,
+                n_iterations=10000,
+                alpha_tol=self._alpha_tol / 100,
                 normalize=False,
             ).squeeze(0)
 
