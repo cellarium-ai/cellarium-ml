@@ -43,6 +43,7 @@ lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML"]
 test = [
   "pytest-xdist",
+  "tenacity",
   "tensorboard",
   "torchvision",
 ]
