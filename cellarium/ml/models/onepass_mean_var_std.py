@@ -125,7 +125,8 @@ class OnePassMeanVarStd(CellariumModel):
         """
         mean_g = self.x_sums / self.x_size
         if self.algorithm == "shifted_data":
-            mean_g = mean_g + self.x_shift
+            if self.x_shift is not None:
+                mean_g = mean_g + self.x_shift
         return mean_g
 
     @property

@@ -45,9 +45,11 @@ class MultiHeadReadout(nn.Module):
 
     def _reset_parameters(self) -> None:
         for module in self.W.children():
+            assert isinstance(module.weight, torch.Tensor)
             create_initializer(self.heads_initializer)(module.weight)
 
             if module.bias is not None:
+                assert isinstance(module.bias, torch.Tensor)
                 nn.init.zeros_(module.bias)
 
     def forward(self, hidden_state_ncd: torch.Tensor) -> dict[str, torch.Tensor]:
