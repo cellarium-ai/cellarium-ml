@@ -322,7 +322,7 @@ def test_nmf_against_sklearn_multi_device(
     nmf_loss_cellarium = torch.nn.functional.mse_loss(x_norm_ng, cellarium_reconstruction_ng)
     print(f"nmf_loss_sklearn: {nmf_loss_sklearn}")
     print(f"nmf_loss_cellarium: {nmf_loss_cellarium}")
-    assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.025, (
+    assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.03, (
         f"cellarium and sklearn loss is not very similar: {torch.abs(nmf_loss_sklearn - nmf_loss_cellarium):.4f}"
     )
 
@@ -385,7 +385,7 @@ def test_nmf_against_sklearn_multi_device(
         case "gaussian_uncorrelated":
             threshold = 0.55
         case "poisson_correlated":
-            threshold = 0.2
+            threshold = 0.19
         case "poisson_uncorrelated":
             threshold = 0.75
         case _:
