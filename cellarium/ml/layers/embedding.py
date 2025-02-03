@@ -43,6 +43,7 @@ class GeneExpressionEmbedding(nn.Module):
 
     def _reset_parameters(self) -> None:
         for module in self.E.children():
+            assert isinstance(module.weight, torch.Tensor)
             create_initializer(self.embeddings_initializer)(module.weight)
 
     def forward(self, gene_tokens_nc: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -86,6 +87,7 @@ class MetadataEmbedding(nn.Module):
 
     def _reset_parameters(self) -> None:
         for module in self.E.children():
+            assert isinstance(module.weight, torch.Tensor)
             create_initializer(self.embeddings_initializer)(module.weight)
 
     def forward(self, metadata_tokens_n: dict[str, torch.Tensor]) -> torch.Tensor:
