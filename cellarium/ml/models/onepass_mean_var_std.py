@@ -125,6 +125,7 @@ class OnePassMeanVarStd(CellariumModel):
         """
         mean_g = self.x_sums / self.x_size
         if self.algorithm == "shifted_data":
+            assert isinstance(self.x_shift, torch.Tensor)
             mean_g = mean_g + self.x_shift
         return mean_g
 
