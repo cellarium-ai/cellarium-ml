@@ -4,7 +4,6 @@
 from abc import ABCMeta, abstractmethod
 
 import lightning.pytorch as pl
-import numpy as np
 import torch
 import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
@@ -57,7 +56,7 @@ class OnePassCellariumModel(CellariumModel, metaclass=ABCMeta):
         gathered_tensor_list = [torch.zeros_like(tensor)] * self.world_size
         dist.gather(tensor, gathered_tensor_list, dst=0)
         return gathered_tensor_list
-        
+
     def _gather_batched_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         """
         Gather a tensor from all devices to a batched tensor on all devices.
@@ -77,7 +76,6 @@ class OnePassCellariumModel(CellariumModel, metaclass=ABCMeta):
 
 
 class OnlineGeneStats(metaclass=ABCMeta):
-
     def __init__(self, n_vars):
         self.n_vars = n_vars
 
@@ -85,16 +83,6 @@ class OnlineGeneStats(metaclass=ABCMeta):
     def reset_parameters(self) -> None:
         """
         Reset the parameters of the model.
-        """
-        pass
-
-    @abstractmethod
-    def forward(self, x_ng: torch.Tensor) -> None:
-        """
-        Updates sufficient statistics for both raw and rank-based (Spearman) correlations.
-
-        Args:
-            x_ng: (num_cells, num_genes) matrix of values
         """
         pass
 
@@ -117,8 +105,8 @@ class OnlineGeneStats(metaclass=ABCMeta):
         Compute the covariance matrix using sufficient statistics.
         """
         return None
-    
-    def _get_correlation(self, use_rank: bool = False) -> torch.Tensor | None:
+
+    def _get_correlation(self) -> torch.Tensor | None:
         """
         Compute the correlation matrix using sufficient statistics.
 
@@ -147,27 +135,20 @@ class OnlineGeneStats(metaclass=ABCMeta):
         Standard deviation of the data.
         """
         return torch.sqrt(self.var_g)
-    
+
     @property
     def covariance_gg(self) -> torch.Tensor | None:
         """
-        Covariance matrix of the data.
+        Gene-gene covariance matrix.
         """
         return self._get_covariance()
-    
+
     @property
-    def correlation_pearson_gg(self) -> torch.Tensor | None:
+    def correlation_gg(self) -> torch.Tensor | None:
         """
-        Pearson correlation matrix of the data.
+        Gene-gene correlation matrix.
         """
-        return self._get_correlation(use_rank=False)
-    
-    @property
-    def correlation_spearman_gg(self) -> torch.Tensor | None:
-        """
-        Spearman correlation matrix of the data.
-        """
-        return self._get_correlation(use_rank=True)
+        return self._get_correlation()
 
 
 class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
@@ -176,7 +157,7 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
     with the option to use mean-shifted data.
 
     **References:**
-    
+
     [1] `Algorithms for calculating variance
         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
     """
@@ -187,7 +168,7 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         self.x_sums_g: torch.Tensor
         self.x_squared_sums_g: torch.Tensor
         self.x_shift_g: torch.Tensor
-        self.n: int
+        self.n: torch.Tensor
 
         self.register_buffer("x_sums_g", torch.empty(n_vars))
         self.register_buffer("x_squared_sums_g", torch.empty(n_vars))
@@ -203,7 +184,7 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         super().reset_parameters()
 
     @torch.no_grad()
-    def forward(self, x_ng: torch.Tensor) -> None:
+    def forward(self, x_ng: torch.Tensor):
         """
         Updates sufficient statistics for both raw and rank-based (Spearman) correlations.
 
@@ -213,7 +194,7 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         """
         if not self.shifted:
             self.x_sums_g += x_ng.sum(dim=0)
-            self.x_squared_sums_g += (x_ng ** 2).sum(dim=0)
+            self.x_squared_sums_g += (x_ng**2).sum(dim=0)
             self.n += x_ng.shape[0]
         else:
             assert self.x_shift_g is not None
@@ -237,7 +218,7 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         if trainer.world_size == 1:
             return
-        
+
         # merge the running sums
         dist.reduce(self.x_sums_g, dst=0, op=dist.ReduceOp.SUM)
         dist.reduce(self.x_squared_sums_g, dst=0, op=dist.ReduceOp.SUM)
@@ -251,7 +232,7 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         if self.shifted:
             mean_g = mean_g + self.x_shift_g
         return mean_g
-    
+
     def _get_var_g(self) -> torch.Tensor:
         """
         Compute the variance of the data using sufficient statistics.
@@ -269,6 +250,7 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
     [1] `Welford's online algorithm for calculating variance
         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm>`_.
     """
+
     def __init__(self, n_vars: int, use_rank: bool = False):
         super().__init__(n_vars=n_vars)
         self.use_rank = use_rank
@@ -302,7 +284,7 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         if self.use_rank:
             x_ng = torch.argsort(torch.argsort(x_ng, dim=0), dim=0).float() + 1
 
-        batch_size = x_ng.shape[0]
+        batch_size = torch.tensor(x_ng.shape[0])
         gathered_batch_size_list = self._gather_tensor_list(batch_size)
         self.n = self.n + sum(gathered_batch_size_list)
 
@@ -327,13 +309,13 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         return delta1_ng, delta2_ng, updated_mean_g
 
     @torch.no_grad()
-    def forward(self, x_ng: torch.Tensor) -> None:
+    def forward(self, x_ng: torch.Tensor):
         self.update(x_ng)
         return {}
 
     def _get_mean_g(self):
         return self.mean_g
-    
+
     def _get_var_g(self):
         return self.m2_g / self.n
 
@@ -350,12 +332,12 @@ def combine_means_across_devices(
 
     if len(mean_g_list) == 1:
         return mean_g_list[0]
-    
+
     if len(mean_g_list) > 2:
         # use recursion to combine means pairwise
         return combine_means_across_devices(
-            mean_g_list=[combine_means_across_devices(mean_g_list[:2], n_list[:2])] + mean_g_list[2:], 
-            n_list=[sum(n_list[:2])] + n_list[2:],
+            mean_g_list=[combine_means_across_devices(mean_g_list[:2], n_list[:2])] + mean_g_list[2:],
+            n_list=[torch.tensor(sum(n_list[:2]))] + n_list[2:],
         )
 
     # compute combined means
@@ -382,31 +364,27 @@ def combine_covariances_across_devices(
 
     if len(cov_gg_list) == 1:
         return cov_gg_list[0]
-    
+
     if len(cov_gg_list) > 2:
         # use recursion to combine covariances pairwise
         return combine_covariances_across_devices(
             cov_gg_list=[
                 combine_covariances_across_devices(
-                    cov_gg_list=cov_gg_list[:2], 
-                    mean_g_list=mean_g_list[:2], 
-                    n_list=n_list[:2]
+                    cov_gg_list=cov_gg_list[:2], mean_g_list=mean_g_list[:2], n_list=n_list[:2]
                 )
-            ] + cov_gg_list[2:],
-            mean_g_list=[
-                combine_means_across_devices(
-                    mean_g_list=mean_g_list[:2], 
-                    n_list=n_list[:2]
-                )
-            ] + mean_g_list[2:], 
-            n_list=[sum(n_list[:2])] + n_list[2:],
+            ]
+            + cov_gg_list[2:],
+            mean_g_list=[combine_means_across_devices(mean_g_list=mean_g_list[:2], n_list=n_list[:2])]
+            + mean_g_list[2:],
+            n_list=[torch.tensor(sum(n_list[:2]))] + n_list[2:],
         )
 
     # compute combined covariances
     combined_covariance_gg = (
-        (n_list[0] - 1) * cov_gg_list[0] 
-        + (n_list[1] - 1) * cov_gg_list[1] 
-        + (n_list[0] * n_list[1] / (n_list[0] + n_list[1])) * (mean_g_list[0] - mean_g_list[1]).outer()
+        (n_list[0] - 1) * cov_gg_list[0]
+        + (n_list[1] - 1) * cov_gg_list[1]
+        + (n_list[0] * n_list[1] / (n_list[0] + n_list[1]))
+        * torch.outer(mean_g_list[0] - mean_g_list[1], mean_g_list[0] - mean_g_list[1])
     ) / (sum(n_list) - 1)
     return combined_covariance_gg
 
@@ -421,6 +399,7 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
     [1] `Welford's online algorithm for calculating variance
         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm>`_.
     """
+
     def __init__(self, n_vars, use_rank: bool = False):
         super().__init__(n_vars=n_vars, use_rank=use_rank)
         self.c_gg: torch.Tensor
@@ -432,14 +411,14 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         self.c_gg.zero_()
 
     @torch.no_grad()
-    def forward(self, x_ng: torch.Tensor) -> None:
+    def forward(self, x_ng: torch.Tensor):
         """
         Updates sufficient statistics for both raw and rank-based (Spearman) correlations.
 
         Args:
             x_ng: (num_cells, num_genes) matrix of raw values
         """
-        n = x_ng.shape[0]
+        n = torch.tensor(x_ng.shape[0])
         delta1_ng, delta2_ng, updated_mean_g = super().update(x_ng)
         c_update_gg = delta1_ng.T @ delta2_ng
 
@@ -447,13 +426,15 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         # gathered_mean_g_list = self._gather_tensor_list(updated_mean_g)
         gathered_n_list = self._gather_tensor_list(n)
         # c_update_gg = combine_covariances_across_devices(
-        #     cov_gg_list=gathered_c_update_gg_list, 
-        #     mean_g_list=gathered_mean_g_list, 
+        #     cov_gg_list=gathered_c_update_gg_list,
+        #     mean_g_list=gathered_mean_g_list,
         #     n_list=gathered_n_list,
         # )
         combined_update_c_gg = sum(
-            [(num / sum(gathered_n_list)) * update_gg 
-             for num, update_gg in zip(gathered_n_list, gathered_c_update_gg_list)]
+            [
+                (num / sum(gathered_n_list)) * update_gg
+                for num, update_gg in zip(gathered_n_list, gathered_c_update_gg_list)
+            ]
         )
 
         self.c_gg = self.c_gg + combined_update_c_gg
@@ -469,7 +450,7 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         """
         if self.n <= 1:
             return torch.zeros((self.n_vars, self.n_vars))
-        
+
         return self.c_gg / self.n
 
     def _get_correlation(self) -> torch.Tensor:
@@ -481,8 +462,9 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         """
         if self.n <= 1:
             return torch.zeros((self.n_vars, self.n_vars))
-        
+
         cov_gg = self.covariance_gg
+        assert isinstance(cov_gg, torch.Tensor)
         var_g = torch.diag(cov_gg).clamp(min=1e-12)
         std_g = torch.sqrt(var_g)
         corr_gg = cov_gg / torch.outer(std_g, std_g)
