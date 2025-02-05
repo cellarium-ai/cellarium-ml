@@ -82,6 +82,14 @@ class TransformerBlock(nn.Module):
         )
         self.normadd2 = NormAdd(d_model, dropout_p, use_bias)
 
+    @property
+    def d_ffn(self) -> int:
+        return self.ffn.dense1.out_features
+
+    @property
+    def d_model(self) -> int:
+        return self.ffn.dense1.in_features
+
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,

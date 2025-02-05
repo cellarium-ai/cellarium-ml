@@ -14,9 +14,9 @@ class TokenEmbedding(nn.Module):
     Gene and metadata tokens embedding.
 
     Args:
-        categorical_vocab_sizes:
+        categorical_token_size_dict:
             Categorical token vocabulary sizes.
-        continuous_tokens:
+        continuous_token_list:
             Continuous tokens.
         d_model:
             Dimensionality of the embeddings and hidden states.
@@ -26,25 +26,26 @@ class TokenEmbedding(nn.Module):
 
     def __init__(
         self,
-        categorical_vocab_sizes: dict[str, int],
-        continuous_tokens: list[str],
+        categorical_token_size_dict: dict[str, int],
+        continuous_token_list: list[str],
         d_model: int,
         embeddings_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
         self.embedding_dict = nn.ModuleDict()
         self.embedding_dict.update(
-            {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()}
+            {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_token_size_dict.items()}
         )
-        self.embedding_dict.update({key: nn.Linear(1, d_model, bias=False) for key in continuous_tokens})
-        self.categorical_vocab_sizes = categorical_vocab_sizes
-        self.continuous_tokens = continuous_tokens
+        self.embedding_dict.update({key: nn.Linear(1, d_model, bias=False) for key in continuous_token_list})
+        self.categorical_token_size_dict = categorical_token_size_dict
+        self.continuous_token_list = continuous_token_list
         self.embeddings_initializer = embeddings_initializer
 
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
         for module in self.embedding_dict.children():
+            assert isinstance(module, (nn.Embedding, nn.Linear))
             create_initializer(self.embeddings_initializer)(module.weight)
 
     def forward(
@@ -63,7 +64,9 @@ class TokenEmbedding(nn.Module):
             Embedding tensor of shape ``(n, c, d)``.
         """
         return sum(
-            self.embedding_dict[key](token_value_nc.unsqueeze(-1) if key in self.continuous_tokens else token_value_nc)
+            self.embedding_dict[key](
+                token_value_nc.unsqueeze(-1) if key in self.continuous_token_list else token_value_nc
+            )
             * token_mask_nc_dict[key].unsqueeze(-1)
             for i, (key, token_value_nc) in enumerate(token_value_nc_dict.items())
         )

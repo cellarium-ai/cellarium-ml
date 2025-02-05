@@ -62,8 +62,11 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     )
     # model
     model = CellariumGPT(
-        gene_vocab_sizes={"gene_id": c, "gene_value": 100},
-        metadata_vocab_sizes={"cell_type": adata.obs["cell_type"].cat.categories.size},
+        categorical_token_size_dict={
+            "gene_id": c,
+            "gene_value": 100,
+            "cell_type": adata.obs["cell_type"].cat.categories.size,
+        },
         d_model=3,
         d_ffn=6,
         n_heads=1,
@@ -72,11 +75,16 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         use_bias=False,
         attention_backend="torch",
         attention_softmax_fp32=True,
-        loss_scales={"gene_value": 0.8, "cell_type": 0.2},
+        loss_scale_dict={"gene_value": 0.8, "cell_type": 0.2},
         attention_logits_scale=1,
         mup_base_d_model=2,
         mup_base_d_ffn=4,
     )
+    assert model.d_model == 3
+    assert model.d_ffn == 6
+    assert model.n_heads == 1
+    assert model.n_blocks == 1
+    assert model.attention_backend == "torch"
     module = CellariumModule(model=model, optim_fn=torch.optim.Adam, optim_kwargs={"lr": 1e-3, "eps": 1e-8})
     # trainer
     trainer = pl.Trainer(
