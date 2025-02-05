@@ -190,6 +190,94 @@ CONFIGS = [
         },
     },
     {
+        "model_name": "welford_onepass_mean_var_std",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
+                "model": "cellarium.ml.models.WelfordOnlineGeneStats",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
+        },
+    },
+    {
+        "model_name": "welford_onepass_covariance",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
+                "model": "cellarium.ml.models.WelfordOnlineGeneGeneStats",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
+        },
+    },
+    {
         "model_name": "incremental_pca",
         "subcommand": "fit",
         "fit": {
