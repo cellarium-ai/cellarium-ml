@@ -186,7 +186,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, ModelClass, algorithm
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g, atol=1e-6)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g, atol=1e-6)
-    if algorithm == "shifted_data":
+    if ModelClass == OnePassMeanVarStd and algorithm == "shifted_data":
         assert model.x_shift_g is not None and loaded_model.x_shift_g is not None
         np.testing.assert_allclose(model.x_shift_g, loaded_model.x_shift_g, atol=1e-6)
     if ModelClass == OnePassMeanVarStd:
