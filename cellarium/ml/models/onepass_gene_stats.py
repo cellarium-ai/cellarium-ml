@@ -180,6 +180,15 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
 
     [1] `Algorithms for calculating variance
         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
+
+    Args:
+        var_names_g: The variable names schema for the input data validation.
+        algorithm: The algorithm to use for computing statistics. Either "naive" or "shifted_data".
+
+    Properties:
+        mean_g: Gene-wise mean
+        var_g: Gene-wise variance
+        std_g: Gene-wise standard deviation
     """
 
     def __init__(self, var_names_g: np.ndarray, algorithm: Literal["naive", "shifted_data"] = "naive"):
@@ -266,28 +275,38 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
 class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
     """
     Compute gene-wise means, variances, and standard deviations
-    using Welford's online algorithm [1].
+    using Welford's online algorithm [1], with an option to use
+    per-cell gene ranks rather than the raw data.
 
     ** References: **
 
     [1] `Welford's online algorithm for calculating variance
         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm>`_.
+
+    Args:
+        var_names_g: The variable names schema for the input data validation.
+        use_rank: Whether to use per-cell gene ranks rather than the raw expression values.
+
+    Properties:
+        mean_g: Gene-wise mean
+        var_g: Gene-wise variance
+        std_g: Gene-wise standard deviation
     """
 
     def __init__(self, var_names_g: np.ndarray, use_rank: bool = False):
         super().__init__(var_names_g=var_names_g)
         self.use_rank = use_rank
-        self.mean_g: torch.Tensor
+        self.mean_stat_g: torch.Tensor
         self.m2_g: torch.Tensor
         self.n: torch.Tensor
 
-        self.register_buffer("mean_raw_g", torch.empty(self.n_vars))
-        self.register_buffer("m2_raw_g", torch.empty(self.n_vars))
+        self.register_buffer("mean_stat_g", torch.empty(self.n_vars))
+        self.register_buffer("m2_g", torch.empty(self.n_vars))
         self.register_buffer("n", torch.empty(()))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        self.mean_g.zero_()
+        self.mean_stat_g.zero_()
         self.m2_g.zero_()
         self.n.zero_()
         super().reset_parameters()
@@ -312,14 +331,14 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         self.n = self.n + sum(gathered_batch_size_list)
 
         # statistics update (Welford's algorithm)
-        delta1_ng = x_ng - self.mean_g
+        delta1_ng = x_ng - self.mean_stat_g
         summed_delta1_g = delta1_ng.sum(dim=0)
 
         gathered_summed_delta1_wg = self._gather_batched_tensor(summed_delta1_g)
         summed_delta1_g = gathered_summed_delta1_wg.sum(dim=0)
 
-        updated_mean_g = self.mean_g + summed_delta1_g / self.n
-        self.mean_g = updated_mean_g
+        updated_mean_g = self.mean_stat_g + summed_delta1_g / self.n
+        self.mean_stat_g = updated_mean_g
 
         delta2_ng = x_ng - updated_mean_g
         m2_update_g = (delta1_ng * delta2_ng).sum(dim=0)
@@ -337,90 +356,103 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         return {}
 
     def _get_mean_g(self):
-        return self.mean_g
+        return self.mean_stat_g
 
     def _get_var_g(self):
         return self.m2_g / self.n
 
 
-@torch.no_grad()
-def combine_means_across_devices(
-    mean_g_list: list[torch.Tensor],
-    n_list: list[torch.Tensor],
-) -> torch.Tensor:
-    """
-    Reduce per-gene means computed on multiple devices.
-    """
-    assert len(mean_g_list) == len(n_list)
+# @torch.no_grad()
+# def combine_means_across_devices(
+#     mean_g_list: list[torch.Tensor],
+#     n_list: list[torch.Tensor],
+# ) -> torch.Tensor:
+#     """
+#     Reduce per-gene means computed on multiple devices.
+#     """
+#     assert len(mean_g_list) == len(n_list)
 
-    if len(mean_g_list) == 1:
-        return mean_g_list[0]
+#     if len(mean_g_list) == 1:
+#         return mean_g_list[0]
 
-    if len(mean_g_list) > 2:
-        # use recursion to combine means pairwise
-        return combine_means_across_devices(
-            mean_g_list=[combine_means_across_devices(mean_g_list[:2], n_list[:2])] + mean_g_list[2:],
-            n_list=[torch.tensor(sum(n_list[:2]))] + n_list[2:],
-        )
+#     if len(mean_g_list) > 2:
+#         # use recursion to combine means pairwise
+#         return combine_means_across_devices(
+#             mean_g_list=[combine_means_across_devices(mean_g_list[:2], n_list[:2])] + mean_g_list[2:],
+#             n_list=[torch.tensor(sum(n_list[:2]))] + n_list[2:],
+#         )
 
-    # compute combined means
-    combined_mean_g = (n_list[0] * mean_g_list[0] + n_list[1] * mean_g_list[1]) / (n_list[0] + n_list[1])
-    return combined_mean_g
+#     # compute combined means
+#     combined_mean_g = (n_list[0] * mean_g_list[0] + n_list[1] * mean_g_list[1]) / (n_list[0] + n_list[1])
+#     return combined_mean_g
 
 
-@torch.no_grad()
-def combine_covariances_across_devices(
-    cov_gg_list: list[torch.Tensor],
-    mean_g_list: list[torch.Tensor],
-    n_list: list[torch.Tensor],
-) -> torch.Tensor:
-    """
-    Reduce gene-gene covariances computed on multiple devices [1].
+# @torch.no_grad()
+# def combine_covariances_across_devices(
+#     cov_gg_list: list[torch.Tensor],
+#     mean_g_list: list[torch.Tensor],
+#     n_list: list[torch.Tensor],
+# ) -> torch.Tensor:
+#     """
+#     Reduce gene-gene covariances computed on multiple devices [1].
 
-    ** References: **
+#     ** References: **
 
-    [1] `Algorithms for calculating variance
-        <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Covariance>`_.
-        See the "Online" subsection.
-    """
-    assert len(cov_gg_list) == len(mean_g_list) == len(n_list)
+#     [1] `Algorithms for calculating variance
+#         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Covariance>`_.
+#         See the "Online" subsection.
+#     """
+#     assert len(cov_gg_list) == len(mean_g_list) == len(n_list)
 
-    if len(cov_gg_list) == 1:
-        return cov_gg_list[0]
+#     if len(cov_gg_list) == 1:
+#         return cov_gg_list[0]
 
-    if len(cov_gg_list) > 2:
-        # use recursion to combine covariances pairwise
-        return combine_covariances_across_devices(
-            cov_gg_list=[
-                combine_covariances_across_devices(
-                    cov_gg_list=cov_gg_list[:2], mean_g_list=mean_g_list[:2], n_list=n_list[:2]
-                )
-            ]
-            + cov_gg_list[2:],
-            mean_g_list=[combine_means_across_devices(mean_g_list=mean_g_list[:2], n_list=n_list[:2])]
-            + mean_g_list[2:],
-            n_list=[torch.tensor(sum(n_list[:2]))] + n_list[2:],
-        )
+#     if len(cov_gg_list) > 2:
+#         # use recursion to combine covariances pairwise
+#         return combine_covariances_across_devices(
+#             cov_gg_list=[
+#                 combine_covariances_across_devices(
+#                     cov_gg_list=cov_gg_list[:2], mean_g_list=mean_g_list[:2], n_list=n_list[:2]
+#                 )
+#             ]
+#             + cov_gg_list[2:],
+#             mean_g_list=[combine_means_across_devices(mean_g_list=mean_g_list[:2], n_list=n_list[:2])]
+#             + mean_g_list[2:],
+#             n_list=[torch.tensor(sum(n_list[:2]))] + n_list[2:],
+#         )
 
-    # compute combined covariances
-    combined_covariance_gg = (
-        (n_list[0] - 1) * cov_gg_list[0]
-        + (n_list[1] - 1) * cov_gg_list[1]
-        + (n_list[0] * n_list[1] / (n_list[0] + n_list[1]))
-        * torch.outer(mean_g_list[0] - mean_g_list[1], mean_g_list[0] - mean_g_list[1])
-    ) / (sum(n_list) - 1)
-    return combined_covariance_gg
+#     # compute combined covariances
+#     combined_covariance_gg = (
+#         (n_list[0] - 1) * cov_gg_list[0]
+#         + (n_list[1] - 1) * cov_gg_list[1]
+#         + (n_list[0] * n_list[1] / (n_list[0] + n_list[1]))
+#         * torch.outer(mean_g_list[0] - mean_g_list[1], mean_g_list[0] - mean_g_list[1])
+#     ) / (sum(n_list) - 1)
+#     return combined_covariance_gg
 
 
 class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
     """
-    Compute gene-wise means, covariance, and correlation in a stable way using Welford's online algorithm [1].
-    Computes correlation using both raw and rank-based statistics.
+    Compute per-gene mean, variance, standard deviation, as well as gene-gene covariance
+    and correlation in a stable way using a Welford-like online algorithm [1], with an
+    option to use per-cell gene ranks rather than the raw data. The use of ranks can be
+    used to compute Spearman correlation between genes.
 
     ** References: **
 
-    [1] `Welford's online algorithm for calculating variance
-        <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm>`_.
+    [1] `Covariance: Online
+        <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Covariance>`_.
+
+    Args:
+        var_names_g: The variable names schema for the input data validation.
+        use_rank: Whether to use per-cell gene ranks rather than the raw expression values.
+
+    Properties:
+        mean_g: Gene-wise mean
+        var_g: Gene-wise variance
+        std_g: Gene-wise standard deviation
+        covariance_gg: Gene-gene covariance matrix
+        correlation_gg: Gene-gene correlation matrix
     """
 
     def __init__(self, var_names_g: np.ndarray, use_rank: bool = False):

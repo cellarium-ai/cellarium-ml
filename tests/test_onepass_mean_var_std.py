@@ -15,7 +15,7 @@ from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.models import OnePassMeanVarStd
+from cellarium.ml.models import OnePassMeanVarStd, WelfordOnlineGeneStats
 from cellarium.ml.transforms import Log1p, NormalizeTotal
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 from tests.common import BoringDataset
@@ -47,6 +47,7 @@ def dadc(adata: AnnData, tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize("ModelClass", [OnePassMeanVarStd, WelfordOnlineGeneStats], ids=["naive", "welford"])
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
@@ -54,11 +55,14 @@ def dadc(adata: AnnData, tmp_path: Path):
 def test_onepass_mean_var_std_multi_device(
     adata: AnnData,
     dadc: DistributedAnnDataCollection,
+    ModelClass,
     shuffle: bool,
     num_workers: int,
     batch_size: int,
     algorithm: Literal["naive", "shifted_data"],
 ):
+    if ModelClass == WelfordOnlineGeneStats and algorithm == "shifted_data":
+        pytest.skip("WelfordOnlineGeneStats does not support shifted_data algorithm.")
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
     dataset = IterableDistributedAnnDataCollectionDataset(
@@ -78,7 +82,10 @@ def test_onepass_mean_var_std_multi_device(
     transforms = [NormalizeTotal(target_count=10_000), Log1p()]
 
     # fit
-    model = OnePassMeanVarStd(var_names_g=dadc.var_names, algorithm=algorithm)
+    kwargs: dict[str, str | np.ndarray] = {"var_names_g": dadc.var_names}
+    if ModelClass == OnePassMeanVarStd:
+        kwargs |= {"algorithm": algorithm}
+    model = ModelClass(**kwargs)
     module = CellariumModule(transforms=transforms, model=model)
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -113,8 +120,11 @@ def test_onepass_mean_var_std_multi_device(
     np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
 
 
+@pytest.mark.parametrize("ModelClass", [OnePassMeanVarStd, WelfordOnlineGeneStats], ids=["naive", "welford"])
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
-def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["naive", "shifted_data"]):
+def test_load_from_checkpoint_multi_device(tmp_path: Path, ModelClass, algorithm: Literal["naive", "shifted_data"]):
+    if ModelClass == WelfordOnlineGeneStats and algorithm == "shifted_data":
+        pytest.skip("WelfordOnlineGeneStats does not support shifted_data algorithm.")
     n, g = 3, 2
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -127,7 +137,10 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
         collate_fn=collate_fn,
     )
     # model
-    model = OnePassMeanVarStd(var_names_g=var_names_g, algorithm=algorithm)
+    kwargs: dict[str, str | np.ndarray] = {"var_names_g": var_names_g}
+    if ModelClass == OnePassMeanVarStd:
+        kwargs |= {"algorithm": algorithm}
+    model = ModelClass(**kwargs)
     module = CellariumModule(model=model)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
@@ -149,7 +162,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
     loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
-    assert isinstance(loaded_model, OnePassMeanVarStd)
+    assert isinstance(loaded_model, ModelClass)
     # assert
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g, atol=1e-6)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
@@ -157,18 +170,25 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     if algorithm == "shifted_data":
         assert model.x_shift_g is not None and loaded_model.x_shift_g is not None
         np.testing.assert_allclose(model.x_shift_g, loaded_model.x_shift_g, atol=1e-6)
-    assert model.algorithm == loaded_model.algorithm
+    if ModelClass == OnePassMeanVarStd:
+        assert model.algorithm == loaded_model.algorithm
 
 
+@pytest.mark.parametrize("ModelClass", [OnePassMeanVarStd, WelfordOnlineGeneStats], ids=["naive", "welford"])
 @pytest.mark.parametrize("mean", [1, 100])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["float32", "float64"])
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
-def test_accuracy(mean: float, dtype: torch.dtype, algorithm: Literal["naive", "shifted_data"]):
+def test_accuracy(ModelClass, mean: float, dtype: torch.dtype, algorithm: Literal["naive", "shifted_data"]):
+    if ModelClass == WelfordOnlineGeneStats and algorithm == "shifted_data":
+        pytest.skip("WelfordOnlineGeneStats does not support shifted_data algorithm.")
     n_trials = 5_000_000
     std = 0.1
     x = mean + std * torch.randn(n_trials, dtype=dtype)
 
-    onepass = OnePassMeanVarStd(var_names_g=np.array(["x"]), algorithm=algorithm)
+    kwargs: dict[str, str | np.ndarray] = {"var_names_g": np.array(["x"])}
+    if ModelClass == OnePassMeanVarStd:
+        kwargs |= {"algorithm": algorithm}
+    onepass = ModelClass(**kwargs)
     for chunk in x.split(1000):
         onepass(x_ng=chunk[:, None], var_names_g=["x"])
 
@@ -178,7 +198,7 @@ def test_accuracy(mean: float, dtype: torch.dtype, algorithm: Literal["naive", "
 
     var_expected = x.var(correction=0).item()
     var_actual = onepass.var_g[0].item()
-    if algorithm == "naive" and dtype == torch.float32 and mean == 100:
+    if ModelClass == OnePassMeanVarStd and algorithm == "naive" and dtype == torch.float32 and mean == 100:
         with pytest.raises(AssertionError):
             assert var_actual == pytest.approx(var_expected, rel=1e-3)
     else:

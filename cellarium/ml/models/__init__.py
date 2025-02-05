@@ -6,6 +6,7 @@ from cellarium.ml.models.incremental_pca import IncrementalPCA
 from cellarium.ml.models.logistic_regression import LogisticRegression
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.models.onepass_gene_stats import NaiveOnlineGeneStats as OnePassMeanVarStd
+from cellarium.ml.models.onepass_gene_stats import WelfordOnlineGeneGeneStats, WelfordOnlineGeneStats
 from cellarium.ml.models.probabilistic_pca import ProbabilisticPCA
 from cellarium.ml.models.tdigest import TDigest
 
@@ -19,4 +20,6 @@ __all__ = [
     "ProbabilisticPCA",
     "TDigest",
     "ValidateMixin",
+    "WelfordOnlineGeneStats",
+    "WelfordOnlineGeneGeneStats",
 ]
