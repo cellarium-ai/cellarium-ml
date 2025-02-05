@@ -560,8 +560,8 @@ def welford_onepass_covariance(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.WelfordOnlineGeneGeneStats` model.
 
-    This example shows how to calculate per-gene mean, variance, standard deviation 
-    of log normalized feature count data in one pass according to the stable Welford 
+    This example shows how to calculate per-gene mean, variance, standard deviation
+    of log normalized feature count data in one pass according to the stable Welford
     algorithm [1], as well as gene-gene covariance and correlation matrices.
 
     Example run::
