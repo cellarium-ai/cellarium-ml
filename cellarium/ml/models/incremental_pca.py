@@ -89,15 +89,11 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        g = self.n_vars
         k = self.n_components
         niter = self.svd_lowrank_niter
         self_X_size = self.x_size
         other_X_size = x_ng.size(0)
         total_X_size = self_X_size + other_X_size
-        assert k <= min(other_X_size, g), (
-            f"Rank of svd_lowrank (n_components): {k} must be less than min(n_obs, n_vars): {min(other_X_size, g)}"
-        )
 
         # compute SVD of new data
         if self.perform_mean_correction:
@@ -173,7 +169,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
             # level i
             # at most two local ranks (leading and trailing)
             if rank % 2 == 0:  # leading rank
-                if rank < world_size:
+                if rank + 1 < world_size:
                     # if there is a trailing rank
                     # then concatenate and merge SVDs
                     src = (rank + 1) * 2**i
