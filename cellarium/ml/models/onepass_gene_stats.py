@@ -272,6 +272,15 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         return self.x_squared_sums_g / self.n - (self.x_sums_g / self.n) ** 2
 
 
+def compute_ranks(x_ng: torch.Tensor) -> torch.Tensor:
+    """
+    Compute g-ranks of the data for each n.
+    Breaks ties by first come first ranked.
+    Ranks start from 1.
+    """
+    return torch.argsort(torch.argsort(x_ng, dim=0), dim=0).float() + 1
+
+
 class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
     """
     Compute gene-wise means, variances, and standard deviations
@@ -293,7 +302,7 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         std_g: Gene-wise standard deviation
     """
 
-    def __init__(self, var_names_g: np.ndarray, use_rank: bool = False):
+    def __init__(self, var_names_g: np.ndarray, use_rank: bool = False, reset_parameters: bool = True):
         super().__init__(var_names_g=var_names_g)
         self.use_rank = use_rank
         self.mean_stat_g: torch.Tensor
@@ -303,7 +312,8 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         self.register_buffer("mean_stat_g", torch.empty(self.n_vars))
         self.register_buffer("m2_g", torch.empty(self.n_vars))
         self.register_buffer("n", torch.empty(()))
-        self.reset_parameters()
+        if reset_parameters:
+            self.reset_parameters()
 
     def reset_parameters(self) -> None:
         self.mean_stat_g.zero_()
@@ -324,7 +334,7 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
             updated_mean_g: Updated mean
         """
         if self.use_rank:
-            x_ng = torch.argsort(torch.argsort(x_ng, dim=0), dim=0).float() + 1
+            x_ng = compute_ranks(x_ng)
 
         batch_size = torch.tensor(x_ng.shape[0])
         gathered_batch_size_list = self._gather_tensor_list(batch_size)
@@ -456,14 +466,15 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
     """
 
     def __init__(self, var_names_g: np.ndarray, use_rank: bool = False):
-        super().__init__(var_names_g=var_names_g, use_rank=use_rank)
+        super().__init__(var_names_g=var_names_g, use_rank=use_rank, reset_parameters=False)
         self.c_gg: torch.Tensor
-        self.register_buffer("c_gg", torch.empty((self.n_vars, self.n_vars)))
+        n_vars = len(var_names_g)
+        self.register_buffer("c_gg", torch.empty((n_vars, n_vars)))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        super().reset_parameters()
         self.c_gg.zero_()
+        super().reset_parameters()
 
     @torch.no_grad()
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:

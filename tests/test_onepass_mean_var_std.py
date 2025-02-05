@@ -12,10 +12,12 @@ import pytest
 import torch
 from anndata import AnnData
 from lightning.pytorch.strategies import DDPStrategy
+from scipy.stats import pearsonr, spearmanr
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.models import OnePassMeanVarStd, WelfordOnlineGeneStats
+from cellarium.ml.models import OnePassMeanVarStd, WelfordOnlineGeneGeneStats, WelfordOnlineGeneStats
+from cellarium.ml.models.onepass_gene_stats import compute_ranks
 from cellarium.ml.transforms import Log1p, NormalizeTotal
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 from tests.common import BoringDataset
@@ -203,3 +205,91 @@ def test_accuracy(ModelClass, mean: float, dtype: torch.dtype, algorithm: Litera
             assert var_actual == pytest.approx(var_expected, rel=1e-3)
     else:
         assert var_actual == pytest.approx(var_expected, rel=1e-3)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 100], ids=["batch1", "batch2", "batch3", "fullbatch"])
+@pytest.mark.parametrize("use_rank", [False, True], ids=["raw", "ranks"])
+def test_welford_covariance(use_rank: bool, batch_size: int):
+    # Simulated test data: shape [cells, genes]
+    x_ng = torch.randn(100, 5)
+
+    var_names_g = [str(i) for i in range(x_ng.shape[1])]
+    model = WelfordOnlineGeneGeneStats(var_names_g=var_names_g, use_rank=use_rank)
+
+    # Feed rows (cells) into the Welford stats one by one
+    for x_mg in torch.split(x_ng, batch_size, dim=0):
+        model.forward(x_mg, var_names_g=var_names_g)
+
+    # Expected covariance matrix
+    if use_rank:
+        # Compute rank-transformed covariance matrix
+        ranked_x_ng = compute_ranks(x_ng)
+        expected_cov_matrix_gg = np.cov(ranked_x_ng.T, bias=True)
+    else:
+        expected_cov_matrix_gg = np.cov(x_ng.T, bias=True)
+
+    # Assert covariance matrix values are correct
+    computed_cov_matrix_gg = model.covariance_gg
+    tol = 1e-6
+    print('expected:')
+    print(expected_cov_matrix_gg)
+    print('computed:')
+    print(computed_cov_matrix_gg)
+    assert np.allclose(computed_cov_matrix_gg, expected_cov_matrix_gg, atol=tol), \
+        f"Expected covariance matrix:\n{expected_cov_matrix_gg}\nGot:\n{computed_cov_matrix_gg}"
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 75, 100], ids=["batch1", "batch2", "batch3", "batch75", "fullbatch"])
+@pytest.mark.parametrize("use_rank", [False, True], ids=["raw", "ranks"])
+def test_welford_correlation(use_rank: bool, batch_size: int):
+    # Simulated test data: shape [cells, genes]
+    x_ng = torch.randn(100, 5)
+
+    n_genes = x_ng.shape[1]
+    var_names_g = [str(i) for i in range(x_ng.shape[1])]
+    model = WelfordOnlineGeneGeneStats(var_names_g=var_names_g, use_rank=use_rank)
+
+    # Feed rows (cells) into the Welford stats one by one
+    for x_mg in torch.split(x_ng, batch_size, dim=0):
+        model.forward(x_mg, var_names_g=var_names_g)
+
+    # Expected correlation matrix
+    expected_corr_matrix_gg = np.zeros((n_genes, n_genes))
+    if use_rank:
+        x_ng = compute_ranks(x_ng)
+    for i in range(n_genes):
+        for j in range(n_genes):
+            x = x_ng[:, i]
+            y = x_ng[:, j]
+            if use_rank:
+                expected_corr_matrix_gg[i, j], _ = spearmanr(x, y)
+            else:
+                expected_corr_matrix_gg[i, j], _ = pearsonr(x, y)
+
+    # Assert correlation matrix values are correct
+    computed_corr_matrix_gg = model.correlation_gg
+    tol = 1e-6
+    assert np.allclose(computed_corr_matrix_gg, expected_corr_matrix_gg, atol=tol), \
+        f"Expected correlation matrix:\n{expected_corr_matrix_gg}\nGot:\n{computed_corr_matrix_gg}"
+
+
+def test_compute_ranks():
+    x = torch.tensor([1, 2, 3, 4, 5])
+    ranks = compute_ranks(x)
+    expected_ranks = torch.tensor([0, 1, 2, 3, 4]) + 1
+    assert torch.all(ranks == expected_ranks)
+
+    x = torch.tensor([5, 4, 3, 2, 1])
+    ranks = compute_ranks(x)
+    expected_ranks = torch.tensor([4, 3, 2, 1, 0]) + 1
+    assert torch.all(ranks == expected_ranks)
+
+    x = torch.tensor([1, 2, 3, 3, 5])
+    ranks = compute_ranks(x)
+    expected_ranks = torch.tensor([0, 1, 2, 3, 4]) + 1
+    assert torch.all(ranks == expected_ranks)
+
+    x = torch.tensor([1, 2, 3, 3, 3])
+    ranks = compute_ranks(x)
+    expected_ranks = torch.tensor([0, 1, 2, 3, 4]) + 1
+    assert torch.all(ranks == expected_ranks)
