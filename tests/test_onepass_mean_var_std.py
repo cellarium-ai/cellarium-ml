@@ -213,7 +213,7 @@ def test_welford_covariance(use_rank: bool, batch_size: int):
     # Simulated test data: shape [cells, genes]
     x_ng = torch.randn(100, 5)
 
-    var_names_g = [str(i) for i in range(x_ng.shape[1])]
+    var_names_g = np.array([str(i) for i in range(x_ng.shape[1])])
     model = WelfordOnlineGeneGeneStats(var_names_g=var_names_g, use_rank=use_rank)
 
     # Feed rows (cells) into the Welford stats one by one
@@ -230,13 +230,11 @@ def test_welford_covariance(use_rank: bool, batch_size: int):
 
     # Assert covariance matrix values are correct
     computed_cov_matrix_gg = model.covariance_gg
+    assert isinstance(computed_cov_matrix_gg, torch.Tensor)
     tol = 1e-6
-    print('expected:')
-    print(expected_cov_matrix_gg)
-    print('computed:')
-    print(computed_cov_matrix_gg)
-    assert np.allclose(computed_cov_matrix_gg, expected_cov_matrix_gg, atol=tol), \
+    assert np.allclose(computed_cov_matrix_gg.numpy(), expected_cov_matrix_gg, atol=tol), (
         f"Expected covariance matrix:\n{expected_cov_matrix_gg}\nGot:\n{computed_cov_matrix_gg}"
+    )
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 75, 100], ids=["batch1", "batch2", "batch3", "batch75", "fullbatch"])
@@ -246,7 +244,7 @@ def test_welford_correlation(use_rank: bool, batch_size: int):
     x_ng = torch.randn(100, 5)
 
     n_genes = x_ng.shape[1]
-    var_names_g = [str(i) for i in range(x_ng.shape[1])]
+    var_names_g = np.array([str(i) for i in range(x_ng.shape[1])])
     model = WelfordOnlineGeneGeneStats(var_names_g=var_names_g, use_rank=use_rank)
 
     # Feed rows (cells) into the Welford stats one by one
@@ -268,9 +266,11 @@ def test_welford_correlation(use_rank: bool, batch_size: int):
 
     # Assert correlation matrix values are correct
     computed_corr_matrix_gg = model.correlation_gg
+    assert isinstance(computed_corr_matrix_gg, torch.Tensor)
     tol = 1e-6
-    assert np.allclose(computed_corr_matrix_gg, expected_corr_matrix_gg, atol=tol), \
+    assert np.allclose(computed_corr_matrix_gg.numpy(), expected_corr_matrix_gg, atol=tol), (
         f"Expected correlation matrix:\n{expected_corr_matrix_gg}\nGot:\n{computed_corr_matrix_gg}"
+    )
 
 
 def test_compute_ranks():
