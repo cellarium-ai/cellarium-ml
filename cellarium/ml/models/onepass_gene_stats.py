@@ -2,14 +2,20 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from abc import ABCMeta, abstractmethod
+from typing import Literal
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.utilities.distributed import get_rank_and_num_replicas
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
 
 
 class OnePassCellariumModel(CellariumModel, metaclass=ABCMeta):
@@ -19,8 +25,10 @@ class OnePassCellariumModel(CellariumModel, metaclass=ABCMeta):
     distributed training, as they must implement a method to reduce their buffers.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, var_names_g: np.ndarray, **kwargs):
         super().__init__()
+        self.var_names_g = var_names_g
+        self.n_vars = len(var_names_g)
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
         _, world_size = get_rank_and_num_replicas()
         self.world_size = world_size
@@ -30,6 +38,21 @@ class OnePassCellariumModel(CellariumModel, metaclass=ABCMeta):
         Reset the parameters of the model.
         """
         self._dummy_param.data.zero_()
+
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+        """
+        Args:
+            x_ng:
+                Gene counts matrix.
+            var_names_g:
+                The list of the variable names in the input data.
+
+        Returns:
+            An empty dictionary.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+        return {}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -76,9 +99,6 @@ class OnePassCellariumModel(CellariumModel, metaclass=ABCMeta):
 
 
 class OnlineGeneStats(metaclass=ABCMeta):
-    def __init__(self, n_vars):
-        self.n_vars = n_vars
-
     @abstractmethod
     def reset_parameters(self) -> None:
         """
@@ -162,18 +182,19 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
     """
 
-    def __init__(self, n_vars: int, shifted: bool):
-        super().__init__(n_vars=n_vars)
-        self.shifted = shifted
+    def __init__(self, var_names_g: np.ndarray, algorithm: Literal["naive", "shifted_data"] = "naive"):
+        super().__init__(var_names_g=var_names_g)
+        self.algorithm = algorithm
+        self.shifted = algorithm == "shifted_data"
         self.x_sums_g: torch.Tensor
         self.x_squared_sums_g: torch.Tensor
         self.x_shift_g: torch.Tensor
         self.n: torch.Tensor
 
-        self.register_buffer("x_sums_g", torch.empty(n_vars))
-        self.register_buffer("x_squared_sums_g", torch.empty(n_vars))
+        self.register_buffer("x_sums_g", torch.empty(self.n_vars))
+        self.register_buffer("x_squared_sums_g", torch.empty(self.n_vars))
         self.register_buffer("n", torch.empty(()))
-        self.register_buffer("x_shift_g", torch.empty(n_vars))
+        self.register_buffer("x_shift_g", torch.empty(self.n_vars))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -184,18 +205,20 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         super().reset_parameters()
 
     @torch.no_grad()
-    def forward(self, x_ng: torch.Tensor):
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Updates sufficient statistics for both raw and rank-based (Spearman) correlations.
 
         Args:
             x_ng: (num_cells, num_genes) matrix of raw values
-            shifted: Whether to use shifted data
+            var_names_g: The list of the variable names in the input data
         """
+        super().forward(x_ng, var_names_g)
+
         if not self.shifted:
-            self.x_sums_g += x_ng.sum(dim=0)
-            self.x_squared_sums_g += (x_ng**2).sum(dim=0)
-            self.n += x_ng.shape[0]
+            self.x_sums_g = self.x_sums_g + x_ng.sum(dim=0)
+            self.x_squared_sums_g = self.x_squared_sums_g + (x_ng**2).sum(dim=0)
+            self.n = self.n + x_ng.shape[0]
         else:
             assert self.x_shift_g is not None
             if (self.x_shift_g == 0).all():
@@ -251,15 +274,15 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm>`_.
     """
 
-    def __init__(self, n_vars: int, use_rank: bool = False):
-        super().__init__(n_vars=n_vars)
+    def __init__(self, var_names_g: np.ndarray, use_rank: bool = False):
+        super().__init__(var_names_g=var_names_g)
         self.use_rank = use_rank
         self.mean_g: torch.Tensor
         self.m2_g: torch.Tensor
         self.n: torch.Tensor
 
-        self.register_buffer("mean_raw_g", torch.empty(n_vars))
-        self.register_buffer("m2_raw_g", torch.empty(n_vars))
+        self.register_buffer("mean_raw_g", torch.empty(self.n_vars))
+        self.register_buffer("m2_raw_g", torch.empty(self.n_vars))
         self.register_buffer("n", torch.empty(()))
         self.reset_parameters()
 
@@ -309,7 +332,7 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
         return delta1_ng, delta2_ng, updated_mean_g
 
     @torch.no_grad()
-    def forward(self, x_ng: torch.Tensor):
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         self.update(x_ng)
         return {}
 
@@ -400,10 +423,10 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm>`_.
     """
 
-    def __init__(self, n_vars, use_rank: bool = False):
-        super().__init__(n_vars=n_vars, use_rank=use_rank)
+    def __init__(self, var_names_g: np.ndarray, use_rank: bool = False):
+        super().__init__(var_names_g=var_names_g, use_rank=use_rank)
         self.c_gg: torch.Tensor
-        self.register_buffer("c_gg", torch.empty((n_vars, n_vars)))
+        self.register_buffer("c_gg", torch.empty((self.n_vars, self.n_vars)))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -411,7 +434,7 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         self.c_gg.zero_()
 
     @torch.no_grad()
-    def forward(self, x_ng: torch.Tensor):
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
         Updates sufficient statistics for both raw and rank-based (Spearman) correlations.
 

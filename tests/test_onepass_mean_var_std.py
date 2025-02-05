@@ -155,8 +155,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g, atol=1e-6)
     if algorithm == "shifted_data":
-        assert model.x_shift is not None and loaded_model.x_shift is not None
-        np.testing.assert_allclose(model.x_shift, loaded_model.x_shift, atol=1e-6)
+        assert model.x_shift_g is not None and loaded_model.x_shift_g is not None
+        np.testing.assert_allclose(model.x_shift_g, loaded_model.x_shift_g, atol=1e-6)
     assert model.algorithm == loaded_model.algorithm
 
 
