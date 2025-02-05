@@ -278,7 +278,8 @@ def compute_ranks(x_ng: torch.Tensor) -> torch.Tensor:
     Breaks ties by first come first ranked.
     Ranks start from 1.
     """
-    return torch.argsort(torch.argsort(x_ng, dim=0), dim=0).float() + 1
+    ranks_ng = torch.argsort(torch.argsort(x_ng, dim=0), dim=0).float() + 1
+    return ranks_ng
 
 
 class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
@@ -305,6 +306,8 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
     def __init__(self, var_names_g: np.ndarray, use_rank: bool = False, reset_parameters: bool = True):
         super().__init__(var_names_g=var_names_g)
         self.use_rank = use_rank
+        if use_rank:
+            raise NotImplementedError("Rank-based statistics are not yet passing tests.")
         self.mean_stat_g: torch.Tensor
         self.m2_g: torch.Tensor
         self.n: torch.Tensor
@@ -333,9 +336,6 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
             delta2_ng: Difference between the raw values and the updated mean
             updated_mean_g: Updated mean
         """
-        if self.use_rank:
-            x_ng = compute_ranks(x_ng)
-
         batch_size = torch.tensor(x_ng.shape[0])
         gathered_batch_size_list = self._gather_tensor_list(batch_size)
         self.n = self.n + sum(gathered_batch_size_list)
@@ -362,6 +362,9 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
 
     @torch.no_grad()
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+        if self.use_rank:
+            x_ng = compute_ranks(x_ng)
+
         self.update(x_ng)
         return {}
 
@@ -484,6 +487,9 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         Args:
             x_ng: (num_cells, num_genes) matrix of raw values
         """
+        if self.use_rank:
+            x_ng = compute_ranks(x_ng)
+
         n = torch.tensor(x_ng.shape[0])
         delta1_ng, delta2_ng, updated_mean_g = super().update(x_ng)
         c_update_gg = delta1_ng.T @ delta2_ng
@@ -526,9 +532,6 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         Args:
             use_rank (bool): Whether to use rank-based statistics
         """
-        if self.n <= 1:
-            return torch.zeros((self.n_vars, self.n_vars))
-
         cov_gg = self.covariance_gg
         assert isinstance(cov_gg, torch.Tensor)
         var_g = torch.diag(cov_gg).clamp(min=1e-12)
