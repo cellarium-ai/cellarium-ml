@@ -14,6 +14,14 @@ def convert_glob_to_regex(f: str) -> re.Pattern:
     return re.compile(fnmatch.translate(f))
 
 
+class glob_expression_param_filter:
+    def __init__(self, param_filters: list[re.Pattern]) -> None:
+        self.param_filters = param_filters
+
+    def __call__(self, name: str) -> bool:
+        return any(filter.fullmatch(name) for filter in self.param_filters)
+
+
 def make_param_filter(param_filter: str | list[str]) -> Callable[[str], bool]:
     """
     Returns the corresponding filter for parameters for the given `param_filter`.
@@ -34,10 +42,7 @@ def make_param_filter(param_filter: str | list[str]) -> Callable[[str], bool]:
         )
     )
 
-    def glob_expression_param_filter(name: str) -> bool:
-        return any(filter.fullmatch(name) for filter in param_filters)
-
-    return glob_expression_param_filter
+    return glob_expression_param_filter(param_filters)
 
 
 class LRAdjustmentGroup:

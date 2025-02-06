@@ -144,9 +144,9 @@ def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
         Numpy array.
     """
     if isinstance(x, pd.DataFrame):
-        return x.apply(lambda col: col.cat.codes).to_numpy()
+        return x.apply(lambda col: col.cat.codes).to_numpy(dtype=np.int32)
     else:
-        return np.asarray(x.cat.codes)
+        return np.asarray(x.cat.codes, dtype=np.int32)
 
 
 def get_categories(x: pd.Series) -> np.ndarray:
