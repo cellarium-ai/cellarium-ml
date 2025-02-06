@@ -4,6 +4,7 @@
 """Utility functions for working with gene sets."""
 
 import io
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -209,7 +210,11 @@ def permutation_test(
 #     )
 
 
-def compute_function_on_gene_sets(in_gset: set[str], gene_sets: dict[str, set[str]], func: str = "iou") -> pd.Series:
+def compute_function_on_gene_sets(
+    in_gset: set[str],
+    gene_sets: dict[str, set[str]],
+    func: Literal["iou", "intersection", "precision", "precision_recall", "f1"],
+) -> pd.Series:
     """
     Given a set of genes and a dictionary of gene sets, compute a function measuring something about the overlap
     between the input set and each predefined gene set.
@@ -248,10 +253,52 @@ def compute_function_on_gene_sets(in_gset: set[str], gene_sets: dict[str, set[st
     return pd.Series(results, name=func)
 
 
+def compute_function_on_gene_sets_given_clustering(
+    clustering: np.ndarray,
+    gene_names: np.ndarray | list[str],
+    reference_gene_sets: dict[str, set[str]],
+    metric_name: Literal["iou", "intersection", "precision", "precision_recall", "f1"],
+) -> pd.DataFrame:
+    """
+    Given gene cluster labels and a dictionary of reference gene sets, compute the best matching
+    reference gene set for each cluster and record the corresponding metric.
+
+    Args:
+        clustering: array of cluster labels
+        gene_names: array of gene names, same order as clustering
+        reference_gene_sets: dictionary of gene set names to set of gene names
+        metric_name: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1']
+
+    Returns:
+        DataFrame with columns ['cluster', 'reference_gene_set', metric_name]
+    """
+    assert len(clustering) == len(gene_names), "clustering and gene_names must have the same length"
+
+    # for each cluster, compute the best matching reference gene set and record its metric
+    best_metric_df = pd.DataFrame(columns=["cluster", "reference_gene_set", metric_name])
+    for k in np.unique(clustering):
+        # genes in this cluster
+        gene_set = gene_names[clustering == k]
+
+        # compute the metric for each reference gene set
+        metrics = compute_function_on_gene_sets(
+            in_gset=gene_set,
+            gene_sets=reference_gene_sets,
+            func=metric_name,
+        )
+
+        # record the best metric and the corresponding reference gene set name
+        best_metric_df = best_metric_df.append(
+            pd.DataFrame({"cluster": [k], "reference_gene_set": [metrics.idxmax()], metric_name: [metrics.max()]})
+        )
+
+    return best_metric_df
+
+
 def compute_top_gene_set_per_gene(
     neighbor_lookup: dict[str, set[str]],
     gene_sets: dict[str, set[str]],
-    func: str = "iou",
+    func: Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "iou",
 ) -> dict[str, str]:
     """
     For each gene in neighbor_lookup.keys(), compute the gene set with the highest metric over all the gene sets.

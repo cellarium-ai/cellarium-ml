@@ -6,7 +6,7 @@
 import logging
 import typing as t
 import warnings
-from functools import cached_property
+from functools import cached_property, lru_cache
 
 import colorcet as cc
 import igraph as ig
@@ -21,6 +21,11 @@ import scanpy as sc
 import torch
 from scipy.linalg import eigh
 from scipy.stats import linregress
+from skopt import gp_minimize
+
+from cellarium.ml.utilities.inference.gene_set_utils import (
+    compute_function_on_gene_sets_given_clustering,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set the logging level
@@ -53,6 +58,236 @@ def load_gene_info_table(
             gene_id_to_gene_symbol_map[gene_id] = gene_id
 
     return gene_info_df, gene_symbol_to_gene_id_map, gene_id_to_gene_symbol_map
+
+
+def compute_adjacency_matrix(
+    z_qp: np.ndarray,
+    adjacency_strategy: t.Literal[
+        "shifted_correlation", "unsigned_correlation", "positive_correlation", "positive_correlation_binary"
+    ],
+    n_neighbors: int | None = 50,
+    self_loop: bool = False,
+    **kwargs,
+) -> np.ndarray:
+    """Compute an adjacency matrix from a query-by-prompt gene matrix of values.
+
+    Args:
+        z_qp: query-by-prompt gene matrix of values
+        adjacency_strategy: adjacency strategy
+        n_neighbors: number of neighbors to keep
+        self_loop: whether to include self-loops
+        **kwargs: additional keyword arguments
+            beta: power for correlation
+            tau: threshold for binary adjacency
+
+    Returns:
+        query-by-query adjacency matrix for genes
+    """
+    if adjacency_strategy == "shifted_correlation":
+        assert "beta" in kwargs, "Must provide beta for shifted correlation"
+        beta = kwargs["beta"]
+        a_qq = np.power(0.5 * (1 + np.dot(z_qp, z_qp.T)), beta)
+    elif adjacency_strategy == "unsigned_correlation":
+        assert "beta" in kwargs, "Must provide beta for unsigned correlation"
+        beta = kwargs["beta"]
+        a_qq = np.power(np.abs(np.dot(z_qp, z_qp.T)), beta)
+    elif adjacency_strategy == "positive_correlation":
+        assert "beta" in kwargs, "Must provide beta for positive correlation"
+        beta = kwargs["beta"]
+        a_qq = np.power(np.maximum(0, np.dot(z_qp, z_qp.T)), beta)
+    elif adjacency_strategy == "positive_correlation_binary":
+        assert n_neighbors is None, "n_neighbors must be None for binary adjacency"
+        assert "tau" in kwargs, "Must provide correlation threshold for binary adjacency"
+        tau = kwargs["tau"]
+        a_qq = (np.maximum(0, np.dot(z_qp, z_qp.T)) > tau).astype(float)
+    else:
+        raise ValueError("Invalid adjacency strategy")
+
+    assert np.isclose(a_qq, a_qq.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
+
+    if n_neighbors is not None:
+        assert n_neighbors > 0, "n_neighbors must be positive"
+        t_qq = np.argsort(a_qq, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
+
+        # make a mask for the top n_neighbors
+        _a_qq = np.zeros_like(a_qq)
+        for q in range(a_qq.shape[0]):
+            _a_qq[q, t_qq[q]] = a_qq[q, t_qq[q]]
+            _a_qq[t_qq[q], q] = a_qq[t_qq[q], q]
+    else:
+        _a_qq = a_qq
+    a_qq = _a_qq
+
+    if not self_loop:
+        np.fill_diagonal(a_qq, 0)
+
+    return a_qq
+
+
+def compute_igraph_from_adjacency(a_qq: np.ndarray, node_names: list[str], directed: bool = False) -> ig.Graph:
+    """
+    Convert an adjacency matrix to an igraph graph.
+
+    Args:
+        a_qq: (gene-gene) adjacency matrix
+        node_names: names of the nodes (gene names)
+        directed: whether the graph is directed
+
+    Returns:
+        igraph graph
+    """
+    assert len(node_names) == a_qq.shape[0], (
+        f"Number of node names ({len(node_names)}) must match adjacency matrix shape ({a_qq.shape[0]})"
+    )
+    assert a_qq.shape[0] == a_qq.shape[1], "Adjacency matrix must be square"
+    sources, targets = a_qq.nonzero()
+    weights = a_qq[sources, targets]
+    g = ig.Graph(directed=directed)
+    g.add_vertices(node_names)
+    g.add_edges(list(zip(sources, targets)))
+    g.es["weight"] = weights
+    return g
+
+
+def compute_leiden_communites(
+    g: ig.Graph,
+    resolution: float = 3.0,
+    min_community_size: int = 2,
+) -> np.ndarray:
+    """
+    Compute Leiden communities from an igraph graph by running leidenalg with RBConfigurationVertexPartition.
+
+    Args:
+        g: igraph graph
+        resolution: resolution parameter
+        min_community_size: minimum community size
+
+    Returns:
+        array of community memberships
+    """
+
+    leiden_partition = leidenalg.find_partition(
+        g, leidenalg.RBConfigurationVertexPartition, resolution_parameter=resolution
+    )
+    leiden_membership = np.array(leiden_partition.membership)
+
+    # optionally remove small communities
+    if min_community_size > 1:
+        n_leiden = len(np.unique(leiden_membership))
+        sizes = np.array([np.sum(leiden_membership == i) for i in range(n_leiden)])
+        for i_leiden in range(n_leiden):
+            if sizes[i_leiden] < min_community_size:
+                leiden_membership[leiden_membership == i_leiden] = -1
+
+    return leiden_membership
+
+
+def mde_embedding(
+    z_qp: np.ndarray,
+    n_neighbors: int = 7,
+    repulsive_fraction: int = 5,
+    attractive_penalty: pymde.functions.function.Function = pymde.penalties.Log1p,
+    repulsive_penalty: pymde.functions.function.Function = pymde.penalties.InvPower,
+    device: torch.device = torch.device("cpu"),
+    max_iter: int = 500,
+    verbose: bool = True,
+    **kwargs,
+) -> np.ndarray:
+    """
+    Run pymde to compute a 2-dimensional MDE embedding.
+
+    Args:
+        passthroughs to pymde
+
+    Returns:
+        2-dimensional MDE embedding
+    """
+    mde = pymde.preserve_neighbors(
+        z_qp,
+        device=device,
+        verbose=verbose,
+        n_neighbors=n_neighbors,
+        repulsive_fraction=repulsive_fraction,
+        attractive_penalty=attractive_penalty,
+        repulsive_penalty=repulsive_penalty,
+        **kwargs,
+    )
+    embedding_q2 = mde.embed(verbose=verbose, max_iter=max_iter).cpu().numpy()
+    return embedding_q2
+
+
+def mde_embedding_replogle(
+    z_qp: np.ndarray,
+    embedding_dimension: int = 2,
+    do_row_zscore: bool = True,
+    do_gene_zscore_preprocessing: bool = False,
+    spectral_embedding_kwargs: dict = dict(
+        n_components=20, affinity="nearest_neighbors", n_neighbors=7, eigen_solver="arpack"
+    ),
+    mde_kwargs: dict = dict(device="cuda", embedding_dim=2, n_neighbors=7, repulsive_fraction=5, verbose=True),
+    scaling_max_value: float = 10.0,
+) -> np.ndarray:
+    """
+    Compute a minimal distortion embedding of a dataset, following the recipe from Replogle et al. [1].
+
+    Args:
+        adata: AnnData object
+        layer: layer in adata.layers to use
+        embedding_dimension: dimension of the embedding
+        do_row_zscore: whether to z-score rows just before computing the spectral embedding, as in [1]
+        do_gene_zscore_preprocessing: whether to z-score genes as a preprocessing step (this should be done
+            per batch. if already done in adata.layers[layer], set to False)
+        spectral_embedding_kwargs: keyword arguments for SpectralEmbedding
+        mde_kwargs: keyword arguments for pymde.preserve_neighbors
+        scaling_max_value: maximum value when scaling the data
+
+    References:
+    [1] Replogle, Joseph M. et al. Mapping information-rich genotype-phenotype landscapes with genome-scale Perturb-seq.
+        Cell, Volume 185, Issue 14, 2559 - 2575.e28
+    """
+
+    try:
+        import pymde
+    except ImportError:
+        raise ImportError("pymde must be installed to run compute_mde. do `pip install pymde`")
+
+    try:
+        from sklearn.manifold import SpectralEmbedding
+    except ImportError:
+        raise ImportError("scikit-learn must be installed to run compute_mde. do `pip install scikit-learn`")
+
+    # handle embedding dimension
+    if "n_components" in spectral_embedding_kwargs:
+        print("WARNING: ignoring n_components in spectral_embedding_kwargs and replacing with embedding_dimension")
+    spectral_embedding_kwargs["n_components"] = embedding_dimension
+
+    if "embedding_dim" in mde_kwargs:
+        print("WARNING: ignoring embedding_dim in mde_kwargs and replacing with embedding_dimension")
+    mde_kwargs["embedding_dim"] = embedding_dimension
+
+    adata = sc.AnnData(X=z_qp)
+
+    # z-score each gene (this is the original scaling of the data done in replogle... per batch)
+    if do_gene_zscore_preprocessing:
+        sc.pp.scale(adata, zero_center=True, max_value=scaling_max_value)
+
+    # as per replogle, scale rows (so that euclidean distance becomes proportional to correlation)
+    if do_row_zscore:
+        adata.X = sc.pp.scale(adata.X.transpose(), max_value=scaling_max_value, zero_center=True).transpose()
+    x = adata.X.copy()
+    adata.obsm["X_moderated"] = x.copy()
+
+    # spectral embedding for initialization (Replogle does 20 dimensions)
+    np.random.seed(0)
+    se = SpectralEmbedding(**spectral_embedding_kwargs).fit_transform(x)
+
+    # minimal distortion embedding
+    pymde.seed(0)
+    mde = pymde.preserve_neighbors(x, **mde_kwargs)  # MDE runs on the actual data
+    x_init = torch.tensor(se).contiguous()  # .contiguous() sidesteps a bug
+    embedding = mde.embed(X=x_init, verbose=True)  # uses the spectral embedding as initialization
+
+    return embedding.detach().cpu().numpy()
 
 
 class GeneNetworkAnalysisBase:
@@ -93,7 +328,20 @@ class GeneNetworkAnalysisBase:
             gene_info_tsv_path, query_var_names + prompt_var_names
         )
 
-        self.processed = False
+        self.processed: bool = False
+
+        # processed data
+        self.z_qp: np.ndarray | None = None
+
+        # adj
+        self.a_qq: np.ndarray | None = None
+
+        # leiden
+        self.leiden_membership: np.ndarray | None = None
+
+        # spectral analysis
+        self.eigs: np.ndarray | None = None
+        self.spectral_dim: np.ndarray | None = None
 
     @property
     def cell_type(self) -> str:
@@ -165,6 +413,7 @@ class GeneNetworkAnalysisBase:
 
         # linear proportional activation
         self.z_qp = self.response_qp * (z_p[None, :] + eps) / (z_q[:, None] + eps)
+        assert isinstance(self.z_qp, np.ndarray)
 
         if self.verbose:
             logger.info(f"Maximum value of z_qp: {np.max(self.z_qp):.3f}")
@@ -210,21 +459,12 @@ class GeneNetworkAnalysisBase:
             raise ValueError("Invalid feature normalization strategy")
 
         # clip features
+        assert isinstance(self.z_qp, np.ndarray)
         self.z_qp[np.isnan(self.z_qp)] = 0.0
         self.z_qp[np.isinf(self.z_qp)] = 0.0
         self.z_qp = np.clip(self.z_qp, -feature_max_value, feature_max_value)
 
         self.processed = True
-
-        # adj
-        self.a_qq: np.ndarray | None = None
-
-        # leiden
-        self.leiden_membership: np.ndarray | None = None
-
-        # spectral analysis
-        self.eigs: np.ndarray | None = None
-        self.spectral_dim: np.ndarray | None = None
 
     def compute_adjacency_matrix(
         self,
@@ -235,77 +475,36 @@ class GeneNetworkAnalysisBase:
         self_loop: bool = False,
         **kwargs,
     ) -> None:
-        if adjacency_strategy == "shifted_correlation":
-            assert "beta" in kwargs, "Must provide beta for shifted correlation"
-            beta = kwargs["beta"]
-            a_qq = np.power(0.5 * (1 + np.dot(self.z_qp, self.z_qp.T)), beta)
-        elif adjacency_strategy == "unsigned_correlation":
-            assert "beta" in kwargs, "Must provide beta for unsigned correlation"
-            beta = kwargs["beta"]
-            a_qq = np.power(np.abs(np.dot(self.z_qp, self.z_qp.T)), beta)
-        elif adjacency_strategy == "positive_correlation":
-            assert "beta" in kwargs, "Must provide beta for positive correlation"
-            beta = kwargs["beta"]
-            a_qq = np.power(np.maximum(0, np.dot(self.z_qp, self.z_qp.T)), beta)
-        elif adjacency_strategy == "positive_correlation_binary":
-            assert n_neighbors is None, "n_neighbors must be None for binary adjacency"
-            assert "tau" in kwargs, "Must provide correlation threshold for binary adjacency"
-            tau = kwargs["tau"]
-            a_qq = (np.maximum(0, np.dot(self.z_qp, self.z_qp.T)) > tau).astype(float)
-        else:
-            raise ValueError("Invalid adjacency strategy")
-
-        assert np.isclose(a_qq, a_qq.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
-
-        if n_neighbors is not None:
-            assert n_neighbors > 0, "n_neighbors must be positive"
-            t_qq = np.argsort(a_qq, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
-
-            # make a mask for the top n_neighbors
-            _a_qq = np.zeros_like(a_qq)
-            for q in range(a_qq.shape[0]):
-                _a_qq[q, t_qq[q]] = a_qq[q, t_qq[q]]
-                _a_qq[t_qq[q], q] = a_qq[t_qq[q], q]
-        else:
-            _a_qq = a_qq
-        a_qq = _a_qq
-
-        if not self_loop:
-            np.fill_diagonal(a_qq, 0)
-
+        assert isinstance(self.z_qp, np.ndarray), "Must call obj.process() before computing adjacency matrix"
+        a_qq = compute_adjacency_matrix(
+            z_qp=self.z_qp,
+            adjacency_strategy=adjacency_strategy,
+            n_neighbors=n_neighbors,
+            self_loop=self_loop,
+            **kwargs,
+        )
         self.a_qq = a_qq
 
-    def _compute_igraph_from_adjacency(self, directed: bool = False) -> ig.Graph:
+    @lru_cache(maxsize=2)
+    def igraph(self, directed: bool = False) -> ig.Graph:
         assert self.a_qq is not None, "Must compute adjacency matrix first by calling obj.compute_adjacency_matrix()"
+        return compute_igraph_from_adjacency(
+            a_qq=self.a_qq,
+            node_names=self.query_var_names,
+            directed=directed,
+        )
 
-        sources, targets = self.a_qq.nonzero()
-        weights = self.a_qq[sources, targets]
-        g = ig.Graph(directed=directed)
-        g.add_vertices(self.a_qq.shape[0])  # this adds adjacency.shape[0] vertices
-        g.add_edges(list(zip(sources, targets)))
-        g.es["weight"] = weights
-        return g
-
+    @lru_cache(maxsize=30)
     def compute_leiden_communites(
         self,
         resolution: float = 3.0,
         min_community_size: int = 2,
     ):
-        g = self._compute_igraph_from_adjacency()
-
-        leiden_partition = leidenalg.find_partition(
-            g, leidenalg.RBConfigurationVertexPartition, resolution_parameter=resolution
+        self.leiden_membership = compute_leiden_communites(
+            g=self.igraph(),
+            resolution=resolution,
+            min_community_size=min_community_size,
         )
-
-        self.leiden_membership = np.array(leiden_partition.membership)
-
-        # remove small communities
-        assert self.leiden_membership is not None  # mypy
-        n_leiden = len(np.unique(self.leiden_membership))
-        sizes = np.array([np.sum(self.leiden_membership == i) for i in range(n_leiden)])
-        for i_leiden in range(n_leiden):
-            if sizes[i_leiden] < min_community_size:
-                self.leiden_membership[self.leiden_membership == i_leiden] = -1
 
     def compute_spectral_dimension(self, offset: int = 2, n_lambda_for_estimation: int = 5) -> float:
         assert self.a_qq is not None, "Must compute adjacency matrix first"
@@ -350,18 +549,18 @@ class GeneNetworkAnalysisBase:
         verbose: bool = True,
         **kwargs,
     ):
-        mde = pymde.preserve_neighbors(
+        assert isinstance(self.z_qp, np.ndarray), "Must call obj.process() before computing MDE embedding"
+        self.embedding_q2 = mde_embedding(
             self.z_qp,
-            device=device,
-            verbose=verbose,
             n_neighbors=n_neighbors,
             repulsive_fraction=repulsive_fraction,
             attractive_penalty=attractive_penalty,
             repulsive_penalty=repulsive_penalty,
+            device=device,
+            max_iter=max_iter,
+            verbose=verbose,
             **kwargs,
         )
-
-        self.embedding_q2 = mde.embed(verbose=verbose, max_iter=max_iter).cpu().numpy()
 
     def plot_mde_embedding(
         self,
@@ -445,7 +644,181 @@ class GeneNetworkAnalysisBase:
         ax.legend()
 
 
-class JacobianContext(GeneNetworkAnalysisBase):
+class ValidationMixin:
+    """Mixin with methods for bio-inspired validation of gene networks."""
+
+    # make this mixin aware that these are defined in the base class (GeneNetworkAnalysisBase)
+    query_var_names: list[str]
+    compute_leiden_communites: t.Callable[..., np.ndarray]
+
+    def compute_network_concordance_metric(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        resolution_range: tuple[float, float] = (0.2, 8.0),
+        metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+    ) -> float:
+        """
+        Compute a metric for the overall concordance between the network in
+        GeneNetworkAnalysisBase.igraph() and reference gene sets defined by a dictionary.
+        Distills the bayesopt_optimal_resolution_communities_given_gene_sets() output
+        into a single concordance metric.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
+            resolution_range: range of Leiden clustering resolutions to consider, e.g. (0.2, 8.0)
+            metric_name: metric to use for concordance
+
+        Returns:
+            concordance value
+        """
+        _, _, best_metrics_df = self.bayesopt_optimal_resolution_communities_given_gene_sets(
+            reference_gene_sets=reference_gene_sets,
+            resolution_range=resolution_range,
+            metric_name=metric_name,
+        )
+
+        # distill a single number
+        return best_metrics_df[metric_name].mean()
+
+    def cluster_and_compute_metrics(
+        self,
+        resolution: float,
+        reference_gene_sets: dict[str, set[str]],
+        metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"],
+    ) -> tuple[np.ndarray, pd.DataFrame]:
+        """
+        Run Leiden clustering on the network and compute the mean of a concordance metric
+        over reference gene sets.
+
+        Args:
+            resolution: Leiden resolution
+            reference_gene_sets: dictionary of reference gene sets
+            metric_name: metric to use for concordance
+
+        Returns:
+            (Leiden clustering, DataFrame of best reference gene set metrics for all clusters)
+        """
+
+        # compute the Leiden clustering
+        clustering = self.compute_leiden_communites(resolution=resolution)
+
+        # compute the best reference gene set for each cluster and record the metric
+        metrics_df = compute_function_on_gene_sets_given_clustering(
+            clustering=clustering,
+            gene_names=self.query_var_names,
+            reference_gene_sets=reference_gene_sets,
+            metric_name=metric_name,
+        )
+
+        return clustering, metrics_df
+
+    def gridsearch_optimal_resolution_communities_given_gene_sets(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        resolutions: list[float] | np.ndarray,
+        metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+    ) -> tuple[float, np.ndarray, pd.DataFrame]:
+        """
+        Compute an "optimal" Leiden clustering by choosing the Leiden resolution by
+        maximizing the mean of a concordance metric over reference gene sets.
+        Optimization is performed by grid search over the input resolutions.
+        The resolution which results in the best concordance with the reference gene sets
+        is chosen and used to compute the Leiden communities.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets
+            resolutions: list of resolutions to consider, e.g. np.linspace(0.5, 5.0, 20)
+            metric_name: metric to use for concordance
+
+        Returns:
+            (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics)
+        """
+        mean_metrics_df = pd.DataFrame(columns=["resolution", "mean_of_best_match_metric"])
+
+        for res in resolutions:
+            _, metrics_df = self.cluster_and_compute_metrics(
+                resolution=res,
+                reference_gene_sets=reference_gene_sets,
+                metric_name=metric_name,
+            )
+            mean_metric = metrics_df[metric_name].mean()
+
+            # mean of best matches over all clusters in clustering
+            mean_metrics_df = mean_metrics_df.append(
+                pd.DataFrame({"resolution": [res], "mean_of_best_match_metric": [mean_metric]})
+            )
+
+        # choose the resolution with the highest mean metric
+        best_resolution = mean_metrics_df["resolution"][mean_metrics_df["mean_of_best_match_metric"].idxmax()]
+
+        # re-compute the Leiden clustering at the best resolution (cached) and metrics
+        best_clustering, best_metrics_df = self.cluster_and_compute_metrics(
+            resolution=best_resolution,
+            reference_gene_sets=reference_gene_sets,
+            metric_name=metric_name,
+        )
+
+        # return the best resolution and the Leiden communities
+        return best_resolution, best_clustering, best_metrics_df
+
+    def bayesopt_optimal_resolution_communities_given_gene_sets(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        resolution_range: tuple[float, float] = (0.2, 10.0),
+        num_clusterings_to_compute: int = 10,
+        metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+    ) -> tuple[float, np.ndarray, pd.DataFrame]:
+        """
+        Compute an "optimal" Leiden clustering by choosing the Leiden resolution by
+        maximizing the mean of a concordance metric over reference gene sets.
+        Optimization is performed by Bayesian optimization over the input resolution range.
+        The resolution which results in the best concordance with the reference gene sets
+        is chosen and used to compute the Leiden communities.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets
+            resolution_range: range of resolutions to consider, e.g. (-2.0, 2.0)
+            num_clusterings_to_compute: number of clusterings to compute during optimization
+            metric_name: metric to use for concordance
+
+        Returns:
+            (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics)
+        """
+        assert num_clusterings_to_compute >= 10, "num_clusterings_to_compute must be >= 10"
+
+        # function to be minimized
+        def _compute_inv_mean_metric(resolution: float) -> float:
+            _, metrics_df = self.cluster_and_compute_metrics(
+                resolution=resolution,
+                reference_gene_sets=reference_gene_sets,
+                metric_name=metric_name,
+            )
+            return -1 * metrics_df[metric_name].mean()
+
+        # use scikit-optimize Bayesian optimization to find the best resolution
+        res = gp_minimize(
+            _compute_inv_mean_metric,
+            [resolution_range],
+            acq_func="EI",
+            n_calls=num_clusterings_to_compute - 5,
+            n_initial_points=5,
+            initial_point_generatorstr="random",
+            random_state=1234,
+        )
+        best_resolution = res.x[0]
+
+        # re-compute the Leiden clustering at the best resolution (cached) and metrics
+        best_clustering, best_metrics_df = self.cluster_and_compute_metrics(
+            resolution=best_resolution,
+            reference_gene_sets=reference_gene_sets,
+            metric_name=metric_name,
+        )
+
+        # return the best resolution and the Leiden communities
+        return best_resolution, best_clustering, best_metrics_df
+
+
+class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
     def __init__(
         self,
         adata_obs: pd.DataFrame,
