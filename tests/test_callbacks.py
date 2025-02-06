@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from lightning.pytorch.strategies import FSDPStrategy
+from torch.distributed.fsdp.fully_sharded_data_parallel import ShardingStrategy
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.callbacks import ComputeNorm, LossScaleMonitor
@@ -57,7 +58,7 @@ def test_loss_scale_monitor(tmp_path: Path):
     trainer.fit(module, train_dataloaders=train_loader)
 
 
-def test_compute_norm(tmp_path: Path):
+def test_compute_norm():
     n, g = 4, 3
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
     y_categories = np.array(["a", "b"])
@@ -80,20 +81,28 @@ def test_compute_norm(tmp_path: Path):
         log_metrics=False,
     )
     module = CellariumModule(model=model, optim_fn=torch.optim.Adam, optim_kwargs={"lr": 1e-3})
+    logger = PandasLogger()
     # trainer
     trainer = pl.Trainer(
         accelerator="cpu",
         devices=1,
+        logger=logger,
         callbacks=[ComputeNorm()],
         max_epochs=1,
         log_every_n_steps=1,
-        default_root_dir=tmp_path,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        enable_progress_bar=False,
     )
     # fit
     trainer.fit(module, train_dataloaders=train_loader)
 
+    assert not logger.df.empty
 
-def test_compute_norm_multi_device(tmp_path: Path):
+
+@pytest.mark.skipif(not USE_CUDA, reason="requires_cuda")
+@pytest.mark.parametrize("sharding_strategy", [ShardingStrategy.NO_SHARD, ShardingStrategy.FULL_SHARD])
+def test_compute_norm_multi_device(sharding_strategy: ShardingStrategy):
     devices = int(os.environ.get("TEST_DEVICES", "1"))
 
     # dataset
@@ -133,7 +142,9 @@ def test_compute_norm_multi_device(tmp_path: Path):
         callbacks=[ComputeNorm()],
         max_epochs=1,
         log_every_n_steps=1,
-        default_root_dir=tmp_path,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        enable_progress_bar=False,
     )
     # fit
     trainer.fit(module, train_dataloaders=train_loader)
@@ -154,13 +165,15 @@ def test_compute_norm_multi_device(tmp_path: Path):
     # trainer
     trainer = pl.Trainer(
         accelerator="gpu",
-        strategy=FSDPStrategy(sharding_strategy="NO_SHARD"),
+        strategy=FSDPStrategy(sharding_strategy=sharding_strategy),
         devices=devices,
         logger=logger_multi_device,
         callbacks=[ComputeNorm()],
         max_epochs=1,
         log_every_n_steps=1,
-        default_root_dir=tmp_path,
+        enable_checkpointing=False,
+        enable_model_summary=False,
+        enable_progress_bar=False,
     )
     # fit
     trainer.fit(module, datamodule)
