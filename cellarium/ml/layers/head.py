@@ -14,7 +14,7 @@ class MultiHeadReadout(nn.Module):
     Multi-head readout.
 
     Args:
-        categorical_vocab_sizes:
+        categorical_token_size_dict:
             Categorical token vocabulary sizes.
         d_model:
             Dimensionality of the embeddings and hidden states.
@@ -28,15 +28,15 @@ class MultiHeadReadout(nn.Module):
 
     def __init__(
         self,
-        categorical_vocab_sizes: dict[str, int],
+        categorical_token_size_dict: dict[str, int],
         d_model: int,
         use_bias: bool,
         output_logits_scale: float,
         heads_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
-        self.W = nn.ModuleDict(
-            {key: nn.Linear(d_model, vocab_size, use_bias) for key, vocab_size in categorical_vocab_sizes.items()}
+        self.readout_dict = nn.ModuleDict(
+            {key: nn.Linear(d_model, vocab_size, use_bias) for key, vocab_size in categorical_token_size_dict.items()}
         )
         self.output_logits_scale = output_logits_scale
         self.heads_initializer = heads_initializer
@@ -44,8 +44,8 @@ class MultiHeadReadout(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
-        for module in self.W.children():
-            assert isinstance(module.weight, torch.Tensor)
+        for module in self.readout_dict.children():
+            assert isinstance(module, nn.Linear)
             create_initializer(self.heads_initializer)(module.weight)
 
             if module.bias is not None:
@@ -61,4 +61,4 @@ class MultiHeadReadout(nn.Module):
         Returns:
             Dictionary of output logits tensors of shape ``(n, c, vocab_size)``.
         """
-        return {key: self.output_logits_scale * self.W[key](hidden_state_ncd) for key in self.W}
+        return {key: self.output_logits_scale * self.readout_dict[key](hidden_state_ncd) for key in self.readout_dict}
