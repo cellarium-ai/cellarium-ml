@@ -107,13 +107,13 @@ def compute_adjacency_matrix(
 
     if n_neighbors is not None:
         assert n_neighbors > 0, "n_neighbors must be positive"
-        t_qq = np.argsort(a_qq, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
+        t_qn = np.argsort(a_qq, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
 
         # make a mask for the top n_neighbors
         _a_qq = np.zeros_like(a_qq)
         for q in range(a_qq.shape[0]):
-            _a_qq[q, t_qq[q]] = a_qq[q, t_qq[q]]
-            _a_qq[t_qq[q], q] = a_qq[t_qq[q], q]
+            _a_qq[q, t_qn[q]] = a_qq[q, t_qn[q]]
+            _a_qq[t_qn[q], q] = a_qq[t_qn[q], q]
     else:
         _a_qq = a_qq
     a_qq = _a_qq
@@ -124,7 +124,9 @@ def compute_adjacency_matrix(
     return a_qq
 
 
-def compute_igraph_from_adjacency(a_qq: np.ndarray, node_names: list[str], directed: bool = False) -> ig.Graph:
+def compute_igraph_from_adjacency(
+    a_qq: np.ndarray, node_names: list[str] | np.ndarray, directed: bool = False
+) -> ig.Graph:
     """
     Convert an adjacency matrix to an igraph graph.
 
@@ -290,7 +292,109 @@ def mde_embedding_replogle(
     return embedding.detach().cpu().numpy()
 
 
-class GeneNetworkAnalysisBase:
+class NetworkAnalysisBase:
+    def __init__(self, z_qp: np.ndarray, node_names_q: list[str] | np.ndarray):
+        assert z_qp.shape[0] == len(node_names_q), "Number of node names must match the first dimension of z_qp"
+        self.z_qp = z_qp
+        self.node_names_q = node_names_q
+
+        # network
+        self.a_qq: np.ndarray | None = None  # adjacency matrix
+        self.leiden_membership: np.ndarray | None = None
+
+        # spectral analysis
+        self.eigs: np.ndarray | None = None
+        self.spectral_dim: np.ndarray | None = None
+
+    @property
+    def adjacency_matrix(self) -> np.ndarray:
+        if self.a_qq is None:
+            raise UserWarning("Compute adjacency matrix by calling obj.compute_adjacency_matrix()")
+        return self.a_qq
+
+    @property
+    def leiden_communities(self) -> np.ndarray:
+        if self.leiden_membership is None:
+            raise UserWarning("Compute Leiden clustering by calling obj.compute_leiden_communites()")
+        return self.leiden_membership
+
+    def compute_adjacency_matrix(
+        self,
+        adjacency_strategy: t.Literal[
+            "shifted_correlation", "unsigned_correlation", "positive_correlation", "positive_correlation_binary"
+        ],
+        n_neighbors: int | None = 50,
+        self_loop: bool = False,
+        **kwargs,
+    ) -> np.ndarray:
+        a_qq = compute_adjacency_matrix(
+            z_qp=self.z_qp,
+            adjacency_strategy=adjacency_strategy,
+            n_neighbors=n_neighbors,
+            self_loop=self_loop,
+            **kwargs,
+        )
+        self.a_qq = a_qq
+        return a_qq
+
+    @lru_cache(maxsize=2)
+    def igraph(self, directed: bool = False) -> ig.Graph:
+        if self.a_qq is None:
+            raise UserWarning("Compute adjacency matrix first by calling obj.compute_adjacency_matrix()")
+        return compute_igraph_from_adjacency(
+            a_qq=self.a_qq,
+            node_names=self.node_names_q,
+            directed=directed,
+        )
+
+    @lru_cache(maxsize=30)
+    def compute_leiden_communites(
+        self,
+        resolution: float = 3.0,
+        min_community_size: int = 2,
+    ) -> np.ndarray:
+        self.leiden_membership = compute_leiden_communites(
+            g=self.igraph(),
+            resolution=resolution,
+            min_community_size=min_community_size,
+        )
+        return self.leiden_membership
+
+    def compute_spectral_dimension(self, offset: int = 2, n_lambda_for_estimation: int = 5) -> float:
+        if self.a_qq is None:
+            raise UserWarning("Compute adjacency matrix first by calling obj.compute_adjacency_matrix()")
+
+        # calculate normalized laplacian and its eigenvalues
+        norm_q = 1.0 / (1e-9 + np.sqrt(self.a_qq.sum(0)))
+        lap_qq = np.eye(self.a_qq.shape[0]) - norm_q[:, None] * norm_q[None, :] * self.a_qq
+        eigs = eigh(lap_qq.astype(np.float64), eigvals_only=True)
+        eigs[0] = 0
+        eigs = np.clip(eigs, 0, np.inf)  # roundoff error guardrail
+        self.eigs = eigs
+
+        n_lambda = np.cumsum(eigs)
+        n_lambda = n_lambda / n_lambda[-1]
+        first_nonzero = np.where(eigs > 0)[0][0] + offset
+        xx = np.log(eigs[first_nonzero : first_nonzero + n_lambda_for_estimation])
+        yy = np.log(n_lambda[first_nonzero : first_nonzero + n_lambda_for_estimation])
+
+        lin = linregress(xx, yy)
+        slope, intercept = lin.slope, lin.intercept
+
+        # save a few thigs for later
+        spectral_dim = 2 * linregress(xx, yy).slope
+        self.spectral_dim = spectral_dim
+        self.eigs = eigs
+        self.n_lambda = n_lambda
+        self.log_eigs_asymptotic = xx
+        self.log_n_lambda_asymptotic = yy
+        self.spectral_dim_slope = slope
+        self.spectral_dim_intercept = intercept
+
+        return float(spectral_dim)
+
+
+class GeneNetworkAnalysisBase(NetworkAnalysisBase):
     def __init__(
         self,
         adata_obs: pd.DataFrame,
@@ -302,6 +406,13 @@ class GeneNetworkAnalysisBase:
         prompt_marginal_std_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
+        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
+        min_prompt_gene_tpm: float = 10.0,
+        min_query_gene_tpm: float = 10.0,
+        query_response_amp_min_pct: float | None = None,
+        feature_max_value: float = 10.0,
+        eps: float = 1e-8,
         verbose: bool = True,
     ):
         self.verbose = verbose
@@ -328,20 +439,17 @@ class GeneNetworkAnalysisBase:
             gene_info_tsv_path, query_var_names + prompt_var_names
         )
 
-        self.processed: bool = False
+        self._process(
+            response_normalization_strategy=response_normalization_strategy,
+            feature_normalization_strategy=feature_normalization_strategy,
+            min_prompt_gene_tpm=min_prompt_gene_tpm,
+            min_query_gene_tpm=min_query_gene_tpm,
+            query_response_amp_min_pct=query_response_amp_min_pct,
+            feature_max_value=feature_max_value,
+            eps=eps,
+        )
 
-        # processed data
-        self.z_qp: np.ndarray | None = None
-
-        # adj
-        self.a_qq: np.ndarray | None = None
-
-        # leiden
-        self.leiden_membership: np.ndarray | None = None
-
-        # spectral analysis
-        self.eigs: np.ndarray | None = None
-        self.spectral_dim: np.ndarray | None = None
+        super().__init__(z_qp=self.z_qp, node_names_q=query_var_names)
 
     @property
     def cell_type(self) -> str:
@@ -377,7 +485,6 @@ class GeneNetworkAnalysisBase:
 
     @cached_property
     def query_gene_id_to_idx_map(self) -> dict[str, int]:
-        assert self.processed, "Must process before accessing"
         return {gene_id: idx for idx, gene_id in enumerate(self.query_var_names)}
 
     def __str__(self) -> str:
@@ -388,7 +495,7 @@ class GeneNetworkAnalysisBase:
 
     __repr__ = __str__
 
-    def process(
+    def _process(
         self,
         response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
         feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
@@ -398,7 +505,6 @@ class GeneNetworkAnalysisBase:
         feature_max_value: float = 10.0,
         eps: float = 1e-8,
     ) -> None:
-        assert not self.processed, "Already processed -- please create a new instance"
         if response_normalization_strategy == "mean":
             z_p = self.prompt_marginal_mean_p
             z_q = self.query_marginal_mean_q
@@ -463,80 +569,6 @@ class GeneNetworkAnalysisBase:
         self.z_qp[np.isnan(self.z_qp)] = 0.0
         self.z_qp[np.isinf(self.z_qp)] = 0.0
         self.z_qp = np.clip(self.z_qp, -feature_max_value, feature_max_value)
-
-        self.processed = True
-
-    def compute_adjacency_matrix(
-        self,
-        adjacency_strategy: t.Literal[
-            "shifted_correlation", "unsigned_correlation", "positive_correlation", "positive_correlation_binary"
-        ],
-        n_neighbors: int | None = 50,
-        self_loop: bool = False,
-        **kwargs,
-    ) -> None:
-        assert isinstance(self.z_qp, np.ndarray), "Must call obj.process() before computing adjacency matrix"
-        a_qq = compute_adjacency_matrix(
-            z_qp=self.z_qp,
-            adjacency_strategy=adjacency_strategy,
-            n_neighbors=n_neighbors,
-            self_loop=self_loop,
-            **kwargs,
-        )
-        self.a_qq = a_qq
-
-    @lru_cache(maxsize=2)
-    def igraph(self, directed: bool = False) -> ig.Graph:
-        assert self.a_qq is not None, "Must compute adjacency matrix first by calling obj.compute_adjacency_matrix()"
-        return compute_igraph_from_adjacency(
-            a_qq=self.a_qq,
-            node_names=self.query_var_names,
-            directed=directed,
-        )
-
-    @lru_cache(maxsize=30)
-    def compute_leiden_communites(
-        self,
-        resolution: float = 3.0,
-        min_community_size: int = 2,
-    ):
-        self.leiden_membership = compute_leiden_communites(
-            g=self.igraph(),
-            resolution=resolution,
-            min_community_size=min_community_size,
-        )
-
-    def compute_spectral_dimension(self, offset: int = 2, n_lambda_for_estimation: int = 5) -> float:
-        assert self.a_qq is not None, "Must compute adjacency matrix first"
-
-        # calculate normalized laplacian and its eigenvalues
-        norm_q = 1.0 / (1e-9 + np.sqrt(self.a_qq.sum(0)))
-        lap_qq = np.eye(self.a_qq.shape[0]) - norm_q[:, None] * norm_q[None, :] * self.a_qq
-        eigs = eigh(lap_qq.astype(np.float64), eigvals_only=True)
-        eigs[0] = 0
-        eigs = np.clip(eigs, 0, np.inf)  # roundoff error guardrail
-        self.eigs = eigs
-
-        n_lambda = np.cumsum(eigs)
-        n_lambda = n_lambda / n_lambda[-1]
-        first_nonzero = np.where(eigs > 0)[0][0] + offset
-        xx = np.log(eigs[first_nonzero : first_nonzero + n_lambda_for_estimation])
-        yy = np.log(n_lambda[first_nonzero : first_nonzero + n_lambda_for_estimation])
-
-        lin = linregress(xx, yy)
-        slope, intercept = lin.slope, lin.intercept
-
-        # save a few thigs for later
-        spectral_dim = 2 * linregress(xx, yy).slope
-        self.spectral_dim = spectral_dim
-        self.eigs = eigs
-        self.n_lambda = n_lambda
-        self.log_eigs_asymptotic = xx
-        self.log_n_lambda_asymptotic = yy
-        self.spectral_dim_slope = slope
-        self.spectral_dim_intercept = intercept
-
-        return float(spectral_dim)
 
     def make_mde_embedding(
         self,
@@ -648,7 +680,7 @@ class ValidationMixin:
     """Mixin with methods for bio-inspired validation of gene networks."""
 
     # make this mixin aware that these are defined in the base class (GeneNetworkAnalysisBase)
-    query_var_names: list[str]
+    node_names_q: list[str] | np.ndarray
     compute_leiden_communites: t.Callable[..., np.ndarray]
 
     def compute_network_concordance_metric(
@@ -656,6 +688,7 @@ class ValidationMixin:
         reference_gene_sets: dict[str, set[str]],
         resolution_range: tuple[float, float] = (0.2, 8.0),
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+        optimization_strategy: t.Literal["gridsearch", "bayesopt"] = "bayesopt",
     ) -> float:
         """
         Compute a metric for the overall concordance between the network in
@@ -667,15 +700,27 @@ class ValidationMixin:
             reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
             resolution_range: range of Leiden clustering resolutions to consider, e.g. (0.2, 8.0)
             metric_name: metric to use for concordance
+            optimization_strategy: optimization strategy, either "gridsearch" or "bayesopt"
 
         Returns:
             concordance value
         """
-        _, _, best_metrics_df = self.bayesopt_optimal_resolution_communities_given_gene_sets(
-            reference_gene_sets=reference_gene_sets,
-            resolution_range=resolution_range,
-            metric_name=metric_name,
-        )
+        if optimization_strategy == "gridsearch":
+            _, _, best_metrics_df = self.gridsearch_optimal_resolution_communities_given_gene_sets(
+                reference_gene_sets=reference_gene_sets,
+                resolutions=np.linspace(*resolution_range, 20),
+                metric_name=metric_name,
+            )
+        elif optimization_strategy == "bayesopt":
+            _, _, best_metrics_df = self.bayesopt_optimal_resolution_communities_given_gene_sets(
+                reference_gene_sets=reference_gene_sets,
+                resolution_range=resolution_range,
+                metric_name=metric_name,
+            )
+        else:
+            raise ValueError("Invalid optimization strategy")
+
+        print(f"best_metrics_df:\n{best_metrics_df}")
 
         # distill a single number
         return best_metrics_df[metric_name].mean()
@@ -705,7 +750,7 @@ class ValidationMixin:
         # compute the best reference gene set for each cluster and record the metric
         metrics_df = compute_function_on_gene_sets_given_clustering(
             clustering=clustering,
-            gene_names=self.query_var_names,
+            gene_names=np.asarray(self.node_names_q),
             reference_gene_sets=reference_gene_sets,
             metric_name=metric_name,
         )
@@ -741,15 +786,16 @@ class ValidationMixin:
                 reference_gene_sets=reference_gene_sets,
                 metric_name=metric_name,
             )
-            mean_metric = metrics_df[metric_name].mean()
+            mean_metric = metrics_df[metric_name][metrics_df["cluster"] != -1].mean()
 
             # mean of best matches over all clusters in clustering
-            mean_metrics_df = mean_metrics_df.append(
-                pd.DataFrame({"resolution": [res], "mean_of_best_match_metric": [mean_metric]})
+            mean_metrics_df = pd.concat(
+                [mean_metrics_df, pd.DataFrame({"resolution": [res], "mean_of_best_match_metric": [mean_metric]})],
+                axis=0,
             )
 
         # choose the resolution with the highest mean metric
-        best_resolution = mean_metrics_df["resolution"][mean_metrics_df["mean_of_best_match_metric"].idxmax()]
+        best_resolution = mean_metrics_df.set_index("resolution")["mean_of_best_match_metric"].idxmax()
 
         # re-compute the Leiden clustering at the best resolution (cached) and metrics
         best_clustering, best_metrics_df = self.cluster_and_compute_metrics(
@@ -765,7 +811,7 @@ class ValidationMixin:
         self,
         reference_gene_sets: dict[str, set[str]],
         resolution_range: tuple[float, float] = (0.2, 10.0),
-        num_clusterings_to_compute: int = 10,
+        num_clusterings_to_compute: int = 20,
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
     ) -> tuple[float, np.ndarray, pd.DataFrame]:
         """
@@ -784,25 +830,26 @@ class ValidationMixin:
         Returns:
             (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics)
         """
-        assert num_clusterings_to_compute >= 10, "num_clusterings_to_compute must be >= 10"
+        assert num_clusterings_to_compute >= 15, "num_clusterings_to_compute must be >= 15"
 
         # function to be minimized
-        def _compute_inv_mean_metric(resolution: float) -> float:
+        def _compute_inv_mean_metric(x: list[float]) -> float:
+            resolution = x[0]
             _, metrics_df = self.cluster_and_compute_metrics(
                 resolution=resolution,
                 reference_gene_sets=reference_gene_sets,
                 metric_name=metric_name,
             )
-            return -1 * metrics_df[metric_name].mean()
+            return -1 * metrics_df[metric_name][metrics_df["cluster"] != -1].mean()
 
         # use scikit-optimize Bayesian optimization to find the best resolution
         res = gp_minimize(
             _compute_inv_mean_metric,
             [resolution_range],
             acq_func="EI",
-            n_calls=num_clusterings_to_compute - 5,
-            n_initial_points=5,
-            initial_point_generatorstr="random",
+            n_calls=num_clusterings_to_compute - 10,
+            n_initial_points=10,
+            initial_point_generator="random",
             random_state=1234,
         )
         best_resolution = res.x[0]
@@ -816,6 +863,10 @@ class ValidationMixin:
 
         # return the best resolution and the Leiden communities
         return best_resolution, best_clustering, best_metrics_df
+
+
+class GeneralContext(NetworkAnalysisBase, ValidationMixin):
+    pass
 
 
 class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):

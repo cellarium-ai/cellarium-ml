@@ -174,40 +174,42 @@ def permutation_test(
     return gene_group_mean, np.mean(np.array(means)), p_value
 
 
-# def append_random_control_collection(
-#     msigdb: GeneSetRecords,
-#     gene_names: np.ndarray,
-#     collection_name: str = 'random_controls',
-#     sizes: list[int] = [10, 50, 100],
-#     repeats: int = 5,
-# ):
-#     """
-#     Append random control gene sets to the GeneSetRecords object
+def append_random_control_collection(
+    msigdb: GeneSetRecords,
+    gene_names: np.ndarray,
+    collection_name: str = "random_controls",
+    sizes: list[int] = [10, 50, 100],
+    repeats: int = 5,
+):
+    """
+    Append random control gene sets to the GeneSetRecords object.
+    The idea is to use this as a control to compare against the real gene sets,
+    sort of like a permutation test that would calibrate computed metrics.
 
-#     Args:
-#         msigdb: GeneSetRecords object
-#         gene_names: array of string gene names
-#         collection_name: name of the collection
-#         sizes: list of gene set sizes
-#         repeats: number of repeats for each size
+    Args:
+        msigdb: GeneSetRecords object
+        gene_names: array of string gene names
+        collection_name: name of the collection
+        sizes: list of gene set sizes
+        repeats: number of repeats for each size
 
-#     Returns:
-#         None, but appends the gene sets to the GeneSetRecords object
-#     """
-#     if len(sizes) < 1:
-#         raise ValueError('sizes must have at least one element')
+    Returns:
+        None, but appends the gene sets to the GeneSetRecords object
+    """
+    if len(sizes) < 1:
+        raise ValueError("sizes must have at least one element")
 
-#     gene_set_names = []
-#     gene_sets = []
-#     for n_genes in sizes:
-#         for i in range(1, repeats + 1):
-#             gene_set_names.append(f'{collection_name}_{n_genes}genes_{i}')
-#             gene_sets.append(np.random.choice(gene_names, size=n_genes, replace=False).tolist())
-#     msigdb.append_collection(
-#         collection=collection_name,
-#         gene_set_names=gene_set_names,
-#         gene_sets=gene_sets,
-#     )
+    gene_set_names = []
+    gene_sets = []
+    for n_genes in sizes:
+        for i in range(1, repeats + 1):
+            gene_set_names.append(f"{collection_name}_{n_genes}genes_{i}")
+            gene_sets.append(np.random.choice(gene_names, size=n_genes, replace=False).tolist())
+    msigdb.append_collection(
+        collection=collection_name,
+        gene_set_names=gene_set_names,
+        gene_sets=gene_sets,
+    )
 
 
 def compute_function_on_gene_sets(
@@ -255,7 +257,7 @@ def compute_function_on_gene_sets(
 
 def compute_function_on_gene_sets_given_clustering(
     clustering: np.ndarray,
-    gene_names: np.ndarray | list[str],
+    gene_names: np.ndarray,
     reference_gene_sets: dict[str, set[str]],
     metric_name: Literal["iou", "intersection", "precision", "precision_recall", "f1"],
 ) -> pd.DataFrame:
@@ -273,12 +275,14 @@ def compute_function_on_gene_sets_given_clustering(
         DataFrame with columns ['cluster', 'reference_gene_set', metric_name]
     """
     assert len(clustering) == len(gene_names), "clustering and gene_names must have the same length"
+    if np.all(clustering == -1):
+        return pd.DataFrame(data={"cluster": [-1], "reference_gene_set": [np.nan], metric_name: [0.0]})
 
     # for each cluster, compute the best matching reference gene set and record its metric
     best_metric_df = pd.DataFrame(columns=["cluster", "reference_gene_set", metric_name])
     for k in np.unique(clustering):
         # genes in this cluster
-        gene_set = gene_names[clustering == k]
+        gene_set = set(gene_names[clustering == k])
 
         # compute the metric for each reference gene set
         metrics = compute_function_on_gene_sets(
@@ -288,8 +292,12 @@ def compute_function_on_gene_sets_given_clustering(
         )
 
         # record the best metric and the corresponding reference gene set name
-        best_metric_df = best_metric_df.append(
-            pd.DataFrame({"cluster": [k], "reference_gene_set": [metrics.idxmax()], metric_name: [metrics.max()]})
+        best_metric_df = pd.concat(
+            [
+                best_metric_df,
+                pd.DataFrame({"cluster": [k], "reference_gene_set": [metrics.idxmax()], metric_name: [metrics.max()]}),
+            ],
+            axis=0,
         )
 
     return best_metric_df
