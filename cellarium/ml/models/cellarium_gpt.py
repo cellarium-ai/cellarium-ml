@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from cellarium.ml.layers import MultiHeadReadout, TokenEmbedding, Transformer
+from cellarium.ml.layers import MultiHeadReadout, TokenEmbedding, Transformer, TransformerBlock
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.layers import scale_initializers_by_dimension
 from cellarium.ml.utilities.mup import LRAdjustmentGroup
@@ -65,12 +65,10 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     CellariumGPT model.
 
     Args:
-        gene_vocab_sizes:
-            Gene token vocabulary sizes. Must include "gene_value" and "gene_id". Additionally, it can include
-            experimental conditions, such as "assay" and "suspension_type".
-        metadata_vocab_sizes:
-            Metadata token vocabulary sizes. This can include metadata tokens such as "cell_type", "tissue",
-            "sex", "development_stage", and "disease".
+        categorical_token_size_dict:
+            Categorical token vocabulary sizes. Must include "gene_value" and "gene_id". Additionally, it can include
+            experimental conditions, such as "assay" and "suspension_type", and metadata tokens such as "cell_type",
+            "tissue", "sex", "development_stage", and "disease".
         d_model:
             Dimensionality of the embeddings and hidden states.
         d_ffn:
@@ -87,8 +85,9 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
             Backend for the attention computation.
         attention_softmax_fp32:
             Whether to use float32 for softmax computation when ``torch`` backend is used.
-        loss_scales:
-            A dictionary of loss scales for each label type.
+        loss_scale_dict:
+            A dictionary of loss scales for each label type. These are the query tokens that are used
+            to compute the loss.
         initializer_range:
             The standard deviation of the truncated normal initializer.
         embeddings_scale:
@@ -106,8 +105,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     def __init__(
         self,
         # Vocab sizes
-        gene_vocab_sizes: dict[str, int],
-        metadata_vocab_sizes: dict[str, int],
+        categorical_token_size_dict: dict[str, int],
         # Model parameters
         d_model: int,
         d_ffn: int,
@@ -117,7 +115,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         use_bias: bool,
         attention_backend: Literal["flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
-        loss_scales: dict[str, float],
+        loss_scale_dict: dict[str, float],
         # Tunable parameters
         initializer_range: float = 0.02,
         embeddings_scale: float = 1.0,
@@ -130,8 +128,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         super().__init__()
 
         # Vocab sizes
-        self.gene_vocab_sizes = gene_vocab_sizes
-        self.metadata_vocab_sizes = metadata_vocab_sizes
+        self.categorical_token_size_dict = categorical_token_size_dict
 
         # Initializers
         self.initializer_range = initializer_range
@@ -200,13 +197,16 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
                 depth_scale=(2 * n_blocks) ** -0.5,
             )
 
-        gene_categorical_vocab_sizes = gene_vocab_sizes.copy()
-        gene_value_vocab_size = gene_categorical_vocab_sizes.pop("gene_value")  # used for the readout head
+        embedding_token_size_dict = {}
+        for key, vocab_size in categorical_token_size_dict.items():
+            if key in loss_scale_dict:
+                # Add 1 to the vocab size for the query tokens to account for the mask token
+                embedding_token_size_dict[key] = vocab_size + 1
+            elif key != "gene_value":
+                embedding_token_size_dict[key] = vocab_size
         self.token_embedding = TokenEmbedding(
-            categorical_vocab_sizes=gene_categorical_vocab_sizes
-            # Add 1 to the vocab size for the metadata tokens to account for the mask token
-            | {key: vocab_size + 1 for key, vocab_size in metadata_vocab_sizes.items()},
-            continuous_tokens=["gene_value", "gene_query_mask", "total_mrna_umis"],
+            categorical_token_size_dict=embedding_token_size_dict,
+            continuous_token_list=["gene_value", "gene_query_mask", "total_mrna_umis"],
             d_model=d_model,
             embeddings_initializer=embeddings_initializer,
         )
@@ -226,13 +226,13 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
             dense2_initializer=dense2_initializer,
         )
         self.head = MultiHeadReadout(
-            categorical_vocab_sizes={"gene_value": gene_value_vocab_size, **metadata_vocab_sizes},
+            categorical_token_size_dict={key: categorical_token_size_dict[key] for key in loss_scale_dict},
             d_model=d_model,
             use_bias=use_bias,
             output_logits_scale=output_logits_scale,
             heads_initializer=heads_initializer,
         )
-        self.loss_scales = loss_scales
+        self.loss_scale_dict = loss_scale_dict
 
         self.reset_parameters()
 
@@ -244,15 +244,21 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
     @property
     def d_model(self) -> int:
-        return self.transformer.blocks[0].d_model
+        block = self.transformer.blocks[0]
+        assert isinstance(block, TransformerBlock)
+        return block.d_model
 
     @property
     def d_ffn(self) -> int:
-        return self.transformer.blocks[0].d_ffn
+        block = self.transformer.blocks[0]
+        assert isinstance(block, TransformerBlock)
+        return block.d_ffn
 
     @property
     def n_heads(self) -> int:
-        return self.transformer.blocks[0].n_heads
+        block = self.transformer.blocks[0]
+        assert isinstance(block, TransformerBlock)
+        return block.attention.n_heads
 
     @property
     def n_blocks(self) -> int:
@@ -260,11 +266,14 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
     @property
     def attention_backend(self) -> Literal["flex", "math", "mem_efficient", "torch"]:
-        return self.transformer.blocks[0].attention.attention_backend
+        block = self.transformer.blocks[0]
+        assert isinstance(block, TransformerBlock)
+        return block.attention.attention_backend
 
     @attention_backend.setter
     def attention_backend(self, value: Literal["flex", "math", "mem_efficient", "torch"]) -> None:
         for block in self.transformer.blocks:
+            assert isinstance(block, TransformerBlock)
             block.attention.attention_backend = value
 
     def predict(
@@ -322,7 +331,9 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         )
 
         # Compute loss
-        losses = {}
+        if not (set(self.loss_scale_dict) == set(label_nc_dict) == set(label_weight_nc_dict)):
+            raise ValueError("The keys of loss_scale_dict, label_nc_dict, and label_weight_nc_dict must be the same.")
+        loss_dict = {}
         loss_fn = nn.CrossEntropyLoss(reduction="none")
         # Make sure that label_nc_dict is created by concatenating the gene_value and metadata labels
         # in the same order as the embeddings.
@@ -331,15 +342,15 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
             assert isinstance(logits_nck, torch.Tensor)
             label_weight_nc = label_weight_nc_dict[key]
             assert isinstance(label_weight_nc, torch.Tensor)
-            losses[key] = torch.sum(
+            loss_dict[key] = torch.sum(
                 loss_fn(logits_nck.view(label_nc.numel(), -1), label_nc.view(-1).long()) * label_weight_nc.view(-1)
             )
 
-        loss = sum(losses[key] * self.loss_scales[key] for key in losses)
+        loss = sum(loss_dict[key] * self.loss_scale_dict[key] for key in loss_dict)
         assert isinstance(loss, torch.Tensor)
-        losses["loss"] = loss
+        loss_dict["loss"] = loss
 
-        return losses
+        return loss_dict
 
     def validate(
         self,
