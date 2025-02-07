@@ -9,7 +9,6 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 from gseapy.algorithm import enrichment_score, gsea_pval
-from tqdm import tqdm
 
 
 def load_gene_set_json(file: str | bytes) -> pd.DataFrame:
@@ -21,7 +20,7 @@ class GeneSetRecords:
     Container to hold gene set data and provide utility functions
     """
 
-    def __init__(self, file="~/msigdb/msigdb.v2024.1.Hs.json"):
+    def __init__(self, file: str):
         # file obtained from https://www.gsea-msigdb.org/gsea/msigdb/download_file.jsp?filePath=/msigdb/release/2024.1.Hs/msigdb.v2024.1.Hs.json
         self.df = load_gene_set_json(file)
         self._reindex()
@@ -100,7 +99,7 @@ def gsea(
     seed: int = 0,
 ) -> dict[str, float]:
     """
-    Use GSEA to come up with an enrichment score and a p-value
+    Use GSEApy to come up with an enrichment score and a p-value
 
     Args:
         df: DataFrame with gene names and values
@@ -182,19 +181,19 @@ def append_random_control_collection(
     repeats: int = 5,
 ):
     """
-    Append random control gene sets to the GeneSetRecords object.
+    Append random control gene sets to the :class:`GeneSetRecords` object.
     The idea is to use this as a control to compare against the real gene sets,
     sort of like a permutation test that would calibrate computed metrics.
 
     Args:
-        msigdb: GeneSetRecords object
+        msigdb: :class:`GeneSetRecords` object to append random gene sets to
         gene_names: array of string gene names
         collection_name: name of the collection
         sizes: list of gene set sizes
         repeats: number of repeats for each size
 
     Returns:
-        None, but appends the gene sets to the GeneSetRecords object
+        None, but appends the gene sets to the :class:`GeneSetRecords` object
     """
     if len(sizes) < 1:
         raise ValueError("sizes must have at least one element")
@@ -213,46 +212,53 @@ def append_random_control_collection(
 
 
 def compute_function_on_gene_sets(
-    in_gset: set[str],
-    gene_sets: dict[str, set[str]],
-    func: Literal["iou", "intersection", "precision", "precision_recall", "f1"],
+    input_gene_set: set[str],
+    reference_gene_sets: dict[str, set[str]],
+    metric_name: Literal["iou", "intersection", "precision", "precision_recall", "f1"],
 ) -> pd.Series:
     """
-    Given a set of genes and a dictionary of gene sets, compute a function measuring something about the overlap
-    between the input set and each predefined gene set.
+    Given a set of genes and a dictionary of gene sets, compute a function measuring
+    something about the overlap between the input set and each predefined gene set.
 
     Args:
-        in_gset: set of gene names
-        gene_sets: dictionary of gene set names to set of gene names (e.g. from gp.get_library(name=...))
-        func: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1']
+        input_gene_set: set of gene names
+        reference_gene_sets: dictionary of gene set names to set of gene names
+            (e.g. from gseapy.get_library(name=...) or :meth:`GeneSetRecords.get_gene_set_dict`)
+        metric_name: one of
+            - 'iou': intersection over union
+            - 'intersection': number of genes in input and reference gene set
+            - 'precision': intersection divided by number of genes in input set
+            - 'precision_recall': precision and recall (intersection divided by
+                number of genes in reference set)
+            - 'f1': f1 score (harmonic mean of precision and recall)
 
     Returns:
         pd.Series with the function value for each gene set
     """
     results = {}
-    for name, gset in gene_sets.items():
-        intersection = len(in_gset.intersection(gset))
-        match func:
+    for name, gset in reference_gene_sets.items():
+        intersection = len(input_gene_set.intersection(gset))
+        match metric_name:
             case "iou":
-                union = len(in_gset.union(gset))  # few extra ms
+                union = len(input_gene_set.union(gset))  # few extra ms
                 metric: float | tuple[float, float] = intersection / union
             case "intersection":
                 metric = intersection
             case "precision":
-                metric = intersection / len(in_gset)
+                metric = intersection / len(input_gene_set)
             case "precision_recall":
-                precision = intersection / len(in_gset)
+                precision = intersection / len(input_gene_set)
                 recall = intersection / len(gset)
                 metric = (precision, recall)
             case "f1":
                 # precision = intersection / len(in_gset)
                 # recall = intersection / len(gset)
                 # metric = 2 * (precision * recall) / (precision + recall + 1e-10)
-                metric = 2 * intersection / (len(in_gset) + len(gset))  # same as above
+                metric = 2 * intersection / (len(input_gene_set) + len(gset))  # same as above
             case _:
-                raise ValueError(f"Unknown function {func}")
+                raise ValueError(f"Unknown function {metric_name}")
         results[name] = metric
-    return pd.Series(results, name=func)
+    return pd.Series(results, name=metric_name)
 
 
 def compute_function_on_gene_sets_given_clustering(
@@ -269,7 +275,8 @@ def compute_function_on_gene_sets_given_clustering(
         clustering: array of cluster labels
         gene_names: array of gene names, same order as clustering
         reference_gene_sets: dictionary of gene set names to set of gene names
-        metric_name: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1']
+        metric_name: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1'].
+            see :func:`compute_function_on_gene_sets`
 
     Returns:
         DataFrame with columns ['cluster', 'reference_gene_set', metric_name]
@@ -286,9 +293,9 @@ def compute_function_on_gene_sets_given_clustering(
 
         # compute the metric for each reference gene set
         metrics = compute_function_on_gene_sets(
-            in_gset=gene_set,
-            gene_sets=reference_gene_sets,
-            func=metric_name,
+            input_gene_set=gene_set,
+            reference_gene_sets=reference_gene_sets,
+            metric_name=metric_name,
         )
 
         # record the best metric and the corresponding reference gene set name
@@ -303,43 +310,78 @@ def compute_function_on_gene_sets_given_clustering(
     return best_metric_df
 
 
+def compute_function_on_gene_sets_given_neighbors(
+    neighbor_lookup: dict[str, set[str]],
+    reference_gene_sets: dict[str, set[str]],
+    metric_name: Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "iou",
+) -> pd.DataFrame:
+    """
+    For each gene in neighbor_lookup.keys(), compute metrics over all the gene sets.
+    Calls :func:`compute_function_on_gene_sets`.
+
+    Example:
+        >>> import gseapy as gp
+        >>> from cellarium.ml.downstream.noise_prompting import compute_knn_dict
+        >>> gene_sets = gp.get_library('Reactome_2022')
+        >>> neighbor_lookup = compute_knn_dict(adata_tpm, k=3, obs_gene_key='perturbation')
+        >>> best_gene_sets = compute_top_gene_set_per_gene(neighbor_lookup, gene_sets, func='iou')
+
+    Args:
+        neighbor_lookup: dictionary of gene names to set of gene names
+        reference_gene_sets: dictionary of gene set names to set of gene names
+        metric_name: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1'].
+            see :func:`compute_function_on_gene_sets`
+
+    Returns:
+        DataFrame with columns ['gene', 'gene_set', metric_name] which includes the best gene set
+        for each gene and the corresponding metric value
+    """
+
+    best_gene_set_df = pd.DataFrame(columns=["gene", "gene_set", metric_name])
+
+    for gene in neighbor_lookup.keys():
+        metric_series = compute_function_on_gene_sets(
+            input_gene_set=neighbor_lookup[gene],
+            reference_gene_sets=reference_gene_sets,
+            metric_name=metric_name,
+        )
+        top_df = pd.DataFrame(
+            {"gene": [gene], "gene_set": [metric_series.idxmax()], metric_name: [metric_series.max()]}
+        )
+        best_gene_set_df = pd.concat([best_gene_set_df, top_df], axis=0)
+
+    return best_gene_set_df
+
+
 def compute_top_gene_set_per_gene(
     neighbor_lookup: dict[str, set[str]],
-    gene_sets: dict[str, set[str]],
-    func: Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "iou",
+    reference_gene_sets: dict[str, set[str]],
+    metric_name: Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "iou",
 ) -> dict[str, str]:
     """
-    For each gene in neighbor_lookup.keys(), compute the gene set with the highest metric over all the gene sets.
-    Calls compute_function_on_gene_sets()
+    For each gene in neighbor_lookup.keys(), compute the gene set with the highest metric
+    over all the gene sets. Calls :func:`compute_function_on_gene_sets_given_neighbors`.
+    Useful for finding a gene set label for plotting, without needing to cluster the data.
 
     Example:
         import gseapy as gp
         from cellarium.ml.downstream.noise_prompting import compute_knn_dict
-        gene_sets = gp.get_library('Reactome_2022')
+        reference_gene_sets = gp.get_library('Reactome_2022')
         neighbor_lookup = compute_knn_dict(adata_tpm, k=3, obs_gene_key='perturbation')
-        best_gene_sets = compute_top_gene_set_per_gene(neighbor_lookup, gene_sets, func='iou')
+        best_gene_sets = compute_top_gene_set_per_gene(neighbor_lookup, reference_gene_sets, func='iou')
 
     Args:
         neighbor_lookup: dictionary of gene names to set of gene names
-        gene_sets: dictionary of gene set names to set of gene names
-        func: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1']
+        reference_gene_sets: dictionary of gene set names to set of gene names
+        metric_name: one of ['iou', 'intersection', 'precision', 'precision_recall', 'f1'].
+            see :func:`compute_function_on_gene_sets`
 
     Returns:
         dictionary of gene names to top gene set names
     """
-
-    best_gene_sets: dict[str, str] = {}
-
-    for gene in tqdm(neighbor_lookup.keys()):
-        top_gene_set = (
-            compute_function_on_gene_sets(
-                in_gset=neighbor_lookup[gene],
-                gene_sets=gene_sets,
-                func=func,
-            )
-            .sort_values(ascending=False)
-            .index[0]
-        )
-        best_gene_sets |= {gene: top_gene_set}
-
-    return best_gene_sets
+    df = compute_function_on_gene_sets_given_neighbors(
+        neighbor_lookup=neighbor_lookup,
+        reference_gene_sets=reference_gene_sets,
+        metric_name=metric_name,
+    )
+    return df.set_index("gene")["gene_set"].to_dict()

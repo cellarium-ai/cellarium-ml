@@ -25,6 +25,7 @@ from skopt import gp_minimize
 
 from cellarium.ml.utilities.inference.gene_set_utils import (
     compute_function_on_gene_sets_given_clustering,
+    compute_function_on_gene_sets_given_neighbors,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def compute_adjacency_matrix(
     z_qp: np.ndarray,
     adjacency_strategy: t.Literal[
         "shifted_correlation", "unsigned_correlation", "positive_correlation", "positive_correlation_binary"
-    ],
+    ] = "positive_correlation",
     n_neighbors: int | None = 50,
     self_loop: bool = False,
     **kwargs,
@@ -128,7 +129,7 @@ def compute_igraph_from_adjacency(
     a_qq: np.ndarray, node_names: list[str] | np.ndarray, directed: bool = False
 ) -> ig.Graph:
     """
-    Convert an adjacency matrix to an igraph graph.
+    Convert an adjacency matrix to an :class:`ig.Graph` graph.
 
     Args:
         a_qq: (gene-gene) adjacency matrix
@@ -136,7 +137,7 @@ def compute_igraph_from_adjacency(
         directed: whether the graph is directed
 
     Returns:
-        igraph graph
+        :class:`ig.Graph` graph
     """
     assert len(node_names) == a_qq.shape[0], (
         f"Number of node names ({len(node_names)}) must match adjacency matrix shape ({a_qq.shape[0]})"
@@ -155,21 +156,24 @@ def compute_leiden_communites(
     g: ig.Graph,
     resolution: float = 3.0,
     min_community_size: int = 2,
+    random_seed: int = 0,
 ) -> np.ndarray:
     """
-    Compute Leiden communities from an igraph graph by running leidenalg with RBConfigurationVertexPartition.
+    Compute Leiden communities from an :class:`ig.Graph` graph by running
+    :meth:`leidenalg.find_partition` with `RBConfigurationVertexPartition`.
 
     Args:
-        g: igraph graph
+        g: :class:`ig.Graph` graph
         resolution: resolution parameter
         min_community_size: minimum community size
+        random_seed: random seed
 
     Returns:
         array of community memberships
     """
 
     leiden_partition = leidenalg.find_partition(
-        g, leidenalg.RBConfigurationVertexPartition, resolution_parameter=resolution
+        g, leidenalg.RBConfigurationVertexPartition, resolution_parameter=resolution, seed=random_seed
     )
     leiden_membership = np.array(leiden_partition.membership)
 
@@ -184,6 +188,78 @@ def compute_leiden_communites(
     return leiden_membership
 
 
+def compute_knn_from_adjacency(
+    a_qq: np.ndarray,
+    node_names_q: np.ndarray,
+    n_neighbors: int,
+) -> dict[str, set[str]]:
+    """
+    Compute the k-nearest neighbors for each node using a pre-computed adjacency matrix.
+
+    Args:
+        a_qq: adjacency matrix
+        node_names_q: names of the nodes
+        n_neighbors: number of neighbors to keep
+
+    Returns:
+        dictionary of k-nearest neighbors for each node
+    """
+    assert a_qq.shape[0] == len(node_names_q), "Number of node names must match the first dimension of a_qq"
+
+    # compute the k-nearest neighbors
+    knn: dict[str, set[str]] = {}
+    for q in range(a_qq.shape[0]):
+        t_q = np.argsort(a_qq[q], axis=-1)[-n_neighbors:].squeeze()  # take the top n_neighbors
+        knn[node_names_q[q]] = set(node_names_q[t_q])
+    return knn
+
+
+def compute_spectral_dimension(
+    a_qq: np.ndarray, offset: int = 2, n_lambda_for_estimation: int = 5
+) -> dict[str, np.ndarray | float]:
+    """
+    Compute the spectral dimension of a graph from its adjacency matrix.
+
+    Args:
+        a_qq: adjacency matrix
+        offset: offset for the first nonzero eigenvalue
+        n_lambda_for_estimation: number of eigenvalues to use for estimation
+
+    Returns:
+        dictionary of spectral dimension results
+    """
+
+    # calculate normalized laplacian and its eigenvalues
+    norm_q = 1.0 / (1e-9 + np.sqrt(a_qq.sum(0)))
+    lap_qq = np.eye(a_qq.shape[0]) - norm_q[:, None] * norm_q[None, :] * a_qq
+    eigs = eigh(lap_qq.astype(np.float64), eigvals_only=True)
+    eigs[0] = 0
+    eigs = np.clip(eigs, 0, np.inf)  # roundoff error guardrail
+
+    n_lambda = np.cumsum(eigs)
+    n_lambda = n_lambda / n_lambda[-1]
+    first_nonzero = np.where(eigs > 0)[0][0] + offset
+    xx = np.log(eigs[first_nonzero : first_nonzero + n_lambda_for_estimation])
+    yy = np.log(n_lambda[first_nonzero : first_nonzero + n_lambda_for_estimation])
+
+    lin = linregress(xx, yy)
+    slope, intercept = lin.slope, lin.intercept
+
+    # save a few thigs for later
+    spectral_dim = 2 * linregress(xx, yy).slope
+    spectral_results = {
+        "spectral_dim": spectral_dim,
+        "eigs": eigs,
+        "n_lambda": n_lambda,
+        "log_eigs_asymptotic": xx,
+        "log_n_lambda_asymptotic": yy,
+        "spectral_dim_slope": slope,
+        "spectral_dim_intercept": intercept,
+    }
+
+    return spectral_results
+
+
 def mde_embedding(
     z_qp: np.ndarray,
     n_neighbors: int = 7,
@@ -196,10 +272,12 @@ def mde_embedding(
     **kwargs,
 ) -> np.ndarray:
     """
-    Run pymde to compute a 2-dimensional MDE embedding.
+    Run :mod:`pymde` to compute a 2-dimensional MDE embedding.
 
     Args:
-        passthroughs to pymde
+        z_qp: matrix to embed
+        others: passthroughs to :func:`pymde.preserve_neighbors`, except
+            for `max_iter` which is passed to :meth:`pymde.MDE.embed`
 
     Returns:
         2-dimensional MDE embedding
@@ -260,11 +338,11 @@ def mde_embedding_replogle(
 
     # handle embedding dimension
     if "n_components" in spectral_embedding_kwargs:
-        print("WARNING: ignoring n_components in spectral_embedding_kwargs and replacing with embedding_dimension")
+        logger.warning("ignoring n_components in spectral_embedding_kwargs and replacing with embedding_dimension")
     spectral_embedding_kwargs["n_components"] = embedding_dimension
 
     if "embedding_dim" in mde_kwargs:
-        print("WARNING: ignoring embedding_dim in mde_kwargs and replacing with embedding_dimension")
+        logger.warning("ignoring embedding_dim in mde_kwargs and replacing with embedding_dimension")
     mde_kwargs["embedding_dim"] = embedding_dimension
 
     adata = sc.AnnData(X=z_qp)
@@ -293,18 +371,30 @@ def mde_embedding_replogle(
 
 
 class NetworkAnalysisBase:
+    """Base class for network analysis.
+
+    Provides methods for computing adjacency matrix, graph, Leiden clustering, and spectral dimension.
+
+    Attributes:
+        z_qp: input matrix of values
+        node_names_q: input names of the rows
+        leiden_membership: Leiden clustering results
+        spectral: dictionary of spectral dimension results
+
+    Properties:
+        adjacency_matrix: computed adjacency matrix
+        leiden_communities: computed Leiden communities
+        spectral_dim: computed spectral dimension and related results
+    """
+
     def __init__(self, z_qp: np.ndarray, node_names_q: list[str] | np.ndarray):
         assert z_qp.shape[0] == len(node_names_q), "Number of node names must match the first dimension of z_qp"
         self.z_qp = z_qp
         self.node_names_q = node_names_q
-
-        # network
         self.a_qq: np.ndarray | None = None  # adjacency matrix
+        self.adjacency_kwargs: dict[str, t.Any] = {}  # used by validation methods to re-compute adjacency matrix
         self.leiden_membership: np.ndarray | None = None
-
-        # spectral analysis
-        self.eigs: np.ndarray | None = None
-        self.spectral_dim: np.ndarray | None = None
+        self.spectral: dict[str, np.ndarray | float] = {}
 
     @property
     def adjacency_matrix(self) -> np.ndarray:
@@ -318,6 +408,12 @@ class NetworkAnalysisBase:
             raise UserWarning("Compute Leiden clustering by calling obj.compute_leiden_communites()")
         return self.leiden_membership
 
+    @property
+    def spectral_dim(self) -> dict:
+        if "spectral_dim" not in self.spectral:
+            raise UserWarning("Compute spectral dimension by calling obj.compute_spectral_dimension()")
+        return self.spectral
+
     def compute_adjacency_matrix(
         self,
         adjacency_strategy: t.Literal[
@@ -327,6 +423,11 @@ class NetworkAnalysisBase:
         self_loop: bool = False,
         **kwargs,
     ) -> np.ndarray:
+        self.adjacency_kwargs = kwargs | {
+            "adjacency_strategy": adjacency_strategy,
+            "n_neighbors": n_neighbors,
+            "self_loop": self_loop,
+        }
         a_qq = compute_adjacency_matrix(
             z_qp=self.z_qp,
             adjacency_strategy=adjacency_strategy,
@@ -350,7 +451,7 @@ class NetworkAnalysisBase:
     @lru_cache(maxsize=30)
     def compute_leiden_communites(
         self,
-        resolution: float = 3.0,
+        resolution: float,
         min_community_size: int = 2,
     ) -> np.ndarray:
         self.leiden_membership = compute_leiden_communites(
@@ -361,37 +462,12 @@ class NetworkAnalysisBase:
         return self.leiden_membership
 
     def compute_spectral_dimension(self, offset: int = 2, n_lambda_for_estimation: int = 5) -> float:
-        if self.a_qq is None:
-            raise UserWarning("Compute adjacency matrix first by calling obj.compute_adjacency_matrix()")
-
-        # calculate normalized laplacian and its eigenvalues
-        norm_q = 1.0 / (1e-9 + np.sqrt(self.a_qq.sum(0)))
-        lap_qq = np.eye(self.a_qq.shape[0]) - norm_q[:, None] * norm_q[None, :] * self.a_qq
-        eigs = eigh(lap_qq.astype(np.float64), eigvals_only=True)
-        eigs[0] = 0
-        eigs = np.clip(eigs, 0, np.inf)  # roundoff error guardrail
-        self.eigs = eigs
-
-        n_lambda = np.cumsum(eigs)
-        n_lambda = n_lambda / n_lambda[-1]
-        first_nonzero = np.where(eigs > 0)[0][0] + offset
-        xx = np.log(eigs[first_nonzero : first_nonzero + n_lambda_for_estimation])
-        yy = np.log(n_lambda[first_nonzero : first_nonzero + n_lambda_for_estimation])
-
-        lin = linregress(xx, yy)
-        slope, intercept = lin.slope, lin.intercept
-
-        # save a few thigs for later
-        spectral_dim = 2 * linregress(xx, yy).slope
-        self.spectral_dim = spectral_dim
-        self.eigs = eigs
-        self.n_lambda = n_lambda
-        self.log_eigs_asymptotic = xx
-        self.log_n_lambda_asymptotic = yy
-        self.spectral_dim_slope = slope
-        self.spectral_dim_intercept = intercept
-
-        return float(spectral_dim)
+        self.spectral = compute_spectral_dimension(
+            a_qq=self.adjacency_matrix,
+            offset=offset,
+            n_lambda_for_estimation=n_lambda_for_estimation,
+        )
+        return float(self.spectral["spectral_dim"])
 
 
 class GeneNetworkAnalysisBase(NetworkAnalysisBase):
@@ -662,13 +738,14 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         return fig
 
     def plot_spectral_dimension(self, ax: plt.Axes) -> None:
-        assert self.eigs is not None, "Must compute spectral dimension first"
-        ax.scatter(self.log_eigs_asymptotic, self.log_n_lambda_asymptotic)
+        assert self.spectral["eigs"] is not None, "Must compute spectral dimension first"
+        ax.scatter(self.spectral["log_eigs_asymptotic"], self.spectral["log_n_lambda_asymptotic"])
         ax.plot(
-            self.log_eigs_asymptotic,
-            self.spectral_dim_slope * self.log_eigs_asymptotic + self.spectral_dim_intercept,
+            self.spectral["log_eigs_asymptotic"],
+            self.spectral["spectral_dim_slope"] * self.spectral["log_eigs_asymptotic"]
+            + self.spectral["spectral_dim_intercept"],
             color="red",
-            label=f"$d_S$ = {self.spectral_dim:.2f}",
+            label=f"$d_S$ = {self.spectral['spectral_dim']:.2f}",
         )
         ax.set_xlabel(r"ln $\lambda$")
         ax.set_ylabel(r"ln N($\lambda$)")
@@ -679,21 +756,24 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 class ValidationMixin:
     """Mixin with methods for bio-inspired validation of gene networks."""
 
-    # make this mixin aware that these are defined in the base class (GeneNetworkAnalysisBase)
+    # make this mixin aware that these are defined in the base class (NetworkAnalysisBase)
+    z_qp: np.ndarray
     node_names_q: list[str] | np.ndarray
     compute_leiden_communites: t.Callable[..., np.ndarray]
+    adjacency_kwargs: dict[str, t.Any]
 
-    def compute_network_concordance_metric(
+    def compute_network_cluster_concordance_metric(
         self,
         reference_gene_sets: dict[str, set[str]],
         resolution_range: tuple[float, float] = (0.2, 8.0),
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
-        optimization_strategy: t.Literal["gridsearch", "bayesopt"] = "bayesopt",
+        optimization_strategy: t.Literal["gridsearch", "bayesopt"] = "gridsearch",
     ) -> float:
         """
         Compute a metric for the overall concordance between the network in
-        GeneNetworkAnalysisBase.igraph() and reference gene sets defined by a dictionary.
-        Distills the bayesopt_optimal_resolution_communities_given_gene_sets() output
+        :meth:`GeneNetworkAnalysisBase.igraph` and reference gene sets defined by a dictionary.
+        Distills the :meth:`bayesopt_optimal_resolution_communities_given_gene_sets` or
+        :meth:`gridsearch_optimal_resolution_communities_given_gene_sets` output
         into a single concordance metric.
 
         Args:
@@ -706,13 +786,13 @@ class ValidationMixin:
             concordance value
         """
         if optimization_strategy == "gridsearch":
-            _, _, best_metrics_df = self.gridsearch_optimal_resolution_communities_given_gene_sets(
+            _, _, _, best_metrics_mean = self.gridsearch_optimal_resolution_communities_given_gene_sets(
                 reference_gene_sets=reference_gene_sets,
                 resolutions=np.linspace(*resolution_range, 20),
                 metric_name=metric_name,
             )
         elif optimization_strategy == "bayesopt":
-            _, _, best_metrics_df = self.bayesopt_optimal_resolution_communities_given_gene_sets(
+            _, _, _, best_metrics_mean = self.bayesopt_optimal_resolution_communities_given_gene_sets(
                 reference_gene_sets=reference_gene_sets,
                 resolution_range=resolution_range,
                 metric_name=metric_name,
@@ -720,10 +800,34 @@ class ValidationMixin:
         else:
             raise ValueError("Invalid optimization strategy")
 
-        print(f"best_metrics_df:\n{best_metrics_df}")
+        return best_metrics_mean
 
-        # distill a single number
-        return best_metrics_df[metric_name].mean()
+    def compute_network_knn_concordance_metric(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        k_values: list[int] | np.ndarray = [2, 3, 4, 5, 6, 7, 8, 9, 10],
+        metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+    ) -> float:
+        """
+        Compute a metric for the overall concordance between the network in
+        :meth:`GeneNetworkAnalysisBase.igraph` and reference gene sets defined by a dictionary.
+        Distills the :meth:`gridsearch_optimal_k_neighbors_given_gene_sets` output
+        into a single concordance metric.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
+            k_values: kNN k values to consider
+            metric_name: metric to use for concordance
+
+        Returns:
+            concordance value
+        """
+        _, _, _, best_metrics_mean = self.gridsearch_optimal_k_neighbors_given_gene_sets(
+            reference_gene_sets=reference_gene_sets,
+            k_values=k_values,
+            metric_name=metric_name,
+        )
+        return best_metrics_mean
 
     def cluster_and_compute_metrics(
         self,
@@ -757,12 +861,163 @@ class ValidationMixin:
 
         return clustering, metrics_df
 
+    def knn_and_compute_metrics(
+        self,
+        a_qq: np.ndarray,
+        k: int,
+        reference_gene_sets: dict[str, set[str]],
+        metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"],
+    ) -> tuple[dict[str, set[str]], pd.DataFrame]:
+        """
+        Compute k-nearest-neighbors on the network and compute the mean of a concordance metric
+        over reference gene sets.
+
+        Args:
+            k: number of neighbors for kNN
+            reference_gene_sets: dictionary of reference gene sets
+            metric_name: metric to use for concordance
+
+        Returns:
+            (neighbor dictionary, DataFrame of best reference gene set metrics for all genes)
+        """
+
+        # compute the neighbors (cheap given adjacency)
+        neighbor_lookup = compute_knn_from_adjacency(
+            a_qq=a_qq,
+            node_names_q=np.asarray(self.node_names_q),
+            n_neighbors=k,
+        )
+
+        # compute the best reference gene set for each cluster and record the metric
+        metrics_df = compute_function_on_gene_sets_given_neighbors(
+            neighbor_lookup=neighbor_lookup,
+            reference_gene_sets=reference_gene_sets,
+            metric_name=metric_name,
+        )
+
+        return neighbor_lookup, metrics_df
+
+    @staticmethod
+    def _mean_metric_knn(
+        metrics_df: pd.DataFrame,
+        metric_name: str,
+        all_genes_in_reference_sets: set[str],
+    ) -> float:
+        """
+        How to take a mean over the computed neighborhood metrics. This method only averages
+        over neighborhoods whose root node is in the union of all reference gene sets. The
+        thought experiment is to imagine reference sets that do not "cover" the space of genes
+        in the graph (imagine one gene set). In this case, we do not want one giant neighboorhood
+        to be "most concordant".
+        """
+        return metrics_df[metric_name][metrics_df["gene"].isin(all_genes_in_reference_sets)].mean()
+
+    @staticmethod
+    def _mean_metric_clustering(
+        metrics_df: pd.DataFrame,
+        metric_name: str,
+        cluster_label_q: np.ndarray,
+        gene_names_q: list[str] | np.ndarray,
+        all_genes_in_reference_sets: set[str],
+    ) -> float:
+        """
+        How to take a mean over the computed cluster metrics. This method only averages
+        over clusters which contain a gene in the union of all reference gene sets. The
+        thought experiment is to imagine reference sets that do not "cover" the space of genes
+        in the graph (imagine one gene set). In this case, we do not want one giant cluster
+        to be "most concordant".
+        """
+        # figure out which cluster labels to exclude from mean calculation
+        clusters_with_genes_in_reference_sets = set(
+            [label for gene, label in zip(gene_names_q, cluster_label_q) if gene in all_genes_in_reference_sets]
+        )
+        clusters_with_no_genes_in_reference_sets = set(cluster_label_q) - clusters_with_genes_in_reference_sets
+        excluded_cluster_labels = clusters_with_no_genes_in_reference_sets.union({-1})
+        return metrics_df[metric_name][~metrics_df["cluster"].isin(excluded_cluster_labels)].mean()
+
+    def gridsearch_optimal_k_neighbors_given_gene_sets(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        k_values: list[int] | np.ndarray,
+        metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+    ) -> tuple[int, dict[str, set[str]], pd.DataFrame, float]:
+        """
+        Compute concordance metrics between the k-nearest-neighbor communities of this graph
+        (of which there are n_genes number) and reference gene sets. Use these metrics to
+        determine an optimal value for k which maximizes concordance.
+        Neighbors are computed using :func:`pymde.preserve_neighbors` with k specified by `k_values`.
+        Optimization is performed by checking each of the input `k_values` and finding the max.
+
+        .. note:
+            When computing a mean metric over the computed neighborhoods, instead of averaging
+            over all neighborhoods, we exclude the gene neighborhoods whose gene is not included
+            in the union of all the reference sets. Otherwise large k values would always be
+            favored due to an increased likelihood of containing anything in the union of the
+            reference sets.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets
+            k_values: list of k values to test when constructing k-nearest-neighbor graph
+            metric_name: metric to use for concordance
+
+        Returns:
+            (optimal k, optimal neighborhoods, dataframe with genes and reference gene set metrics, mean metric)
+        """
+        all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
+        mean_metrics_df = pd.DataFrame(columns=["k", "mean_of_best_match_metric"])
+
+        # precompute adjacency matrix once using max k
+        a_qq = compute_adjacency_matrix(z_qp=self.z_qp, **self.adjacency_kwargs)  # same kwargs as user invocation
+
+        for k in k_values:
+            # compute neighbors and metrics
+            _, metrics_df = self.knn_and_compute_metrics(
+                a_qq=a_qq,
+                k=k,
+                reference_gene_sets=reference_gene_sets,
+                metric_name=metric_name,
+            )
+
+            # compute mean metric
+            mean_metric = self._mean_metric_knn(
+                metrics_df=metrics_df,
+                metric_name=metric_name,
+                all_genes_in_reference_sets=all_genes_in_reference_sets,
+            )
+
+            # mean of best matches over all gene neighborhoods
+            mean_metrics_df = pd.concat(
+                [mean_metrics_df, pd.DataFrame({"k": [k], "mean_of_best_match_metric": [mean_metric]})],
+                axis=0,
+            )
+
+        # choose the resolution with the highest mean metric
+        best_k = mean_metrics_df.set_index("k")["mean_of_best_match_metric"].idxmax()
+
+        # re-compute the kNN at the best resolution (cached) and metrics
+        best_knn, best_metrics_df = self.knn_and_compute_metrics(
+            a_qq=a_qq,
+            k=best_k,
+            reference_gene_sets=reference_gene_sets,
+            metric_name=metric_name,
+        )
+
+        # compute best mean metric
+        best_mean_metric = self._mean_metric_knn(
+            metrics_df=best_metrics_df,
+            metric_name=metric_name,
+            all_genes_in_reference_sets=all_genes_in_reference_sets,
+        )
+
+        # return the best resolution and the Leiden communities
+        return best_k, best_knn, best_metrics_df, best_mean_metric
+
     def gridsearch_optimal_resolution_communities_given_gene_sets(
         self,
         reference_gene_sets: dict[str, set[str]],
         resolutions: list[float] | np.ndarray,
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
-    ) -> tuple[float, np.ndarray, pd.DataFrame]:
+    ) -> tuple[float, np.ndarray, pd.DataFrame, float]:
         """
         Compute an "optimal" Leiden clustering by choosing the Leiden resolution by
         maximizing the mean of a concordance metric over reference gene sets.
@@ -770,23 +1025,40 @@ class ValidationMixin:
         The resolution which results in the best concordance with the reference gene sets
         is chosen and used to compute the Leiden communities.
 
+        .. note:
+            When computing a mean metric over the computed clusters, instead of averaging
+            over all clusters, we exclude the clusters with no genes included
+            in the union of all the reference sets. Otherwise low-resolution clusters would always be
+            favored due to an increased number of clusters with metric=0 at high resolution
+            (even if the high resolution clusters that do overlap the reference are more concordant).
+
         Args:
             reference_gene_sets: dictionary of reference gene sets
             resolutions: list of resolutions to consider, e.g. np.linspace(0.5, 5.0, 20)
             metric_name: metric to use for concordance
 
         Returns:
-            (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics)
+            (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics, mean metric)
         """
+        all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
         mean_metrics_df = pd.DataFrame(columns=["resolution", "mean_of_best_match_metric"])
 
         for res in resolutions:
-            _, metrics_df = self.cluster_and_compute_metrics(
+            # compute clustering and metrics
+            cluster_label_q, metrics_df = self.cluster_and_compute_metrics(
                 resolution=res,
-                reference_gene_sets=reference_gene_sets,
                 metric_name=metric_name,
+                reference_gene_sets=reference_gene_sets,
             )
-            mean_metric = metrics_df[metric_name][metrics_df["cluster"] != -1].mean()
+
+            # compute mean metric
+            mean_metric = self._mean_metric_clustering(
+                metrics_df=metrics_df,
+                metric_name=metric_name,
+                cluster_label_q=cluster_label_q,
+                gene_names_q=self.node_names_q,
+                all_genes_in_reference_sets=all_genes_in_reference_sets,
+            )
 
             # mean of best matches over all clusters in clustering
             mean_metrics_df = pd.concat(
@@ -804,8 +1076,17 @@ class ValidationMixin:
             metric_name=metric_name,
         )
 
+        # compute best mean metric
+        best_mean_metric = self._mean_metric_clustering(
+            metrics_df=best_metrics_df,
+            metric_name=metric_name,
+            cluster_label_q=best_clustering,
+            gene_names_q=self.node_names_q,
+            all_genes_in_reference_sets=all_genes_in_reference_sets,
+        )
+
         # return the best resolution and the Leiden communities
-        return best_resolution, best_clustering, best_metrics_df
+        return best_resolution, best_clustering, best_metrics_df, best_mean_metric
 
     def bayesopt_optimal_resolution_communities_given_gene_sets(
         self,
@@ -813,13 +1094,20 @@ class ValidationMixin:
         resolution_range: tuple[float, float] = (0.2, 10.0),
         num_clusterings_to_compute: int = 20,
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
-    ) -> tuple[float, np.ndarray, pd.DataFrame]:
+    ) -> tuple[float, np.ndarray, pd.DataFrame, float]:
         """
         Compute an "optimal" Leiden clustering by choosing the Leiden resolution by
         maximizing the mean of a concordance metric over reference gene sets.
         Optimization is performed by Bayesian optimization over the input resolution range.
         The resolution which results in the best concordance with the reference gene sets
         is chosen and used to compute the Leiden communities.
+
+        .. note:
+            When computing a mean metric over the computed clusters, instead of averaging
+            over all clusters, we exclude the clusters with no genes included
+            in the union of all the reference sets. Otherwise low-resolution clusters would always be
+            favored due to an increased number of clusters with metric=0 at high resolution
+            (even if the high resolution clusters that do overlap the reference are more concordant).
 
         Args:
             reference_gene_sets: dictionary of reference gene sets
@@ -828,19 +1116,32 @@ class ValidationMixin:
             metric_name: metric to use for concordance
 
         Returns:
-            (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics)
+            (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics, mean metric)
         """
         assert num_clusterings_to_compute >= 15, "num_clusterings_to_compute must be >= 15"
+        all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
 
         # function to be minimized
         def _compute_inv_mean_metric(x: list[float]) -> float:
             resolution = x[0]
-            _, metrics_df = self.cluster_and_compute_metrics(
+
+            # compute clustering and metrics
+            cluster_label_q, metrics_df = self.cluster_and_compute_metrics(
                 resolution=resolution,
-                reference_gene_sets=reference_gene_sets,
                 metric_name=metric_name,
+                reference_gene_sets=reference_gene_sets,
             )
-            return -1 * metrics_df[metric_name][metrics_df["cluster"] != -1].mean()
+
+            # compute mean metric
+            mean_metric = self._mean_metric_clustering(
+                metrics_df=metrics_df,
+                metric_name=metric_name,
+                cluster_label_q=cluster_label_q,
+                gene_names_q=self.node_names_q,
+                all_genes_in_reference_sets=all_genes_in_reference_sets,
+            )
+
+            return -1 * mean_metric
 
         # use scikit-optimize Bayesian optimization to find the best resolution
         res = gp_minimize(
@@ -861,8 +1162,17 @@ class ValidationMixin:
             metric_name=metric_name,
         )
 
+        # compute best mean metric
+        best_mean_metric = self._mean_metric_clustering(
+            metrics_df=best_metrics_df,
+            metric_name=metric_name,
+            cluster_label_q=best_clustering,
+            gene_names_q=self.node_names_q,
+            all_genes_in_reference_sets=all_genes_in_reference_sets,
+        )
+
         # return the best resolution and the Leiden communities
-        return best_resolution, best_clustering, best_metrics_df
+        return best_resolution, best_clustering, best_metrics_df, best_mean_metric
 
 
 class GeneralContext(NetworkAnalysisBase, ValidationMixin):
