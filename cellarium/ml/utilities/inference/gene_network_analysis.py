@@ -35,7 +35,8 @@ logger.setLevel(logging.DEBUG)  # Set the logging level
 handler = logging.StreamHandler()
 
 # Create and set a formatter
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+formatter = logging.Formatter("%(levelname)s - %(message)s")
 handler.setFormatter(formatter)
 
 # Add the handler to the logger
@@ -510,6 +511,7 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         self.prompt_marginal_std_p = prompt_marginal_std_p
         self.query_marginal_mean_q = query_marginal_mean_q
         self.query_marginal_std_q = query_marginal_std_q
+        self.gene_info_tsv_path = gene_info_tsv_path
 
         self.gene_info_df, self.gene_symbol_to_gene_id_map, self.gene_id_to_gene_symbol_map = load_gene_info_table(
             gene_info_tsv_path, query_var_names + prompt_var_names
@@ -525,7 +527,7 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             eps=eps,
         )
 
-        super().__init__(z_qp=self.z_qp, node_names_q=query_var_names)
+        super().__init__(z_qp=self.z_qp, node_names_q=self.query_var_names)
 
     @property
     def cell_type(self) -> str:
@@ -615,12 +617,12 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 
         # apply the mask to everything else
         self.prompt_var_names = [self.prompt_var_names[i] for i in range(len(self.prompt_var_names)) if self.mask_p[i]]
-        # self.prompt_empirical_mean_p = self.prompt_empirical_mean_p[self.mask_p]
+        self.prompt_empirical_mean_p: np.ndarray = self.prompt_empirical_mean_p[self.mask_p]
         self.prompt_marginal_mean_p = self.prompt_marginal_mean_p[self.mask_p]
         self.prompt_marginal_std_p = self.prompt_marginal_std_p[self.mask_p]
 
         self.query_var_names = [self.query_var_names[i] for i in range(len(self.query_var_names)) if self.mask_q[i]]
-        # self.query_empirical_mean_q = self.query_empirical_mean_q[self.mask_q]
+        self.query_empirical_mean_q: np.ndarray = self.query_empirical_mean_q[self.mask_q]
         self.query_marginal_mean_q = self.query_marginal_mean_q[self.mask_q]
         self.query_marginal_std_q = self.query_marginal_std_q[self.mask_q]
 
@@ -1194,6 +1196,13 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         prompt_marginal_std_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
+        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
+        min_prompt_gene_tpm: float = 10.0,
+        min_query_gene_tpm: float = 10.0,
+        query_response_amp_min_pct: float | None = None,
+        feature_max_value: float = 10.0,
+        eps: float = 1e-8,
         verbose: bool = True,
     ):
         super().__init__(
@@ -1206,6 +1215,13 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             prompt_marginal_std_p=prompt_marginal_std_p,
             query_marginal_mean_q=query_marginal_mean_q,
             query_marginal_std_q=query_marginal_std_q,
+            response_normalization_strategy=response_normalization_strategy,
+            feature_normalization_strategy=feature_normalization_strategy,
+            min_prompt_gene_tpm=min_prompt_gene_tpm,
+            min_query_gene_tpm=min_query_gene_tpm,
+            query_response_amp_min_pct=query_response_amp_min_pct,
+            feature_max_value=feature_max_value,
+            eps=eps,
             verbose=verbose,
         )
 
@@ -1220,12 +1236,25 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         self.query_empirical_mean_q = query_empirical_mean_q
 
     @staticmethod
-    def from_old_jacobian_pt_dump(jacobian_pt_path: str, adata_path: str, gene_info_tsv_path: str) -> "JacobianContext":
+    def from_old_jacobian_pt_dump(
+        jacobian_pt_path: str,
+        adata_path: str,
+        gene_info_tsv_path: str,
+        device: torch.device | str,
+        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
+        min_prompt_gene_tpm: float = 10.0,
+        min_query_gene_tpm: float = 10.0,
+        query_response_amp_min_pct: float | None = None,
+        feature_max_value: float = 10.0,
+        eps: float = 1e-8,
+        verbose: bool = True,
+    ) -> "JacobianContext":
         # suppres FutureWarning in a context manager
         with warnings.catch_warnings():
             warnings.simplefilter(action="ignore", category=FutureWarning)
             adata = sc.read_h5ad(adata_path)
-            old_jac_dict = torch.load(jacobian_pt_path)
+            old_jac_dict = torch.load(jacobian_pt_path, weights_only=False, map_location=device)
 
         # make a metacell
         X_meta_g = np.asarray(adata.X.sum(0))
@@ -1242,6 +1271,10 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         prompt_empirical_mean_p = adata_meta[0, old_jac_dict["prompt_var_names"]].X.flatten()
         query_empirical_mean_q = adata_meta[0, old_jac_dict["query_var_names"]].X.flatten()
 
+        assert (len(old_jac_dict["query_var_names"]), len(old_jac_dict["prompt_var_names"])) == old_jac_dict[
+            "jacobian_qg"
+        ].shape, "Jacobian shape mismatch"
+
         return JacobianContext(
             adata_obs=adata_meta.obs,
             gene_info_tsv_path=gene_info_tsv_path,
@@ -1255,7 +1288,52 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             prompt_marginal_std_p=old_jac_dict["prompt_marginal_dict"]["gene_marginal_std_q"].cpu().numpy(),
             query_marginal_mean_q=old_jac_dict["query_marginal_dict"]["gene_marginal_means_q"].cpu().numpy(),
             query_marginal_std_q=old_jac_dict["query_marginal_dict"]["gene_marginal_std_q"].cpu().numpy(),
+            response_normalization_strategy=response_normalization_strategy,
+            feature_normalization_strategy=feature_normalization_strategy,
+            min_prompt_gene_tpm=min_prompt_gene_tpm,
+            min_query_gene_tpm=min_query_gene_tpm,
+            query_response_amp_min_pct=query_response_amp_min_pct,
+            feature_max_value=feature_max_value,
+            eps=eps,
+            verbose=verbose,
         )
+
+    # def reprocess(
+    #     self,
+    #     response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+    #     feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
+    #     min_prompt_gene_tpm: float = 10.0,
+    #     min_query_gene_tpm: float = 10.0,
+    #     query_response_amp_min_pct: float | None = None,
+    #     feature_max_value: float = 10.0,
+    #     eps: float = 1e-8,
+    #     verbose: bool = True,
+    # ) -> None:
+
+    # TODO: will not work due to changes in vars during calls to _process()
+
+    #     self = JacobianContext(
+    #         adata_obs=self.adata_obs,
+    #         gene_info_tsv_path=self.gene_info_tsv_path,
+    #         jacobian_point=self.jacobian_point,
+    #         query_var_names=self.query_var_names,
+    #         prompt_var_names=self.prompt_var_names,
+    #         jacobian_qp=self.response_qp,
+    #         prompt_empirical_mean_p=self.prompt_empirical_mean_p,
+    #         query_empirical_mean_q=self.query_empirical_mean_q,
+    #         prompt_marginal_mean_p=self.prompt_marginal_mean_p,
+    #         prompt_marginal_std_p=self.prompt_marginal_std_p,
+    #         query_marginal_mean_q=self.query_marginal_mean_q,
+    #         query_marginal_std_q=self.query_marginal_std_q,
+    #         response_normalization_strategy=response_normalization_strategy,
+    #         feature_normalization_strategy=feature_normalization_strategy,
+    #         min_prompt_gene_tpm=min_prompt_gene_tpm,
+    #         min_query_gene_tpm=min_query_gene_tpm,
+    #         query_response_amp_min_pct=query_response_amp_min_pct,
+    #         feature_max_value=feature_max_value,
+    #         eps=eps,
+    #         verbose=verbose,
+    #     )
 
     def __str__(self) -> str:
         return (
