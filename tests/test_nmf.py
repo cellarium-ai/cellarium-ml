@@ -12,7 +12,7 @@ from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.models import NonNegativeMatrixFactorization
-from cellarium.ml.models.nmf import update_consensusD
+from cellarium.ml.models.nmf import compute_consensus_factors, get_embedding
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDataset
 
@@ -136,14 +136,19 @@ def run_cellarium_nmf(
 
     # dataloader
     batch_size = n // 10
+    dataset = BoringDataset(
+        data=x_ng.numpy(),
+        var_names=var_names_g,
+        obs_names=np.array([f"cell_{i}" for i in range(n)]),
+    )
     train_loader = torch.utils.data.DataLoader(
-        BoringDataset(
-            x_ng.numpy(),
-            var_names_g,
-        ),
+        dataset=dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
+    )
+    predict_loader = torch.utils.data.DataLoader(
+        dataset=dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
     )
 
     # model
@@ -173,11 +178,14 @@ def run_cellarium_nmf(
     trainer.fit(module, train_dataloaders=train_loader)
 
     # get loadings and factors
-    cellarium_nmf.the_best_k = k  # hacking around strange code design
-    cellarium_nmf.get_rec_error = False  # hacking around strange code design
-    cellarium_nmf.if_get_full_D = False  # hacking around strange code design
-    update_consensusD(nmf_model=cellarium_nmf)  # again sort of strange to need to do this
-    cellarium_loadings_nk = cellarium_nmf.predict(x_ng, var_names_g=var_names_g)["alpha_nk"]  # TODO: use dataloader
+    compute_consensus_factors(nmf_model=cellarium_nmf)  # sort of strange to need to do this
+    cellarium_loadings_dataframe = get_embedding(
+        dataset=predict_loader,
+        pipeline=module.pipeline,
+        k=k,
+        if_get_final_gene_loading=False,
+    )
+    cellarium_loadings_nk = torch.tensor(cellarium_loadings_dataframe.values).float()
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
     cellarium_factors_kg = getattr(cellarium_nmf, f"D_{k}_kg").squeeze(0)
 
