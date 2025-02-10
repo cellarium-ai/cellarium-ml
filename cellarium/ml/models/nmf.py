@@ -313,24 +313,25 @@ def init_weights(m):
 
 class NMFInit:
     @staticmethod
-    def __call__(x: torch.Tensor, transformed_data_mean: float, k: int) -> None:
+    def __call__(x: torch.Tensor, k: int, transformed_data_mean: float | None = None) -> None:
         """Modify the values of x in place as a way to initialize a dictionary factor matrix for NMF."""
         pass
 
 
 class NMFInitSklearnRandom(NMFInit):
     @staticmethod
-    def __call__(x: torch.Tensor, transformed_data_mean: float, k: int) -> None:
+    def __call__(x: torch.Tensor, k: int, transformed_data_mean: float | None = None) -> None:
         """Modify the values of x in place according to the sklearn NMF init random recipe."""
         # https://github.com/scikit-learn/scikit-learn/blob/
         # 99bf3d8e4eed5ba5db19a1869482a238b6223ffd/sklearn/decomposition/_nmf.py#L304-L315
+        assert transformed_data_mean is not None
         factor = np.sqrt(transformed_data_mean / k)
         x.normal_(0.0, factor).abs_()
 
 
 class NMFInitUniformRandom(NMFInit):
     @staticmethod
-    def __call__(x: torch.Tensor, transformed_data_mean: float, k: int) -> None:
+    def __call__(x: torch.Tensor, k: int, transformed_data_mean: float | None = None) -> None:
         """Modify the values of x in place according to a Joshua Welch NMF init random recipe."""
         # https://www.nature.com/articles/s41587-021-00867-x#Sec10
         # algorithm 1 step 2
@@ -362,7 +363,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         log_variational: bool,
         algorithm: Literal["mairal"] = "mairal",
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
-        transformed_data_mean: float = 1.0,
+        transformed_data_mean: None | float = None,
     ) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -378,6 +379,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.if_get_full_D = False
         self.transformed_data_mean = transformed_data_mean
         self.init = init
+        if init == "sklearn_random":
+            if transformed_data_mean is None:
+                raise ValueError("transformed_data_mean must be provided when using the sklearn_random initialization")
 
         for i in self.k_values:
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
@@ -411,11 +415,11 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
             getattr(self, f"A_{i}_rkk").zero_()
             getattr(self, f"B_{i}_rkg").zero_()
-            init_fn(getattr(self, f"D_{i}_rkg"), self.transformed_data_mean, i)
+            init_fn(getattr(self, f"D_{i}_rkg"), k=i, transformed_data_mean=self.transformed_data_mean)
 
             getattr(self, f"full_A_{i}_kk").zero_()
             getattr(self, f"full_B_{i}_kg").zero_()
-            init_fn(getattr(self, f"full_D_{i}_kg"), self.transformed_data_mean, i)
+            init_fn(getattr(self, f"full_D_{i}_kg"), k=i, transformed_data_mean=self.transformed_data_mean)
 
     def _compute_loadings(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor, n_iterations: int) -> torch.Tensor:
         """
