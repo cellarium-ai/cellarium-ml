@@ -308,6 +308,7 @@ class CellariumGPTInferenceContext:
             assay, suspension_type, prompt_metadata_dict, total_mrna_umis)
 
         obs_df = pd.DataFrame({key: [value] for key, value in metadata_dict.items()})
+        obs_df.index = obs_df.index.astype(str)
         var_df = pd.DataFrame()
         adata = sc.AnnData(X=np.zeros((1, 0)), obs=obs_df, var=var_df)
 
@@ -332,6 +333,7 @@ class CellariumGPTInferenceContext:
         total_mrna_umis: int,
         query_gene_ids: list[list],
         perturb_gene_ids: list[str] | None,
+        perturb_gene_values: np.ndarray | None = None,
     ) -> t.Tuple[dict, dict]:
         
         """
@@ -362,6 +364,7 @@ class CellariumGPTInferenceContext:
         # be replaced with the gene to be perturbed. If no perturbation is required, the gene
         # will be set to the first gene in the gene ID dictionary.
         obs_df = pd.DataFrame({key: [value] * n_cells for key, value in metadata_dict.items()})
+        obs_df.index = obs_df.index.astype(str)
         var_df = pd.DataFrame(index=[self.model_var_names[0]])
         pert_adata = sc.AnnData(X=np.zeros((n_cells, 1)), obs=obs_df, var=var_df)
 
@@ -374,8 +377,9 @@ class CellariumGPTInferenceContext:
         )
 
         # The first cell is control unperturbed, so we will ensure that the first gene is marked as queried  (not perturbed)
+        PERTURB_GENE_CONTEXT_INDEX = 0
         tokens_dict['prompt_mask_nc'][0, 0] = False
-        tokens_dict['gene_tokens_nc']['gene_value'][0, context_indices['prompt_genes'], 1] = 1  # Queried
+        tokens_dict['gene_tokens_nc']['gene_value'][0, PERTURB_GENE_CONTEXT_INDEX, 1] = 1  # Mark as queried
 
         # In subsequent cells, prompt genes are set to 0 sequentially
         if perturb_gene_ids is not None:
@@ -383,6 +387,15 @@ class CellariumGPTInferenceContext:
             tokens_dict['gene_tokens_nc']['gene_id'] = tokens_dict['gene_tokens_nc']['gene_id'].clone()
             tokens_dict['gene_tokens_nc']['gene_id'][1:, 0] = torch.tensor([
                 self.var_name_to_index_map[var_name] for var_name in perturb_gene_ids])
+            if perturb_gene_values is None:
+                self.log("Perturbed gene values are not provided, assuming in silico deletion (set to 0) ...")
+                perturb_gene_values = np.zeros((len(perturb_gene_ids),))
+            else:
+                self.log("Perturbed gene values are provided, injecting the provided values into the prompt ...")
+                assert len(perturb_gene_values) == len(perturb_gene_ids)
+                tokens_dict['gene_tokens_nc']['gene_value'] = tokens_dict['gene_tokens_nc']['gene_value'].clone()
+                tokens_dict['gene_tokens_nc']['gene_value'][1:, PERTURB_GENE_CONTEXT_INDEX, 0] = torch.tensor(
+                    perturb_gene_values).log1p()
 
         return tokens_dict, context_indices, pert_adata, metadata_prompt_masks_dict
 
@@ -561,6 +574,9 @@ class CellariumGPTInferenceContext:
     
         gene_logits_nqk = self.get_gene_value_logits_from_tokens(tokens_dict, context_indices, max_counts)
 
+        if max_counts is None:
+            max_counts = gene_logits_nqk.shape[-1]
+        
         if use_logsumexp:
             log_counts_1_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).log()
             log_counts_2_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).pow(2).log()
