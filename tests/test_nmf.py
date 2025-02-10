@@ -288,7 +288,7 @@ def run_nmf_and_sklearn_multi_device(
 @pytest.mark.parametrize(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
-def test_nmf_against_sklearn_multi_device(
+def test_nmf_against_sklearn(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
     fixture_d_correlated_kg: torch.Tensor,
@@ -331,7 +331,7 @@ def test_nmf_against_sklearn_multi_device(
     nmf_loss_cellarium = torch.nn.functional.mse_loss(x_norm_ng, cellarium_reconstruction_ng)
     print(f"nmf_loss_sklearn: {nmf_loss_sklearn}")
     print(f"nmf_loss_cellarium: {nmf_loss_cellarium}")
-    assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.035, (
+    assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.03, (
         f"cellarium and sklearn loss is not very similar: {torch.abs(nmf_loss_sklearn - nmf_loss_cellarium):.4f}"
     )
 
@@ -433,3 +433,18 @@ def test_nmf_against_sklearn_multi_device(
     assert total_similarity > 0.95, (
         f"cellarium loadings are not very similar to truth: {total_cellarium_similarity:.4f}"
     )
+
+
+@pytest.mark.skip(reason="NMF does not yet work with multiple devices")
+@pytest.mark.parametrize(
+    "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
+)
+def test_nmf_against_sklearn_multi_device(
+    x_nmf_ng: dict[str, torch.Tensor],
+    data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
+    fixture_d_correlated_kg: torch.Tensor,
+    fixture_d_uncorrelated_kg: torch.Tensor,
+    fixture_alpha_correlated_nk: torch.Tensor,
+    fixture_alpha_uncorrelated_nk: torch.Tensor,
+):
+    pass
