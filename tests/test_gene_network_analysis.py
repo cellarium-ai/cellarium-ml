@@ -1,10 +1,14 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
+
 import numpy as np
+import pandas as pd
 import pytest
 
 from cellarium.ml.utilities.inference.gene_network_analysis import (
+    GeneNetworkAnalysisBase,
     GeneralContext,
     compute_adjacency_matrix,
 )
@@ -153,3 +157,57 @@ def test_knn_concordance_metric(ctx):
         reference_gene_sets=reference_gene_sets,
         k_values=k_values,
     )
+
+
+def test_gene_network_analysis_base(tmpdir):
+    gene_info_tsv_path = tmpdir / "gene_info.tsv"
+    gene_info_df = pd.DataFrame(
+        {
+            "Gene Symbol": ["TTN", "RYR2", "NRXN1"],
+            "ENSEMBL Gene ID": ["ENSG1", "ENSG2", "ENSG3"],
+        }
+    )
+    gene_info_df.to_csv(gene_info_tsv_path, sep="\t", index=False)
+    response_qp = np.random.randn(q, p)
+
+    adata_obs = pd.DataFrame({"total_mrna_umis": [1000.0]})
+
+    gene_ctx = GeneNetworkAnalysisBase(
+        adata_obs=adata_obs,
+        gene_info_tsv_path=gene_info_tsv_path,
+        query_var_names=[f"gene_{i}" for i in range(response_qp.shape[0])],
+        prompt_var_names=[f"gene_{i}" for i in range(response_qp.shape[1])],
+        response_qp=response_qp,
+        prompt_marginal_mean_p=np.abs(np.random.randn(p)),
+        prompt_marginal_std_p=np.square(np.random.randn(p)),
+        prompt_empirical_mean_p=np.abs(np.random.randn(p)),
+        query_marginal_mean_q=np.abs(np.random.randn(q)),
+        query_marginal_std_q=np.square(np.random.randn(q)),
+        query_empirical_mean_q=np.abs(np.random.randn(q)),
+    )
+    original_processed_data = copy.deepcopy(gene_ctx.processed)
+
+    gene_ctx.compute_adjacency_matrix(
+        adjacency_strategy="positive_correlation",
+        n_neighbors=10,
+        self_loop=False,
+        beta=3.0,
+    )
+    gene_ctx.compute_leiden_communites(resolution=0.1)
+    gene_ctx.compute_spectral_dimension()
+
+    gene_ctx.reprocess(  # more stringent cutoff values
+        min_prompt_gene_tpm=25.0,
+        min_query_gene_tpm=25.0,
+    )
+    assert gene_ctx.processed != original_processed_data
+
+    # demonstrate we are not saving old state
+    assert gene_ctx.a_qq is None
+    assert gene_ctx.leiden_membership is None
+    assert gene_ctx.spectral == {}
+
+    # reprocess now
+    gene_ctx.reprocess()  # default values
+
+    assert gene_ctx.processed == original_processed_data

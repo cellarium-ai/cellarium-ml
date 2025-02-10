@@ -79,6 +79,34 @@ class GeneNetworkAnalysisData:
     query_marginal_std_q: np.ndarray
     query_empirical_mean_q: np.ndarray
 
+    def __eq__(self, value):
+        # for testing purposes
+        return all(
+            [
+                (
+                    (getattr(self, key).shape == getattr(value, key).shape)
+                    and np.allclose(getattr(self, key), getattr(value, key))
+                )
+                for key in [
+                    "matrix_qp",
+                    "prompt_marginal_mean_p",
+                    "prompt_marginal_std_p",
+                    "prompt_empirical_mean_p",
+                    "query_marginal_mean_q",
+                    "query_marginal_std_q",
+                    "query_empirical_mean_q",
+                ]
+            ]
+        ) and all(
+            [
+                getattr(self, key) == getattr(value, key)
+                for key in [
+                    "prompt_var_names",
+                    "query_var_names",
+                ]
+            ]
+        )
+
 
 def process_response_matrix(
     analysis_data: GeneNetworkAnalysisData,
