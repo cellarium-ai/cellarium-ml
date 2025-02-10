@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import tqdm
 from lightning.pytorch.strategies import DDPStrategy
 from sklearn.metrics import silhouette_score
-from torch.utils.data import IterableDataset
+from torch.utils.data import DataLoader, IterableDataset
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.transforms import Filter
@@ -27,11 +27,11 @@ warnings.filterwarnings("ignore")
 
 
 def calculate_rec_error(
-    dataset: IterableDataset,
+    dataset: DataLoader | IterableDataset,
     pipeline,  #: "CellariumPipeline",
 ) -> anndata.AnnData:
     """
-    Embed the dataset using the pipeline.
+    Compute reconstruction error using the pipeline.
 
     Args:
         dataset: Dataset.
@@ -55,12 +55,13 @@ def calculate_rec_error(
 
 
 def get_embedding(
-    dataset: IterableDataset,
+    dataset: DataLoader | IterableDataset,
     pipeline,  #: "CellariumPipeline",
     k: int,
     if_get_final_gene_loading: bool = True,
 ) -> pd.DataFrame:
-    """Helper function to embed the dataset using the pipeline.
+    """
+    Helper function to embed the dataset using the pipeline.
 
     Args:
         dataset: Dataset.
@@ -79,7 +80,8 @@ def get_embedding(
     embedding = []
     index = []
     for batch in tqdm.tqdm(dataset):
-        batch["x_ng"] = torch.from_numpy(batch["x_ng"]).to(device)
+        if isinstance(batch["x_ng"], np.ndarray):
+            batch["x_ng"] = torch.from_numpy(batch["x_ng"]).to(device)
         out = pipeline.predict(batch)
         z = out["alpha_nk"]
         embedding += [z.cpu()]
@@ -294,7 +296,6 @@ def compute_factors(
             / updated_factors_rkg.square().sum(dim=[-2, -1])
         ).max()
         if D_max_diff <= D_tol:
-            print(f"D break at iteration {i}: {D_max_diff}")
             break
         factors_buffer_rkg = updated_factors_rkg.clone()
 
@@ -600,22 +601,16 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         else:
             k = self.the_best_k
-            # TODO if update_consensusD has not been called, then D_{k}_kg is not updated
-            # but if it is, then you would want to use that
-            # D_rkg = getattr(self, f"D_{k}_rkg")
             D_kg = getattr(self, f"D_{k}_kg")
+            if (D_kg == 0).all():
+                raise ValueError("D_kg is all zeros, please run compute_consensus_factors() before calling predict()")
 
             # compute loadings, Mairal Algorithm 1 step 4
-            # alpha_nk = compute_loadings(
-            #     x_ng=x_,
-            #     factors_rkg=D_kg.to(x_.device).unsqueeze(0),
-            #     n_iterations=1000,
-            # ).squeeze(0)
             alpha_nk = compute_loadings(
                 x_ng=x_,
                 factors_rkg=D_kg.to(x_.device).unsqueeze(0),
-                n_iterations=10000,
-                alpha_tol=self._alpha_tol / 100,
+                n_iterations=1000,
+                alpha_tol=self._alpha_tol,
                 learning_rate=0.01,
                 normalize=False,
             ).squeeze(0)
@@ -657,7 +652,22 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         return {k: getattr(self, f"D_{k}_kg") for k in self.k_values}
 
 
-def update_consensusD(nmf_model: NonNegativeMatrixFactorization, density_threshold=0.2, local_neighborhood_size=0.3):
+def compute_consensus_factors(
+    nmf_model: NonNegativeMatrixFactorization,
+    density_threshold=0.2,
+    local_neighborhood_size=0.3,
+):
+    """
+    Run the consensus step of consensus NMF, and store the consensus factors as attributes of `nmf_model`.
+
+    Args:
+        nmf_model: The trained NMF model.
+        density_threshold: The threshold for the density of the local neighborhood.
+        local_neighborhood_size: The size of the local neighborhood.
+
+    Returns:
+        A dictionary of the consensus factors_kg for each value of k.
+    """
     torch.manual_seed(0)
     k_values = nmf_model.k_values
 
