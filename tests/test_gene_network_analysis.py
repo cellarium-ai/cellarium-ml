@@ -223,3 +223,6 @@ def test_gene_network_analysis_base(tmpdir):
     gene_ctx.reprocess()  # default values
 
     assert gene_ctx.processed == original_processed_data
+
+    assert max(gene_ctx.query_gene_id_to_idx_map.values()) < gene_ctx.z_qp.shape[0]
+    assert max(gene_ctx.query_gene_id_to_idx_map.values()) < len(gene_ctx.processed.query_var_names)

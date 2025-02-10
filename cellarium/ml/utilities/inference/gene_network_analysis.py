@@ -783,7 +783,7 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 
     @cached_property
     def query_gene_id_to_idx_map(self) -> dict[str, int]:
-        return {gene_id: idx for idx, gene_id in enumerate(self.unprocessed.query_var_names)}
+        return {gene_id: idx for idx, gene_id in enumerate(self.processed.query_var_names)}
 
     def __str__(self) -> str:
         return (
@@ -816,7 +816,9 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             verbose=self.verbose,
         )
 
-        # re-initialize the object and zero out pre-computed properties
+        # re-initialize the object and zero out pre-computed and cached properties
+        if hasattr(self, "query_gene_id_to_idx_map"):
+            del self.query_gene_id_to_idx_map  # clear cached property
         super().__init__(z_qp=self.processed.matrix_qp, node_names_q=self.processed.query_var_names)
 
     def plot_mde_embedding(
