@@ -390,7 +390,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             self.register_buffer(f"full_B_{i}_kg", torch.empty(i, g))
             self.register_buffer(f"full_D_{i}_kg", torch.empty(i, g))
 
-        self._D_tol = 2e-5
+        self._D_tol = 1e-5
         self._alpha_tol = 1e-5
 
         self.n_nmf = r
@@ -433,7 +433,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             x_ng=x_ng,
             factors_rkg=factors_rkg,
             n_iterations=n_iterations,
-            learning_rate=0.2,
+            learning_rate=0.05,
             normalize=False,
             alpha_tol=self._alpha_tol,
         )
@@ -486,7 +486,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         alpha_rnk = self._compute_loadings(
             x_ng=x_ng,
             factors_rkg=factors_rkg,
-            n_iterations=1000,
+            n_iterations=200,
         )
 
         with torch.no_grad():
@@ -503,7 +503,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 factors_rkg=factors_rkg,
                 A_rkk=A_rkk,
                 B_rkg=B_rkg,
-                n_iterations=1000,
+                n_iterations=200,
             )
 
         return updated_factors_rkg
@@ -585,6 +585,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                     x_ng=x_,
                     factors_rkg=D_kg.to(x_.device).unsqueeze(0),
                     n_iterations=1000,
+                    learning_rate=0.01,
                     alpha_tol=self._alpha_tol,
                 ).squeeze(0)
                 rec_error.append(
@@ -611,6 +612,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 factors_rkg=D_kg.to(x_.device).unsqueeze(0),
                 n_iterations=10000,
                 alpha_tol=self._alpha_tol / 100,
+                learning_rate=0.01,
                 normalize=False,
             ).squeeze(0)
 
