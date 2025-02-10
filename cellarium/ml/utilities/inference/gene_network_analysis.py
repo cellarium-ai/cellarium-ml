@@ -6,6 +6,7 @@
 import logging
 import typing as t
 import warnings
+from dataclasses import dataclass
 from functools import cached_property, lru_cache
 
 import colorcet as cc
@@ -60,6 +61,156 @@ def load_gene_info_table(
             gene_id_to_gene_symbol_map[gene_id] = gene_id
 
     return gene_info_df, gene_symbol_to_gene_id_map, gene_id_to_gene_symbol_map
+
+
+@dataclass
+class GeneNetworkAnalysisData:
+    """Container for required inputs for a gene network analysis with type annotations."""
+
+    matrix_qp: np.ndarray
+
+    prompt_var_names: list[str]
+    prompt_marginal_mean_p: np.ndarray
+    prompt_marginal_std_p: np.ndarray
+    prompt_empirical_mean_p: np.ndarray
+
+    query_var_names: list[str]
+    query_marginal_mean_q: np.ndarray
+    query_marginal_std_q: np.ndarray
+    query_empirical_mean_q: np.ndarray
+
+
+def process_response_matrix(
+    analysis_data: GeneNetworkAnalysisData,
+    total_mrna_umis: float,
+    response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+    feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
+    min_prompt_gene_tpm: float = 10.0,
+    min_query_gene_tpm: float = 10.0,
+    query_response_amp_min_pct: float | None = None,
+    feature_max_value: float = 10.0,
+    eps: float = 1e-8,
+    verbose: bool = True,
+) -> GeneNetworkAnalysisData:
+    """
+    Process the response matrix for gene network analysis.
+
+    Args:
+        response_qp: response matrix
+        prompt_var_names: prompt gene names
+        prompt_marginal_mean_p: prompt marginal mean
+        prompt_marginal_std_p: prompt marginal standard deviation
+        prompt_empirical_mean_p: prompt empirical mean
+        query_var_names: query gene names
+        query_marginal_mean_q: query marginal mean
+        query_marginal_std_q: query marginal standard deviation
+        query_empirical_mean_q: query empirical mean
+        total_mrna_umis: total mRNA UMIs
+        response_normalization_strategy: response_qp normalization strategy
+            - "mean": normalize by marginal mean
+            - "std": normalize by marginal standard deviation
+            - "none": no normalization
+        feature_normalization_strategy: feature normalization strategy
+            - "l2": L2 normalization per query feature
+            - "query_z_score": z-score per query feature
+            - "prompt_z_score": z-score per prompt feature
+        min_prompt_gene_tpm: minimum prompt gene TPM
+        min_query_gene_tpm: minimum query gene TPM
+        query_response_amp_min_pct: minimum query response amplitude percentile
+        feature_max_value: maximum feature value
+        eps: epsilon value for numerical stability
+        verbose: whether to print verbose output
+    """
+    response_qp = analysis_data.matrix_qp
+
+    prompt_var_names = analysis_data.prompt_var_names
+    prompt_marginal_mean_p = analysis_data.prompt_marginal_mean_p
+    prompt_marginal_std_p = analysis_data.prompt_marginal_std_p
+    prompt_empirical_mean_p = analysis_data.prompt_empirical_mean_p
+
+    query_var_names = analysis_data.query_var_names
+    query_marginal_mean_q = analysis_data.query_marginal_mean_q
+    query_marginal_std_q = analysis_data.query_marginal_std_q
+    query_empirical_mean_q = analysis_data.query_empirical_mean_q
+
+    if response_normalization_strategy == "mean":
+        z_p = prompt_marginal_mean_p
+        z_q = query_marginal_mean_q
+    elif response_normalization_strategy == "std":
+        z_p = prompt_marginal_std_p
+        z_q = query_marginal_std_q
+    elif response_normalization_strategy == "none":
+        z_p = np.ones_like(prompt_marginal_mean_p)
+        z_q = np.ones_like(query_marginal_mean_q)
+    else:
+        raise ValueError("Invalid Jacobian normalization strategy")
+
+    # linear proportional activation
+    z_qp = response_qp * (z_p[None, :] + eps) / (z_q[:, None] + eps)
+    assert isinstance(z_qp, np.ndarray)
+
+    if verbose:
+        logger.info(f"Maximum value of z_qp: {np.max(z_qp):.3f}")
+        logger.info(f"Minimum value of z_qp: {np.min(z_qp):.3f}")
+
+    mask_q = (1e6 * query_marginal_mean_q / total_mrna_umis) >= min_query_gene_tpm
+    mask_p = (1e6 * prompt_marginal_mean_p / total_mrna_umis) >= min_prompt_gene_tpm
+
+    logger.info(f"Number of query genes after TPM filtering: {np.sum(mask_q)} / {len(mask_q)}")
+    logger.info(f"Number of prompt genes after TPM filtering: {np.sum(mask_p)} / {len(mask_p)}")
+
+    if query_response_amp_min_pct is not None:
+        z_norm_q = np.linalg.norm(z_qp, axis=-1)
+        z_norm_thresh = np.percentile(z_norm_q, query_response_amp_min_pct)
+        mask_q = mask_q & (z_norm_q >= z_norm_thresh)
+        logger.info(f"Number of query genes after z-norm filtering: {np.sum(mask_q)} / {len(mask_q)}")
+
+    # apply the mask to everything else
+    prompt_var_names_masked = [prompt_var_names[i] for i in range(len(prompt_var_names)) if mask_p[i]]
+    prompt_empirical_mean_p_masked = prompt_empirical_mean_p[mask_p]
+    prompt_marginal_mean_p_masked = prompt_marginal_mean_p[mask_p]
+    prompt_marginal_std_p_masked = prompt_marginal_std_p[mask_p]
+
+    query_var_names_masked = [query_var_names[i] for i in range(len(query_var_names)) if mask_q[i]]
+    query_empirical_mean_q_masked = query_empirical_mean_q[mask_q]
+    query_marginal_mean_q_masked = query_marginal_mean_q[mask_q]
+    query_marginal_std_q_masked = query_marginal_std_q[mask_q]
+
+    # apply the mask to z_qp
+    z_qp = z_qp[mask_q, :][:, mask_p]
+
+    if feature_normalization_strategy == "prompt_z_score":
+        # self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=0, keepdims=True)) / (
+        #     np.sqrt(self.z_qp.shape[0]) * (eps + np.std(self.z_qp, axis=0, keepdims=True))
+        # )
+        z_qp = (z_qp - np.mean(z_qp, axis=0, keepdims=True)) / (eps + np.std(z_qp, axis=0, keepdims=True))
+    elif feature_normalization_strategy == "query_z_score":
+        # self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=1, keepdims=True)) / (
+        #     np.sqrt(self.z_qp.shape[1]) * (eps + np.std(self.z_qp, axis=1, keepdims=True))
+        # )
+        z_qp = (z_qp - np.mean(z_qp, axis=1, keepdims=True)) / (eps + np.std(z_qp, axis=1, keepdims=True))
+    elif feature_normalization_strategy == "l2":
+        z_qp = z_qp / (eps + np.linalg.norm(z_qp, axis=-1, keepdims=True))
+    else:
+        raise ValueError("Invalid feature normalization strategy")
+
+    # clip features
+    assert isinstance(z_qp, np.ndarray)
+    z_qp[np.isnan(z_qp)] = 0.0
+    z_qp[np.isinf(z_qp)] = 0.0
+    z_qp = np.clip(z_qp, -feature_max_value, feature_max_value)
+
+    return GeneNetworkAnalysisData(
+        matrix_qp=z_qp,
+        prompt_var_names=prompt_var_names_masked,
+        prompt_marginal_mean_p=prompt_marginal_mean_p_masked,
+        prompt_marginal_std_p=prompt_marginal_std_p_masked,
+        prompt_empirical_mean_p=prompt_empirical_mean_p_masked,
+        query_var_names=query_var_names_masked,
+        query_marginal_mean_q=query_marginal_mean_q_masked,
+        query_marginal_std_q=query_marginal_std_q_masked,
+        query_empirical_mean_q=query_empirical_mean_q_masked,
+    )
 
 
 def compute_adjacency_matrix(
@@ -390,12 +541,16 @@ class NetworkAnalysisBase:
 
     def __init__(self, z_qp: np.ndarray, node_names_q: list[str] | np.ndarray):
         assert z_qp.shape[0] == len(node_names_q), "Number of node names must match the first dimension of z_qp"
+        assert np.isnan(z_qp).sum() == 0, "There are NaNs in z_qp, which is not allowed"
+        assert np.isinf(z_qp).sum() == 0, "There are infs in z_qp, which is not allowed"
+        assert (z_qp != 0).sum() > 0, "There are no nonzero values in z_qp, which is not allowed"
         self.z_qp = z_qp
         self.node_names_q = node_names_q
         self.a_qq: np.ndarray | None = None  # adjacency matrix
         self.adjacency_kwargs: dict[str, t.Any] = {}  # used by validation methods to re-compute adjacency matrix
         self.leiden_membership: np.ndarray | None = None
         self.spectral: dict[str, np.ndarray | float] = {}
+        self.embedding_q2: np.ndarray | None = None
 
     @property
     def adjacency_matrix(self) -> np.ndarray:
@@ -470,6 +625,29 @@ class NetworkAnalysisBase:
         )
         return float(self.spectral["spectral_dim"])
 
+    def make_mde_embedding(
+        self,
+        n_neighbors: int = 7,
+        repulsive_fraction: int = 5,
+        attractive_penalty: pymde.functions.function.Function = pymde.penalties.Log1p,
+        repulsive_penalty: pymde.functions.function.Function = pymde.penalties.InvPower,
+        device: torch.device = torch.device("cpu"),
+        max_iter: int = 500,
+        verbose: bool = True,
+        **kwargs,
+    ):
+        self.embedding_q2 = mde_embedding(
+            self.z_qp,
+            n_neighbors=n_neighbors,
+            repulsive_fraction=repulsive_fraction,
+            attractive_penalty=attractive_penalty,
+            repulsive_penalty=repulsive_penalty,
+            device=device,
+            max_iter=max_iter,
+            verbose=verbose,
+            **kwargs,
+        )
+
 
 class GeneNetworkAnalysisBase(NetworkAnalysisBase):
     def __init__(
@@ -481,8 +659,10 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         response_qp: np.ndarray,
         prompt_marginal_mean_p: np.ndarray,
         prompt_marginal_std_p: np.ndarray,
+        prompt_empirical_mean_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
+        query_empirical_mean_q: np.ndarray,
         response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
         feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
         min_prompt_gene_tpm: float = 10.0,
@@ -500,24 +680,32 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         assert response_qp.shape == (n_query_vars, n_prompt_vars)
         assert prompt_marginal_mean_p.shape == (n_prompt_vars,)
         assert prompt_marginal_std_p.shape == (n_prompt_vars,)
+        assert prompt_empirical_mean_p.shape == (n_prompt_vars,)
         assert query_marginal_mean_q.shape == (n_query_vars,)
         assert query_marginal_std_q.shape == (n_query_vars,)
+        assert query_empirical_mean_q.shape == (n_query_vars,)
 
         self.adata_obs = adata_obs
-        self.query_var_names = query_var_names
-        self.prompt_var_names = prompt_var_names
-        self.response_qp = response_qp
-        self.prompt_marginal_mean_p = prompt_marginal_mean_p
-        self.prompt_marginal_std_p = prompt_marginal_std_p
-        self.query_marginal_mean_q = query_marginal_mean_q
-        self.query_marginal_std_q = query_marginal_std_q
-        self.gene_info_tsv_path = gene_info_tsv_path
 
+        self.unprocessed = GeneNetworkAnalysisData(
+            matrix_qp=response_qp,
+            prompt_var_names=prompt_var_names,
+            prompt_marginal_mean_p=prompt_marginal_mean_p,
+            prompt_marginal_std_p=prompt_marginal_std_p,
+            prompt_empirical_mean_p=prompt_empirical_mean_p,
+            query_var_names=query_var_names,
+            query_marginal_mean_q=query_marginal_mean_q,
+            query_marginal_std_q=query_marginal_std_q,
+            query_empirical_mean_q=query_empirical_mean_q,
+        )
+
+        self.gene_info_tsv_path = gene_info_tsv_path
         self.gene_info_df, self.gene_symbol_to_gene_id_map, self.gene_id_to_gene_symbol_map = load_gene_info_table(
             gene_info_tsv_path, query_var_names + prompt_var_names
         )
 
-        self._process(
+        self.processed: GeneNetworkAnalysisData
+        self.reprocess(
             response_normalization_strategy=response_normalization_strategy,
             feature_normalization_strategy=feature_normalization_strategy,
             min_prompt_gene_tpm=min_prompt_gene_tpm,
@@ -527,7 +715,7 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             eps=eps,
         )
 
-        super().__init__(z_qp=self.z_qp, node_names_q=self.query_var_names)
+        super().__init__(z_qp=self.processed.matrix_qp, node_names_q=self.processed.query_var_names)
 
     @property
     def cell_type(self) -> str:
@@ -555,15 +743,15 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 
     @property
     def query_gene_symbols(self) -> list[str]:
-        return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.query_var_names]
+        return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.processed.query_var_names]
 
     @property
     def prompt_gene_symbols(self) -> list[str]:
-        return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.prompt_var_names]
+        return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.processed.prompt_var_names]
 
     @cached_property
     def query_gene_id_to_idx_map(self) -> dict[str, int]:
-        return {gene_id: idx for idx, gene_id in enumerate(self.query_var_names)}
+        return {gene_id: idx for idx, gene_id in enumerate(self.unprocessed.query_var_names)}
 
     def __str__(self) -> str:
         return (
@@ -573,7 +761,7 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 
     __repr__ = __str__
 
-    def _process(
+    def reprocess(
         self,
         response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
         feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
@@ -583,94 +771,21 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         feature_max_value: float = 10.0,
         eps: float = 1e-8,
     ) -> None:
-        if response_normalization_strategy == "mean":
-            z_p = self.prompt_marginal_mean_p
-            z_q = self.query_marginal_mean_q
-        elif response_normalization_strategy == "std":
-            z_p = self.prompt_marginal_std_p
-            z_q = self.query_marginal_std_q
-        elif response_normalization_strategy == "none":
-            z_p = np.ones_like(self.prompt_marginal_mean_p)
-            z_q = np.ones_like(self.query_marginal_mean_q)
-        else:
-            raise ValueError("Invalid Jacobian normalization strategy")
-
-        # linear proportional activation
-        self.z_qp = self.response_qp * (z_p[None, :] + eps) / (z_q[:, None] + eps)
-        assert isinstance(self.z_qp, np.ndarray)
-
-        if self.verbose:
-            logger.info(f"Maximum value of z_qp: {np.max(self.z_qp):.3f}")
-            logger.info(f"Minimum value of z_qp: {np.min(self.z_qp):.3f}")
-
-        self.mask_q = (1e6 * self.query_marginal_mean_q / self.total_mrna_umis) >= min_query_gene_tpm
-        self.mask_p = (1e6 * self.prompt_marginal_mean_p / self.total_mrna_umis) >= min_prompt_gene_tpm
-
-        logger.info(f"Number of query genes after TPM filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
-        logger.info(f"Number of prompt genes after TPM filtering: {np.sum(self.mask_p)} / {len(self.mask_p)}")
-
-        if query_response_amp_min_pct is not None:
-            z_norm_q = np.linalg.norm(self.z_qp, axis=-1)
-            z_norm_thresh = np.percentile(z_norm_q, query_response_amp_min_pct)
-            self.mask_q = self.mask_q & (z_norm_q >= z_norm_thresh)
-            logger.info(f"Number of query genes after z-norm filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
-
-        # apply the mask to everything else
-        self.prompt_var_names = [self.prompt_var_names[i] for i in range(len(self.prompt_var_names)) if self.mask_p[i]]
-        self.prompt_empirical_mean_p: np.ndarray = self.prompt_empirical_mean_p[self.mask_p]
-        self.prompt_marginal_mean_p = self.prompt_marginal_mean_p[self.mask_p]
-        self.prompt_marginal_std_p = self.prompt_marginal_std_p[self.mask_p]
-
-        self.query_var_names = [self.query_var_names[i] for i in range(len(self.query_var_names)) if self.mask_q[i]]
-        self.query_empirical_mean_q: np.ndarray = self.query_empirical_mean_q[self.mask_q]
-        self.query_marginal_mean_q = self.query_marginal_mean_q[self.mask_q]
-        self.query_marginal_std_q = self.query_marginal_std_q[self.mask_q]
-
-        # apply the mask to z_qp
-        self.z_qp = self.z_qp[self.mask_q, :][:, self.mask_p]
-
-        if feature_normalization_strategy == "prompt_z_score":
-            self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=0, keepdims=True)) / (
-                np.sqrt(self.z_qp.shape[0]) * (eps + np.std(self.z_qp, axis=0, keepdims=True))
-            )
-        elif feature_normalization_strategy == "query_z_score":
-            self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=1, keepdims=True)) / (
-                np.sqrt(self.z_qp.shape[1]) * (eps + np.std(self.z_qp, axis=1, keepdims=True))
-            )
-        elif feature_normalization_strategy == "l2":
-            self.z_qp = self.z_qp / (eps + np.linalg.norm(self.z_qp, axis=-1, keepdims=True))
-        else:
-            raise ValueError("Invalid feature normalization strategy")
-
-        # clip features
-        assert isinstance(self.z_qp, np.ndarray)
-        self.z_qp[np.isnan(self.z_qp)] = 0.0
-        self.z_qp[np.isinf(self.z_qp)] = 0.0
-        self.z_qp = np.clip(self.z_qp, -feature_max_value, feature_max_value)
-
-    def make_mde_embedding(
-        self,
-        n_neighbors: int = 7,
-        repulsive_fraction: int = 5,
-        attractive_penalty: pymde.functions.function.Function = pymde.penalties.Log1p,
-        repulsive_penalty: pymde.functions.function.Function = pymde.penalties.InvPower,
-        device: torch.device = torch.device("cpu"),
-        max_iter: int = 500,
-        verbose: bool = True,
-        **kwargs,
-    ):
-        assert isinstance(self.z_qp, np.ndarray), "Must call obj.process() before computing MDE embedding"
-        self.embedding_q2 = mde_embedding(
-            self.z_qp,
-            n_neighbors=n_neighbors,
-            repulsive_fraction=repulsive_fraction,
-            attractive_penalty=attractive_penalty,
-            repulsive_penalty=repulsive_penalty,
-            device=device,
-            max_iter=max_iter,
-            verbose=verbose,
-            **kwargs,
+        self.processed = process_response_matrix(
+            analysis_data=self.unprocessed,
+            total_mrna_umis=self.total_mrna_umis,
+            response_normalization_strategy=response_normalization_strategy,
+            feature_normalization_strategy=feature_normalization_strategy,
+            min_prompt_gene_tpm=min_prompt_gene_tpm,
+            min_query_gene_tpm=min_query_gene_tpm,
+            query_response_amp_min_pct=query_response_amp_min_pct,
+            feature_max_value=feature_max_value,
+            eps=eps,
+            verbose=self.verbose,
         )
+
+        # re-initialize the object and zero out pre-computed properties
+        super().__init__(z_qp=self.processed.matrix_qp, node_names_q=self.processed.query_var_names)
 
     def plot_mde_embedding(
         self,
@@ -1205,6 +1320,8 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         eps: float = 1e-8,
         verbose: bool = True,
     ):
+        self.jacobian_point = jacobian_point
+
         super().__init__(
             adata_obs=adata_obs,
             gene_info_tsv_path=gene_info_tsv_path,
@@ -1213,8 +1330,10 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             response_qp=jacobian_qp,
             prompt_marginal_mean_p=prompt_marginal_mean_p,
             prompt_marginal_std_p=prompt_marginal_std_p,
+            prompt_empirical_mean_p=prompt_empirical_mean_p,
             query_marginal_mean_q=query_marginal_mean_q,
             query_marginal_std_q=query_marginal_std_q,
+            query_empirical_mean_q=query_empirical_mean_q,
             response_normalization_strategy=response_normalization_strategy,
             feature_normalization_strategy=feature_normalization_strategy,
             min_prompt_gene_tpm=min_prompt_gene_tpm,
@@ -1224,16 +1343,6 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             eps=eps,
             verbose=verbose,
         )
-
-        n_query_vars = len(query_var_names)
-        n_prompt_vars = len(prompt_var_names)
-
-        assert prompt_empirical_mean_p.shape == (n_prompt_vars,)
-        assert query_empirical_mean_q.shape == (n_query_vars,)
-
-        self.jacobian_point = jacobian_point
-        self.prompt_empirical_mean_p = prompt_empirical_mean_p
-        self.query_empirical_mean_q = query_empirical_mean_q
 
     @staticmethod
     def from_old_jacobian_pt_dump(
@@ -1297,43 +1406,6 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             eps=eps,
             verbose=verbose,
         )
-
-    # def reprocess(
-    #     self,
-    #     response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
-    #     feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
-    #     min_prompt_gene_tpm: float = 10.0,
-    #     min_query_gene_tpm: float = 10.0,
-    #     query_response_amp_min_pct: float | None = None,
-    #     feature_max_value: float = 10.0,
-    #     eps: float = 1e-8,
-    #     verbose: bool = True,
-    # ) -> None:
-
-    # TODO: will not work due to changes in vars during calls to _process()
-
-    #     self = JacobianContext(
-    #         adata_obs=self.adata_obs,
-    #         gene_info_tsv_path=self.gene_info_tsv_path,
-    #         jacobian_point=self.jacobian_point,
-    #         query_var_names=self.query_var_names,
-    #         prompt_var_names=self.prompt_var_names,
-    #         jacobian_qp=self.response_qp,
-    #         prompt_empirical_mean_p=self.prompt_empirical_mean_p,
-    #         query_empirical_mean_q=self.query_empirical_mean_q,
-    #         prompt_marginal_mean_p=self.prompt_marginal_mean_p,
-    #         prompt_marginal_std_p=self.prompt_marginal_std_p,
-    #         query_marginal_mean_q=self.query_marginal_mean_q,
-    #         query_marginal_std_q=self.query_marginal_std_q,
-    #         response_normalization_strategy=response_normalization_strategy,
-    #         feature_normalization_strategy=feature_normalization_strategy,
-    #         min_prompt_gene_tpm=min_prompt_gene_tpm,
-    #         min_query_gene_tpm=min_query_gene_tpm,
-    #         query_response_amp_min_pct=query_response_amp_min_pct,
-    #         feature_max_value=feature_max_value,
-    #         eps=eps,
-    #         verbose=verbose,
-    #     )
 
     def __str__(self) -> str:
         return (
