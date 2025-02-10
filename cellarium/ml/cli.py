@@ -508,6 +508,103 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
 
 
 @register_model
+def welford_onepass_mean_var_std(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.WelfordOnlineGeneStats` model.
+
+    This example shows how to calculate mean, variance, and standard deviation of log normalized
+    feature count data in one pass according to the stable Welford algorithm [1].
+
+    Example run::
+
+        cellarium-ml welford_onepass_mean_var_std fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/onepass \
+
+    **References:**
+
+    1. `Algorithms for calculating variance
+       <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.WelfordOnlineGeneStats",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
+        ],
+        trainer_defaults={
+            "max_epochs": 1,  # one pass
+            "strategy": {
+                "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                "dict_kwargs": {"broadcast_buffers": False},
+            },
+        },
+    )
+    cli(args=args)
+
+
+@register_model
+def welford_onepass_covariance(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.WelfordOnlineGeneGeneStats` model.
+
+    This example shows how to calculate per-gene mean, variance, standard deviation
+    of log normalized feature count data in one pass according to the stable Welford
+    algorithm [1], as well as gene-gene covariance and correlation matrices.
+
+    Example run::
+
+        cellarium-ml welford_onepass_covariance fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/onepass \
+
+    **References:**
+
+    1. `Covariance: Online
+       <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Covariance>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.WelfordOnlineGeneGeneStats",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
+        ],
+        trainer_defaults={
+            "max_epochs": 1,  # one pass
+            "strategy": {
+                "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                "dict_kwargs": {"broadcast_buffers": False},
+            },
+        },
+    )
+    cli(args=args)
+
+
+@register_model
 def probabilistic_pca(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.ProbabilisticPCA` model.
