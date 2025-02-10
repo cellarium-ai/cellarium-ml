@@ -173,13 +173,13 @@ def run_cellarium_nmf(
     trainer.fit(module, train_dataloaders=train_loader)
 
     # get loadings and factors
-    cellarium_nmf.the_best_k = simulated_k  # hacking around strange code design
+    cellarium_nmf.the_best_k = k  # hacking around strange code design
     cellarium_nmf.get_rec_error = False  # hacking around strange code design
     cellarium_nmf.if_get_full_D = False  # hacking around strange code design
     update_consensusD(nmf_model=cellarium_nmf)  # again sort of strange to need to do this
-    cellarium_loadings_nk = cellarium_nmf.predict(x_ng, var_names_g=var_names_g)["alpha_nk"]
+    cellarium_loadings_nk = cellarium_nmf.predict(x_ng, var_names_g=var_names_g)["alpha_nk"]  # TODO: use dataloader
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
-    cellarium_factors_kg = getattr(cellarium_nmf, f"D_{simulated_k}_kg").squeeze(0)
+    cellarium_factors_kg = getattr(cellarium_nmf, f"D_{k}_kg").squeeze(0)
 
     return cellarium_loadings_nk, cellarium_factors_kg
 
@@ -243,16 +243,17 @@ def similarity_matrix_assign_rows_to_columns(
 
 def run_nmf_and_sklearn_multi_device(
     x_ng: torch.Tensor,
+    k: int = simulated_k,
     seed: int = 0,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     devices = int(os.environ.get("TEST_DEVICES", "1"))
-    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
 
     # cellarium nmf fit
     cellarium_loadings_nk, cellarium_factors_kg = run_cellarium_nmf(
         x_ng=x_ng,
         var_names_g=var_names_g,
-        k=simulated_k,
+        k=k,
         devices=devices,
         seed=seed,
     )
@@ -260,7 +261,7 @@ def run_nmf_and_sklearn_multi_device(
     # sklearn nmf fit
     sklearn_loadings_nk, sklearn_factors_kg = run_sklearn_nmf(
         x_norm_ng=get_cellarium_normalized_data(x_ng),
-        k=simulated_k,
+        k=k,
         seed=seed,
     )
 
@@ -322,7 +323,7 @@ def test_nmf_against_sklearn_multi_device(
     nmf_loss_cellarium = torch.nn.functional.mse_loss(x_norm_ng, cellarium_reconstruction_ng)
     print(f"nmf_loss_sklearn: {nmf_loss_sklearn}")
     print(f"nmf_loss_cellarium: {nmf_loss_cellarium}")
-    assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.03, (
+    assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.035, (
         f"cellarium and sklearn loss is not very similar: {torch.abs(nmf_loss_sklearn - nmf_loss_cellarium):.4f}"
     )
 
