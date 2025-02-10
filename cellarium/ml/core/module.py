@@ -151,6 +151,7 @@ class CellariumModule(pl.LightningModule):
         self.pipeline = CellariumPipeline(cpu_transforms + transforms + (model,))  # the full pipeline
 
         if not self.hparams["is_initialized"]:
+            # Note: when using FSDPStrategy, the model is initialized here and then wrapped and sharded by the strategy.
             model.reset_parameters()
             self.hparams["is_initialized"] = True
 
@@ -344,7 +345,7 @@ class CellariumModule(pl.LightningModule):
                 param_groups.append({"params": params, **group_optim_kwargs})
             optimizer = optim_fn(param_groups)
         else:
-            optimizer = optim_fn(self.model.parameters(), **optim_kwargs)
+            optimizer = optim_fn(self.parameters(), **optim_kwargs)
 
         if scheduler_fn is not None:
             scheduler = scheduler_fn(optimizer, **scheduler_kwargs)
@@ -354,6 +355,30 @@ class CellariumModule(pl.LightningModule):
             }
         else:
             return {"optimizer": optimizer}
+
+    def configure_gradient_clipping(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: int | float | None = None,
+        gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        """
+        Handle gradient clipping by norm when using the FSDP strategy.
+        """
+        from lightning.pytorch.strategies import FSDPStrategy
+        from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
+
+        if isinstance(self.trainer.strategy, FSDPStrategy) and gradient_clip_algorithm in ("norm", None):
+            if gradient_clip_val is None:
+                gradient_clip_val = self.trainer.gradient_clip_val or 0.0
+            if gradient_clip_val <= 0:
+                return
+            assert isinstance(self.trainer.strategy.model, FullyShardedDataParallel)
+            self.trainer.strategy.model.clip_grad_norm_(gradient_clip_val)
+        else:
+            self.clip_gradients(
+                optimizer, gradient_clip_val=gradient_clip_val, gradient_clip_algorithm=gradient_clip_algorithm
+            )
 
     def on_train_epoch_start(self) -> None:
         """
