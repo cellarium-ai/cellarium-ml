@@ -13,9 +13,8 @@ import torch
 import torch.nn.functional as F
 import tqdm
 from lightning.pytorch.strategies import DDPStrategy
-
-# from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from torch.utils.data import DataLoader, IterableDataset
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.transforms import Filter
@@ -28,11 +27,11 @@ warnings.filterwarnings("ignore")
 
 
 def calculate_rec_error(
-    dataset,  # : IterableDistributedAnnDataCollectionDataset,
-    pipeline,  # : CellariumPipeline,
+    dataset: DataLoader | IterableDataset,
+    pipeline,  #: "CellariumPipeline",
 ) -> anndata.AnnData:
     """
-    Embed the dataset using the pipeline.
+    Compute reconstruction error using the pipeline.
 
     Args:
         dataset: Dataset.
@@ -42,11 +41,11 @@ def calculate_rec_error(
         reconstruction error
     """
 
-    k_range = pipeline[-1].k_range
+    k_values = pipeline[-1].k_values
     pipeline[-1].get_rec_error = True
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    rec_error = np.zeros((len(k_range), 1)).astype("float64")
+    rec_error = torch.zeros((len(k_values)))
     for batch in tqdm.tqdm(dataset):
         batch["x_ng"] = torch.from_numpy(batch["x_ng"]).to(device)
         out = pipeline.predict(batch)
@@ -56,13 +55,13 @@ def calculate_rec_error(
 
 
 def get_embedding(
-    dataset,  # : IterableDistributedAnnDataCollectionDataset,
-    pipeline,  # : CellariumPipeline,
+    dataset: DataLoader | IterableDataset,
+    pipeline,  #: "CellariumPipeline",
     k: int,
     if_get_final_gene_loading: bool = True,
 ) -> pd.DataFrame:
     """
-    Embed the dataset using the pipeline.
+    Helper function to embed the dataset using the pipeline.
 
     Args:
         dataset: Dataset.
@@ -81,31 +80,14 @@ def get_embedding(
     embedding = []
     index = []
     for batch in tqdm.tqdm(dataset):
-        batch["x_ng"] = torch.from_numpy(batch["x_ng"]).to(device)
+        if isinstance(batch["x_ng"], np.ndarray):
+            batch["x_ng"] = torch.from_numpy(batch["x_ng"]).to(device)
         out = pipeline.predict(batch)
         z = out["alpha_nk"]
         embedding += [z.cpu()]
         index.extend(batch["obs_names_n"])
 
     return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
-
-
-def update_consensusD(pipeline, density_threshold=0.2, local_neighborhood_size=0.3):
-    torch.manual_seed(0)
-    k_range = pipeline[-1].k_range
-
-    consensus_stat = {}
-    for k in k_range:
-        D_rkg = getattr(pipeline[-1], f"D_{k}_rkg")
-        consensus_output = consensus(
-            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
-        )
-        setattr(pipeline[-1], f"D_{k}_kg", consensus_output["consensus_D"])
-
-        consensus_stat[k] = consensus_output
-        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
-
-    return consensus_stat
 
 
 class KMeans:
@@ -119,9 +101,12 @@ class KMeans:
         # KMeans++ initialization
         first_random_index = int(torch.randint(0, x_np.shape[0], (1,)).item())
         indices: list[int] = [first_random_index]
-        for _ in self.n_clusters:
+        for _ in range(1, self.n_clusters):
             square_distance_n = torch.min(torch.cdist(x_np, x_np[indices], p=2) ** 2, dim=1)[0]
             probs_n = square_distance_n / torch.sum(square_distance_n)
+            # cumulative_probs_n = torch.cumsum(probs_n, dim=0)
+            # r = torch.rand(1).item()
+            # next_index = torch.searchsorted(cumulative_probs_n, r).item()
             next_index = int(torch.multinomial(probs_n, 1).item())
             indices.append(next_index)
 
@@ -154,62 +139,47 @@ class KMeans:
         return torch.argmin(distances, dim=1)
 
 
-def cal_reconstruction_error(x, alpha_nk, D_kg):
-    # Compute prediction error as a frobenius norm
-    rf_pred = torch.matmul(alpha_nk, D_kg)
-    prediction_error = ((x - rf_pred) ** 2).sum()  # .sum()
-
-    return prediction_error
+def nmf_frobenius_loss(x: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: torch.Tensor):
+    # compute prediction error as the frobenius norm
+    return F.mse_loss(torch.matmul(loadings_nk, factors_kg), x, reduction="sum")
 
 
-def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """The `Euclidean distance
-    .. math::
-        \\ell(x, y) = \frac{1}{2} \\sum_{n = 0}^{N - 1} (x_n - y_n)^2
-
-    Args:
-        input (Tensor): tensor of arbitrary shape
-        target (Tensor): tensor of the same shape as input
-
-    Returns:
-        Tensor: single element tensor
-    """
-    return F.mse_loss(input, target, reduction="sum") * 0.5
-
-
-def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=0.30):
+def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neighborhood_size: float):
     r, num_component, g = D_rkg.shape
-    d_norm_mg = F.normalize(D_rkg, dim=2, p=2)
-    d_norm_mg = d_norm_mg.reshape(r * num_component, g)
-    L = int(r * local_neighborhood_size)
+    d_norm_rkg = F.normalize(D_rkg, dim=2, p=2)
+    d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
 
-    euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
-    L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
-    local_neigh_dist = L_nearest_neigh.sum(1) / L
+    if r > 1:
+        L = int(r * local_neighborhood_size)
+        euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+        L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
+        local_neigh_dist = L_nearest_neigh.sum(1) / L
 
-    topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
-    topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
-    d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
-    # D = pd.DataFrame(D.cpu().numpy())
+        topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
+        topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
+        d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
 
-    D_mean = d_norm_mg.mean(0)
-    D_norm = d_norm_mg - D_mean
+        # mean centering prevents underflow in distance computations in the kmeans algorithm
+        d_norm_mg_mean = d_norm_mg.mean(0)
+        d_norm_mg = d_norm_mg - d_norm_mg_mean
 
-    # kmeans = KMeans(n_clusters=k, n_init=10, random_state=1)
-    # kmeans.fit(D_norm)
-    # kmeans_cluster_labels = pd.Series(kmeans.labels_+1, index=D.index)
+        kmeans = KMeans(n_clusters=k)
+        kmeans.fit(d_norm_mg)
+        kmeans_cluster_labels = kmeans.predict(d_norm_mg)
+        df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
+        kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
 
-    kmeans = KMeans(n_clusters=k)
-    kmeans.fit(D_norm)
-    kmeans_cluster_labels = kmeans.predict(D_norm)
-    df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
-    kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
+        silhouette = silhouette_score(df_d_norm_mg.values, kmeans_cluster_labels, metric="cosine")
 
-    silhouette = silhouette_score(df_d_norm_mg.values, kmeans_cluster_labels, metric="cosine")
+        median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median()
+        median_D = torch.Tensor(median_D.values)
+        median_D = F.normalize(median_D, dim=1, p=1)
 
-    median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median()
-    median_D = torch.Tensor(median_D.values)
-    median_D = F.normalize(median_D, dim=1, p=1)
+    else:
+        topk_euc_dist = None
+        local_neigh_dist = None
+        median_D = F.normalize(d_norm_mg, dim=1, p=1)
+        silhouette = 1.0
 
     return {
         "topk_euc_dist": topk_euc_dist,
@@ -219,120 +189,117 @@ def consensus(D_rkg=None, k=10, density_threshold=0.25, local_neighborhood_size=
     }
 
 
-def get_final_alpha_wKL(x_ng, D, n_iterations):
+def compute_loadings(
+    x_ng: torch.Tensor,
+    factors_rkg: torch.Tensor,
+    n_iterations: int,
+    learning_rate: float = 0.2,
+    normalize: bool = False,
+    alpha_tol: float = 5e-5,
+) -> torch.Tensor:
     """
-    Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
+    Algorithm 1 step 4 from Mairal et al. [1] for computing the loadings.
 
     Args:
-        factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
-        n_iterations: The number of iterations to perform.
+        x_ng: The data.
+        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+        n_iterations: The max number of iterations to perform.
+        learning_rate: The learning rate for the optimizer.
+        normalize: Whether to normalize the output.
+        alpha_tol: The tolerance for the change in alpha for stopping.
+
+    Returns:
+        The computed loadings.
     """
-    _alpha_tol = 0.005
-    alpha_nk = torch.zeros((x_ng.shape[0], D.shape[0]), requires_grad=True, device=D.device)
-    alpha_buffer = alpha_nk.exp().clone()
+    n, _ = x_ng.shape
+    r, k, _ = factors_rkg.shape
+    alpha_unconstrained_rnk = torch.nn.Parameter(
+        torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)  # TODO: try others
+    )
+    alpha_init_rnk = alpha_unconstrained_rnk.exp().clone()
+    alpha_buffer_rnk = alpha_init_rnk.clone()
 
-    optimizer = torch.optim.AdamW([alpha_nk], lr=0.01)
+    optimizer = torch.optim.Adam([alpha_unconstrained_rnk], lr=learning_rate)
 
-    for _ in range(n_iterations):
+    for i in range(n_iterations):
         optimizer.zero_grad()
-
-        alpha_nk_exp = alpha_nk.exp()
-        loss = euclidean(torch.matmul(alpha_nk_exp, D), x_ng)
-        loss = loss.mul(2).sqrt()
+        loss = (
+            F.mse_loss(
+                torch.bmm(alpha_unconstrained_rnk.exp(), factors_rkg),
+                x_ng.unsqueeze(0),
+                reduction="sum",
+            )
+            * 0.5
+        )
 
         loss.backward()
         optimizer.step()
+        alpha_rnk = alpha_unconstrained_rnk.exp()
 
-        alpha_diff = torch.linalg.norm(alpha_nk.exp() - alpha_buffer) / torch.linalg.norm(alpha_nk.exp())
-        if alpha_diff <= _alpha_tol:
+        alpha_max_diff = (
+            F.mse_loss(alpha_rnk, alpha_buffer_rnk, reduction="none").sum(dim=[-2, -1])
+            / alpha_init_rnk.square().sum(dim=[-2, -1])
+        ).max()
+        if alpha_max_diff <= alpha_tol:
             break
-        alpha_buffer = alpha_nk.exp().clone()
+        alpha_buffer_rnk = alpha_rnk.clone()
 
-    alpha = F.normalize(alpha_nk.exp(), dim=1, p=1)
+    if normalize:
+        alpha_rnk = F.normalize(alpha_rnk, dim=-1, p=1)
 
-    return alpha.detach()
+    return alpha_rnk.detach()
 
 
-def get_final_alpha(x_ng, D, n_iterations):
+def compute_factors(
+    A_rkk: torch.Tensor,
+    B_rkg: torch.Tensor,
+    factors_rkg: torch.Tensor,
+    n_iterations: int,
+    D_tol: float = 2e-5,
+) -> torch.Tensor:
     """
     Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
 
     Args:
-        factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
+        A_rkk: Mairal's matrix A.
+        B_rkg: Mairal's matrix B.
+        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
         n_iterations: The number of iterations to perform.
+        D_tol: The tolerance for the change in D for stopping.
+
+    Returns:
+        The updated dictionary.
     """
+    factors_buffer_rkg = factors_rkg.clone()
+    updated_factors_rkg = factors_rkg.clone()
+    r, n_factors, g = factors_rkg.shape
 
-    _alpha_tol = 0.005
-    alpha_nk = torch.zeros((x_ng.shape[0], D.shape[0]), device=D.device)
-    alpha_buffer = alpha_nk.clone()
-
-    k_dimension = alpha_nk.shape[1]
-
-    DDT_kk = torch.matmul(D, D.T)
-    DXT_kn = torch.matmul(D, x_ng.T)
-
-    for _ in range(n_iterations):
-        for k in range(k_dimension):
-            scalar = DDT_kk[k, k]
-            a_1k = DDT_kk[k, :]
-            b_1g = DXT_kn[k, :]
-
-            u_1g = torch.clamp(
-                alpha_nk[:, k] + (b_1g - torch.matmul(a_1k, alpha_nk.T)) / scalar,
-                min=0.0,
-            )
-
-            u_1g = u_1g / torch.clamp(torch.linalg.norm(u_1g), min=1.0)
-            alpha_nk[:, k] = u_1g
-
-        alpha_diff = torch.linalg.norm(alpha_nk - alpha_buffer) / torch.linalg.norm(alpha_nk)
-        if alpha_diff <= _alpha_tol:
-            break
-        alpha_buffer = alpha_nk.clone()
-
-    alpha_nk = F.normalize(alpha_nk, dim=1, p=1)
-
-    return alpha_nk.detach()
-
-
-def get_full_D(x_ng, alpha_nk, A_kk, B_kg, factors_kg, n_iterations):
-    """
-    Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
-
-    Args:
-        factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
-        n_iterations: The number of iterations to perform.
-    """
-    _D_tol = 0.005
-
-    n, k_dimension = alpha_nk.shape
-
-    A_kk = A_kk + torch.matmul(alpha_nk.T, alpha_nk) / n
-    B_kg = B_kg + torch.matmul(alpha_nk.T, x_ng) / n
-
-    D_buffer = factors_kg.clone()
-
-    for _ in range(n_iterations):
-        for k in range(k_dimension):
-            scalar = A_kk[k, k]
-            a_1k = A_kk[k, :]
-            b_1g = B_kg[k, :]
+    for i in range(n_iterations):
+        for k in range(n_factors):
+            scalar = A_rkk[:, k, k].view(r, 1, 1)
+            a_r1k = A_rkk[:, k, :].unsqueeze(1)
+            b_r1g = B_rkg[:, k, :].unsqueeze(1)
 
             # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
-            u_1g = torch.clamp(
-                factors_kg[k, :] + (b_1g - torch.matmul(a_1k, factors_kg)) / scalar,
+            u_r1g = torch.clamp(
+                updated_factors_rkg[:, k, :].unsqueeze(1) + (b_r1g - torch.bmm(a_r1k, updated_factors_rkg)) / scalar,
                 min=0.0,
             )
 
-            factors_1g = u_1g / torch.clamp(torch.linalg.norm(u_1g), min=1.0)
-            factors_kg[k, :] = factors_1g
+            updated_factors_r1g = u_r1g / torch.clamp(
+                torch.linalg.vector_norm(u_r1g, ord=2, dim=-1, keepdim=True), min=1.0
+            )
+            updated_factors_rkg[:, k, :] = updated_factors_r1g.squeeze(1)
 
-        D_diff = torch.linalg.norm(factors_kg - D_buffer) / torch.linalg.norm(factors_kg)
-        if D_diff <= _D_tol:
+        D_max_diff = (
+            F.mse_loss(updated_factors_rkg, factors_buffer_rkg, reduction="none").sum(dim=[-2, -1])
+            / updated_factors_rkg.square().sum(dim=[-2, -1])
+        ).max()
+        if D_max_diff <= D_tol:
             break
-        D_buffer = factors_kg.clone()
+        factors_buffer_rkg = updated_factors_rkg.clone()
 
-    return A_kk, B_kg, factors_kg
+    return updated_factors_rkg
 
 
 def init_weights(m):
@@ -343,6 +310,33 @@ def init_weights(m):
     elif classname.find("Linear") != -1:
         torch.nn.init.xavier_normal_(m.weight)
         torch.nn.init.zeros_(m.bias)
+
+
+class NMFInit:
+    @staticmethod
+    def __call__(x: torch.Tensor, k: int, transformed_data_mean: float | None = None) -> None:
+        """Modify the values of x in place as a way to initialize a dictionary factor matrix for NMF."""
+        pass
+
+
+class NMFInitSklearnRandom(NMFInit):
+    @staticmethod
+    def __call__(x: torch.Tensor, k: int, transformed_data_mean: float | None = None) -> None:
+        """Modify the values of x in place according to the sklearn NMF init random recipe."""
+        # https://github.com/scikit-learn/scikit-learn/blob/
+        # 99bf3d8e4eed5ba5db19a1869482a238b6223ffd/sklearn/decomposition/_nmf.py#L304-L315
+        assert transformed_data_mean is not None
+        factor = np.sqrt(transformed_data_mean / k)
+        x.normal_(0.0, factor).abs_()
+
+
+class NMFInitUniformRandom(NMFInit):
+    @staticmethod
+    def __call__(x: torch.Tensor, k: int, transformed_data_mean: float | None = None) -> None:
+        """Modify the values of x in place according to a Joshua Welch NMF init random recipe."""
+        # https://www.nature.com/articles/s41587-021-00867-x#Sec10
+        # algorithm 1 step 2
+        x.uniform_(0.0, 2.0)
 
 
 class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
@@ -356,7 +350,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
     Args:
         var_names_g: The variable names schema for the input data validation.
-        k_list: The number of gene expression programs to infer.
+        k_values: The number of gene expression programs to infer.
         algorithm: The algorithm to use for the online NMF. Currently only "mairal" is supported.
     """
 
@@ -364,11 +358,13 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self,
         var_names_g: Sequence[str],
         var_names_hvg: Sequence[str],
-        k_list: list[int],
+        k_values: list[int],
         r: int,
         full_g: int,
         log_variational: bool,
         algorithm: Literal["mairal"] = "mairal",
+        init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
+        transformed_data_mean: None | float = None,
     ) -> None:
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -378,163 +374,144 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         self.algorithm = algorithm
         self.log_variational = log_variational
         self.full_g = full_g
-        self.k_list = k_list
-        self.the_best_k = k_list[0]  # default and has to be reassigned
+        self.k_values = k_values
+        self.the_best_k = k_values[0]  # default and has to be reassigned
         self.get_rec_error = True
         self.if_get_full_D = False
+        self.transformed_data_mean = transformed_data_mean
+        self.init = init
+        if init == "sklearn_random":
+            if transformed_data_mean is None:
+                raise ValueError("transformed_data_mean must be provided when using the sklearn_random initialization")
 
-        # self.A_rkk: torch.Tensor
-        # self.B_rkg: torch.Tensor
-        # self.D_rkg: torch.Tensor
-        # self.D_kg: torch.Tensor
-
-        for i in self.k_list:
+        for i in self.k_values:
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_kg", torch.empty(i, g))
             self._dummy_param = torch.nn.Parameter(torch.empty(()))
 
-            # self.full_A_kk: torch.Tensor
-            # self.full_B_kg: torch.Tensor
-            # self.full_D_kg: torch.Tensor
             self.register_buffer(f"full_A_{i}_kk", torch.empty(i, i))
-            self.register_buffer(f"full_B_{i}_kg", torch.empty(i, full_g))
-            self.register_buffer(f"full_D_{i}_kg", torch.empty(i, full_g))
+            self.register_buffer(f"full_B_{i}_kg", torch.empty(i, g))
+            self.register_buffer(f"full_D_{i}_kg", torch.empty(i, g))
 
-        self._D_tol = 0.005
-        self._alpha_tol = 0.005
+        self._D_tol = 1e-5
+        self._alpha_tol = 1e-5
 
         self.n_nmf = r
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        for i in self.k_list:
+        match self.init:
+            case "sklearn_random":
+                init_fn: NMFInit = NMFInitSklearnRandom()
+            case "uniform_random":
+                init_fn = NMFInitUniformRandom()
+            case _:
+                raise ValueError(f"Unknown initialization method: {self.init}")
+
+        for i in self.k_values:
             getattr(self, f"D_{i}_kg").zero_()
+
             getattr(self, f"A_{i}_rkk").zero_()
             getattr(self, f"B_{i}_rkg").zero_()
-            getattr(self, f"D_{i}_rkg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
+            init_fn(getattr(self, f"D_{i}_rkg"), k=i, transformed_data_mean=self.transformed_data_mean)
 
             getattr(self, f"full_A_{i}_kk").zero_()
             getattr(self, f"full_B_{i}_kg").zero_()
-            getattr(self, f"full_D_{i}_kg").uniform_(0.0, 2.0)  # TODO: figure out best initialization
+            init_fn(getattr(self, f"full_D_{i}_kg"), k=i, transformed_data_mean=self.transformed_data_mean)
+
+    def _compute_loadings(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor, n_iterations: int) -> torch.Tensor:
+        """
+        Run compute_loadings.
+
+        Args:
+            x_ng: The data.
+            factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+            n_iterations: The max number of iterations to perform.
+
+        Returns:
+            The computed loadings.
+        """
+        alpha_rnk = compute_loadings(
+            x_ng=x_ng,
+            factors_rkg=factors_rkg,
+            n_iterations=n_iterations,
+            learning_rate=0.05,
+            normalize=False,
+            alpha_tol=self._alpha_tol,
+        )
+        return alpha_rnk
+
+    def _compute_factors(
+        self,
+        factors_rkg: torch.Tensor,
+        A_rkk: torch.Tensor,
+        B_rkg: torch.Tensor,
+        n_iterations: int = 1,
+    ) -> torch.Tensor:
+        """
+        Run compute_factors.
+
+        Args:
+            factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+            A_rkk: Mairal's matrix A.
+            B_rkg: Mairal's matrix B.
+            n_iterations: The number of iterations to perform.
+
+        Returns:
+            The updated dictionary.
+        """
+        factors_rkg = compute_factors(
+            A_rkk=A_rkk,
+            B_rkg=B_rkg,
+            factors_rkg=factors_rkg,
+            n_iterations=n_iterations,
+            D_tol=self._D_tol,
+        )
+        return factors_rkg
 
     def online_dictionary_learning(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor) -> torch.Tensor:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
         Args:
+            x_ng: The data.
             factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
+
+        Returns:
+            The updated dictionary.
         """
 
         n, g = x_ng.shape
-        r = factors_rkg.shape[0]
-        k = factors_rkg.shape[1]
+        r, k, _ = factors_rkg.shape
 
-        # updata alpha
-        alpha_rnk = torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)
-        alpha_rnk = self.solve_alpha_wKL(alpha_rnk, x_ng, 100)
+        # update alpha, Mairal Algorithm 1 step 4
+        alpha_rnk = self._compute_loadings(
+            x_ng=x_ng,
+            factors_rkg=factors_rkg,
+            n_iterations=200,
+        )
 
-        # update D
         with torch.no_grad():
+            # update A and B, Mairal Algorithm 1 step 5 and 6
             A_rkk = getattr(self, f"A_{k}_rkk")
             B_rkg = getattr(self, f"B_{k}_rkg")
-
             A_rkk = A_rkk + torch.bmm(alpha_rnk.transpose(1, 2), alpha_rnk) / n
             B_rkg = B_rkg + torch.bmm(alpha_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
-
             setattr(self, f"A_{k}_rkk", A_rkk)
             setattr(self, f"B_{k}_rkg", B_rkg)
 
-            # compiled_dictionary_update_3d = torch.compile(self.dictionary_update_3d)
-            # updated_factors_kg = compiled_dictionary_update_3d(factors_rkg, 100)
-            updated_factors_kg = self.dictionary_update_3d(factors_rkg, 100)
-
-        return updated_factors_kg
-
-    # @cuda.jit
-    def solve_alpha_wKL(self, alpha_rnk: torch.Tensor, x_ng: torch.Tensor, n_iterations: int) -> torch.Tensor:
-        """
-        Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
-
-        Args:
-            factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
-            n_iterations: The number of iterations to perform.
-        """
-
-        r, _, k = alpha_rnk.shape
-        n, g = x_ng.shape
-
-        alpha_buffer = alpha_rnk.exp().clone()
-
-        optimizer = torch.optim.AdamW([alpha_rnk], lr=0.2)
-
-        for _ in range(n_iterations):
-            optimizer.zero_grad()
-
-            alpha_rnk_exp = alpha_rnk.exp()
-
-            D_rkg = getattr(self, f"D_{k}_rkg")
-
-            loss = euclidean(torch.bmm(alpha_rnk_exp, D_rkg), x_ng.expand(r, n, g))
-            loss = loss.mul(2).sqrt()
-
-            loss.backward()
-            optimizer.step()
-
-            alpha_diff = torch.linalg.norm(alpha_rnk.exp().view(-1, k) - alpha_buffer.view(-1, k)) / torch.linalg.norm(
-                alpha_rnk.exp().view(-1, k)
+            # update D, Mairal Algorithm 1 step 7
+            updated_factors_rkg = self._compute_factors(
+                factors_rkg=factors_rkg,
+                A_rkk=A_rkk,
+                B_rkg=B_rkg,
+                n_iterations=200,
             )
-            if alpha_diff <= self._alpha_tol:
-                break
-            alpha_buffer = alpha_rnk.exp().clone()
 
-        return alpha_rnk.exp().detach()
-
-    # @cuda.jit
-    def dictionary_update_3d(self, factors_rkg: torch.Tensor, n_iterations: int = 1) -> torch.Tensor:
-        """
-        Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
-
-        Args:
-            factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
-            n_iterations: The number of iterations to perform.
-        """
-
-        i = factors_rkg.shape[1]
-        D_buffer = factors_rkg.clone()
-        updated_factors_kg = factors_rkg.clone()
-
-        for _ in range(n_iterations):
-            for k in range(i):
-                A_rkk = getattr(self, f"A_{i}_rkk")
-                B_rkg = getattr(self, f"B_{i}_rkg")
-
-                scalar = A_rkk[:, k, k].view(self.n_nmf, 1, 1)
-                a_1k = A_rkk[:, k, :].unsqueeze(1)
-                b_1g = B_rkg[:, k, :].unsqueeze(1)
-
-                # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
-                u_1g = torch.clamp(
-                    updated_factors_kg[:, k, :].unsqueeze(1) + (b_1g - torch.bmm(a_1k, updated_factors_kg)) / scalar,
-                    min=0.0,
-                )
-
-                u_1g_reshape = u_1g.squeeze(1)
-                u_1g_reshape = torch.linalg.norm(u_1g_reshape, dim=1)
-
-                updated_factors_1g = u_1g / torch.clamp(u_1g_reshape.view(self.n_nmf, 1, 1), min=1.0)
-                updated_factors_kg[:, k, :] = updated_factors_1g.squeeze(1)
-
-            D_diff = torch.linalg.norm(
-                updated_factors_kg.view(-1, self.n_vars) - D_buffer.view(-1, self.n_vars)
-            ) / torch.linalg.norm(updated_factors_kg.view(-1, self.n_vars))
-            if D_diff <= self._D_tol:
-                break
-            D_buffer = updated_factors_kg.clone()
-
-        return updated_factors_kg
+        return updated_factors_rkg
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -553,12 +530,12 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         if self.log_variational:
             x_ = torch.log1p(x_ng)
         else:
-            std = torch.std(x_ng, dim=0) + 1e-4
-            x_ = x_ng / std
+            std_g = torch.std(x_ng, dim=0) + 1e-4
+            x_ = x_ng / std_g
             x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.algorithm == "mairal":
-            for i in self.k_list:
+            for i in self.k_values:
                 D_rkg = getattr(self, f"D_{i}_rkg")
                 D_rkg = self.online_dictionary_learning(x_ng=x_, factors_rkg=D_rkg)
                 setattr(self, f"D_{i}_rkg", D_rkg)
@@ -570,12 +547,12 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
-            assert isinstance(
-                trainer.strategy, DDPStrategy
-            ), "NonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
-            assert (
-                trainer.strategy._ddp_kwargs["broadcast_buffers"] is True
-            ), "NonNegativeMatrixFactorization requires that the `broadcast_buffers` parameter of "
+            assert isinstance(trainer.strategy, DDPStrategy), (
+                "NonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
+            )
+            assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is True, (
+                "NonNegativeMatrixFactorization requires that the `broadcast_buffers` parameter of "
+            )
             "lightning.pytorch.strategies.DDPStrategy is set to True."
 
     def on_end(self, trainer: pl.Trainer) -> None:
@@ -594,24 +571,30 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         # assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         transform = Filter([str(s) for s in self.var_names_hvg])
-        x_filtered_ng = transform(x_ng, var_names_g)
+        x_filtered_ng = transform(x_ng, var_names_g)["x_ng"]
 
-        ## get the final alpha_nk
+        # get the final alpha_nk
         if self.log_variational:
-            x_ = torch.log1p(x_filtered_ng["x_ng"])
+            x_ = torch.log1p(x_filtered_ng)
         else:
-            std = torch.std(x_filtered_ng["x_ng"], dim=0) + 1e-4
-            x_ = x_filtered_ng["x_ng"] / std
+            std_g = torch.std(x_filtered_ng, dim=0) + 1e-4
+            x_ = x_filtered_ng / std_g
             x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.get_rec_error:
             rec_error = []
-            for k in self.k_list:
+            for k in self.k_values:
                 D_kg = getattr(self, f"D_{k}_kg")
 
-                alpha_nk = get_final_alpha_wKL(x_ng=x_, D=D_kg.to(x_.device), n_iterations=1000)
+                alpha_nk = compute_loadings(
+                    x_ng=x_,
+                    factors_rkg=D_kg.to(x_.device).unsqueeze(0),
+                    n_iterations=1000,
+                    learning_rate=0.01,
+                    alpha_tol=self._alpha_tol,
+                ).squeeze(0)
                 rec_error.append(
-                    np.sum(cal_reconstruction_error(x_, alpha_nk.to(x_.device), D_kg.to(x_.device)).cpu().numpy())
+                    np.sum(nmf_frobenius_loss(x_, alpha_nk.to(x_.device), D_kg.to(x_.device)).cpu().numpy())
                 )
 
             return {"rec_error": torch.tensor(rec_error)}
@@ -619,10 +602,26 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         else:
             k = self.the_best_k
             D_kg = getattr(self, f"D_{k}_kg")
+            if (D_kg == 0).all():
+                raise ValueError("D_kg is all zeros, please run compute_consensus_factors() before calling predict()")
 
-            # with torch.set_grad_enabled(True):
-            alpha_nk = get_final_alpha_wKL(x_ng=x_, D=D_kg.to(x_.device), n_iterations=1000)
-            # alpha_nk = get_final_alpha(x_ng=x_, D=self.D_kg, n_iterations=1000)
+            # compute loadings, Mairal Algorithm 1 step 4
+            alpha_nk = compute_loadings(
+                x_ng=x_,
+                factors_rkg=D_kg.to(x_.device).unsqueeze(0),
+                n_iterations=1000,
+                alpha_tol=self._alpha_tol,
+                learning_rate=0.01,
+                normalize=False,
+            ).squeeze(0)
+
+            # update A and B, Mairal Algorithm 1 step 5 and 6
+            A_kk: torch.Tensor = getattr(self, f"full_A_{k}_kk")
+            B_kg: torch.Tensor = getattr(self, f"full_B_{k}_kg")
+            A = A_kk + torch.matmul(alpha_nk.T, alpha_nk) / x_ng.shape[0]
+            B = B_kg + torch.matmul(alpha_nk.T, x_) / x_ng.shape[0]
+            setattr(self, f"full_A_{k}_kk", A)
+            setattr(self, f"full_B_{k}_kg", B)
 
             ## get the final D for full transcrptome
             if self.if_get_full_D:
@@ -631,17 +630,56 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 A_kk = getattr(self, f"full_A_{k}_kk")
                 B_kg = getattr(self, f"full_B_{k}_kg")
                 full_D_kg = getattr(self, f"full_D_{k}_kg")
-                A, B, D = get_full_D(x_, alpha_nk, A_kk, B_kg, full_D_kg, 100)
 
-                setattr(self, f"full_A_{k}_kk", A)
-                setattr(self, f"full_B_{k}_kg", B)
+                # compute factors, Mairal Algorithm 1 step 7
+                D = compute_factors(
+                    A_rkk=A_kk.unsqueeze(0),
+                    B_rkg=B_kg.unsqueeze(0),
+                    factors_rkg=full_D_kg.unsqueeze(0),
+                    n_iterations=100,
+                    D_tol=self._D_tol,
+                ).squeeze(0)
                 setattr(self, f"full_D_{k}_kg", D)
 
-            return {"alpha_nk": alpha_nk}  # , "pred_count": rf_pred
+            return {"alpha_nk": alpha_nk}
 
     @property
-    def factors_kg(self) -> torch.Tensor:
+    def factors_kg(self) -> dict[int, torch.Tensor]:
         """
-        Inferred gene expression programs (i.e. "factors").
+        Inferred consensus gene expression programs (i.e. "factors") defined on the highly variable genes
+        used to train the model.
         """
-        return self.D_rkg
+        return {k: getattr(self, f"D_{k}_kg") for k in self.k_values}
+
+
+def compute_consensus_factors(
+    nmf_model: NonNegativeMatrixFactorization,
+    density_threshold=0.2,
+    local_neighborhood_size=0.3,
+):
+    """
+    Run the consensus step of consensus NMF, and store the consensus factors as attributes of `nmf_model`.
+
+    Args:
+        nmf_model: The trained NMF model.
+        density_threshold: The threshold for the density of the local neighborhood.
+        local_neighborhood_size: The size of the local neighborhood.
+
+    Returns:
+        A dictionary of the consensus factors_kg for each value of k.
+    """
+    torch.manual_seed(0)
+    k_values = nmf_model.k_values
+
+    consensus_stat = {}
+    for k in k_values:
+        D_rkg = getattr(nmf_model, f"D_{k}_rkg")
+        consensus_output = consensus(
+            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
+        )
+        setattr(nmf_model, f"D_{k}_kg", consensus_output["consensus_D"])
+
+        consensus_stat[k] = consensus_output
+        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
+
+    return consensus_stat
