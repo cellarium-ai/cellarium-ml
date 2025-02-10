@@ -441,7 +441,7 @@ def compute_spectral_dimension(
 
 
 def mde_embedding(
-    z_qp: np.ndarray,
+    z_qp: np.ndarray | torch.Tensor,
     n_neighbors: int = 7,
     repulsive_fraction: int = 5,
     attractive_penalty: pymde.functions.function.Function = pymde.penalties.Log1p,
@@ -463,7 +463,7 @@ def mde_embedding(
         2-dimensional MDE embedding
     """
     mde = pymde.preserve_neighbors(
-        z_qp,
+        torch.tensor(z_qp),
         device=device,
         verbose=verbose,
         n_neighbors=n_neighbors,
@@ -579,6 +579,10 @@ class NetworkAnalysisBase:
         self.leiden_membership: np.ndarray | None = None
         self.spectral: dict[str, np.ndarray | float] = {}
         self.embedding_q2: np.ndarray | None = None
+
+        # prevent false cache hits after reprocessing
+        self.igraph.cache_clear()
+        self.compute_leiden_communites.cache_clear()
 
     @property
     def adjacency_matrix(self) -> np.ndarray:
@@ -1090,7 +1094,6 @@ class ValidationMixin:
         Compute concordance metrics between the k-nearest-neighbor communities of this graph
         (of which there are n_genes number) and reference gene sets. Use these metrics to
         determine an optimal value for k which maximizes concordance.
-        Neighbors are computed using :func:`pymde.preserve_neighbors` with k specified by `k_values`.
         Optimization is performed by checking each of the input `k_values` and finding the max.
 
         .. note:

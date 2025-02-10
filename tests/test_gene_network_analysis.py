@@ -168,6 +168,7 @@ def test_gene_network_analysis_base(tmpdir):
         }
     )
     gene_info_df.to_csv(gene_info_tsv_path, sep="\t", index=False)
+    np.random.seed(0)
     response_qp = np.random.randn(q, p)
 
     adata_obs = pd.DataFrame({"total_mrna_umis": [1000.0]})
@@ -195,17 +196,28 @@ def test_gene_network_analysis_base(tmpdir):
     )
     gene_ctx.compute_leiden_communites(resolution=0.1)
     gene_ctx.compute_spectral_dimension()
+    assert gene_ctx.adjacency_matrix.shape[0] == gene_ctx.leiden_communities.shape[0]
 
     gene_ctx.reprocess(  # more stringent cutoff values
-        min_prompt_gene_tpm=25.0,
-        min_query_gene_tpm=25.0,
+        min_prompt_gene_tpm=500.0,
+        min_query_gene_tpm=750.0,
     )
-    assert gene_ctx.processed != original_processed_data
 
     # demonstrate we are not saving old state
     assert gene_ctx.a_qq is None
     assert gene_ctx.leiden_membership is None
     assert gene_ctx.spectral == {}
+
+    # ensure the leiden and adjacency dimensions agree
+    gene_ctx.compute_adjacency_matrix(
+        adjacency_strategy="positive_correlation",
+        n_neighbors=10,
+        self_loop=False,
+        beta=3.0,
+    )
+    assert gene_ctx.processed != original_processed_data
+    gene_ctx.compute_leiden_communites(resolution=0.1)
+    assert gene_ctx.adjacency_matrix.shape[0] == gene_ctx.leiden_communities.shape[0]
 
     # reprocess now
     gene_ctx.reprocess()  # default values
