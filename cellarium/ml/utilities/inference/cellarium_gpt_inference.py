@@ -12,6 +12,8 @@ import pandas as pd
 from scanpy import AnnData
 from tqdm.notebook import tqdm
 from functools import cached_property
+from more_itertools import chunked
+
 from cellarium.ml import CellariumModule, CellariumPipeline
 from cellarium.ml.models.cellarium_gpt import PredictTokenizer
 
@@ -38,6 +40,9 @@ handler.setFormatter(formatter)
 
 # Add the handler to the logger
 logger.addHandler(handler)
+
+# To suppress the stupid AnnData warning ...
+warnings.filterwarnings("ignore", category=UserWarning, message="Transforming to str index.")
 
 
 def load_gene_info_table(gene_info_tsv_path: str, included_gene_ids: list[str]) -> t.Tuple[pd.DataFrame, dict, dict]:
@@ -527,38 +532,26 @@ class CellariumGPTInferenceContext:
         ) -> torch.Tensor:
 
         # convert to cuda
-        self.log("Transferring the tokens to the device ...")
         tokens_dict = self.gpt_pipeline.transfer_batch_to_device(tokens_dict, self.device, 0)
-        self.log("Done.")
         
         # get model predictions
-        self.log("Predicting ...")
         logits_dict = self.gpt_pipeline.model.predict(
             gene_tokens_nc=tokens_dict["gene_tokens_nc"],
             metadata_tokens_n=tokens_dict["metadata_tokens_n"],
             prompt_mask_nc=tokens_dict["prompt_mask_nc"],
             predict_keys=['gene_value']
         )
-        self.log("Done.")
 
         # note: we use `q` to denote query genes
-        self.log("Calculating marginal mean and std ...")
-        self.log("Obtaining gene logits ...")
-
         query_gene_indices = torch.tensor(context_indices['query_genes'], device=self.device, dtype=torch.int64)
-
+        gene_logits_nqk = logits_dict['gene_value'][:, query_gene_indices, :]
+        
         if max_counts is None:
-            gene_logits_nqk = logits_dict['gene_value'][:, query_gene_indices, :]
             max_counts = gene_logits_nqk.shape[-1]
         else:
             assert max_counts > 0
-            gene_logits_nqk = logits_dict['gene_value'][:, query_gene_indices, :max_counts]
-
-        self.log("Done.")
-        self.log("Normalizing gene logits ...")
-
-        gene_logits_nqk = gene_logits_nqk - torch.logsumexp(gene_logits_nqk, dim=-1, keepdim=True)
-        self.log("Done.")
+        gene_logits_nqk = gene_logits_nqk[:, :, :max_counts]  # truncate to max_counts
+        gene_logits_nqk = gene_logits_nqk - torch.logsumexp(gene_logits_nqk, dim=-1, keepdim=True)  # renormalize
 
         return gene_logits_nqk
      
@@ -569,7 +562,6 @@ class CellariumGPTInferenceContext:
             context_indices: dict,
             use_logsumexp: bool = True,
             max_counts: int | None = None,
-            verbose: bool = False,
         ) -> t.Tuple[torch.Tensor, torch.Tensor]:
     
         gene_logits_nqk = self.get_gene_value_logits_from_tokens(tokens_dict, context_indices, max_counts)
@@ -592,9 +584,6 @@ class CellariumGPTInferenceContext:
             gene_mom_2_nq = (gene_probs_nqk * counts_2_k[None, None, :]).sum(dim=-1)
             gene_marginal_means_nq = gene_mom_1_nq
             gene_marginal_std_nq = torch.clamp(gene_mom_2_nq - gene_mom_1_nq.pow(2), 0.).sqrt()
-
-        if verbose:
-            logger.info("Done.")
 
         return gene_marginal_means_nq, gene_marginal_std_nq
 
@@ -636,7 +625,7 @@ class CellariumGPTInferenceContext:
         )
 
 
-    def predict_gene_expression_dynamic_range_for_metadata(
+    def predict_gene_expression_range_for_metadata(
         self,
         assay: str,
         suspension_type: str,
@@ -644,9 +633,10 @@ class CellariumGPTInferenceContext:
         total_mrna_umis: int | float,
         query_gene_ids: list[str],
         query_chunk_size: int | None = None,
-        upper_percentile: float = 0.9999,
-        upper_pad: int = 1
-    ):
+        upper_percentile: float = 0.9,
+        upper_pad: int = 1,
+        max_counts: int | None = None,
+    ) -> dict[str, torch.Tensor]:
         """
         Compute the maximum counts indices based on cumulative gene probabilities.
 
@@ -668,6 +658,7 @@ class CellariumGPTInferenceContext:
             query_chunk_size (int): Number of gene IDs to process in one chunk.
             upper_percentile (float): Upper percentile threshold (e.g., 0.999).
             upper_pad (int): Value to add as padding to the found index.
+            max_counts (int): Maximum number of counts to consider. If None, use the full range. Otherwise, truncate.
 
         Returns:
             torch.Tensor: A tensor containing, for each query, the smallest index along k
@@ -676,44 +667,125 @@ class CellariumGPTInferenceContext:
 
         assert 0.0 < upper_percentile < 1.0, "The upper percentile must be between 0 and 1."
 
-        def yield_chunks(lst, n):
-            """Yield successive n-sized chunks from the list."""
-            for i in range(0, len(lst), n):
-                yield lst[i:i + n]
-
         if query_chunk_size is None:
             query_chunk_size = len(query_gene_ids)
         
         partial_gene_logits_list = []
         with torch.inference_mode():
             # Process gene IDs in chunks to limit memory usage
-            for partial_query_gene_ids in tqdm(list(yield_chunks(query_gene_ids, query_chunk_size)),
+            for partial_query_gene_ids in tqdm(list(chunked(query_gene_ids, query_chunk_size)),
                                             desc="Processing gene chunks"):
                 partial_gene_logits_nqk = self.get_gene_value_logits_by_metadata(
                     assay=assay,
                     suspension_type=suspension_type,
                     prompt_metadata_dict=prompt_metadata_dict,
                     total_mrna_umis=total_mrna_umis,
-                    query_gene_ids=partial_query_gene_ids
+                    query_gene_ids=partial_query_gene_ids,
+                    max_counts=max_counts,
                 )
                 partial_gene_logits_list.append(partial_gene_logits_nqk)
-            
-            # Concatenate along the gene dimension (assumed to be dim=1) and select the first element along dim=0.
+
             gene_logits_qk = torch.cat(partial_gene_logits_list, dim=1)[0]
 
-        # Compute the cumulative sum of the exponentiated logits (interpreted as gene probabilities)
-        gene_count_probs_cumsum_qk = gene_logits_qk.exp().cumsum(dim=1)
+        # first, find the mode of the counts distribution for each gene
+        gene_logits_mode_q = torch.argmax(gene_logits_qk, dim=1)
+
+        # symmetric lower and upper counts about the mode for each gene
+        x_lo_qm = torch.clamp(
+            gene_logits_mode_q[:, None] - torch.arange(0, max_counts, device=self.device)[None, :], min=0)
+        x_hi_qm = torch.clamp(
+            gene_logits_mode_q[:, None] + torch.arange(0, max_counts, device=self.device)[None, :], max=max_counts - 1)
+
+        # compute the CDF of counts for each gene
+        pdf_qk = gene_logits_qk.exp()
+        cdf_qk = pdf_qk.cumsum(dim=1)
+        q_indices = torch.arange(cdf_qk.size(0), device=self.device)
+        symm_prob_mass_qm = (
+            cdf_qk[q_indices[:, None], x_hi_qm]  # add total prob mass at the right point (inclusive)
+            - cdf_qk[q_indices[:, None], x_lo_qm]  # subtract total prob mass at the left point (inclusive)
+            + pdf_qk[q_indices[:, None], x_lo_qm]  # add back the prob mass of the left point
+        )
+        mask_qm = symm_prob_mass_qm > upper_percentile
+        range_q = torch.clamp(mask_qm.float().argmax(dim=-1) + upper_pad, max=max_counts - 1)
+        x_lo_q = x_lo_qm[q_indices, range_q]
+        x_hi_q = x_hi_qm[q_indices, range_q]
+
+        return {
+            'gene_logits_qk': gene_logits_qk,
+            'gene_logits_mode_q': gene_logits_mode_q,
+            'range_q': range_q,
+            'x_lo_q': x_lo_q,
+            'x_hi_q': x_hi_q,
+        }
+
+    def generate_gene_dose_response_for_metadata(
+        self,
+        assay: str,
+        suspension_type: str,
+        prompt_metadata_dict: dict[str, str],
+        total_mrna_umis: int | float,
+        query_gene_ids: list[str],
+        perturb_gene_ids: list[str],
+        x_lo_p: np.ndarray,
+        x_hi_p: np.ndarray,
+        n_points: int,
+        query_chunk_size: int,
+        max_counts: int | None = None,
+    ):
         
-        # Create a mask where cumulative probabilities exceed the threshold.
-        # (Note: If you ever need the mask for other purposes, you can return it or process it further.)
-        mask_qk = gene_count_probs_cumsum_qk > upper_percentile
+        assert n_points >= 2
 
-        # For each row, find the first index where the mask is True.
-        # Converting the boolean mask to float ensures that True becomes 1.0 and False becomes 0.0.
-        # Since the mask is assumed to eventually become True, argmax returns the index of the first True.
-        max_counts_k = mask_qk.float().argmax(dim=-1) + upper_pad
+        # initialize arrays to store results
+        n_query_genes = len(query_gene_ids)
+        n_perturb_genes = len(perturb_gene_ids)
+        doses_pi = np.zeros((n_perturb_genes, n_points))
+        responses_mean_pqi = np.zeros((n_perturb_genes, n_query_genes, n_points))
+        responses_std_pqi = np.zeros((n_perturb_genes, n_query_genes, n_points))
 
-        return max_counts_k
+        # outer loop (dose quantiles)
+        for i_point in tqdm(range(n_points), desc="Processing dose quantiles"):
+
+            # values of genes to perturb
+            perturb_gene_values = x_lo_p +  (x_hi_p - x_lo_p) * i_point / (n_points - 1)
+            doses_pi[:, i_point] = perturb_gene_values
+
+            # inner loop (responses)
+            gene_marginal_mean_nq_chunks = []
+            gene_marginal_std_nq_chunks = []
+            for query_gene_ids_chunk in tqdm(list(chunked(query_gene_ids, query_chunk_size)),
+                                             desc="Processing query gene chunks"):
+                with torch.inference_mode():
+                    tokens_dict, context_indices, _, _ = self.generate_gene_tokens_by_metadata(
+                        assay=assay,
+                        suspension_type=suspension_type,
+                        prompt_metadata_dict=prompt_metadata_dict,
+                        total_mrna_umis=total_mrna_umis,
+                        query_gene_ids=query_gene_ids_chunk,
+                        perturb_gene_ids=perturb_gene_ids,
+                        perturb_gene_values=perturb_gene_values
+                    )
+                    tokens_dict = self.gpt_pipeline.transfer_batch_to_device(tokens_dict, self.device, 0)
+                    gene_marginal_mean_nq, gene_marginal_std_nq = self.get_marginal_mean_std_from_tokens(
+                        tokens_dict=tokens_dict,
+                        context_indices=context_indices,
+                        max_counts=max_counts)
+                gene_marginal_mean_nq_chunks.append(gene_marginal_mean_nq.cpu().numpy())
+                gene_marginal_std_nq_chunks.append(gene_marginal_std_nq.cpu().numpy())
+            gene_marginal_mean_nq = np.concatenate(gene_marginal_mean_nq_chunks, axis=1)
+            gene_marginal_std_nq = np.concatenate(gene_marginal_std_nq_chunks, axis=1)
+
+            control_mean_q = gene_marginal_mean_nq[0, :]
+            control_std_q = gene_marginal_std_nq[0, :]
+            responses_mean_pqi[:, :, i_point] = gene_marginal_mean_nq[1:, :]
+            responses_std_pqi[:, :, i_point] = gene_marginal_std_nq[1:, :]
+
+        return {
+            'doses_pi': doses_pi,
+            'responses_mean_pqi': responses_mean_pqi,
+            'responses_std_pqi': responses_std_pqi,
+            'control_mean_q': control_mean_q,
+            'control_std_q': control_std_q,
+        }
     
 
     def predict_metadata_chunked(self, adata: sc.AnnData, chunk_size: int = 128) -> dict[str, np.ndarray]:
@@ -831,11 +903,7 @@ class CellariumGPTInferenceContext:
         else:
             raise ValueError
 
-        def yield_chunks(lst, n):
-            for i in range(0, len(lst), n):
-                yield lst[i:i + n]
-
-        query_var_names_chunks = list(yield_chunks(query_gene_ids, query_chunk_size))
+        query_var_names_chunks = list(chunked(query_gene_ids, query_chunk_size))
         jacobian_chunks = []
 
         print("Calculating the Jacobian ...")
