@@ -281,13 +281,18 @@ def compute_function_on_gene_sets_given_clustering(
     Returns:
         DataFrame with columns ['cluster', 'reference_gene_set', metric_name]
     """
+    all_genes_in_reference = set.union(*reference_gene_sets.values())
+    if len(set(gene_names).intersection(all_genes_in_reference)) == 0:
+        raise ValueError("No overlap between genes in gene_names and reference_gene_sets")
     assert len(clustering) == len(gene_names), "clustering and gene_names must have the same length"
-    if np.all(clustering == -1):
-        return pd.DataFrame(data={"cluster": [-1], "reference_gene_set": [np.nan], metric_name: [0.0]})
 
     # for each cluster, compute the best matching reference gene set and record its metric
-    best_metric_df = pd.DataFrame(columns=["cluster", "reference_gene_set", metric_name])
+    best_metric_dfs: list[pd.DataFrame] = []
     for k in np.unique(clustering):
+        # skip the noise cluster
+        if k == -1:
+            continue
+
         # genes in this cluster
         gene_set = set(gene_names[clustering == k])
 
@@ -299,13 +304,14 @@ def compute_function_on_gene_sets_given_clustering(
         )
 
         # record the best metric and the corresponding reference gene set name
-        best_metric_df = pd.concat(
-            [
-                best_metric_df,
-                pd.DataFrame({"cluster": [k], "reference_gene_set": [metrics.idxmax()], metric_name: [metrics.max()]}),
-            ],
-            axis=0,
+        best_metric_dfs.append(
+            pd.DataFrame({"cluster": [k], "reference_gene_set": [metrics.idxmax()], metric_name: [metrics.max()]})
         )
+    best_metric_df = (
+        pd.concat(best_metric_dfs, axis=0)
+        if best_metric_dfs
+        else pd.DataFrame(data={"cluster": [-1], "reference_gene_set": [np.nan], metric_name: [0.0]})
+    )
 
     return best_metric_df
 
@@ -336,8 +342,12 @@ def compute_function_on_gene_sets_given_neighbors(
         DataFrame with columns ['gene', 'gene_set', metric_name] which includes the best gene set
         for each gene and the corresponding metric value
     """
+    all_genes_in_knn = set.union(*neighbor_lookup.values())
+    all_genes_in_reference = set.union(*reference_gene_sets.values())
+    if len(all_genes_in_knn.intersection(all_genes_in_reference)) == 0:
+        raise ValueError("No overlap between genes in neighbor_lookup and reference_gene_sets")
 
-    best_gene_set_df = pd.DataFrame(columns=["gene", "gene_set", metric_name])
+    best_gene_set_dfs: list[pd.DataFrame] = []
 
     for gene in neighbor_lookup.keys():
         metric_series = compute_function_on_gene_sets(
@@ -345,11 +355,15 @@ def compute_function_on_gene_sets_given_neighbors(
             reference_gene_sets=reference_gene_sets,
             metric_name=metric_name,
         )
-        top_df = pd.DataFrame(
-            {"gene": [gene], "gene_set": [metric_series.idxmax()], metric_name: [metric_series.max()]}
+        best_gene_set_dfs.append(
+            pd.DataFrame({"gene": [gene], "gene_set": [metric_series.idxmax()], metric_name: [metric_series.max()]})
         )
-        best_gene_set_df = pd.concat([best_gene_set_df, top_df], axis=0)
 
+    best_gene_set_df = (
+        pd.concat(best_gene_set_dfs, axis=0)
+        if best_gene_set_dfs
+        else pd.DataFrame(data={"gene": [np.nan], "gene_set": [np.nan], metric_name: [0.0]})
+    )
     return best_gene_set_df
 
 

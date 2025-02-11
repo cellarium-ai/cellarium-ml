@@ -159,7 +159,8 @@ def test_knn_concordance_metric(ctx):
     )
 
 
-def test_gene_network_analysis_base(tmpdir):
+@pytest.fixture
+def gene_info_tsv_path(tmpdir) -> str:
     gene_info_tsv_path = tmpdir / "gene_info.tsv"
     gene_info_df = pd.DataFrame(
         {
@@ -168,6 +169,10 @@ def test_gene_network_analysis_base(tmpdir):
         }
     )
     gene_info_df.to_csv(gene_info_tsv_path, sep="\t", index=False)
+    return gene_info_tsv_path
+
+
+def test_gene_network_analysis_base(gene_info_tsv_path):
     np.random.seed(0)
     response_qp = np.random.randn(large_q, p)
 
@@ -247,3 +252,7 @@ def test_gene_network_analysis_base(tmpdir):
 
     assert max(gene_ctx.query_gene_id_to_idx_map.values()) < gene_ctx.z_qp.shape[0]
     assert max(gene_ctx.query_gene_id_to_idx_map.values()) < len(gene_ctx.processed.query_var_names)
+
+
+# def test_validation_mixin():
+#     jac_ctx

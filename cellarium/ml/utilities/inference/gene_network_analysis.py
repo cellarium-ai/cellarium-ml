@@ -916,6 +916,7 @@ class ValidationMixin:
     z_qp: np.ndarray
     node_names_q: list[str] | np.ndarray
     compute_leiden_communites: t.Callable[..., np.ndarray]
+    query_gene_symbols: t.Callable[..., list[str]]
     adjacency_kwargs: dict[str, t.Any]
 
     def compute_network_cluster_concordance_metric(
@@ -924,6 +925,7 @@ class ValidationMixin:
         resolution_range: tuple[float, float] = (0.2, 8.0),
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
         optimization_strategy: t.Literal["gridsearch", "bayesopt"] = "gridsearch",
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
     ) -> float:
         """
         Compute a metric for the overall concordance between the network in
@@ -937,6 +939,7 @@ class ValidationMixin:
             resolution_range: range of Leiden clustering resolutions to consider, e.g. (0.2, 8.0)
             metric_name: metric to use for concordance
             optimization_strategy: optimization strategy, either "gridsearch" or "bayesopt"
+            gene_naming: whether to use gene IDs or gene symbols
 
         Returns:
             concordance value
@@ -946,12 +949,14 @@ class ValidationMixin:
                 reference_gene_sets=reference_gene_sets,
                 resolutions=np.linspace(*resolution_range, 20),
                 metric_name=metric_name,
+                gene_naming=gene_naming,
             )
         elif optimization_strategy == "bayesopt":
             _, _, _, best_metrics_mean = self.bayesopt_optimal_resolution_communities_given_gene_sets(
                 reference_gene_sets=reference_gene_sets,
                 resolution_range=resolution_range,
                 metric_name=metric_name,
+                gene_naming=gene_naming,
             )
         else:
             raise ValueError("Invalid optimization strategy")
@@ -963,6 +968,7 @@ class ValidationMixin:
         reference_gene_sets: dict[str, set[str]],
         k_values: list[int] | np.ndarray = [2, 3, 4, 5, 6, 7, 8, 9, 10],
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
     ) -> float:
         """
         Compute a metric for the overall concordance between the network in
@@ -974,6 +980,7 @@ class ValidationMixin:
             reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
             k_values: kNN k values to consider
             metric_name: metric to use for concordance
+            gene_naming: whether to use gene IDs or gene symbols
 
         Returns:
             concordance value
@@ -982,6 +989,7 @@ class ValidationMixin:
             reference_gene_sets=reference_gene_sets,
             k_values=k_values,
             metric_name=metric_name,
+            gene_naming=gene_naming,
         )
         return best_metrics_mean
 
@@ -990,6 +998,7 @@ class ValidationMixin:
         resolution: float,
         reference_gene_sets: dict[str, set[str]],
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"],
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
     ) -> tuple[np.ndarray, pd.DataFrame]:
         """
         Run Leiden clustering on the network and compute the mean of a concordance metric
@@ -999,10 +1008,12 @@ class ValidationMixin:
             resolution: Leiden resolution
             reference_gene_sets: dictionary of reference gene sets
             metric_name: metric to use for concordance
+            gene_naming: whether to use gene IDs or gene symbols
 
         Returns:
             (Leiden clustering, DataFrame of best reference gene set metrics for all clusters)
         """
+        gene_names = np.asarray(self.node_names_q) if (gene_naming == "id") else np.asarray(self.query_gene_symbols)
 
         # compute the Leiden clustering
         clustering = self.compute_leiden_communites(resolution=resolution)
@@ -1010,7 +1021,7 @@ class ValidationMixin:
         # compute the best reference gene set for each cluster and record the metric
         metrics_df = compute_function_on_gene_sets_given_clustering(
             clustering=clustering,
-            gene_names=np.asarray(self.node_names_q),
+            gene_names=gene_names,
             reference_gene_sets=reference_gene_sets,
             metric_name=metric_name,
         )
@@ -1023,6 +1034,7 @@ class ValidationMixin:
         k: int,
         reference_gene_sets: dict[str, set[str]],
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"],
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
     ) -> tuple[dict[str, set[str]], pd.DataFrame]:
         """
         Compute k-nearest-neighbors on the network and compute the mean of a concordance metric
@@ -1032,6 +1044,7 @@ class ValidationMixin:
             k: number of neighbors for kNN
             reference_gene_sets: dictionary of reference gene sets
             metric_name: metric to use for concordance
+            gene_naming: whether to use gene IDs or gene symbols
 
         Returns:
             (neighbor dictionary, DataFrame of best reference gene set metrics for all genes)
@@ -1040,7 +1053,9 @@ class ValidationMixin:
         # compute the neighbors (cheap given adjacency)
         neighbor_lookup = compute_knn_from_adjacency(
             a_qq=a_qq,
-            node_names_q=np.asarray(self.node_names_q),
+            node_names_q=(
+                np.asarray(self.node_names_q) if (gene_naming == "id") else np.asarray(self.query_gene_symbols)
+            ),
             n_neighbors=k,
         )
 
@@ -1096,6 +1111,7 @@ class ValidationMixin:
         reference_gene_sets: dict[str, set[str]],
         k_values: list[int] | np.ndarray,
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
     ) -> tuple[int, dict[str, set[str]], pd.DataFrame, float]:
         """
         Compute concordance metrics between the k-nearest-neighbor communities of this graph
@@ -1114,6 +1130,7 @@ class ValidationMixin:
             reference_gene_sets: dictionary of reference gene sets
             k_values: list of k values to test when constructing k-nearest-neighbor graph
             metric_name: metric to use for concordance
+            gene_naming: whether to use gene IDs or gene symbols
 
         Returns:
             (optimal k, optimal neighborhoods, dataframe with genes and reference gene set metrics, mean metric)
@@ -1131,6 +1148,7 @@ class ValidationMixin:
                 k=k,
                 reference_gene_sets=reference_gene_sets,
                 metric_name=metric_name,
+                gene_naming=gene_naming,
             )
 
             # compute mean metric
@@ -1155,6 +1173,7 @@ class ValidationMixin:
             k=best_k,
             reference_gene_sets=reference_gene_sets,
             metric_name=metric_name,
+            gene_naming=gene_naming,
         )
 
         # compute best mean metric
@@ -1172,6 +1191,7 @@ class ValidationMixin:
         reference_gene_sets: dict[str, set[str]],
         resolutions: list[float] | np.ndarray,
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
     ) -> tuple[float, np.ndarray, pd.DataFrame, float]:
         """
         Compute an "optimal" Leiden clustering by choosing the Leiden resolution by
@@ -1191,12 +1211,14 @@ class ValidationMixin:
             reference_gene_sets: dictionary of reference gene sets
             resolutions: list of resolutions to consider, e.g. np.linspace(0.5, 5.0, 20)
             metric_name: metric to use for concordance
+            gene_naming: whether to use gene IDs or gene symbols
 
         Returns:
             (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics, mean metric)
         """
         all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
-        mean_metrics_df = pd.DataFrame(columns=["resolution", "mean_of_best_match_metric"])
+        gene_names_q = np.asarray(self.node_names_q) if (gene_naming == "id") else np.asarray(self.query_gene_symbols)
+        mean_metrics_dfs: list[pd.DataFrame] = []
 
         for res in resolutions:
             # compute clustering and metrics
@@ -1204,6 +1226,7 @@ class ValidationMixin:
                 resolution=res,
                 metric_name=metric_name,
                 reference_gene_sets=reference_gene_sets,
+                gene_naming=gene_naming,
             )
 
             # compute mean metric
@@ -1211,15 +1234,14 @@ class ValidationMixin:
                 metrics_df=metrics_df,
                 metric_name=metric_name,
                 cluster_label_q=cluster_label_q,
-                gene_names_q=self.node_names_q,
+                gene_names_q=gene_names_q,
                 all_genes_in_reference_sets=all_genes_in_reference_sets,
             )
 
             # mean of best matches over all clusters in clustering
-            mean_metrics_df = pd.concat(
-                [mean_metrics_df, pd.DataFrame({"resolution": [res], "mean_of_best_match_metric": [mean_metric]})],
-                axis=0,
-            )
+            mean_metrics_dfs.append(pd.DataFrame({"resolution": [res], "mean_of_best_match_metric": [mean_metric]}))
+
+        mean_metrics_df = pd.concat(mean_metrics_dfs, axis=0)
 
         # choose the resolution with the highest mean metric
         best_resolution = mean_metrics_df.set_index("resolution")["mean_of_best_match_metric"].idxmax()
@@ -1229,6 +1251,7 @@ class ValidationMixin:
             resolution=best_resolution,
             reference_gene_sets=reference_gene_sets,
             metric_name=metric_name,
+            gene_naming=gene_naming,
         )
 
         # compute best mean metric
@@ -1249,6 +1272,7 @@ class ValidationMixin:
         resolution_range: tuple[float, float] = (0.2, 10.0),
         num_clusterings_to_compute: int = 20,
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
     ) -> tuple[float, np.ndarray, pd.DataFrame, float]:
         """
         Compute an "optimal" Leiden clustering by choosing the Leiden resolution by
@@ -1269,6 +1293,7 @@ class ValidationMixin:
             resolution_range: range of resolutions to consider, e.g. (-2.0, 2.0)
             num_clusterings_to_compute: number of clusterings to compute during optimization
             metric_name: metric to use for concordance
+            gene_naming: whether to use gene IDs or gene symbols
 
         Returns:
             (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics, mean metric)
@@ -1285,6 +1310,7 @@ class ValidationMixin:
                 resolution=resolution,
                 metric_name=metric_name,
                 reference_gene_sets=reference_gene_sets,
+                gene_naming=gene_naming,
             )
 
             # compute mean metric
@@ -1315,6 +1341,7 @@ class ValidationMixin:
             resolution=best_resolution,
             reference_gene_sets=reference_gene_sets,
             metric_name=metric_name,
+            gene_naming=gene_naming,
         )
 
         # compute best mean metric
