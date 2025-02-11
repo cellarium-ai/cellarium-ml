@@ -624,6 +624,11 @@ class NetworkAnalysisBase:
             **kwargs,
         )
         self.a_qq = a_qq
+
+        # clear previously computed properties
+        self.igraph.cache_clear()
+        self.compute_leiden_communites.cache_clear()
+
         return a_qq
 
     @lru_cache(maxsize=2)
