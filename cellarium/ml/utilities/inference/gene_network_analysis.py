@@ -1259,7 +1259,7 @@ class ValidationMixin:
             metrics_df=best_metrics_df,
             metric_name=metric_name,
             cluster_label_q=best_clustering,
-            gene_names_q=self.node_names_q,
+            gene_names_q=gene_names_q,
             all_genes_in_reference_sets=all_genes_in_reference_sets,
         )
 
@@ -1299,6 +1299,7 @@ class ValidationMixin:
             (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics, mean metric)
         """
         assert num_clusterings_to_compute >= 15, "num_clusterings_to_compute must be >= 15"
+        gene_names_q = np.asarray(self.node_names_q) if (gene_naming == "id") else np.asarray(self.query_gene_symbols)
         all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
 
         # function to be minimized
@@ -1318,7 +1319,7 @@ class ValidationMixin:
                 metrics_df=metrics_df,
                 metric_name=metric_name,
                 cluster_label_q=cluster_label_q,
-                gene_names_q=self.node_names_q,
+                gene_names_q=gene_names_q,
                 all_genes_in_reference_sets=all_genes_in_reference_sets,
             )
 
@@ -1349,7 +1350,7 @@ class ValidationMixin:
             metrics_df=best_metrics_df,
             metric_name=metric_name,
             cluster_label_q=best_clustering,
-            gene_names_q=self.node_names_q,
+            gene_names_q=gene_names_q,
             all_genes_in_reference_sets=all_genes_in_reference_sets,
         )
 
