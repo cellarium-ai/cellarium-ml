@@ -21,8 +21,9 @@ import pymde
 import scanpy as sc
 import torch
 from scipy.linalg import eigh
-from scipy.stats import linregress
+from scipy.stats import linregress, norm
 from skopt import gp_minimize
+from tqdm import tqdm
 
 from cellarium.ml.utilities.inference.gene_set_utils import (
     compute_function_on_gene_sets_given_clustering,
@@ -207,16 +208,15 @@ def process_response_matrix(
     # apply the mask to z_qp
     z_qp = z_qp[mask_q, :][:, mask_p]
 
+    pearson = True  # True means that z_qp @ z_qp.T will be the pearson correlation matrix
     if feature_normalization_strategy == "prompt_z_score":
-        # self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=0, keepdims=True)) / (
-        #     np.sqrt(self.z_qp.shape[0]) * (eps + np.std(self.z_qp, axis=0, keepdims=True))
-        # )
         z_qp = (z_qp - np.mean(z_qp, axis=0, keepdims=True)) / (eps + np.std(z_qp, axis=0, keepdims=True))
+        if pearson:
+            z_qp = z_qp / np.sqrt(z_qp.shape[0])
     elif feature_normalization_strategy == "query_z_score":
-        # self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=1, keepdims=True)) / (
-        #     np.sqrt(self.z_qp.shape[1]) * (eps + np.std(self.z_qp, axis=1, keepdims=True))
-        # )
         z_qp = (z_qp - np.mean(z_qp, axis=1, keepdims=True)) / (eps + np.std(z_qp, axis=1, keepdims=True))
+        if pearson:
+            z_qp = z_qp / np.sqrt(z_qp.shape[1])
     elif feature_normalization_strategy == "l2":
         z_qp = z_qp / (eps + np.linalg.norm(z_qp, axis=-1, keepdims=True))
     else:
@@ -264,23 +264,25 @@ def compute_adjacency_matrix(
     Returns:
         query-by-query adjacency matrix for genes
     """
+    # mat_prod_qq = np.dot(z_qp, z_qp.T)  # older code
+    mat_prod_qq = z_qp @ z_qp.T
     if adjacency_strategy == "shifted_correlation":
         assert "beta" in kwargs, "Must provide beta for shifted correlation"
         beta = kwargs["beta"]
-        a_qq = np.power(0.5 * (1 + np.dot(z_qp, z_qp.T)), beta)
+        a_qq = np.power(0.5 * (1 + mat_prod_qq), beta)
     elif adjacency_strategy == "unsigned_correlation":
         assert "beta" in kwargs, "Must provide beta for unsigned correlation"
         beta = kwargs["beta"]
-        a_qq = np.power(np.abs(np.dot(z_qp, z_qp.T)), beta)
+        a_qq = np.power(np.abs(mat_prod_qq), beta)
     elif adjacency_strategy == "positive_correlation":
         assert "beta" in kwargs, "Must provide beta for positive correlation"
         beta = kwargs["beta"]
-        a_qq = np.power(np.maximum(0, np.dot(z_qp, z_qp.T)), beta)
+        a_qq = np.power(np.maximum(0, mat_prod_qq), beta)
     elif adjacency_strategy == "positive_correlation_binary":
         assert n_neighbors is None, "n_neighbors must be None for binary adjacency"
         assert "tau" in kwargs, "Must provide correlation threshold for binary adjacency"
         tau = kwargs["tau"]
-        a_qq = (np.maximum(0, np.dot(z_qp, z_qp.T)) > tau).astype(float)
+        a_qq = (np.maximum(0, mat_prod_qq) > tau).astype(float)
     else:
         raise ValueError("Invalid adjacency strategy")
 
@@ -783,12 +785,28 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.processed.query_var_names]
 
     @property
+    def query_gene_ids(self) -> list[str]:
+        return self.processed.query_var_names
+
+    @property
     def prompt_gene_symbols(self) -> list[str]:
         return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.processed.prompt_var_names]
 
     @cached_property
     def query_gene_id_to_idx_map(self) -> dict[str, int]:
         return {gene_id: idx for idx, gene_id in enumerate(self.processed.query_var_names)}
+
+    @cached_property
+    def query_gene_symbol_to_idx_map(self) -> dict[str, int]:
+        return {gene_symbol: idx for idx, gene_symbol in enumerate(self.query_gene_symbols)}
+
+    @cached_property
+    def query_gene_symbol_to_id_map(self) -> dict[str, str]:
+        return {gene_symbol: gene_id for gene_symbol, gene_id in zip(self.query_gene_symbols, self.query_gene_ids)}
+
+    @cached_property
+    def query_gene_id_to_symbol_map(self) -> dict[str, str]:
+        return {gene_id: gene_symbol for gene_symbol, gene_id in self.query_gene_symbol_to_id_map.items()}
 
     def __str__(self) -> str:
         return (
@@ -909,15 +927,171 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         ax.legend()
 
 
-class ValidationMixin:
-    """Mixin with methods for bio-inspired validation of gene networks."""
+class BaseClassProtocol(t.Protocol):
+    """Tell the mixin what it can count on inheriting from the base class (for typechecking)"""
 
-    # make this mixin aware that these are defined in the base class (NetworkAnalysisBase)
     z_qp: np.ndarray
     node_names_q: list[str] | np.ndarray
-    compute_leiden_communites: t.Callable[..., np.ndarray]
-    query_gene_symbols: t.Callable[..., list[str]]
     adjacency_kwargs: dict[str, t.Any]
+
+    @property
+    def adjacency_matrix(self) -> np.ndarray: ...
+
+    @property
+    def query_gene_symbol_to_idx_map(self) -> dict[str, int]: ...
+
+    @property
+    def query_gene_id_to_idx_map(self) -> dict[str, int]: ...
+
+    @property
+    def query_gene_symbols(self) -> list[str]: ...
+
+    compute_leiden_communites: t.Callable[..., np.ndarray]
+
+
+class ValidationMixin(BaseClassProtocol):
+    """Mixin with methods for bio-inspired validation of gene networks."""
+
+    def compute_network_adjacency_concordance_metric(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        reference_set_exclusion_fraction: float = 0.25,
+        min_set_size: int = 3,
+        p_value_threshold: float = 0.5,
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
+        verbose: bool = False,
+    ) -> tuple[float, pd.DataFrame]:
+        """
+        Compute a metric for the overall concordance between the concordance matrix in
+        :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and reference gene sets defined by a dictionary.
+        The metric is based on the adjacency matrix and the reference gene sets, and is computed
+        by comparing the mean adjacency element for a set of genes to the mean adjacency element
+        for a random set of genes and computing a p-value. The concordance metric is the sum of
+        -log10(p-value) for all reference gene sets with p-value below a threshold.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
+            reference_set_exclusion_fraction: gene sets with fewer than this fraction of genes present in the graph
+                are excluded from the concordance metric
+            min_set_size: minimum size of a gene set present in the graph to be included in the concordance metric
+            adjacency_strategy: adjacency strategy
+            p_value_threshold: p-values above this threshold are considered totally insignificant
+                and are not included in the final concordance metric, which is the sum of -log10(p-value)
+            gene_naming: whether to use gene IDs or gene symbols
+            verbose: whether to print warnings for excluded gene sets
+
+        Returns:
+            concordance, DataFrame of values for each reference gene set
+        """
+        # precompute sums of adjacency matrix rows without diagonal elements
+        a_qq = self.adjacency_matrix
+        assert isinstance(a_qq, np.ndarray)
+        q = a_qq.shape[0]
+        zero_diag_a_qq = a_qq * (1.0 - np.eye(q))
+        mean_element_value = zero_diag_a_qq.sum() / (q * q - q)
+
+        # handle gene naming
+        if gene_naming == "symbol":
+            gene_ind_lookup: dict[str, int] = self.query_gene_symbol_to_idx_map
+        elif gene_naming == "id":
+            gene_ind_lookup = self.query_gene_id_to_idx_map
+        else:
+            raise ValueError("Invalid gene_naming")
+
+        # convert reference gene sets to indices
+        reference_gene_sets_as_inds = {
+            set_name: {gene_ind_lookup[g] for g in gene_set if g in gene_ind_lookup.keys()}
+            for set_name, gene_set in reference_gene_sets.items()
+        }
+
+        # filter out gene sets that are too small
+        final_ref_gene_sets_as_inds: dict[str, set[int]] = {}
+        for set_name, gene_set_inds in reference_gene_sets_as_inds.items():
+            if len(gene_set_inds) < min_set_size:
+                if verbose:
+                    logger.warning(
+                        f"Reference gene set {set_name} has < {min_set_size} members in graph and will be skipped"
+                    )
+                continue
+            fraction_of_set_in_graph = len(gene_set_inds) / len(reference_gene_sets[set_name])
+            if fraction_of_set_in_graph < reference_set_exclusion_fraction:
+                if verbose:
+                    logger.warning(
+                        f"Reference gene set {set_name} has < {reference_set_exclusion_fraction:.2f} "
+                        "fraction of members in graph and will be skipped"
+                    )
+                continue
+            final_ref_gene_sets_as_inds[set_name] = gene_set_inds
+
+        def _effect_of_set(gene_inds: set[int]) -> float:
+            assert len(gene_inds) > 1, "Gene set must have at least 2 members"
+            # compute the mean adjacency element for a set of genes
+            inds = np.array(list(gene_inds))
+            element_sum = zero_diag_a_qq[inds][:, inds].sum()
+            effect = element_sum / (len(gene_inds) * len(gene_inds) - len(gene_inds))
+            return effect
+
+        n_samples = 1000
+
+        @lru_cache(maxsize=1000)
+        def _random_set_effects(size_of_random_set: int, n_samples: int = n_samples) -> np.ndarray:
+            # compute the standard deviation of the effect of a random set of genes
+            effects = [
+                _effect_of_set(set(np.random.choice(a_qq.shape[0], size_of_random_set, replace=False)))
+                for _ in range(n_samples)
+            ]
+            return np.array(effects)
+
+        # go through each reference gene set and compute the effect
+        dfs = []
+        for set_name, gene_set_inds in tqdm(final_ref_gene_sets_as_inds.items()):
+            if len(gene_set_inds) < min_set_size:
+                if verbose:
+                    logger.warning(
+                        f"Reference gene set {set_name} has < {min_set_size} members in graph and will be skipped"
+                    )
+                continue
+            fraction_of_set_in_graph = len(gene_set_inds) / len(reference_gene_sets[set_name])
+            if fraction_of_set_in_graph < reference_set_exclusion_fraction:
+                if verbose:
+                    logger.warning(
+                        f"Reference gene set {set_name} has < {reference_set_exclusion_fraction:.2f} "
+                        "fraction of members in graph and will be skipped"
+                    )
+                continue
+            effect = _effect_of_set(gene_set_inds)
+            normalized_effect = effect - mean_element_value
+
+            # p-value via permutation test
+            random_control_effects = _random_set_effects(size_of_random_set=len(gene_set_inds))
+            pval = (random_control_effects > effect).mean()
+
+            # p-value via analytical approximation using law of large numbers
+            scale = 1 / len(gene_set_inds) / 22
+            pval_analytic = 1.0 - norm.cdf(effect, loc=mean_element_value, scale=scale)
+
+            dfs.append(
+                pd.DataFrame(
+                    {
+                        "gene_set": [set_name],
+                        "effect": [effect],
+                        "normalized_effect": [normalized_effect],
+                        "pval": [pval],
+                        "pval_analytic": [pval_analytic],
+                        "fraction_of_set_in_graph": [fraction_of_set_in_graph],
+                        "n_genes_in_set": [len(reference_gene_sets[set_name])],
+                        "n_genes_in_set_in_graph": [len(gene_set_inds)],
+                    }
+                )
+            )
+
+        df = pd.concat(dfs, axis=0, ignore_index=True)
+        concordance = (
+            df["pval"][df["pval"] < p_value_threshold]
+            .apply(lambda x: -1 * np.log10(np.clip(x, a_min=1.0 / n_samples, a_max=None)))
+            .sum()
+        )  # sum of negative log p-values
+        return concordance, df
 
     def compute_network_cluster_concordance_metric(
         self,
@@ -1106,6 +1280,11 @@ class ValidationMixin:
         excluded_cluster_labels = clusters_with_no_genes_in_reference_sets.union({-1})
         return metrics_df[metric_name][~metrics_df["cluster"].isin(excluded_cluster_labels)].mean()
 
+    # TODO consider a method which computes the below for (gene, k) and then takes the k for each gene
+    # that maximizes the metric for that gene. (also ignore node genes that do not appear in any reference set).
+    # this could deal with the fact that having the same k everywhere is not ever going to be perfectly concordant
+    # with reference gene sets of multiple sizes.
+
     def gridsearch_optimal_k_neighbors_given_gene_sets(
         self,
         reference_gene_sets: dict[str, set[str]],
@@ -1136,7 +1315,8 @@ class ValidationMixin:
             (optimal k, optimal neighborhoods, dataframe with genes and reference gene set metrics, mean metric)
         """
         all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
-        mean_metrics_df = pd.DataFrame(columns=["k", "mean_of_best_match_metric"])
+        mean_metrics_dfs: list[pd.DataFrame] = []
+        metrics_dfs: list[pd.DataFrame] = []
 
         # precompute adjacency matrix once using max k
         a_qq = compute_adjacency_matrix(z_qp=self.z_qp, **self.adjacency_kwargs)  # same kwargs as user invocation
@@ -1159,10 +1339,13 @@ class ValidationMixin:
             )
 
             # mean of best matches over all gene neighborhoods
-            mean_metrics_df = pd.concat(
-                [mean_metrics_df, pd.DataFrame({"k": [k], "mean_of_best_match_metric": [mean_metric]})],
-                axis=0,
-            )
+            mean_metrics_dfs.append(pd.DataFrame({"k": [k], "mean_of_best_match_metric": [mean_metric]}))
+
+            # store all metrics for later inspection
+            metrics_dfs.append(metrics_df)
+
+        mean_metrics_df = pd.concat(mean_metrics_dfs, axis=0)
+        metrics_df = pd.concat(metrics_dfs, axis=0)
 
         # choose the resolution with the highest mean metric
         best_k = mean_metrics_df.set_index("k")["mean_of_best_match_metric"].idxmax()
@@ -1184,7 +1367,7 @@ class ValidationMixin:
         )
 
         # return the best resolution and the Leiden communities
-        return best_k, best_knn, best_metrics_df, best_mean_metric
+        return best_k, best_knn, metrics_df, best_mean_metric
 
     def gridsearch_optimal_resolution_communities_given_gene_sets(
         self,
