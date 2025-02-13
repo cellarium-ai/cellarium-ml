@@ -1113,6 +1113,26 @@ class ValidationMixin(BaseClassProtocol):
 
         return auc, edges_in_adjacency_df
 
+    @staticmethod
+    def plot_roc_network_adjacency(df: pd.DataFrame) -> None:
+        """
+        Plot an ROC curve for the network adjacency concordance metric.
+
+        Args:
+            df: DataFrame of thresholds, true positive rate, false positive rate
+        """
+        auc = np.trapz(df["true_positive_rate"], df["false_positive_rate"])
+        plt.fill_between(df["false_positive_rate"], df["true_positive_rate"], color="gray", alpha=0.25)
+        plt.fill_between([0, 1], [0, 1], color="white", alpha=1.0)
+        plt.plot([0, 1], [0, 1], "--", color="red")
+        plt.plot(df["false_positive_rate"], df["true_positive_rate"], ".k")
+        plt.xlabel("False positive rate")
+        plt.ylabel("True positive rate")
+        plt.annotate(f"AUC: {auc:.3f}", (0.5, 0.05))
+        plt.grid(False)
+        plt.title("Ability of adjacency matrix\nto predict gene set membership")
+        plt.gca().set_aspect("equal")
+
     def compute_network_adjacency_concordance_metric(
         self,
         reference_gene_sets: dict[str, set[str]],
@@ -1202,6 +1222,7 @@ class ValidationMixin(BaseClassProtocol):
             # p-value via permutation test
             random_control_effects = _random_set_effects(size_of_random_set=len(gene_set_inds))
             pval = (random_control_effects > effect).mean()
+            pval = np.clip(pval, a_min=1.0 / n_samples, a_max=None)  # cannot be less than 1/n_samples
 
             # p-value via analytical approximation using law of large numbers
             scale = 1 / len(gene_set_inds) / 22  # the factor 1/22 is empirical
@@ -1224,9 +1245,7 @@ class ValidationMixin(BaseClassProtocol):
 
         df = pd.concat(dfs, axis=0, ignore_index=True)
         concordance = (
-            df["pval"][df["pval"] < p_value_threshold]
-            .apply(lambda x: -1 * np.log10(np.clip(x, a_min=1.0 / n_samples, a_max=None)))
-            .sum()
+            df["pval"][df["pval"] < p_value_threshold].apply(lambda x: -1 * np.log10(x)).sum()
         )  # sum of negative log p-values
         return concordance, df
 

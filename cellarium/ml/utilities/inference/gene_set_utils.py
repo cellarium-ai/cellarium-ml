@@ -86,6 +86,21 @@ class GeneSetRecords:
         )
         self._reindex()
 
+    def append_random_control_collection(
+        self,
+        gene_names: np.ndarray,
+        collection_name: str,
+        sizes: list[int],
+        repeats: int,
+    ) -> None:
+        append_random_control_collection(
+            msigdb=self,
+            gene_names=gene_names,
+            collection_name=collection_name,
+            sizes=sizes,
+            repeats=repeats,
+        )
+
     def remove_gene_sets(self, gene_set_names: list[str]) -> None:
         self.df = self.df.drop(gene_set_names)
         self._reindex()
