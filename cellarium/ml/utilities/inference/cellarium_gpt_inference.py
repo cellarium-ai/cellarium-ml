@@ -569,6 +569,15 @@ class CellariumGPTInferenceContext:
         if max_counts is None:
             max_counts = gene_logits_nqk.shape[-1]
         
+        return self.calculate_gene_mean_std_from_logits(gene_logits_nqk, max_counts, use_logsumexp)
+
+
+    def calculate_gene_mean_std_from_logits(
+            self,
+            gene_logits_nqk: torch.Tensor,
+            max_counts: int,
+            use_logsumexp: bool = True) -> t.Tuple[torch.Tensor, torch.Tensor]:
+    
         if use_logsumexp:
             log_counts_1_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).log()
             log_counts_2_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).pow(2).log()
@@ -633,8 +642,8 @@ class CellariumGPTInferenceContext:
         total_mrna_umis: int | float,
         query_gene_ids: list[str],
         query_chunk_size: int | None = None,
-        upper_percentile: float = 0.9,
-        upper_pad: int = 1,
+        total_prob_mass: float = 0.9,
+        symmetric_range_pad: int = 1,
         max_counts: int | None = None,
     ) -> dict[str, torch.Tensor]:
         """
@@ -656,8 +665,9 @@ class CellariumGPTInferenceContext:
             prompt_metadata_dict (dict): Metadata dictionary (e.g., cell type, tissue).
             total_mrna_umis (int): Total number of mRNA UMIs.
             query_chunk_size (int): Number of gene IDs to process in one chunk.
-            upper_percentile (float): Upper percentile threshold (e.g., 0.999).
-            upper_pad (int): Value to add as padding to the found index.
+            total_prob_mass (float): The amount of probability mass to capture within the to be determined
+              expression range (e.g., 0.999).
+            symmetric_range_pad (int): Value to add symmetrically as padding to the found range.
             max_counts (int): Maximum number of counts to consider. If None, use the full range. Otherwise, truncate.
 
         Returns:
@@ -665,7 +675,7 @@ class CellariumGPTInferenceContext:
                         where the cumulative probability exceeds upper_percentile plus upper_pad.
         """
 
-        assert 0.0 < upper_percentile < 1.0, "The upper percentile must be between 0 and 1."
+        assert 0.0 < total_prob_mass < 1.0, "The upper percentile must be between 0 and 1."
 
         if query_chunk_size is None:
             query_chunk_size = len(query_gene_ids)
@@ -705,17 +715,25 @@ class CellariumGPTInferenceContext:
             - cdf_qk[q_indices[:, None], x_lo_qm]  # subtract total prob mass at the left point (inclusive)
             + pdf_qk[q_indices[:, None], x_lo_qm]  # add back the prob mass of the left point
         )
-        mask_qm = symm_prob_mass_qm > upper_percentile
-        range_q = torch.clamp(mask_qm.float().argmax(dim=-1) + upper_pad, max=max_counts - 1)
+        mask_qm = symm_prob_mass_qm > total_prob_mass
+        range_q = torch.clamp(mask_qm.float().argmax(dim=-1) + symmetric_range_pad, max=max_counts - 1)
         x_lo_q = x_lo_qm[q_indices, range_q]
         x_hi_q = x_hi_qm[q_indices, range_q]
 
+        # calculate the mean and std of expression for bookkeeping
+        gene_marginal_mean_nq, gene_marginal_std_nq = self.calculate_gene_mean_std_from_logits(
+            gene_logits_nqk=gene_logits_qk[None, :, :],
+            max_counts=max_counts,
+            use_logsumexp=True)
+
         return {
-            'gene_logits_qk': gene_logits_qk,
-            'gene_logits_mode_q': gene_logits_mode_q,
-            'range_q': range_q,
             'x_lo_q': x_lo_q,
             'x_hi_q': x_hi_q,
+            'range_q': range_q,
+            'gene_logits_qk': gene_logits_qk,
+            'gene_logits_mode_q': gene_logits_mode_q,
+            'gene_marginal_mean_q': gene_marginal_mean_nq[0],
+            'gene_marginal_std_q': gene_marginal_std_nq[0],
         }
 
     def generate_gene_dose_response_for_metadata(
@@ -943,6 +961,79 @@ class CellariumGPTInferenceContext:
             'query_marginal_std_q': query_marginal_std_q,
         }
 
+
+def quantile_normalize_select(
+        x: np.ndarray,
+        y: np.ndarray,
+        n_bins: int,
+        top_k: int,
+        min_x: int | None = None,
+        max_x: int | None = None):
+    """
+    Filter, normalize, and select top_k elements.
+    
+    Parameters:
+    -----------
+    x : np.ndarray
+        1D numpy array of covariate values.
+    y : np.ndarray
+        1D numpy array of response values.
+    n_bins : int
+        Number of bins to subdivide the range [min_x, max_x].
+    top_k : int
+        Number of top largest normalized y values to select.
+    min_x : float
+        Minimum x value (x must be > min_x).
+    max_x : float
+        Maximum x value (x must be < max_x).
+
+    Returns:
+    --------
+    selected_indices : np.ndarray
+        Indices in the original arrays corresponding to the top_k selected values.
+    top_normalized_y : np.ndarray
+        The normalized y values corresponding to these selected indices.
+    """
+    
+    # Create bin edges (n_bins bins from min_x to max_x).
+    bin_edges = np.linspace(np.min(x), np.max(x), n_bins + 1)
+
+    # Assign each x_valid to a bin.
+    # np.digitize returns bin indices in 1..n_bins, so subtract 1 to have 0-indexed bins.
+    bin_indices = np.digitize(x, bin_edges) - 1
+
+    # Prepare an array for the normalized y values.
+    y_normalized = np.empty_like(y, dtype=float)
+
+    # Process each bin separately.
+    for i in range(n_bins):
+        # Find indices in x_valid that fall in bin i.
+        in_bin = np.where(bin_indices == i)[0]
+        if in_bin.size > 0:
+            # Compute the mean of y values in this bin.
+            bin_mean = np.mean(y[in_bin])
+            # Avoid division by zero (if bin_mean happens to be zero, leave values unchanged).
+            if bin_mean == 0:
+                y_normalized[in_bin] = y[in_bin]
+            else:
+                y_normalized[in_bin] = y[in_bin] / bin_mean
+
+    if min_x is None:
+        min_x = np.min(x)
+    if max_x is None:
+        max_x = np.max(x)
+
+    _y_normalized = y_normalized.copy()
+    _y_normalized[x < min_x] = -np.inf
+    _y_normalized[x > max_x] = -np.inf
+
+    sorted_idx = np.argsort(_y_normalized)[::-1]
+    top_k = min(top_k, np.sum(_y_normalized > -np.inf))
+    top_idx = sorted_idx[:top_k]
+
+    return top_idx, y_normalized
+
+
 class GeneNetworkAnalysisBase:
     def __init__(
             self,
@@ -1019,6 +1110,11 @@ class GeneNetworkAnalysisBase:
         assert self.processed, "Must process before accessing"
         return {gene_id: idx for idx, gene_id in enumerate(self.query_var_names)}
     
+    @cached_property
+    def prompt_gene_id_to_idx_map(self) -> dict[str, int]:
+        assert self.processed, "Must process before accessing"
+        return {gene_id: idx for idx, gene_id in enumerate(self.prompt_var_names)}
+
     def __str__(self) -> str:
         return (
             f"GeneNetworkAnalysisBase({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
@@ -1030,12 +1126,18 @@ class GeneNetworkAnalysisBase:
     def process(
             self,
             response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
-            feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
-            min_prompt_gene_tpm: float = 10.,
-            min_query_gene_tpm: float = 10.,
+            feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+            min_prompt_gene_tpm: float = 0.,
+            min_query_gene_tpm: float = 0.,
             query_response_amp_min_pct: float | None = None,
-            feature_max_value: float = 10.,
+            feature_max_value: float | None = None,
+            norm_pseudo_count: float = 1e-3,
+            query_hv_top_k: int | None = None,
+            query_hv_n_bins: int | None = 50,
+            query_hv_min_x: float | None = 1e-2,
+            query_hv_max_x: float | None = np.inf,
             eps: float = 1e-8,
+            z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
         ) -> None:
 
         assert not self.processed, "Already processed -- please create a new instance"
@@ -1052,7 +1154,7 @@ class GeneNetworkAnalysisBase:
             raise ValueError("Invalid Jacobian normalization strategy")
 
         # linear proportional activation
-        self.z_qp = self.response_qp * (z_p[None, :] + eps) / (z_q[:, None] + eps)
+        self.z_qp = self.response_qp * (z_p[None, :] + norm_pseudo_count) / (z_q[:, None] + norm_pseudo_count)
 
         if self.verbose:
             logger.info(f"Maximum value of z_qp: {np.max(self.z_qp):.3f}")
@@ -1069,41 +1171,62 @@ class GeneNetworkAnalysisBase:
             z_norm_thresh = np.percentile(z_norm_q, query_response_amp_min_pct)
             self.mask_q = self.mask_q & (z_norm_q >= z_norm_thresh)
             logger.info(f"Number of query genes after z-norm filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
-            
+        
+        if query_hv_top_k is not None:
+            assert query_hv_n_bins is not None
+            assert query_hv_min_x is not None
+            assert query_hv_max_x is not None
+            top_idx, _ = quantile_normalize_select(
+                x=np.log1p(self.query_marginal_mean_q),
+                y=np.std(self.z_qp, axis=1),
+                n_bins=query_hv_n_bins,
+                top_k=query_hv_top_k,
+                min_x=query_hv_min_x,
+                max_x=query_hv_max_x)
+            hv_mask_q = np.zeros_like(self.mask_q, dtype=bool)
+            hv_mask_q[top_idx] = True
+            self.mask_q = self.mask_q & hv_mask_q
+            logger.info(f"Number of query genes after highly-variable filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
+
         # apply the mask to everything else
         self.prompt_var_names = [self.prompt_var_names[i] for i in range(len(self.prompt_var_names)) if self.mask_p[i]]
-        # self.prompt_empirical_mean_p = self.prompt_empirical_mean_p[self.mask_p]
         self.prompt_marginal_mean_p = self.prompt_marginal_mean_p[self.mask_p]
         self.prompt_marginal_std_p = self.prompt_marginal_std_p[self.mask_p]
 
         self.query_var_names = [self.query_var_names[i] for i in range(len(self.query_var_names)) if self.mask_q[i]]
-        # self.query_empirical_mean_q = self.query_empirical_mean_q[self.mask_q]
         self.query_marginal_mean_q = self.query_marginal_mean_q[self.mask_q]
         self.query_marginal_std_q = self.query_marginal_std_q[self.mask_q]
 
         # apply the mask to z_qp
         self.z_qp = self.z_qp[self.mask_q, :][:, self.mask_p]
 
-        if feature_normalization_strategy == "prompt_z_score":
-            self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=0, keepdims=True)) / (
-                np.sqrt(self.z_qp.shape[0]) * (eps + np.std(self.z_qp, axis=0, keepdims=True)))
-        elif feature_normalization_strategy == "query_z_score":
-            self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=1, keepdims=True)) / (
-                np.sqrt(self.z_qp.shape[1]) * (eps + np.std(self.z_qp, axis=1, keepdims=True)))
-        elif feature_normalization_strategy == "l2":
-            self.z_qp = self.z_qp / (eps + np.linalg.norm(self.z_qp, axis=-1, keepdims=True))
-        else:
-            raise ValueError("Invalid feature normalization strategy")
-
-        # clip features
+        # clip and transform features
         self.z_qp[np.isnan(self.z_qp)] = 0.
         self.z_qp[np.isinf(self.z_qp)] = 0.
-        self.z_qp = np.clip(self.z_qp, -feature_max_value, feature_max_value)
+
+        if feature_max_value is not None:
+            assert feature_max_value > 0
+            self.z_qp = np.clip(self.z_qp, -feature_max_value, feature_max_value)
+
+        if z_trans_func is not None:
+            self.z_qp = z_trans_func(self.z_qp)
+
+        if feature_normalization_strategy == "z_score":
+            # z-score each query gene separately in response to prompt genes
+            self.z_qp = (self.z_qp - np.mean(self.z_qp, axis=0, keepdims=True)) / (
+                eps + np.std(self.z_qp, axis=0, keepdims=True))
+        elif feature_normalization_strategy == "l2":
+            # l2-normalize query genes separately for each prompt gene
+            self.z_qp = self.z_qp / (eps + np.linalg.norm(self.z_qp, axis=0, keepdims=True))
+        elif feature_normalization_strategy == "none":
+            pass
+        else:
+            raise ValueError("Invalid feature normalization strategy")
 
         self.processed = True
 
         # adj
-        self.a_qq = None
+        self.a_pp = None
         
         # leiden
         self.leiden_membership = None
@@ -1121,52 +1244,55 @@ class GeneNetworkAnalysisBase:
             self_loop: bool = False,
             **kwargs) -> None:
 
+        n_query_genes = self.z_qp.shape[0]
+        rho_pp = self.z_qp.T @ self.z_qp / n_query_genes
+
         if adjacency_strategy == "shifted_correlation":
             assert "beta" in kwargs, "Must provide beta for shifted correlation"
             beta = kwargs["beta"]
-            a_qq = np.power(0.5 * (1 + np.dot(self.z_qp, self.z_qp.T)), beta)
+            a_pp = np.power(0.5 * (1 + rho_pp), beta)
         elif adjacency_strategy == "unsigned_correlation":
             assert "beta" in kwargs, "Must provide beta for unsigned correlation"
             beta = kwargs["beta"]
-            a_qq = np.power(np.abs(np.dot(self.z_qp, self.z_qp.T)), beta)
+            a_pp = np.power(np.abs(rho_pp), beta)
         elif adjacency_strategy == "positive_correlation":
             assert "beta" in kwargs, "Must provide beta for positive correlation"
             beta = kwargs["beta"]
-            a_qq = np.power(np.maximum(0, np.dot(self.z_qp, self.z_qp.T)), beta)
+            a_pp = np.power(np.maximum(0, rho_pp), beta)
         elif adjacency_strategy == "positive_correlation_binary":
             assert n_neighbors is None, "n_neighbors must be None for binary adjacency"
             assert "tau" in kwargs, "Must provide correlation threshold for binary adjacency"
             tau = kwargs["tau"]
-            a_qq = (np.maximum(0, np.dot(self.z_qp, self.z_qp.T)) > tau).astype(float)
+            a_pp = (np.maximum(0, rho_pp) > tau).astype(float)
         else:
             raise ValueError("Invalid adjacency strategy")
 
-        assert np.isclose(a_qq, a_qq.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
+        assert np.isclose(a_pp, a_pp.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
 
         if n_neighbors is not None:
             assert n_neighbors > 0, "n_neighbors must be positive"
-            t_qq = np.argsort(a_qq, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
+            t_pp = np.argsort(a_pp, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
 
             # make a mask for the top n_neighbors
-            _a_qq = np.zeros_like(a_qq)
-            for q in range(a_qq.shape[0]):
-                _a_qq[q, t_qq[q]] = a_qq[q, t_qq[q]]
-                _a_qq[t_qq[q], q] = a_qq[t_qq[q], q]
+            _a_pp = np.zeros_like(a_pp)
+            for p in range(a_pp.shape[0]):
+                _a_pp[p, t_pp[p]] = a_pp[p, t_pp[p]]
+                _a_pp[t_pp[p], p] = a_pp[t_pp[p], p]
         else:
-            _a_qq = a_qq
-        a_qq = _a_qq
+            _a_pp = a_pp
+        a_pp = _a_pp
         
         if not self_loop:
-            np.fill_diagonal(a_qq, 0)
+            np.fill_diagonal(a_pp, 0)
 
-        self.a_qq = a_qq
+        self.a_pp = a_pp
 
     def _compute_igraph_from_adjacency(self, directed: bool = False) -> ig.Graph:
-        assert self.a_qq is not None, "Must compute adjacency matrix first"
-        sources, targets = self.a_qq.nonzero()
-        weights = self.a_qq[sources, targets]
+        assert self.a_pp is not None, "Must compute adjacency matrix first"
+        sources, targets = self.a_pp.nonzero()
+        weights = self.a_pp[sources, targets]
         g = ig.Graph(directed=directed)
-        g.add_vertices(self.a_qq.shape[0])  # this adds adjacency.shape[0] vertices
+        g.add_vertices(self.a_pp.shape[0])  # this adds adjacency.shape[0] vertices
         g.add_edges(list(zip(sources, targets)))
         g.es["weight"] = weights
         return g
@@ -1195,12 +1321,12 @@ class GeneNetworkAnalysisBase:
             self,
             offset: int = 2,
             n_lambda_for_estimation: int = 5) -> float:
-        assert self.a_qq is not None, "Must compute adjacency matrix first"
+        assert self.a_pp is not None, "Must compute adjacency matrix first"
         
         # calculate normalized laplacian and its eigenvalues
-        norm_q = 1. / (1e-9 + np.sqrt(self.a_qq.sum(0)))
-        lap_qq = np.eye(self.a_qq.shape[0]) - norm_q[:, None] * norm_q[None, :] * self.a_qq
-        eigs = eigh(lap_qq.astype(np.float64), eigvals_only=True)
+        norm_p = 1. / (1e-9 + np.sqrt(self.a_pp.sum(0)))
+        lap_pp = np.eye(self.a_pp.shape[0]) - norm_p[:, None] * norm_p[None, :] * self.a_pp
+        eigs = eigh(lap_pp.astype(np.float64), eigvals_only=True)
         eigs[0] = 0
         eigs = np.clip(eigs, 0, np.inf)  # roundoff error guardrail
         self.eigs = eigs
@@ -1236,7 +1362,7 @@ class GeneNetworkAnalysisBase:
         ):
         
         mde = pymde.preserve_neighbors(
-            self.z_qp,
+            self.z_qp.T,  # we are embedding the prompts (perturbations)
             device=device,
             verbose=verbose,
             n_neighbors=n_neighbors,
@@ -1245,7 +1371,7 @@ class GeneNetworkAnalysisBase:
             repulsive_penalty=repulsive_penalty,
             **kwargs)
 
-        self.embedding_q2 = mde.embed(verbose=verbose, max_iter=max_iter).cpu().numpy()
+        self.embedding_p2 = mde.embed(verbose=verbose, max_iter=max_iter).cpu().numpy()
 
     def plot_mde_embedding(
             self,
@@ -1256,27 +1382,24 @@ class GeneNetworkAnalysisBase:
             highlight_gene_sets: dict[str, t.Tuple[list[str], list[str], str]] | None = None,
         ) -> go.Figure:
 
-        assert self.embedding_q2 is not None, "Must compute MDE embedding first"
+        assert self.embedding_p2 is not None, "Must compute MDE embedding first"
         assert self.leiden_membership is not None, "Must compute Leiden communities first"
 
         plot_title = f"""{self.cell_type}<br>{self.tissue}<br>{self.disease}"""
         
         # Create a color map for the memberships
-        memberships_q = self.leiden_membership
-        unique_memberships = np.unique(memberships_q)
-
-        # Convert memberships to strings for categorical mapping
-        unique_memberships_str = unique_memberships.astype(str)
+        memberships_p = self.leiden_membership
+        unique_memberships = np.unique(memberships_p)
 
         # Create the color map with string keys
         colormap = {str(label): cc.glasbey[i % len(cc.glasbey)] for i, label in enumerate(unique_memberships)}
 
         # Create a DataFrame for Plotly
         df = pd.DataFrame({
-            'x': self.embedding_q2[:, 0],
-            'y': self.embedding_q2[:, 1],
-            'label': self.query_gene_symbols,
-            'membership': memberships_q.astype(str)  # Convert to string
+            'x': self.embedding_p2[:, 0],
+            'y': self.embedding_p2[:, 1],
+            'label': self.prompt_gene_symbols,
+            'membership': memberships_p.astype(str)  # Convert to string
         })
 
         # Create the scatter plot
@@ -1295,12 +1418,12 @@ class GeneNetworkAnalysisBase:
 
         if highlight_gene_sets is not None:
             for gene_set_name, (gene_ids, gene_symbols, color) in highlight_gene_sets.items():
-                query_gene_indices = [self.query_gene_id_to_idx_map[gene_id] for gene_id in gene_ids]
+                prompt_gene_indices = [self.prompt_gene_id_to_idx_map[gene_id] for gene_id in gene_ids]
 
                 # show a scatter plot and color the markers in red
                 fig.add_scatter(
-                    x=self.embedding_q2[query_gene_indices, 0],
-                    y=self.embedding_q2[query_gene_indices, 1],
+                    x=self.embedding_p2[prompt_gene_indices, 0],
+                    y=self.embedding_p2[prompt_gene_indices, 1],
                     mode='markers',
                     marker=dict(color=color, size=highlight_marker_size),
                     text=gene_symbols,
