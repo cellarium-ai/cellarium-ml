@@ -3,6 +3,7 @@
 
 """General gene network analysis and validation."""
 
+import itertools
 import logging
 import typing as t
 import warnings
@@ -19,6 +20,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pymde
 import scanpy as sc
+import scipy.sparse as sp
 import torch
 from scipy.linalg import eigh
 from scipy.stats import linregress, norm
@@ -952,44 +954,27 @@ class BaseClassProtocol(t.Protocol):
 class ValidationMixin(BaseClassProtocol):
     """Mixin with methods for bio-inspired validation of gene networks."""
 
-    def compute_network_adjacency_concordance_metric(
+    def _get_reference_gene_sets_as_inds_and_filter(
         self,
         reference_gene_sets: dict[str, set[str]],
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
         reference_set_exclusion_fraction: float = 0.25,
         min_set_size: int = 3,
-        p_value_threshold: float = 0.5,
-        gene_naming: t.Literal["id", "symbol"] = "symbol",
         verbose: bool = False,
-    ) -> tuple[float, pd.DataFrame]:
+    ) -> dict[str, set[int]]:
         """
-        Compute a metric for the overall concordance between the concordance matrix in
-        :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and reference gene sets defined by a dictionary.
-        The metric is based on the adjacency matrix and the reference gene sets, and is computed
-        by comparing the mean adjacency element for a set of genes to the mean adjacency element
-        for a random set of genes and computing a p-value. The concordance metric is the sum of
-        -log10(p-value) for all reference gene sets with p-value below a threshold.
+        Convert reference gene sets to indices. Omits gene sets entirely if they do not have enough
+        members in :meth:`GeneNetworkAnalysisBase.igraph`.
 
         Args:
             reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
-            reference_set_exclusion_fraction: gene sets with fewer than this fraction of genes present in the graph
-                are excluded from the concordance metric
-            min_set_size: minimum size of a gene set present in the graph to be included in the concordance metric
-            adjacency_strategy: adjacency strategy
-            p_value_threshold: p-values above this threshold are considered totally insignificant
-                and are not included in the final concordance metric, which is the sum of -log10(p-value)
-            gene_naming: whether to use gene IDs or gene symbols
-            verbose: whether to print warnings for excluded gene sets
+            gene_naming: whether the genes in the reference sets are gene IDs or gene symbols
+            reference_set_exclusion_fraction: gene sets with fewer than this fraction in graph are excluded
+            min_set_size: minimum size of a gene set present in the graph to be included
 
         Returns:
-            concordance, DataFrame of values for each reference gene set
+            dictionary of reference gene sets as indices {set1_name: {gene_A_idx, gene_B_idx, ...}, ...}
         """
-        # precompute sums of adjacency matrix rows without diagonal elements
-        a_qq = self.adjacency_matrix
-        assert isinstance(a_qq, np.ndarray)
-        q = a_qq.shape[0]
-        zero_diag_a_qq = a_qq * (1.0 - np.eye(q))
-        mean_element_value = zero_diag_a_qq.sum() / (q * q - q)
-
         # handle gene naming
         if gene_naming == "symbol":
             gene_ind_lookup: dict[str, int] = self.query_gene_symbol_to_idx_map
@@ -1022,6 +1007,158 @@ class ValidationMixin(BaseClassProtocol):
                     )
                 continue
             final_ref_gene_sets_as_inds[set_name] = gene_set_inds
+
+        return final_ref_gene_sets_as_inds
+
+    def compute_network_adjacency_auc_metric(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        reference_set_exclusion_fraction: float = 0.25,
+        min_set_size: int = 3,
+        min_adjacency: float = 1e-3,
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
+        verbose: bool = False,
+    ) -> tuple[float, pd.DataFrame]:
+        """
+        Compute a metric for the overall concordance between the concordance matrix in
+        :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and reference gene sets defined by a dictionary.
+        The metric is based on the adjacency matrix and the reference gene sets, and is computed
+        by calculating an AUC by varying the threshold for the adjacency matrix and considering
+        true positives as the number of edges (above the threshold) that are in a reference set,
+        and false positives as the number of edges that are not in a reference set. The adjacency
+        can be considered to be the metric which prioritizes candidate edges, and the union of
+        reference gene sets constitutes ground truth.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
+            reference_set_exclusion_fraction: gene sets with fewer than this fraction of genes present in the graph
+                are excluded from the concordance metric
+            min_set_size: minimum size of a gene set present in the graph to be included in the concordance metric
+            min_adjacency: act as though all adjacencies below this value are zero
+            gene_naming: whether to use gene IDs or gene symbols
+            verbose: whether to print warnings for excluded gene sets
+
+        Returns:
+            concordance AUC, DataFrame of thresholds, true positive rate, false positive rate
+        """
+        # adjacency matrix without diagonal elements and with small values set to zero
+        a_qq = self.adjacency_matrix
+        assert isinstance(a_qq, np.ndarray)
+        q = a_qq.shape[0]
+        zero_diag_a_qq = a_qq * (1.0 - np.eye(q))
+        mask_qq = zero_diag_a_qq > min_adjacency
+        zero_diag_a_qq = zero_diag_a_qq * mask_qq  # helps sparse calcs below
+
+        # decide which gene sets to include and convert to indices
+        final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
+            reference_gene_sets=reference_gene_sets,
+            gene_naming=gene_naming,
+            reference_set_exclusion_fraction=reference_set_exclusion_fraction,
+            min_set_size=min_set_size,
+            verbose=verbose,
+        )
+
+        # compute ground truth for edge evidence in any reference gene set
+        row: list[int] = []
+        col: list[int] = []
+        for _, gene_set_inds in final_ref_gene_sets_as_inds.items():
+            # all pairs of inds in the gene set
+            gene_set_pairs = list(itertools.combinations(gene_set_inds, 2))
+            # convert list of tuples to row list and column list, and append
+            row_inds, col_inds = zip(*gene_set_pairs)
+            row.extend(row_inds)
+            col.extend(col_inds)
+        edges_in_reference_coo = sp.coo_matrix((np.ones(len(row), dtype=bool), (row, col)), shape=(q, q))
+
+        # set up dataframe used for ROC curve
+        edges_in_adjacency_coo = sp.coo_matrix(zero_diag_a_qq)
+        edges_in_adjacency_coo.eliminate_zeros()
+        edges_in_adjacency_df = pd.DataFrame(
+            {
+                "row": edges_in_adjacency_coo.row,
+                "col": edges_in_adjacency_coo.col,
+                "adjacency": edges_in_adjacency_coo.data,
+            }
+        )
+        edges_in_reference_df = pd.DataFrame(
+            {
+                "row": edges_in_reference_coo.row,
+                "col": edges_in_reference_coo.col,
+                "reference": edges_in_reference_coo.data,
+            }
+        )
+        edges_in_adjacency_df = pd.merge(
+            left=edges_in_adjacency_df,
+            right=edges_in_reference_df,
+            on=["row", "col"],
+            how="left",
+        )
+        edges_in_adjacency_df["reference"] = edges_in_adjacency_df["reference"].fillna(0)
+
+        # compute tpr and fpr
+        # tpr = tp / (tp + fn) = tp / total positives
+        # fpr = fp / (fp + tn) = fp / total negatives
+        edges_in_adjacency_df = edges_in_adjacency_df.sort_values("adjacency", ascending=False)
+        edges_in_adjacency_df["true_positives"] = edges_in_adjacency_df["reference"].cumsum().astype(int)
+        edges_in_adjacency_df["false_positives"] = (1 - edges_in_adjacency_df["reference"]).cumsum().astype(int)
+        edges_in_adjacency_df["true_positive_rate"] = (
+            edges_in_adjacency_df["true_positives"] / edges_in_adjacency_df["reference"].sum()
+        )
+        edges_in_adjacency_df["false_positive_rate"] = (
+            edges_in_adjacency_df["false_positives"] / (1 - edges_in_adjacency_df["reference"]).sum()
+        )
+
+        # compute AUC
+        auc = np.trapz(edges_in_adjacency_df["true_positive_rate"], edges_in_adjacency_df["false_positive_rate"])
+
+        return auc, edges_in_adjacency_df
+
+    def compute_network_adjacency_concordance_metric(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        reference_set_exclusion_fraction: float = 0.25,
+        min_set_size: int = 3,
+        p_value_threshold: float = 0.5,
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
+        verbose: bool = False,
+    ) -> tuple[float, pd.DataFrame]:
+        """
+        Compute a metric for the overall concordance between the concordance matrix in
+        :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and reference gene sets defined by a dictionary.
+        The metric is based on the adjacency matrix and the reference gene sets, and is computed
+        by comparing the mean adjacency element for a set of genes to the mean adjacency element
+        for a random set of genes and computing a p-value. The concordance metric is the sum of
+        -log10(p-value) for all reference gene sets with p-value below a threshold.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
+            reference_set_exclusion_fraction: gene sets with fewer than this fraction of genes present in the graph
+                are excluded from the concordance metric
+            min_set_size: minimum size of a gene set present in the graph to be included in the concordance metric
+            adjacency_strategy: adjacency strategy
+            p_value_threshold: p-values above this threshold are considered totally insignificant
+                and are not included in the final concordance metric, which is the sum of -log10(p-value)
+            gene_naming: whether to use gene IDs or gene symbols
+            verbose: whether to print warnings for excluded gene sets
+
+        Returns:
+            concordance, DataFrame of values for each reference gene set
+        """
+        # adjacency matrix without diagonal elements
+        a_qq = self.adjacency_matrix
+        assert isinstance(a_qq, np.ndarray)
+        q = a_qq.shape[0]
+        zero_diag_a_qq = a_qq * (1.0 - np.eye(q))
+        mean_element_value = zero_diag_a_qq.sum() / (q * q - q)
+
+        # decide which gene sets to include and convert to indices
+        final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
+            reference_gene_sets=reference_gene_sets,
+            gene_naming=gene_naming,
+            reference_set_exclusion_fraction=reference_set_exclusion_fraction,
+            min_set_size=min_set_size,
+            verbose=verbose,
+        )
 
         def _effect_of_set(gene_inds: set[int]) -> float:
             assert len(gene_inds) > 1, "Gene set must have at least 2 members"
@@ -1067,7 +1204,7 @@ class ValidationMixin(BaseClassProtocol):
             pval = (random_control_effects > effect).mean()
 
             # p-value via analytical approximation using law of large numbers
-            scale = 1 / len(gene_set_inds) / 22
+            scale = 1 / len(gene_set_inds) / 22  # the factor 1/22 is empirical
             pval_analytic = 1.0 - norm.cdf(effect, loc=mean_element_value, scale=scale)
 
             dfs.append(
