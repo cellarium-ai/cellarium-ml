@@ -250,6 +250,7 @@ def compute_adjacency_matrix(
     ] = "positive_correlation",
     n_neighbors: int | None = 50,
     self_loop: bool = False,
+    scale_by_node_degree: bool = False,
     **kwargs,
 ) -> np.ndarray:
     """Compute an adjacency matrix from a query-by-prompt gene matrix of values.
@@ -259,6 +260,8 @@ def compute_adjacency_matrix(
         adjacency_strategy: adjacency strategy
         n_neighbors: number of neighbors to keep
         self_loop: whether to include self-loops
+        scale_by_node_degree: whether to scale the adjacency matrix a_ij by the node degree d_i
+            a_ij -> a_ij / sqrt(d_i * d_j)
         **kwargs: additional keyword arguments
             beta: power for correlation
             tau: threshold for binary adjacency
@@ -305,6 +308,10 @@ def compute_adjacency_matrix(
 
     if not self_loop:
         np.fill_diagonal(a_qq, 0)
+
+    if scale_by_node_degree:
+        d_q = np.sum(a_qq, axis=1)
+        a_qq = a_qq / np.sqrt(d_q[:, None] * d_q[None, :])
 
     return a_qq
 
@@ -613,6 +620,7 @@ class NetworkAnalysisBase:
         ],
         n_neighbors: int | None = 50,
         self_loop: bool = False,
+        scale_by_node_degree: bool = False,
         **kwargs,
     ) -> np.ndarray:
         self.adjacency_kwargs = kwargs | {
@@ -625,6 +633,7 @@ class NetworkAnalysisBase:
             adjacency_strategy=adjacency_strategy,
             n_neighbors=n_neighbors,
             self_loop=self_loop,
+            scale_by_node_degree=scale_by_node_degree,
             **kwargs,
         )
         self.a_qq = a_qq
@@ -1015,7 +1024,7 @@ class ValidationMixin(BaseClassProtocol):
         reference_gene_sets: dict[str, set[str]],
         reference_set_exclusion_fraction: float = 0.25,
         min_set_size: int = 3,
-        min_adjacency: float = 1e-3,
+        min_adjacency: float = 1e-5,
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         verbose: bool = False,
     ) -> tuple[float, pd.DataFrame]:
@@ -1055,8 +1064,10 @@ class ValidationMixin(BaseClassProtocol):
             gene_naming=gene_naming,
             reference_set_exclusion_fraction=reference_set_exclusion_fraction,
             min_set_size=min_set_size,
-            verbose=verbose,
+            verbose=False,
         )
+        if verbose:
+            logger.info(f"{len(final_ref_gene_sets_as_inds)} gene sets meet criteria")
 
         # compute ground truth for edge evidence in any reference gene set
         row: list[int] = []
@@ -1068,7 +1079,13 @@ class ValidationMixin(BaseClassProtocol):
             row_inds, col_inds = zip(*gene_set_pairs)
             row.extend(row_inds)
             col.extend(col_inds)
-        edges_in_reference_coo = sp.coo_matrix((np.ones(len(row), dtype=bool), (row, col)), shape=(q, q))
+        edges_in_reference_df = pd.DataFrame(
+            {
+                "row": row,
+                "col": col,
+            }
+        ).drop_duplicates()
+        edges_in_reference_df["reference"] = 1
 
         # set up dataframe used for ROC curve
         edges_in_adjacency_coo = sp.coo_matrix(zero_diag_a_qq)
@@ -1078,13 +1095,6 @@ class ValidationMixin(BaseClassProtocol):
                 "row": edges_in_adjacency_coo.row,
                 "col": edges_in_adjacency_coo.col,
                 "adjacency": edges_in_adjacency_coo.data,
-            }
-        )
-        edges_in_reference_df = pd.DataFrame(
-            {
-                "row": edges_in_reference_coo.row,
-                "col": edges_in_reference_coo.col,
-                "reference": edges_in_reference_coo.data,
             }
         )
         edges_in_adjacency_df = pd.merge(
@@ -1114,24 +1124,92 @@ class ValidationMixin(BaseClassProtocol):
         return auc, edges_in_adjacency_df
 
     @staticmethod
-    def plot_roc_network_adjacency(df: pd.DataFrame) -> None:
+    def plot_roc(
+        fpr: pd.Series | np.ndarray | list[float],
+        tpr: pd.Series | np.ndarray | list[float],
+        max_datapoints: int = 10_000,
+    ) -> None:
         """
-        Plot an ROC curve for the network adjacency concordance metric.
+        Plot a ROC curve.
 
         Args:
-            df: DataFrame of thresholds, true positive rate, false positive rate
+            fpr: false positive rate
+            tpr: true positive rate
+            max_datapoints: maximum number of data points to plot
         """
-        auc = np.trapz(df["true_positive_rate"], df["false_positive_rate"])
-        plt.fill_between(df["false_positive_rate"], df["true_positive_rate"], color="gray", alpha=0.25)
+        assert len(fpr) == len(tpr), "fpr and tpr must have the same length"
+        auc = np.trapz(tpr, fpr)
+        if len(fpr) > max_datapoints:
+            step = len(fpr) // max_datapoints
+            fpr = fpr[::step]
+            tpr = tpr[::step]
+        plt.fill_between(fpr, tpr, color="gray", alpha=0.25)
         plt.fill_between([0, 1], [0, 1], color="white", alpha=1.0)
         plt.plot([0, 1], [0, 1], "--", color="red")
-        plt.plot(df["false_positive_rate"], df["true_positive_rate"], ".k")
+        plt.plot(fpr, tpr, ".k")
         plt.xlabel("False positive rate")
         plt.ylabel("True positive rate")
         plt.annotate(f"AUC: {auc:.3f}", (0.5, 0.05))
         plt.grid(False)
-        plt.title("Ability of adjacency matrix\nto predict gene set membership")
         plt.gca().set_aspect("equal")
+
+    def plot_gene_set_adjacency_heatmap(
+        self,
+        gene_set: set[str],
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
+        n_random_control_genes: int = 0,
+    ) -> None:
+        """
+        Plot a heatmap of the adjacency matrix for a set of genes.
+
+        Args:
+            gene_set: set of gene names
+            gene_naming: whether to use gene IDs or gene symbols
+            n_random_control_genes: number of random genes to include as a control
+        """
+        import seaborn as sns
+
+        gene_list = list(gene_set)
+
+        # handle gene naming
+        if gene_naming == "symbol":
+            gene_ind_lookup: dict[str, int] = self.query_gene_symbol_to_idx_map
+        elif gene_naming == "id":
+            gene_ind_lookup = self.query_gene_id_to_idx_map
+        else:
+            raise ValueError("Invalid gene_naming")
+
+        # convert reference gene sets to indices
+        gene_inds = [gene_ind_lookup[g] for g in gene_list if g in gene_ind_lookup.keys()]
+
+        # add random genes as a control if called for
+        if n_random_control_genes > 0:
+            random_gene_inds = np.random.choice(
+                np.array(list(set(np.arange(self.z_qp.shape[0])) - set(gene_inds))),
+                n_random_control_genes,
+                replace=False,
+            )
+            gene_inds.extend(random_gene_inds)
+            gene_list.extend(self.query_gene_symbols[i] for i in random_gene_inds)
+
+        a_qq = self.adjacency_matrix
+        a_qq = a_qq[gene_inds][:, gene_inds]
+
+        # seaborn clustermap that labels the genes
+        g = sns.clustermap(
+            a_qq,
+            cmap="Oranges",
+            figsize=(4, 4),
+            xticklabels=gene_list,
+            yticklabels=gene_list,
+        )
+        g.ax_heatmap.grid(False)
+        # plt.imshow(a_qq, cmap="Oranges", aspect="auto")
+        # plt.colorbar()
+        # plt.xticks(range(len(gene_inds)), [f"{g}\n{i}" for i, g in enumerate(gene_set)], rotation=90)
+        # plt.yticks(range(len(gene_inds)), [f"{g}\n{i}" for i, g in enumerate(gene_set)])
+        # plt.title("Adjacency matrix for gene set")
+        # plt.show()
 
     def compute_network_adjacency_concordance_metric(
         self,
@@ -1143,7 +1221,7 @@ class ValidationMixin(BaseClassProtocol):
         verbose: bool = False,
     ) -> tuple[float, pd.DataFrame]:
         """
-        Compute a metric for the overall concordance between the concordance matrix in
+        Compute a metric for the overall concordance between the adjacency matrix in
         :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and reference gene sets defined by a dictionary.
         The metric is based on the adjacency matrix and the reference gene sets, and is computed
         by comparing the mean adjacency element for a set of genes to the mean adjacency element
@@ -1177,8 +1255,11 @@ class ValidationMixin(BaseClassProtocol):
             gene_naming=gene_naming,
             reference_set_exclusion_fraction=reference_set_exclusion_fraction,
             min_set_size=min_set_size,
-            verbose=verbose,
+            verbose=False,
         )
+
+        if verbose:
+            logger.info(f"{len(final_ref_gene_sets_as_inds)} gene sets meet criteria")
 
         def _effect_of_set(gene_inds: set[int]) -> float:
             assert len(gene_inds) > 1, "Gene set must have at least 2 members"
@@ -1227,6 +1308,8 @@ class ValidationMixin(BaseClassProtocol):
             # p-value via analytical approximation using law of large numbers
             scale = 1 / len(gene_set_inds) / 22  # the factor 1/22 is empirical
             pval_analytic = 1.0 - norm.cdf(effect, loc=mean_element_value, scale=scale)
+
+            # TODO permutation test for small gene sets, then analytic approx for large gene sets
 
             dfs.append(
                 pd.DataFrame(
