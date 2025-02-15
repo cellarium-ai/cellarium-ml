@@ -10,7 +10,7 @@ import typing as t
 import scanpy as sc
 import pandas as pd
 from scanpy import AnnData
-from tqdm.notebook import tqdm
+from tqdm.auto import tqdm
 from functools import cached_property
 from more_itertools import chunked
 
