@@ -2,11 +2,8 @@
 import os
 import torch
 import pickle
-import warnings
 import numpy as np
 import scanpy as sc
-import pandas as pd
-import matplotlib.pyplot as plt
 import argparse
 
 from cellarium.ml.utilities.inference.cellarium_gpt_inference import CellariumGPTInferenceContext
