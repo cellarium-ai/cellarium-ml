@@ -55,6 +55,9 @@ class GeneSetRecords:
 
     def get_gene_set_dict(self) -> dict[str, set[str]]:
         return self.gene_set_dict
+    
+    def get_gene_set(self, gene_set_name: str) -> set[str]:
+        return self.gene_set_dict[gene_set_name]
 
     def get_gene_set_dict_for_collection(self, collection: str) -> dict[str, set[str]]:
         collection_gene_set_dict = self.df["geneSymbols"][self.df["collection"] == collection].to_dict()
