@@ -15,7 +15,6 @@ from tqdm.auto import tqdm
 
 from cellarium.ml import CellariumModule, CellariumPipeline
 from cellarium.ml.models.cellarium_gpt import PredictTokenizer
-from cellarium.ml.utilities.inference.gene_network_analysis import load_gene_info_table
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set the logging level
@@ -32,6 +31,22 @@ logger.addHandler(handler)
 
 # To suppress the stupid AnnData warning ...
 warnings.filterwarnings("ignore", category=UserWarning, message="Transforming to str index.")
+
+
+def load_gene_info_table(gene_info_tsv_path: str, included_gene_ids: list[str]) -> t.Tuple[pd.DataFrame, dict, dict]:
+    gene_info_df = pd.read_csv(gene_info_tsv_path, sep="\t")
+
+    gene_symbol_to_gene_id_map = dict()
+    for gene_symbol, gene_id in zip(gene_info_df["Gene Symbol"], gene_info_df["ENSEMBL Gene ID"]):
+        if gene_symbol != float("nan"):
+            gene_symbol_to_gene_id_map[gene_symbol] = gene_id
+
+    gene_id_to_gene_symbol_map = {gene_id: gene_symbol for gene_symbol, gene_id in gene_symbol_to_gene_id_map.items()}
+    for gene_id in included_gene_ids:
+        if gene_id not in gene_id_to_gene_symbol_map:
+            gene_id_to_gene_symbol_map[gene_id] = gene_id
+
+    return gene_info_df, gene_symbol_to_gene_id_map, gene_id_to_gene_symbol_map
 
 
 class CellariumGPTInferenceContext:
