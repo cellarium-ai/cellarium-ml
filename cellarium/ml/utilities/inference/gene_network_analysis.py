@@ -845,14 +845,14 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         height: int = 800,
         highlight_gene_sets: dict[str, t.Tuple[list[str], list[str], str]] | None = None,
     ) -> go.Figure:
-        assert self.embedding_q2 is not None, "Must compute MDE embedding first"
+        assert self.embedding_p2 is not None, "Must compute MDE embedding first"
         assert self.leiden_membership is not None, "Must compute Leiden communities first"
 
         plot_title = f"""{self.cell_type}<br>{self.tissue}<br>{self.disease}"""
 
         # Create a color map for the memberships
-        memberships_q = self.leiden_membership
-        unique_memberships = np.unique(memberships_q)
+        memberships_p = self.leiden_membership
+        unique_memberships = np.unique(memberships_p)
 
         # Convert memberships to strings for categorical mapping
         unique_memberships.astype(str)
@@ -863,10 +863,10 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         # Create a DataFrame for Plotly
         df = pd.DataFrame(
             {
-                "x": self.embedding_q2[:, 0],
-                "y": self.embedding_q2[:, 1],
-                "label": self.query_gene_symbols,
-                "membership": memberships_q.astype(str),  # Convert to string
+                "x": self.embedding_p2[:, 0],
+                "y": self.embedding_p2[:, 1],
+                "label": self.prompt_gene_symbols,
+                "membership": memberships_p.astype(str),  # Convert to string
             }
         )
 
@@ -880,12 +880,12 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 
         if highlight_gene_sets is not None:
             for gene_set_name, (gene_ids, gene_symbols, color) in highlight_gene_sets.items():
-                query_gene_indices = [self.query_gene_id_to_idx_map[gene_id] for gene_id in gene_ids]
+                prompt_gene_indices = [self.prompt_gene_id_to_idx_map[gene_id] for gene_id in gene_ids]
 
                 # show a scatter plot and color the markers in red
                 fig.add_scatter(
-                    x=self.embedding_q2[query_gene_indices, 0],
-                    y=self.embedding_q2[query_gene_indices, 1],
+                    x=self.embedding_p2[prompt_gene_indices, 0],
+                    y=self.embedding_p2[prompt_gene_indices, 1],
                     mode="markers",
                     marker=dict(color=color, size=highlight_marker_size),
                     text=gene_symbols,
