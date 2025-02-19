@@ -571,7 +571,7 @@ class NetworkAnalysisBase:
         self.adjacency_kwargs: dict[str, t.Any] = {}  # used by validation methods to re-compute adjacency matrix
         self.leiden_membership: np.ndarray | None = None
         self.spectral: dict[str, np.ndarray | float] = {}
-        self.embedding_q2: np.ndarray | None = None
+        self.embedding_p2: np.ndarray | None = None
 
         # prevent false cache hits after reprocessing
         self.igraph.cache_clear()
@@ -785,6 +785,10 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
     def prompt_gene_symbols(self) -> list[str]:
         return [self.gene_id_to_gene_symbol_map[gene_id] for gene_id in self.processed.prompt_var_names]
 
+    @property
+    def prompt_gene_ids(self) -> list[str]:
+        return self.processed.prompt_var_names
+
     @cached_property
     def query_gene_id_to_idx_map(self) -> dict[str, int]:
         return {gene_id: idx for idx, gene_id in enumerate(self.processed.query_var_names)}
@@ -800,6 +804,22 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
     @cached_property
     def query_gene_id_to_symbol_map(self) -> dict[str, str]:
         return {gene_id: gene_symbol for gene_symbol, gene_id in self.query_gene_symbol_to_id_map.items()}
+
+    @cached_property
+    def prompt_gene_id_to_idx_map(self) -> dict[str, int]:
+        return {gene_id: idx for idx, gene_id in enumerate(self.processed.prompt_var_names)}
+
+    @cached_property
+    def prompt_gene_symbol_to_idx_map(self) -> dict[str, int]:
+        return {gene_symbol: idx for idx, gene_symbol in enumerate(self.prompt_gene_symbols)}
+
+    @cached_property
+    def prompt_gene_symbol_to_id_map(self) -> dict[str, str]:
+        return {gene_symbol: gene_id for gene_symbol, gene_id in zip(self.prompt_gene_symbols, self.prompt_gene_ids)}
+
+    @cached_property
+    def prompt_gene_id_to_symbol_map(self) -> dict[str, str]:
+        return {gene_id: gene_symbol for gene_symbol, gene_id in self.prompt_gene_symbol_to_id_map.items()}
 
     def __str__(self) -> str:
         return (
@@ -935,6 +955,9 @@ class BaseClassProtocol(t.Protocol):
 
     @property
     def query_gene_id_to_idx_map(self) -> dict[str, int]: ...
+
+    @property
+    def prompt_gene_id_to_idx_map(self) -> dict[str, int]: ...
 
     @property
     def query_gene_symbols(self) -> list[str]: ...

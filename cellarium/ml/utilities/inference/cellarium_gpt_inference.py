@@ -100,7 +100,7 @@ class CellariumGPTInferenceContext:
         )
 
         # inject gene categories
-        self.gpt_pipeline.model.gene_categories = np.asarray(self._adata.var_names)
+        self.gpt_pipeline.model.gene_categories = torch.from_numpy(np.asarray(self._adata.var_names))
 
         # change attention backend to memory efficient
         self.gpt_pipeline.model.set_attention_backend(attention_backend)
