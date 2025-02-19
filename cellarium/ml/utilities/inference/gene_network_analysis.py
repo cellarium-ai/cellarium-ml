@@ -27,6 +27,7 @@ from scipy.stats import linregress, norm
 from skopt import gp_minimize
 from tqdm import tqdm
 
+from cellarium.ml.utilities.inference.cellarium_gpt_inference import load_gene_info_table
 from cellarium.ml.utilities.inference.gene_set_utils import (
     compute_function_on_gene_sets_given_clustering,
     compute_function_on_gene_sets_given_neighbors,
@@ -45,25 +46,6 @@ handler.setFormatter(formatter)
 
 # Add the handler to the logger
 logger.addHandler(handler)
-
-
-def load_gene_info_table(
-    gene_info_tsv_path: str,
-    included_gene_ids: list[str] | np.ndarray,
-) -> t.Tuple[pd.DataFrame, dict, dict]:
-    gene_info_df = pd.read_csv(gene_info_tsv_path, sep="\t")
-
-    gene_symbol_to_gene_id_map = dict()
-    for gene_symbol, gene_id in zip(gene_info_df["Gene Symbol"], gene_info_df["ENSEMBL Gene ID"]):
-        if gene_symbol != float("nan"):
-            gene_symbol_to_gene_id_map[gene_symbol] = gene_id
-
-    gene_id_to_gene_symbol_map = {gene_id: gene_symbol for gene_symbol, gene_id in gene_symbol_to_gene_id_map.items()}
-    for gene_id in included_gene_ids:
-        if gene_id not in gene_id_to_gene_symbol_map:
-            gene_id_to_gene_symbol_map[gene_id] = gene_id
-
-    return gene_info_df, gene_symbol_to_gene_id_map, gene_id_to_gene_symbol_map
 
 
 @dataclass
