@@ -251,73 +251,74 @@ def compute_adjacency_matrix(
     Returns:
         query-by-query adjacency matrix for genes
     """
-    # mat_prod_qq = np.dot(z_qp, z_qp.T)  # older code
-    mat_prod_qq = z_qp @ z_qp.T
+    n_query_genes = z_qp.shape[0]
+    rho_pp = z_qp.T @ z_qp / n_query_genes
+
     if adjacency_strategy == "shifted_correlation":
         assert "beta" in kwargs, "Must provide beta for shifted correlation"
         beta = kwargs["beta"]
-        a_qq = np.power(0.5 * (1 + mat_prod_qq), beta)
+        a_pp = np.power(0.5 * (1 + rho_pp), beta)
     elif adjacency_strategy == "unsigned_correlation":
         assert "beta" in kwargs, "Must provide beta for unsigned correlation"
         beta = kwargs["beta"]
-        a_qq = np.power(np.abs(mat_prod_qq), beta)
+        a_pp = np.power(np.abs(rho_pp), beta)
     elif adjacency_strategy == "positive_correlation":
         assert "beta" in kwargs, "Must provide beta for positive correlation"
         beta = kwargs["beta"]
-        a_qq = np.power(np.maximum(0, mat_prod_qq), beta)
+        a_pp = np.power(np.maximum(0, rho_pp), beta)
     elif adjacency_strategy == "positive_correlation_binary":
         assert n_neighbors is None, "n_neighbors must be None for binary adjacency"
         assert "tau" in kwargs, "Must provide correlation threshold for binary adjacency"
         tau = kwargs["tau"]
-        a_qq = (np.maximum(0, mat_prod_qq) > tau).astype(float)
+        a_pp = (np.maximum(0, rho_pp) > tau).astype(float)
     else:
         raise ValueError("Invalid adjacency strategy")
 
-    assert np.isclose(a_qq, a_qq.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
+    assert np.isclose(a_pp, a_pp.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
 
     if n_neighbors is not None:
         assert n_neighbors > 0, "n_neighbors must be positive"
-        t_qn = np.argsort(a_qq, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
+        t_qn = np.argsort(a_pp, axis=-1)[:, -n_neighbors:]  # take the top n_neighbors
 
         # make a mask for the top n_neighbors
-        _a_qq = np.zeros_like(a_qq)
-        for q in range(a_qq.shape[0]):
-            _a_qq[q, t_qn[q]] = a_qq[q, t_qn[q]]
-            _a_qq[t_qn[q], q] = a_qq[t_qn[q], q]
+        _a_pp = np.zeros_like(a_pp)
+        for p in range(a_pp.shape[0]):
+            _a_pp[p, t_qn[p]] = a_pp[p, t_qn[p]]
+            _a_pp[t_qn[p], p] = a_pp[t_qn[p], p]
     else:
-        _a_qq = a_qq
-    a_qq = _a_qq
+        _a_pp = a_pp
+    a_pp = _a_pp
 
     if not self_loop:
-        np.fill_diagonal(a_qq, 0)
+        np.fill_diagonal(a_pp, 0)
 
     if scale_by_node_degree:
-        d_q = np.sum(a_qq, axis=1)
-        a_qq = a_qq / np.sqrt(d_q[:, None] * d_q[None, :])
+        d_p = np.sum(a_pp, axis=1)
+        a_pp = a_pp / np.sqrt(d_p[:, None] * d_p[None, :])
 
-    return a_qq
+    return a_pp
 
 
 def compute_igraph_from_adjacency(
-    a_qq: np.ndarray, node_names: list[str] | np.ndarray, directed: bool = False
+    a_pp: np.ndarray, node_names: list[str] | np.ndarray, directed: bool = False
 ) -> ig.Graph:
     """
     Convert an adjacency matrix to an :class:`ig.Graph` graph.
 
     Args:
-        a_qq: (gene-gene) adjacency matrix
+        a_pp: (gene-gene) adjacency matrix
         node_names: names of the nodes (gene names)
         directed: whether the graph is directed
 
     Returns:
         :class:`ig.Graph` graph
     """
-    assert len(node_names) == a_qq.shape[0], (
-        f"Number of node names ({len(node_names)}) must match adjacency matrix shape ({a_qq.shape[0]})"
+    assert len(node_names) == a_pp.shape[0], (
+        f"Number of node names ({len(node_names)}) must match adjacency matrix shape ({a_pp.shape[0]})"
     )
-    assert a_qq.shape[0] == a_qq.shape[1], "Adjacency matrix must be square"
-    sources, targets = a_qq.nonzero()
-    weights = a_qq[sources, targets]
+    assert a_pp.shape[0] == a_pp.shape[1], "Adjacency matrix must be square"
+    sources, targets = a_pp.nonzero()
+    weights = a_pp[sources, targets]
     g = ig.Graph(directed=directed)
     g.add_vertices(node_names)
     g.add_edges(list(zip(sources, targets)))
@@ -362,33 +363,33 @@ def compute_leiden_communites(
 
 
 def compute_knn_from_adjacency(
-    a_qq: np.ndarray,
-    node_names_q: np.ndarray,
+    a_pp: np.ndarray,
+    node_names_p: np.ndarray,
     n_neighbors: int,
 ) -> dict[str, set[str]]:
     """
     Compute the k-nearest neighbors for each node using a pre-computed adjacency matrix.
 
     Args:
-        a_qq: adjacency matrix
-        node_names_q: names of the nodes
+        a_pp: adjacency matrix
+        node_names_p: names of the nodes
         n_neighbors: number of neighbors to keep
 
     Returns:
         dictionary of k-nearest neighbors for each node
     """
-    assert a_qq.shape[0] == len(node_names_q), "Number of node names must match the first dimension of a_qq"
+    assert a_pp.shape[0] == len(node_names_p), "Number of node names must match the first dimension of a_qq"
 
     # compute the k-nearest neighbors
     knn: dict[str, set[str]] = {}
-    for q in range(a_qq.shape[0]):
-        t_q = np.argsort(a_qq[q], axis=-1)[-n_neighbors:].squeeze()  # take the top n_neighbors
-        knn[node_names_q[q]] = set(node_names_q[t_q])
+    for p in range(a_pp.shape[0]):
+        t_p = np.argsort(a_pp[p], axis=-1)[-n_neighbors:].squeeze()  # take the top n_neighbors
+        knn[node_names_p[p]] = set(node_names_p[t_p])
     return knn
 
 
 def compute_spectral_dimension(
-    a_qq: np.ndarray, offset: int = 2, n_lambda_for_estimation: int = 5
+    a_pp: np.ndarray, offset: int = 2, n_lambda_for_estimation: int = 5
 ) -> dict[str, np.ndarray | float]:
     """
     Compute the spectral dimension of a graph from its adjacency matrix.
@@ -403,9 +404,9 @@ def compute_spectral_dimension(
     """
 
     # calculate normalized laplacian and its eigenvalues
-    norm_q = 1.0 / (1e-9 + np.sqrt(a_qq.sum(0)))
-    lap_qq = np.eye(a_qq.shape[0]) - norm_q[:, None] * norm_q[None, :] * a_qq
-    eigs = eigh(lap_qq.astype(np.float64), eigvals_only=True)
+    norm_p = 1.0 / (1e-9 + np.sqrt(a_pp.sum(0)))
+    lap_pp = np.eye(a_pp.shape[0]) - norm_p[:, None] * norm_p[None, :] * a_pp
+    eigs = eigh(lap_pp.astype(np.float64), eigvals_only=True)
     eigs[0] = 0
     eigs = np.clip(eigs, 0, np.inf)  # roundoff error guardrail
 
@@ -439,7 +440,7 @@ def mde_embedding(
     repulsive_fraction: int = 5,
     attractive_penalty: pymde.functions.function.Function = pymde.penalties.Log1p,
     repulsive_penalty: pymde.functions.function.Function = pymde.penalties.InvPower,
-    device: torch.device = torch.device("cpu"),
+    device: torch.device | str = "cuda",
     max_iter: int = 500,
     verbose: bool = True,
     **kwargs,
@@ -550,7 +551,7 @@ class NetworkAnalysisBase:
 
     Attributes:
         z_qp: input matrix of values
-        node_names_q: input names of the rows
+        node_names_p: input names of the prompt genes (nodes -- the perturbations)
         leiden_membership: Leiden clustering results
         spectral: dictionary of spectral dimension results
 
@@ -560,14 +561,14 @@ class NetworkAnalysisBase:
         spectral_dim: computed spectral dimension and related results
     """
 
-    def __init__(self, z_qp: np.ndarray, node_names_q: list[str] | np.ndarray):
-        assert z_qp.shape[0] == len(node_names_q), "Number of node names must match the first dimension of z_qp"
+    def __init__(self, z_qp: np.ndarray, node_names_p: list[str] | np.ndarray):
+        assert z_qp.shape[-1] == len(node_names_p), "Number of node names must match the second dimension of z_qp"
         assert np.isnan(z_qp).sum() == 0, "There are NaNs in z_qp, which is not allowed"
         assert np.isinf(z_qp).sum() == 0, "There are infs in z_qp, which is not allowed"
         assert (z_qp != 0).sum() > 0, "There are no nonzero values in z_qp, which is not allowed"
         self.z_qp = z_qp
-        self.node_names_q = node_names_q
-        self.a_qq: np.ndarray | None = None  # adjacency matrix
+        self.node_names_p = node_names_p
+        self.a_pp: np.ndarray | None = None  # adjacency matrix
         self.adjacency_kwargs: dict[str, t.Any] = {}  # used by validation methods to re-compute adjacency matrix
         self.leiden_membership: np.ndarray | None = None
         self.spectral: dict[str, np.ndarray | float] = {}
@@ -579,9 +580,9 @@ class NetworkAnalysisBase:
 
     @property
     def adjacency_matrix(self) -> np.ndarray:
-        if self.a_qq is None:
+        if self.a_pp is None:
             raise UserWarning("Compute adjacency matrix by calling obj.compute_adjacency_matrix()")
-        return self.a_qq
+        return self.a_pp
 
     @property
     def leiden_communities(self) -> np.ndarray:
@@ -610,7 +611,7 @@ class NetworkAnalysisBase:
             "n_neighbors": n_neighbors,
             "self_loop": self_loop,
         }
-        a_qq = compute_adjacency_matrix(
+        a_pp = compute_adjacency_matrix(
             z_qp=self.z_qp,
             adjacency_strategy=adjacency_strategy,
             n_neighbors=n_neighbors,
@@ -618,21 +619,21 @@ class NetworkAnalysisBase:
             scale_by_node_degree=scale_by_node_degree,
             **kwargs,
         )
-        self.a_qq = a_qq
+        self.a_pp = a_pp
 
         # clear previously computed properties
         self.igraph.cache_clear()
         self.compute_leiden_communites.cache_clear()
 
-        return a_qq
+        return a_pp
 
     @lru_cache(maxsize=2)
     def igraph(self, directed: bool = False) -> ig.Graph:
-        if self.a_qq is None:
+        if self.a_pp is None:
             raise UserWarning("Compute adjacency matrix first by calling obj.compute_adjacency_matrix()")
         return compute_igraph_from_adjacency(
-            a_qq=self.a_qq,
-            node_names=self.node_names_q,
+            a_pp=self.a_pp,
+            node_names=self.node_names_p,
             directed=directed,
         )
 
@@ -651,7 +652,7 @@ class NetworkAnalysisBase:
 
     def compute_spectral_dimension(self, offset: int = 2, n_lambda_for_estimation: int = 5) -> float:
         self.spectral = compute_spectral_dimension(
-            a_qq=self.adjacency_matrix,
+            a_pp=self.adjacency_matrix,
             offset=offset,
             n_lambda_for_estimation=n_lambda_for_estimation,
         )
@@ -668,8 +669,8 @@ class NetworkAnalysisBase:
         verbose: bool = True,
         **kwargs,
     ):
-        self.embedding_q2 = mde_embedding(
-            self.z_qp,
+        self.embedding_p2 = mde_embedding(
+            self.z_qp.T,  # we are embedding the prompts (perturbations)
             n_neighbors=n_neighbors,
             repulsive_fraction=repulsive_fraction,
             attractive_penalty=attractive_penalty,
@@ -747,7 +748,7 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             eps=eps,
         )
 
-        super().__init__(z_qp=self.processed.matrix_qp, node_names_q=self.processed.query_var_names)
+        super().__init__(z_qp=self.processed.matrix_qp, node_names_p=self.processed.prompt_var_names)
 
     @property
     def cell_type(self) -> str:
@@ -853,9 +854,19 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         )
 
         # re-initialize the object and zero out pre-computed and cached properties
-        if hasattr(self, "query_gene_id_to_idx_map"):
-            del self.query_gene_id_to_idx_map  # clear cached property
-        super().__init__(z_qp=self.processed.matrix_qp, node_names_q=self.processed.query_var_names)
+        for attr in [
+            "query_gene_id_to_idx_map",
+            "prompt_gene_id_to_idx_map",
+            "query_gene_symbol_to_idx_map",
+            "prompt_gene_symbol_to_idx_map",
+            "query_gene_symbol_to_id_map",
+            "query_gene_id_to_symbol_map",
+            "prompt_gene_symbol_to_id_map",
+            "prompt_gene_id_to_symbol_map",
+        ]:
+            if hasattr(self, attr):
+                delattr(self, attr)  # clear cached property
+        super().__init__(z_qp=self.processed.matrix_qp, node_names_p=self.processed.prompt_var_names)
 
     def plot_mde_embedding(
         self,
@@ -944,7 +955,7 @@ class BaseClassProtocol(t.Protocol):
     """Tell the mixin what it can count on inheriting from the base class (for typechecking)"""
 
     z_qp: np.ndarray
-    node_names_q: list[str] | np.ndarray
+    node_names_p: list[str] | np.ndarray
     adjacency_kwargs: dict[str, t.Any]
 
     @property
@@ -960,7 +971,13 @@ class BaseClassProtocol(t.Protocol):
     def prompt_gene_id_to_idx_map(self) -> dict[str, int]: ...
 
     @property
+    def prompt_gene_symbol_to_idx_map(self) -> dict[str, int]: ...
+
+    @property
     def query_gene_symbols(self) -> list[str]: ...
+
+    @property
+    def prompt_gene_symbols(self) -> list[str]: ...
 
     compute_leiden_communites: t.Callable[..., np.ndarray]
 
@@ -991,9 +1008,9 @@ class ValidationMixin(BaseClassProtocol):
         """
         # handle gene naming
         if gene_naming == "symbol":
-            gene_ind_lookup: dict[str, int] = self.query_gene_symbol_to_idx_map
+            gene_ind_lookup: dict[str, int] = self.prompt_gene_symbol_to_idx_map
         elif gene_naming == "id":
-            gene_ind_lookup = self.query_gene_id_to_idx_map
+            gene_ind_lookup = self.prompt_gene_id_to_idx_map
         else:
             raise ValueError("Invalid gene_naming")
 
@@ -1178,9 +1195,9 @@ class ValidationMixin(BaseClassProtocol):
 
         # handle gene naming
         if gene_naming == "symbol":
-            gene_ind_lookup: dict[str, int] = self.query_gene_symbol_to_idx_map
+            gene_ind_lookup: dict[str, int] = self.prompt_gene_symbol_to_idx_map
         elif gene_naming == "id":
-            gene_ind_lookup = self.query_gene_id_to_idx_map
+            gene_ind_lookup = self.prompt_gene_id_to_idx_map
         else:
             raise ValueError("Invalid gene_naming")
 
@@ -1195,7 +1212,7 @@ class ValidationMixin(BaseClassProtocol):
                 replace=False,
             )
             gene_inds.extend(random_gene_inds)
-            gene_list.extend(self.query_gene_symbols[i] for i in random_gene_inds)
+            gene_list.extend(self.prompt_gene_symbols[i] for i in random_gene_inds)
 
         a_qq = self.adjacency_matrix
         a_qq = a_qq[gene_inds][:, gene_inds]
@@ -1431,7 +1448,7 @@ class ValidationMixin(BaseClassProtocol):
         Returns:
             (Leiden clustering, DataFrame of best reference gene set metrics for all clusters)
         """
-        gene_names = np.asarray(self.node_names_q) if (gene_naming == "id") else np.asarray(self.query_gene_symbols)
+        gene_names = np.asarray(self.node_names_p) if (gene_naming == "id") else np.asarray(self.prompt_gene_symbols)
 
         # compute the Leiden clustering
         clustering = self.compute_leiden_communites(resolution=resolution)
@@ -1448,7 +1465,7 @@ class ValidationMixin(BaseClassProtocol):
 
     def knn_and_compute_metrics(
         self,
-        a_qq: np.ndarray,
+        a_pp: np.ndarray,
         k: int,
         reference_gene_sets: dict[str, set[str]],
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"],
@@ -1459,6 +1476,7 @@ class ValidationMixin(BaseClassProtocol):
         over reference gene sets.
 
         Args:
+            a_pp: adjacency matrix
             k: number of neighbors for kNN
             reference_gene_sets: dictionary of reference gene sets
             metric_name: metric to use for concordance
@@ -1470,9 +1488,9 @@ class ValidationMixin(BaseClassProtocol):
 
         # compute the neighbors (cheap given adjacency)
         neighbor_lookup = compute_knn_from_adjacency(
-            a_qq=a_qq,
-            node_names_q=(
-                np.asarray(self.node_names_q) if (gene_naming == "id") else np.asarray(self.query_gene_symbols)
+            a_pp=a_pp,
+            node_names_p=(
+                np.asarray(self.node_names_p) if (gene_naming == "id") else np.asarray(self.prompt_gene_symbols)
             ),
             n_neighbors=k,
         )
@@ -1505,8 +1523,8 @@ class ValidationMixin(BaseClassProtocol):
     def _mean_metric_clustering(
         metrics_df: pd.DataFrame,
         metric_name: str,
-        cluster_label_q: np.ndarray,
-        gene_names_q: list[str] | np.ndarray,
+        cluster_label_p: np.ndarray,
+        gene_names_p: list[str] | np.ndarray,
         all_genes_in_reference_sets: set[str],
     ) -> float:
         """
@@ -1518,9 +1536,9 @@ class ValidationMixin(BaseClassProtocol):
         """
         # figure out which cluster labels to exclude from mean calculation
         clusters_with_genes_in_reference_sets = set(
-            [label for gene, label in zip(gene_names_q, cluster_label_q) if gene in all_genes_in_reference_sets]
+            [label for gene, label in zip(gene_names_p, cluster_label_p) if gene in all_genes_in_reference_sets]
         )
-        clusters_with_no_genes_in_reference_sets = set(cluster_label_q) - clusters_with_genes_in_reference_sets
+        clusters_with_no_genes_in_reference_sets = set(cluster_label_p) - clusters_with_genes_in_reference_sets
         excluded_cluster_labels = clusters_with_no_genes_in_reference_sets.union({-1})
         return metrics_df[metric_name][~metrics_df["cluster"].isin(excluded_cluster_labels)].mean()
 
@@ -1563,12 +1581,12 @@ class ValidationMixin(BaseClassProtocol):
         metrics_dfs: list[pd.DataFrame] = []
 
         # precompute adjacency matrix once using max k
-        a_qq = compute_adjacency_matrix(z_qp=self.z_qp, **self.adjacency_kwargs)  # same kwargs as user invocation
+        a_pp = compute_adjacency_matrix(z_qp=self.z_qp, **self.adjacency_kwargs)  # same kwargs as user invocation
 
         for k in k_values:
             # compute neighbors and metrics
             _, metrics_df = self.knn_and_compute_metrics(
-                a_qq=a_qq,
+                a_pp=a_pp,
                 k=k,
                 reference_gene_sets=reference_gene_sets,
                 metric_name=metric_name,
@@ -1596,7 +1614,7 @@ class ValidationMixin(BaseClassProtocol):
 
         # re-compute the kNN at the best resolution (cached) and metrics
         best_knn, best_metrics_df = self.knn_and_compute_metrics(
-            a_qq=a_qq,
+            a_pp=a_pp,
             k=best_k,
             reference_gene_sets=reference_gene_sets,
             metric_name=metric_name,
@@ -1644,12 +1662,12 @@ class ValidationMixin(BaseClassProtocol):
             (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics, mean metric)
         """
         all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
-        gene_names_q = np.asarray(self.node_names_q) if (gene_naming == "id") else np.asarray(self.query_gene_symbols)
+        gene_names_p = np.asarray(self.node_names_p) if (gene_naming == "id") else np.asarray(self.prompt_gene_symbols)
         mean_metrics_dfs: list[pd.DataFrame] = []
 
         for res in resolutions:
             # compute clustering and metrics
-            cluster_label_q, metrics_df = self.cluster_and_compute_metrics(
+            cluster_label_p, metrics_df = self.cluster_and_compute_metrics(
                 resolution=res,
                 metric_name=metric_name,
                 reference_gene_sets=reference_gene_sets,
@@ -1660,8 +1678,8 @@ class ValidationMixin(BaseClassProtocol):
             mean_metric = self._mean_metric_clustering(
                 metrics_df=metrics_df,
                 metric_name=metric_name,
-                cluster_label_q=cluster_label_q,
-                gene_names_q=gene_names_q,
+                cluster_label_p=cluster_label_p,
+                gene_names_p=gene_names_p,
                 all_genes_in_reference_sets=all_genes_in_reference_sets,
             )
 
@@ -1685,8 +1703,8 @@ class ValidationMixin(BaseClassProtocol):
         best_mean_metric = self._mean_metric_clustering(
             metrics_df=best_metrics_df,
             metric_name=metric_name,
-            cluster_label_q=best_clustering,
-            gene_names_q=gene_names_q,
+            cluster_label_p=best_clustering,
+            gene_names_p=gene_names_p,
             all_genes_in_reference_sets=all_genes_in_reference_sets,
         )
 
@@ -1726,7 +1744,7 @@ class ValidationMixin(BaseClassProtocol):
             (optimal resolution, Leiden clusters, dataframe with clusters and reference gene set metrics, mean metric)
         """
         assert num_clusterings_to_compute >= 15, "num_clusterings_to_compute must be >= 15"
-        gene_names_q = np.asarray(self.node_names_q) if (gene_naming == "id") else np.asarray(self.query_gene_symbols)
+        gene_names_p = np.asarray(self.node_names_p) if (gene_naming == "id") else np.asarray(self.prompt_gene_symbols)
         all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
 
         # function to be minimized
@@ -1734,7 +1752,7 @@ class ValidationMixin(BaseClassProtocol):
             resolution = x[0]
 
             # compute clustering and metrics
-            cluster_label_q, metrics_df = self.cluster_and_compute_metrics(
+            cluster_label_p, metrics_df = self.cluster_and_compute_metrics(
                 resolution=resolution,
                 metric_name=metric_name,
                 reference_gene_sets=reference_gene_sets,
@@ -1745,8 +1763,8 @@ class ValidationMixin(BaseClassProtocol):
             mean_metric = self._mean_metric_clustering(
                 metrics_df=metrics_df,
                 metric_name=metric_name,
-                cluster_label_q=cluster_label_q,
-                gene_names_q=gene_names_q,
+                cluster_label_p=cluster_label_p,
+                gene_names_p=gene_names_p,
                 all_genes_in_reference_sets=all_genes_in_reference_sets,
             )
 
@@ -1776,8 +1794,8 @@ class ValidationMixin(BaseClassProtocol):
         best_mean_metric = self._mean_metric_clustering(
             metrics_df=best_metrics_df,
             metric_name=metric_name,
-            cluster_label_q=best_clustering,
-            gene_names_q=gene_names_q,
+            cluster_label_p=best_clustering,
+            gene_names_p=gene_names_p,
             all_genes_in_reference_sets=all_genes_in_reference_sets,
         )
 
