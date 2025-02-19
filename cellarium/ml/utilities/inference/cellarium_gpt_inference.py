@@ -35,7 +35,10 @@ logger.addHandler(handler)
 warnings.filterwarnings("ignore", category=UserWarning, message="Transforming to str index.")
 
 
-def load_gene_info_table(gene_info_tsv_path: str, included_gene_ids: list[str]) -> t.Tuple[pd.DataFrame, dict, dict]:
+def load_gene_info_table(
+    gene_info_tsv_path: str,
+    included_gene_ids: list[str] | np.ndarray,
+) -> t.Tuple[pd.DataFrame, dict, dict]:
     gene_info_df = pd.read_csv(gene_info_tsv_path, sep="\t")
 
     gene_symbol_to_gene_id_map = dict()
@@ -305,10 +308,10 @@ class CellariumGPTInferenceContext:
         assay: str,
         suspension_type: str,
         prompt_metadata_dict: dict,
-        total_mrna_umis: int,
+        total_mrna_umis: int | float,
         query_gene_ids: list[str],
         max_counts: int | None = None,
-    ) -> t.Tuple[dict, dict]:
+    ) -> torch.Tensor:
         metadata_prompt_masks_dict, metadata_dict = self.process_user_metadata(
             assay, suspension_type, prompt_metadata_dict, total_mrna_umis
         )
@@ -335,11 +338,11 @@ class CellariumGPTInferenceContext:
         assay: str,
         suspension_type: str,
         prompt_metadata_dict: dict,
-        total_mrna_umis: int,
+        total_mrna_umis: int | float,
         query_gene_ids: list[str],
         perturb_gene_ids: list[str] | None,
         perturb_gene_values: np.ndarray | None = None,
-    ) -> t.Tuple[dict, dict]:
+    ) -> t.Tuple[dict, dict, sc.AnnData, dict]:
         """
 
         .. note::
@@ -613,7 +616,6 @@ class CellariumGPTInferenceContext:
             context_indices=context_indices,
             use_logsumexp=use_logsumexp,
             max_counts=max_counts,
-            verbose=verbose,
         )
 
     def predict_gene_expression_range_for_metadata(
@@ -684,6 +686,8 @@ class CellariumGPTInferenceContext:
         gene_logits_mode_q = torch.argmax(gene_logits_qk, dim=1)
 
         # symmetric lower and upper counts about the mode for each gene
+        if max_counts is None:
+            max_counts = gene_logits_qk.shape[-1]
         x_lo_qm = torch.clamp(
             gene_logits_mode_q[:, None] - torch.arange(0, max_counts, device=self.device)[None, :], min=0
         )
