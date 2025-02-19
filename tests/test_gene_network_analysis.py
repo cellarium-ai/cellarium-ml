@@ -112,6 +112,7 @@ def jac_ctx(structured_z_qp, gene_info_tsv_path) -> JacobianContext:
         query_empirical_mean_q=np.ones(response_qp.shape[0]),
         min_prompt_gene_tpm=0.0,
         min_query_gene_tpm=0.0,
+        feature_max_value=10.0,
     )
     jac_ctx.compute_adjacency_matrix(
         adjacency_strategy="positive_correlation",

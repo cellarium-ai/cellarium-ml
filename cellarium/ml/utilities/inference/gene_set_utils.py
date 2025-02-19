@@ -313,9 +313,9 @@ def compute_function_on_gene_sets_given_clustering(
     # for each cluster, compute the best matching reference gene set and record its metric
     best_metric_dfs: list[pd.DataFrame] = []
     for k in np.unique(clustering):
-        # skip the noise cluster
-        if k == -1:
-            continue
+        # # skip the noise cluster
+        # if k == -1:
+        #     continue
 
         # genes in this cluster
         gene_set = set(gene_names[clustering == k])

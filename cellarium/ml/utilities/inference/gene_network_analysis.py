@@ -48,6 +48,69 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+def quantile_normalize_select(
+    x: np.ndarray,
+    y: np.ndarray,
+    n_bins: int,
+    top_k: int,
+    min_x: int | float | None = None,
+    max_x: int | float | None = None,
+):
+    """
+    Filter, normalize, and select top_k elements.
+
+    Args:
+        x: 1D numpy array of covariate values.
+        y: 1D numpy array of response values.
+        n_bins: Number of bins to subdivide the range [min_x, max_x].
+        top_k: Number of top largest normalized y values to select.
+        min_x: Minimum x value (x must be > min_x).
+        max_x: Maximum x value (x must be < max_x).
+
+    Returns:
+        selected_indices: indices in the original arrays corresponding to the top_k selected values
+        top_normalized_y: the normalized y values corresponding to these selected indices
+    """
+
+    # Create bin edges (n_bins bins from min_x to max_x).
+    bin_edges = np.linspace(np.min(x), np.max(x), n_bins + 1)
+
+    # Assign each x_valid to a bin.
+    # np.digitize returns bin indices in 1..n_bins, so subtract 1 to have 0-indexed bins.
+    bin_indices = np.digitize(x, bin_edges) - 1
+
+    # Prepare an array for the normalized y values.
+    y_normalized = np.empty_like(y, dtype=float)
+
+    # Process each bin separately.
+    for i in range(n_bins):
+        # Find indices in x_valid that fall in bin i.
+        in_bin = np.where(bin_indices == i)[0]
+        if in_bin.size > 0:
+            # Compute the mean of y values in this bin.
+            bin_mean = np.mean(y[in_bin])
+            # Avoid division by zero (if bin_mean happens to be zero, leave values unchanged).
+            if bin_mean == 0:
+                y_normalized[in_bin] = y[in_bin]
+            else:
+                y_normalized[in_bin] = y[in_bin] / bin_mean
+
+    if min_x is None:
+        min_x = np.min(x)
+    if max_x is None:
+        max_x = np.max(x)
+
+    _y_normalized = y_normalized.copy()
+    _y_normalized[x < min_x] = -np.inf
+    _y_normalized[x > max_x] = -np.inf
+
+    sorted_idx = np.argsort(_y_normalized)[::-1]
+    top_k = min(top_k, int(np.sum(_y_normalized > -np.inf)))
+    top_idx = sorted_idx[:top_k]
+
+    return top_idx, y_normalized
+
+
 @dataclass
 class GeneNetworkAnalysisData:
     """Container for required inputs for a gene network analysis with type annotations."""
@@ -97,11 +160,17 @@ def process_response_matrix(
     analysis_data: GeneNetworkAnalysisData,
     total_mrna_umis: float,
     response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
-    feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
-    min_prompt_gene_tpm: float = 10.0,
-    min_query_gene_tpm: float = 10.0,
+    feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+    min_prompt_gene_tpm: float = 0.0,
+    min_query_gene_tpm: float = 0.0,
     query_response_amp_min_pct: float | None = None,
-    feature_max_value: float = 10.0,
+    feature_max_value: float | None = None,
+    norm_pseudo_count: float = 1e-3,
+    query_hv_top_k: int | None = None,
+    query_hv_n_bins: int | None = 50,
+    query_hv_min_x: float | None = 1e-2,
+    query_hv_max_x: float | None = np.inf,
+    z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
     eps: float = 1e-8,
     verbose: bool = True,
 ) -> GeneNetworkAnalysisData:
@@ -125,12 +194,18 @@ def process_response_matrix(
             - "none": no normalization
         feature_normalization_strategy: feature normalization strategy
             - "l2": L2 normalization per query feature
-            - "query_z_score": z-score per query feature
-            - "prompt_z_score": z-score per prompt feature
+            - "z_score": z-score per feature
+            - "none": no normalization
         min_prompt_gene_tpm: minimum prompt gene TPM
         min_query_gene_tpm: minimum query gene TPM
         query_response_amp_min_pct: minimum query response amplitude percentile
         feature_max_value: maximum feature value
+        norm_pseudo_count: pseudo-count for normalization
+        query_hv_top_k: number of top query genes to select
+        query_hv_n_bins: number of bins for histogram equalization
+        query_hv_min_x: minimum x value for histogram equalization
+        query_hv_max_x: maximum x value for histogram equalization
+        z_trans_func: transformation function for z values
         eps: epsilon value for numerical stability
         verbose: whether to print verbose output
     """
@@ -159,7 +234,7 @@ def process_response_matrix(
         raise ValueError("Invalid Jacobian normalization strategy")
 
     # linear proportional activation
-    z_qp = response_qp * (z_p[None, :] + eps) / (z_q[:, None] + eps)
+    z_qp = response_qp * (z_p[None, :] + norm_pseudo_count) / (z_q[:, None] + norm_pseudo_count)
     assert isinstance(z_qp, np.ndarray)
 
     if verbose:
@@ -178,6 +253,23 @@ def process_response_matrix(
         mask_q = mask_q & (z_norm_q >= z_norm_thresh)
         logger.info(f"Number of query genes after z-norm filtering: {np.sum(mask_q)} / {len(mask_q)}")
 
+    if query_hv_top_k is not None:
+        assert query_hv_n_bins is not None
+        assert query_hv_min_x is not None
+        assert query_hv_max_x is not None
+        top_idx, _ = quantile_normalize_select(
+            x=np.log1p(query_marginal_mean_q),
+            y=np.std(z_qp, axis=1),
+            n_bins=query_hv_n_bins,
+            top_k=query_hv_top_k,
+            min_x=query_hv_min_x,
+            max_x=query_hv_max_x,
+        )
+        hv_mask_q = np.zeros_like(mask_q, dtype=bool)
+        hv_mask_q[top_idx] = True
+        mask_q = mask_q & hv_mask_q
+        logger.info(f"Number of query genes after highly-variable filtering: {np.sum(mask_q)} / {len(mask_q)}")
+
     # apply the mask to everything else
     prompt_var_names_masked = [prompt_var_names[i] for i in range(len(prompt_var_names)) if mask_p[i]]
     prompt_empirical_mean_p_masked = prompt_empirical_mean_p[mask_p]
@@ -192,25 +284,35 @@ def process_response_matrix(
     # apply the mask to z_qp
     z_qp = z_qp[mask_q, :][:, mask_p]
 
-    pearson = True  # True means that z_qp @ z_qp.T will be the pearson correlation matrix
-    if feature_normalization_strategy == "prompt_z_score":
-        z_qp = (z_qp - np.mean(z_qp, axis=0, keepdims=True)) / (eps + np.std(z_qp, axis=0, keepdims=True))
-        if pearson:
-            z_qp = z_qp / np.sqrt(z_qp.shape[0])
-    elif feature_normalization_strategy == "query_z_score":
+    # clip and transform features
+    assert isinstance(z_qp, np.ndarray)
+    z_qp[np.isnan(z_qp)] = 0.0
+    z_qp[np.isinf(z_qp)] = 0.0
+
+    if feature_max_value is not None:
+        assert feature_max_value > 0
+        z_qp = np.clip(z_qp, -feature_max_value, feature_max_value)
+
+    if z_trans_func is not None:
+        z_qp = z_trans_func(z_qp)
+
+    # handle feature normalization
+    pearson = False  # True means that z_qp @ z_qp.T will be the pearson correlation matrix
+    if feature_normalization_strategy == "z_score":
+        # z-score each query gene separately in response to prompt genes
         z_qp = (z_qp - np.mean(z_qp, axis=1, keepdims=True)) / (eps + np.std(z_qp, axis=1, keepdims=True))
         if pearson:
             z_qp = z_qp / np.sqrt(z_qp.shape[1])
     elif feature_normalization_strategy == "l2":
-        z_qp = z_qp / (eps + np.linalg.norm(z_qp, axis=-1, keepdims=True))
+        # l2-normalize query genes separately for each prompt gene
+        z_qp = z_qp / (eps + np.linalg.norm(z_qp, axis=0, keepdims=True))
+    elif feature_normalization_strategy == "none":
+        pass
     else:
         raise ValueError("Invalid feature normalization strategy")
 
-    # clip features
-    assert isinstance(z_qp, np.ndarray)
     z_qp[np.isnan(z_qp)] = 0.0
     z_qp[np.isinf(z_qp)] = 0.0
-    z_qp = np.clip(z_qp, -feature_max_value, feature_max_value)
 
     return GeneNetworkAnalysisData(
         matrix_qp=z_qp,
@@ -697,11 +799,17 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         query_marginal_std_q: np.ndarray,
         query_empirical_mean_q: np.ndarray,
         response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
-        feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
-        min_prompt_gene_tpm: float = 10.0,
-        min_query_gene_tpm: float = 10.0,
+        feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+        min_prompt_gene_tpm: float = 0.0,
+        min_query_gene_tpm: float = 0.0,
         query_response_amp_min_pct: float | None = None,
-        feature_max_value: float = 10.0,
+        feature_max_value: float | None = None,
+        norm_pseudo_count: float = 1e-3,
+        query_hv_top_k: int | None = None,
+        query_hv_n_bins: int | None = 50,
+        query_hv_min_x: float | None = 1e-2,
+        query_hv_max_x: float | None = np.inf,
+        z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
         eps: float = 1e-8,
         verbose: bool = True,
     ):
@@ -745,6 +853,12 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             min_query_gene_tpm=min_query_gene_tpm,
             query_response_amp_min_pct=query_response_amp_min_pct,
             feature_max_value=feature_max_value,
+            norm_pseudo_count=norm_pseudo_count,
+            query_hv_top_k=query_hv_top_k,
+            query_hv_n_bins=query_hv_n_bins,
+            query_hv_min_x=query_hv_min_x,
+            query_hv_max_x=query_hv_max_x,
+            z_trans_func=z_trans_func,
             eps=eps,
         )
 
@@ -833,11 +947,17 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
     def reprocess(
         self,
         response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
-        feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
-        min_prompt_gene_tpm: float = 10.0,
-        min_query_gene_tpm: float = 10.0,
+        feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+        min_prompt_gene_tpm: float = 0.0,
+        min_query_gene_tpm: float = 0.0,
         query_response_amp_min_pct: float | None = None,
-        feature_max_value: float = 10.0,
+        feature_max_value: float | None = None,
+        norm_pseudo_count: float = 1e-3,
+        query_hv_top_k: int | None = None,
+        query_hv_n_bins: int | None = 50,
+        query_hv_min_x: float | None = 1e-2,
+        query_hv_max_x: float | None = np.inf,
+        z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
         eps: float = 1e-8,
     ) -> None:
         self.processed = process_response_matrix(
@@ -849,6 +969,12 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             min_query_gene_tpm=min_query_gene_tpm,
             query_response_amp_min_pct=query_response_amp_min_pct,
             feature_max_value=feature_max_value,
+            norm_pseudo_count=norm_pseudo_count,
+            query_hv_top_k=query_hv_top_k,
+            query_hv_n_bins=query_hv_n_bins,
+            query_hv_min_x=query_hv_min_x,
+            query_hv_max_x=query_hv_max_x,
+            z_trans_func=z_trans_func,
             eps=eps,
             verbose=self.verbose,
         )
@@ -1539,7 +1665,8 @@ class ValidationMixin(BaseClassProtocol):
             [label for gene, label in zip(gene_names_p, cluster_label_p) if gene in all_genes_in_reference_sets]
         )
         clusters_with_no_genes_in_reference_sets = set(cluster_label_p) - clusters_with_genes_in_reference_sets
-        excluded_cluster_labels = clusters_with_no_genes_in_reference_sets.union({-1})
+        # excluded_cluster_labels = clusters_with_no_genes_in_reference_sets.union({-1})
+        excluded_cluster_labels = clusters_with_no_genes_in_reference_sets
         return metrics_df[metric_name][~metrics_df["cluster"].isin(excluded_cluster_labels)].mean()
 
     # TODO consider a method which computes the below for (gene, k) and then takes the k for each gene
@@ -1823,11 +1950,17 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
         response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
-        feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
-        min_prompt_gene_tpm: float = 10.0,
-        min_query_gene_tpm: float = 10.0,
+        feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+        min_prompt_gene_tpm: float = 0.0,
+        min_query_gene_tpm: float = 0.0,
         query_response_amp_min_pct: float | None = None,
-        feature_max_value: float = 10.0,
+        feature_max_value: float | None = None,
+        norm_pseudo_count: float = 1e-3,
+        query_hv_top_k: int | None = None,
+        query_hv_n_bins: int | None = 50,
+        query_hv_min_x: float | None = 1e-2,
+        query_hv_max_x: float | None = np.inf,
+        z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
         eps: float = 1e-8,
         verbose: bool = True,
     ):
@@ -1851,6 +1984,12 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             min_query_gene_tpm=min_query_gene_tpm,
             query_response_amp_min_pct=query_response_amp_min_pct,
             feature_max_value=feature_max_value,
+            norm_pseudo_count=norm_pseudo_count,
+            query_hv_top_k=query_hv_top_k,
+            query_hv_n_bins=query_hv_n_bins,
+            query_hv_min_x=query_hv_min_x,
+            query_hv_max_x=query_hv_max_x,
+            z_trans_func=z_trans_func,
             eps=eps,
             verbose=verbose,
         )
@@ -1862,11 +2001,17 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         gene_info_tsv_path: str,
         device: torch.device | str,
         response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
-        feature_normalization_strategy: t.Literal["l2", "query_z_score", "prompt_z_score"] = "query_z_score",
-        min_prompt_gene_tpm: float = 10.0,
-        min_query_gene_tpm: float = 10.0,
+        feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+        min_prompt_gene_tpm: float = 0.0,
+        min_query_gene_tpm: float = 0.0,
         query_response_amp_min_pct: float | None = None,
-        feature_max_value: float = 10.0,
+        feature_max_value: float | None = None,
+        norm_pseudo_count: float = 1e-3,
+        query_hv_top_k: int | None = None,
+        query_hv_n_bins: int | None = 50,
+        query_hv_min_x: float | None = 1e-2,
+        query_hv_max_x: float | None = np.inf,
+        z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
         eps: float = 1e-8,
         verbose: bool = True,
     ) -> "JacobianContext":
@@ -1914,6 +2059,12 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             min_query_gene_tpm=min_query_gene_tpm,
             query_response_amp_min_pct=query_response_amp_min_pct,
             feature_max_value=feature_max_value,
+            norm_pseudo_count=norm_pseudo_count,
+            query_hv_top_k=query_hv_top_k,
+            query_hv_n_bins=query_hv_n_bins,
+            query_hv_min_x=query_hv_min_x,
+            query_hv_max_x=query_hv_max_x,
+            z_trans_func=z_trans_func,
             eps=eps,
             verbose=verbose,
         )
