@@ -306,8 +306,8 @@ class CellariumGPTInferenceContext:
         prompt_metadata_dict: dict,
         total_mrna_umis: int,
         query_gene_ids: list[list],
-        max_counts: int | None = None
-    ) -> t.Tuple[dict, dict]:
+        max_counts: int | None = None,
+    ) -> torch.Tensor:
         
         metadata_prompt_masks_dict, metadata_dict = self.process_user_metadata(
             assay, suspension_type, prompt_metadata_dict, total_mrna_umis)
@@ -518,10 +518,10 @@ class CellariumGPTInferenceContext:
         log_counts_2_k = torch.arange(0, MAX_COUNTS, device=gene_logits_qk.device).pow(2).log()
         gene_mom_1_q = torch.logsumexp(gene_logits_qk + log_counts_1_k[None, :], dim=-1).exp()
         gene_mom_2_q = torch.logsumexp(gene_logits_qk + log_counts_2_k[None, :], dim=-1).exp()
-        gene_marginal_means_q = gene_mom_1_q
+        gene_marginal_mean_q = gene_mom_1_q
         gene_marginal_std_q = torch.clamp(gene_mom_2_q - gene_mom_1_q.pow(2), 0.).sqrt()
 
-        return gene_marginal_means_q, gene_marginal_std_q
+        return gene_marginal_mean_q, gene_marginal_std_q
 
 
     def get_gene_value_logits_from_tokens(
@@ -583,7 +583,7 @@ class CellariumGPTInferenceContext:
             log_counts_2_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).pow(2).log()
             gene_mom_1_nq = torch.logsumexp(gene_logits_nqk + log_counts_1_k[None, None, :], dim=-1).exp()
             gene_mom_2_nq = torch.logsumexp(gene_logits_nqk + log_counts_2_k[None, None, :], dim=-1).exp()
-            gene_marginal_means_nq = gene_mom_1_nq
+            gene_marginal_mean_nq = gene_mom_1_nq
             gene_marginal_std_nq = torch.clamp(gene_mom_2_nq - gene_mom_1_nq.pow(2), 0.).sqrt()
         else:
             gene_probs_nqk = torch.exp(gene_logits_nqk)
@@ -591,10 +591,10 @@ class CellariumGPTInferenceContext:
             counts_2_k = torch.arange(0, max_counts, device=gene_logits_nqk.device).pow(2)
             gene_mom_1_nq = (gene_probs_nqk * counts_1_k[None, None, :]).sum(dim=-1)
             gene_mom_2_nq = (gene_probs_nqk * counts_2_k[None, None, :]).sum(dim=-1)
-            gene_marginal_means_nq = gene_mom_1_nq
+            gene_marginal_mean_nq = gene_mom_1_nq
             gene_marginal_std_nq = torch.clamp(gene_mom_2_nq - gene_mom_1_nq.pow(2), 0.).sqrt()
 
-        return gene_marginal_means_nq, gene_marginal_std_nq
+        return gene_marginal_mean_nq, gene_marginal_std_nq
 
 
     def get_marginal_mean_std_multi_cell(
@@ -677,25 +677,14 @@ class CellariumGPTInferenceContext:
 
         assert 0.0 < total_prob_mass < 1.0, "The upper percentile must be between 0 and 1."
 
-        if query_chunk_size is None:
-            query_chunk_size = len(query_gene_ids)
-        
-        partial_gene_logits_list = []
-        with torch.inference_mode():
-            # Process gene IDs in chunks to limit memory usage
-            for partial_query_gene_ids in tqdm(list(chunked(query_gene_ids, query_chunk_size)),
-                                            desc="Processing gene chunks"):
-                partial_gene_logits_nqk = self.get_gene_value_logits_by_metadata(
-                    assay=assay,
-                    suspension_type=suspension_type,
-                    prompt_metadata_dict=prompt_metadata_dict,
-                    total_mrna_umis=total_mrna_umis,
-                    query_gene_ids=partial_query_gene_ids,
-                    max_counts=max_counts,
-                )
-                partial_gene_logits_list.append(partial_gene_logits_nqk)
-
-            gene_logits_qk = torch.cat(partial_gene_logits_list, dim=1)[0]
+        gene_logits_qk = self.get_gene_value_logits_by_metadata_chunked(
+            assay=assay,
+            suspension_type=suspension_type,
+            prompt_metadata_dict=prompt_metadata_dict,
+            total_mrna_umis=total_mrna_umis,
+            query_gene_ids=query_gene_ids,
+            query_chunk_size=query_chunk_size,
+            max_counts=max_counts)[0]
 
         # first, find the mode of the counts distribution for each gene
         gene_logits_mode_q = torch.argmax(gene_logits_qk, dim=1)
@@ -735,6 +724,39 @@ class CellariumGPTInferenceContext:
             'gene_marginal_mean_q': gene_marginal_mean_nq[0],
             'gene_marginal_std_q': gene_marginal_std_nq[0],
         }
+
+    def get_gene_value_logits_by_metadata_chunked(
+        self,
+        assay: str,
+        suspension_type: str,
+        prompt_metadata_dict: dict,
+        total_mrna_umis: int,
+        query_gene_ids: list[list],
+        max_counts: int | None = None,
+        query_chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        
+        if query_chunk_size is None:
+            query_chunk_size = len(query_gene_ids)
+        
+        partial_gene_logits_list = []
+        with torch.inference_mode():
+            # Process gene IDs in chunks to limit memory usage
+            for partial_query_gene_ids in tqdm(list(chunked(query_gene_ids, query_chunk_size)),
+                                            desc="Processing gene chunks"):
+                partial_gene_logits_nqk = self.get_gene_value_logits_by_metadata(
+                    assay=assay,
+                    suspension_type=suspension_type,
+                    prompt_metadata_dict=prompt_metadata_dict,
+                    total_mrna_umis=total_mrna_umis,
+                    query_gene_ids=partial_query_gene_ids,
+                    max_counts=max_counts,
+                )
+                partial_gene_logits_list.append(partial_gene_logits_nqk)
+
+            gene_logits_nqk = torch.cat(partial_gene_logits_list, dim=1)
+
+        return gene_logits_nqk
 
     def generate_gene_dose_response_for_metadata(
         self,
@@ -1539,9 +1561,9 @@ class JacobianContext(GeneNetworkAnalysisBase):
             jacobian_qp=old_jac_dict['jacobian_qg'].cpu().numpy(),
             prompt_empirical_mean_p=prompt_empirical_mean_p,
             query_empirical_mean_q=query_empirical_mean_q,
-            prompt_marginal_mean_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_means_q'].cpu().numpy(),
+            prompt_marginal_mean_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_mean_q'].cpu().numpy(),
             prompt_marginal_std_p=old_jac_dict['prompt_marginal_dict']['gene_marginal_std_q'].cpu().numpy(),
-            query_marginal_mean_q=old_jac_dict['query_marginal_dict']['gene_marginal_means_q'].cpu().numpy(),
+            query_marginal_mean_q=old_jac_dict['query_marginal_dict']['gene_marginal_mean_q'].cpu().numpy(),
             query_marginal_std_q=old_jac_dict['query_marginal_dict']['gene_marginal_std_q'].cpu().numpy(),
         )
 
