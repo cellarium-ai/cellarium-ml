@@ -27,29 +27,29 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-def d_uncorrelated_kg() -> torch.Tensor:
+def d_uncorrelated_kg(k, g, gene_set_sparsity_factor=gene_set_sparsity_factor) -> torch.Tensor:
     """Gene programs for NMF which are uncorrelated."""
     torch.manual_seed(0)
-    d_kg = torch.distributions.Dirichlet(gene_set_sparsity_factor * torch.ones(g)).sample([simulated_k])
+    d_kg = torch.distributions.Dirichlet(gene_set_sparsity_factor * torch.ones(g)).sample([k])
     return d_kg
 
 
 @pytest.fixture(scope="module")
 def fixture_d_uncorrelated_kg() -> torch.Tensor:
-    return d_uncorrelated_kg()
+    return d_uncorrelated_kg(simulated_k, g)
 
 
-def d_correlated_kg() -> torch.Tensor:
+def d_correlated_kg(k, g, gene_set_sparsity_factor=gene_set_sparsity_factor) -> torch.Tensor:
     """Gene programs for NMF which are somewhat correlated (some genes always off for example)."""
     torch.manual_seed(0)
     d_g = torch.distributions.Dirichlet(gene_set_sparsity_factor * 100 * torch.ones(g)).sample()
-    d_kg = torch.distributions.Dirichlet(gene_set_sparsity_factor * 100 * d_g).sample([simulated_k])
+    d_kg = torch.distributions.Dirichlet(gene_set_sparsity_factor * 100 * d_g).sample([k])
     return d_kg
 
 
 @pytest.fixture(scope="module")
 def fixture_d_correlated_kg() -> torch.Tensor:
-    return d_correlated_kg()
+    return d_correlated_kg(simulated_k, g)
 
 
 def alpha_uncorrelated_nk() -> torch.Tensor:
@@ -64,27 +64,27 @@ def fixture_alpha_uncorrelated_nk() -> torch.Tensor:
     return alpha_uncorrelated_nk()
 
 
-def alpha_correlated_nk() -> torch.Tensor:
+def alpha_correlated_nk(n, k, n_celltypes) -> torch.Tensor:
     """Cell loadings for NMF which are correlated within celltype blocks."""
     torch.manual_seed(0)
-    alpha_ck = torch.distributions.Dirichlet(torch.ones(simulated_k)).sample([n_celltypes])
+    alpha_ck = torch.distributions.Dirichlet(torch.ones(k)).sample([n_celltypes])
     alpha_nk = (
         torch.distributions.Dirichlet(cell_type_coherence_factor * alpha_ck + 1e-5)
         .sample([n // n_celltypes])
-        .reshape(n, simulated_k)
+        .reshape(n, k)
     )
     return alpha_nk
 
 
 @pytest.fixture(scope="module")
 def fixture_alpha_correlated_nk() -> torch.Tensor:
-    return alpha_correlated_nk()
+    return alpha_correlated_nk(n, simulated_k, n_celltypes)
 
 
 def x_uncorrelated_mean_nmf_ng(alpha_uncorrelated_nk, d_uncorrelated_kg) -> torch.Tensor:
     """Data created by a sparse NMF process with no correlation between the underlying factors."""
     x_ng = alpha_uncorrelated_nk @ d_uncorrelated_kg
-    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g
+    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g * 100
     return x_ng
 
 
@@ -97,7 +97,7 @@ def x_correlated_mean_nmf_ng(alpha_correlated_nk, d_correlated_kg) -> torch.Tens
     """Data created by a sparse NMF process where the underlying factors are
     drawn from the same dirichlet distribution."""
     x_ng = alpha_correlated_nk @ d_correlated_kg
-    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g
+    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g * 100
     return x_ng
 
 
@@ -228,6 +228,50 @@ def pairwise_cosine_similarity_cdist(tensor1_kg: torch.Tensor, tensor2_kg: torch
     # Convert to cosine similarity
     cosine_similarity_matrix_kk = 1 - squared_euclidean_dist_kk / 2
     return cosine_similarity_matrix_kk
+
+
+def pairwise_spearman_correlation(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
+    def rank_transform(tensor: torch.Tensor) -> torch.Tensor:
+        """ Returns the ranks of elements along each row. """
+        ranks = tensor.argsort(dim=1).argsort(dim=1).to(torch.float)
+        return ranks
+    
+    # Rank-transform both tensors
+    ranked_tensor1_kg = rank_transform(tensor1_kg)
+    ranked_tensor2_kg = rank_transform(tensor2_kg)
+    
+    # Normalize ranks (zero mean, unit variance)
+    ranked_tensor1_kg = (
+        (ranked_tensor1_kg - ranked_tensor1_kg.mean(dim=1, keepdim=True)) 
+        / ranked_tensor1_kg.std(dim=1, unbiased=False, keepdim=True)
+    )
+    ranked_tensor2_kg = (
+        (ranked_tensor2_kg - ranked_tensor2_kg.mean(dim=1, keepdim=True)) 
+        / ranked_tensor2_kg.std(dim=1, unbiased=False, keepdim=True)
+    )
+
+    # Compute the Pearson correlation (dot product normalized by the number of elements)
+    spearman_matrix_kk = ranked_tensor1_kg @ ranked_tensor2_kg.T / ranked_tensor1_kg.shape[1]
+    
+    return spearman_matrix_kk
+
+
+def pairwise_pearson_correlation(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
+    
+    # Normalize (zero mean, unit variance)
+    norm_tensor1_kg = (
+        (tensor1_kg - tensor1_kg.mean(dim=1, keepdim=True)) 
+        / tensor1_kg.std(dim=1, unbiased=False, keepdim=True)
+    )
+    norm_tensor2_kg = (
+        (tensor2_kg - tensor2_kg.mean(dim=1, keepdim=True)) 
+        / tensor2_kg.std(dim=1, unbiased=False, keepdim=True)
+    )
+
+    # Compute the Pearson correlation (dot product normalized by the number of elements)
+    pearson_matrix_kk = norm_tensor1_kg @ norm_tensor2_kg.T / norm_tensor1_kg.shape[1]
+    
+    return pearson_matrix_kk
 
 
 def similarity_matrix_assign_rows_to_columns(
