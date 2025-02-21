@@ -85,10 +85,8 @@ def gene_ctx(structured_z_qp, gene_info_tsv_path) -> GeneNetworkAnalysisBase:
         response_qp=response_qp,
         prompt_marginal_mean_p=np.abs(np.random.randn(response_qp.shape[1])),
         prompt_marginal_std_p=np.square(np.random.randn(response_qp.shape[1])),
-        prompt_empirical_mean_p=np.abs(np.random.randn(response_qp.shape[1])),
         query_marginal_mean_q=np.abs(np.random.randn(response_qp.shape[0])),
         query_marginal_std_q=np.square(np.random.randn(response_qp.shape[0])),
-        query_empirical_mean_q=np.abs(np.random.randn(response_qp.shape[0])),
     )
     return gene_ctx
 
@@ -106,10 +104,8 @@ def jac_ctx(structured_z_qp, gene_info_tsv_path) -> JacobianContext:
         jacobian_qp=response_qp,
         prompt_marginal_mean_p=np.ones(response_qp.shape[1]),
         prompt_marginal_std_p=np.square(np.random.randn(response_qp.shape[1])),
-        prompt_empirical_mean_p=np.ones(response_qp.shape[1]),
         query_marginal_mean_q=np.ones(response_qp.shape[0]),
         query_marginal_std_q=np.square(np.random.randn(response_qp.shape[0])),
-        query_empirical_mean_q=np.ones(response_qp.shape[0]),
         min_prompt_gene_tpm=0.0,
         min_query_gene_tpm=0.0,
         feature_max_value=10.0,

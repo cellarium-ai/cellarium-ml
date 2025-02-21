@@ -120,12 +120,10 @@ class GeneNetworkAnalysisData:
     prompt_var_names: list[str]
     prompt_marginal_mean_p: np.ndarray
     prompt_marginal_std_p: np.ndarray
-    prompt_empirical_mean_p: np.ndarray
 
     query_var_names: list[str]
     query_marginal_mean_q: np.ndarray
     query_marginal_std_q: np.ndarray
-    query_empirical_mean_q: np.ndarray
 
     def __eq__(self, value):
         # for testing purposes
@@ -139,10 +137,8 @@ class GeneNetworkAnalysisData:
                     "matrix_qp",
                     "prompt_marginal_mean_p",
                     "prompt_marginal_std_p",
-                    "prompt_empirical_mean_p",
                     "query_marginal_mean_q",
                     "query_marginal_std_q",
-                    "query_empirical_mean_q",
                 ]
             ]
         ) and all(
@@ -178,17 +174,16 @@ def process_response_matrix(
     Process the response matrix for gene network analysis.
 
     Args:
-        response_qp: response matrix
-        prompt_var_names: prompt gene names
-        prompt_marginal_mean_p: prompt marginal mean
-        prompt_marginal_std_p: prompt marginal standard deviation
-        prompt_empirical_mean_p: prompt empirical mean
-        query_var_names: query gene names
-        query_marginal_mean_q: query marginal mean
-        query_marginal_std_q: query marginal standard deviation
-        query_empirical_mean_q: query empirical mean
+        analysis_data: input data
+            matrix_qp: response matrix
+            prompt_var_names: prompt gene names
+            prompt_marginal_mean_p: prompt marginal mean
+            prompt_marginal_std_p: prompt marginal standard deviation
+            query_var_names: query gene names
+            query_marginal_mean_q: query marginal mean
+            query_marginal_std_q: query marginal standard deviation
         total_mrna_umis: total mRNA UMIs
-        response_normalization_strategy: response_qp normalization strategy
+        response_normalization_strategy: matrix_qp normalization strategy
             - "mean": normalize by marginal mean
             - "std": normalize by marginal standard deviation
             - "none": no normalization
@@ -214,12 +209,10 @@ def process_response_matrix(
     prompt_var_names = analysis_data.prompt_var_names
     prompt_marginal_mean_p = analysis_data.prompt_marginal_mean_p
     prompt_marginal_std_p = analysis_data.prompt_marginal_std_p
-    prompt_empirical_mean_p = analysis_data.prompt_empirical_mean_p
 
     query_var_names = analysis_data.query_var_names
     query_marginal_mean_q = analysis_data.query_marginal_mean_q
     query_marginal_std_q = analysis_data.query_marginal_std_q
-    query_empirical_mean_q = analysis_data.query_empirical_mean_q
 
     if response_normalization_strategy == "mean":
         z_p = prompt_marginal_mean_p
@@ -272,12 +265,10 @@ def process_response_matrix(
 
     # apply the mask to everything else
     prompt_var_names_masked = [prompt_var_names[i] for i in range(len(prompt_var_names)) if mask_p[i]]
-    prompt_empirical_mean_p_masked = prompt_empirical_mean_p[mask_p]
     prompt_marginal_mean_p_masked = prompt_marginal_mean_p[mask_p]
     prompt_marginal_std_p_masked = prompt_marginal_std_p[mask_p]
 
     query_var_names_masked = [query_var_names[i] for i in range(len(query_var_names)) if mask_q[i]]
-    query_empirical_mean_q_masked = query_empirical_mean_q[mask_q]
     query_marginal_mean_q_masked = query_marginal_mean_q[mask_q]
     query_marginal_std_q_masked = query_marginal_std_q[mask_q]
 
@@ -319,11 +310,9 @@ def process_response_matrix(
         prompt_var_names=prompt_var_names_masked,
         prompt_marginal_mean_p=prompt_marginal_mean_p_masked,
         prompt_marginal_std_p=prompt_marginal_std_p_masked,
-        prompt_empirical_mean_p=prompt_empirical_mean_p_masked,
         query_var_names=query_var_names_masked,
         query_marginal_mean_q=query_marginal_mean_q_masked,
         query_marginal_std_q=query_marginal_std_q_masked,
-        query_empirical_mean_q=query_empirical_mean_q_masked,
     )
 
 
@@ -794,10 +783,8 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         response_qp: np.ndarray,
         prompt_marginal_mean_p: np.ndarray,
         prompt_marginal_std_p: np.ndarray,
-        prompt_empirical_mean_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
-        query_empirical_mean_q: np.ndarray,
         response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
@@ -821,10 +808,8 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         assert response_qp.shape == (n_query_vars, n_prompt_vars)
         assert prompt_marginal_mean_p.shape == (n_prompt_vars,)
         assert prompt_marginal_std_p.shape == (n_prompt_vars,)
-        assert prompt_empirical_mean_p.shape == (n_prompt_vars,)
         assert query_marginal_mean_q.shape == (n_query_vars,)
         assert query_marginal_std_q.shape == (n_query_vars,)
-        assert query_empirical_mean_q.shape == (n_query_vars,)
 
         self.adata_obs = adata_obs
 
@@ -833,11 +818,9 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             prompt_var_names=prompt_var_names,
             prompt_marginal_mean_p=prompt_marginal_mean_p,
             prompt_marginal_std_p=prompt_marginal_std_p,
-            prompt_empirical_mean_p=prompt_empirical_mean_p,
             query_var_names=query_var_names,
             query_marginal_mean_q=query_marginal_mean_q,
             query_marginal_std_q=query_marginal_std_q,
-            query_empirical_mean_q=query_empirical_mean_q,
         )
 
         self.gene_info_tsv_path = gene_info_tsv_path
@@ -1943,8 +1926,6 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         query_var_names: list[str],
         prompt_var_names: list[str],
         jacobian_qp: np.ndarray,
-        prompt_empirical_mean_p: np.ndarray,
-        query_empirical_mean_q: np.ndarray,
         prompt_marginal_mean_p: np.ndarray,
         prompt_marginal_std_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
@@ -1974,10 +1955,8 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             response_qp=jacobian_qp,
             prompt_marginal_mean_p=prompt_marginal_mean_p,
             prompt_marginal_std_p=prompt_marginal_std_p,
-            prompt_empirical_mean_p=prompt_empirical_mean_p,
             query_marginal_mean_q=query_marginal_mean_q,
             query_marginal_std_q=query_marginal_std_q,
-            query_empirical_mean_q=query_empirical_mean_q,
             response_normalization_strategy=response_normalization_strategy,
             feature_normalization_strategy=feature_normalization_strategy,
             min_prompt_gene_tpm=min_prompt_gene_tpm,
@@ -2033,9 +2012,6 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         adata_meta.X = X_meta_g
         adata_meta.obs["total_mrna_umis"] = [target_total_mrna_umis]
 
-        prompt_empirical_mean_p = adata_meta[0, old_jac_dict["prompt_var_names"]].X.flatten()
-        query_empirical_mean_q = adata_meta[0, old_jac_dict["query_var_names"]].X.flatten()
-
         assert (len(old_jac_dict["query_var_names"]), len(old_jac_dict["prompt_var_names"])) == old_jac_dict[
             "jacobian_qg"
         ].shape, "Jacobian shape mismatch"
@@ -2047,8 +2023,6 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             query_var_names=old_jac_dict["query_var_names"],
             prompt_var_names=old_jac_dict["prompt_var_names"],
             jacobian_qp=old_jac_dict["jacobian_qg"].cpu().numpy(),
-            prompt_empirical_mean_p=prompt_empirical_mean_p,
-            query_empirical_mean_q=query_empirical_mean_q,
             prompt_marginal_mean_p=old_jac_dict["prompt_marginal_dict"]["gene_marginal_means_q"].cpu().numpy(),
             prompt_marginal_std_p=old_jac_dict["prompt_marginal_dict"]["gene_marginal_std_q"].cpu().numpy(),
             query_marginal_mean_q=old_jac_dict["query_marginal_dict"]["gene_marginal_means_q"].cpu().numpy(),
