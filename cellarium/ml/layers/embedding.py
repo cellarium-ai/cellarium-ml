@@ -9,15 +9,15 @@ from torch import nn
 from cellarium.ml.utilities.layers import create_initializer
 
 
-class TokenEmbedding(nn.Module):
+class GeneExpressionEmbedding(nn.Module):
     """
-    Gene and metadata tokens embedding.
+    Gene embedding.
 
     Args:
-        categorical_token_size_dict:
-            Categorical token vocabulary sizes.
-        continuous_token_list:
-            Continuous tokens.
+        categorical_vocab_sizes:
+            Categorical gene token vocabulary sizes.
+        continuous_vocab_sizes:
+            Continuous gene token vocabulary sizes.
         d_model:
             Dimensionality of the embeddings and hidden states.
         embeddings_initializer:
@@ -26,47 +26,78 @@ class TokenEmbedding(nn.Module):
 
     def __init__(
         self,
-        categorical_token_size_dict: dict[str, int],
-        continuous_token_list: list[str],
+        categorical_vocab_sizes: dict[str, int],
+        continuous_vocab_sizes: dict[str, int],
         d_model: int,
         embeddings_initializer: dict[str, Any],
     ) -> None:
         super().__init__()
-        self.embedding_dict = nn.ModuleDict()
-        self.embedding_dict.update(
-            {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_token_size_dict.items()}
+        self.E = nn.ModuleDict()
+        self.E.update({key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()})
+        self.E.update(
+            {key: nn.Linear(vocab_size, d_model, bias=False) for key, vocab_size in continuous_vocab_sizes.items()}
         )
-        self.embedding_dict.update({key: nn.Linear(1, d_model, bias=False) for key in continuous_token_list})
-        self.categorical_token_size_dict = categorical_token_size_dict
-        self.continuous_token_list = continuous_token_list
         self.embeddings_initializer = embeddings_initializer
 
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
-        for module in self.embedding_dict.children():
-            assert isinstance(module, (nn.Embedding, nn.Linear))
+        for module in self.E.children():
             create_initializer(self.embeddings_initializer)(module.weight)
 
-    def forward(
-        self,
-        token_value_nc_dict: dict[str, torch.Tensor],
-        token_mask_nc_dict: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
+    def forward(self, gene_tokens_nc: dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Args:
-            token_value_nc_dict:
-                Dictionary of token value tensors of shape ``(n, c)``.
-            token_mask_nc_dict:
-                Dictionary of token mask tensors of shape ``(n, c)``.
+            gene_tokens_nc:
+                Dictionary of gene token tensors of shape ``(n, c)``.
 
         Returns:
-            Embedding tensor of shape ``(n, c, d)``.
+            The gene embedding tensor of shape ``(n, c, d)``.
         """
-        return sum(
-            self.embedding_dict[key](
-                token_value_nc.unsqueeze(-1) if key in self.continuous_token_list else token_value_nc
-            )
-            * token_mask_nc_dict[key].unsqueeze(-1)
-            for i, (key, token_value_nc) in enumerate(token_value_nc_dict.items())
+        return sum(self.E[key](gene_token_nc) for key, gene_token_nc in gene_tokens_nc.items())
+
+
+class MetadataEmbedding(nn.Module):
+    """
+    Metadata embedding.
+
+    Args:
+        categorical_vocab_sizes:
+            Categorical metadata token vocabulary sizes.
+        d_model:
+            Dimensionality of the embeddings and hidden states.
+        initializer:
+            Initializer for the embeddings.
+    """
+
+    def __init__(
+        self,
+        categorical_vocab_sizes: dict[str, int],
+        d_model: int,
+        embeddings_initializer: dict[str, Any],
+    ) -> None:
+        super().__init__()
+        self.E = nn.ModuleDict(
+            {key: nn.Embedding(vocab_size, d_model) for key, vocab_size in categorical_vocab_sizes.items()}
+        )
+        self.embeddings_initializer = embeddings_initializer
+
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        for module in self.E.children():
+            create_initializer(self.embeddings_initializer)(module.weight)
+
+    def forward(self, metadata_tokens_n: dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Args:
+            metadata_token_n:
+                Dictionary of metadata token tensors of shape ``(n,)``.
+
+        Returns:
+            The metadata embedding tensor of shape ``(n, m, d)``.
+        """
+        return torch.stack(
+            [self.E[key](metadata_token_n) for key, metadata_token_n in metadata_tokens_n.items()],
+            dim=1,
         )
