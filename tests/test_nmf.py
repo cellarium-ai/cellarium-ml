@@ -232,45 +232,40 @@ def pairwise_cosine_similarity_cdist(tensor1_kg: torch.Tensor, tensor2_kg: torch
 
 def pairwise_spearman_correlation(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
     def rank_transform(tensor: torch.Tensor) -> torch.Tensor:
-        """ Returns the ranks of elements along each row. """
+        """Returns the ranks of elements along each row."""
         ranks = tensor.argsort(dim=1).argsort(dim=1).to(torch.float)
         return ranks
-    
+
     # Rank-transform both tensors
     ranked_tensor1_kg = rank_transform(tensor1_kg)
     ranked_tensor2_kg = rank_transform(tensor2_kg)
-    
+
     # Normalize ranks (zero mean, unit variance)
-    ranked_tensor1_kg = (
-        (ranked_tensor1_kg - ranked_tensor1_kg.mean(dim=1, keepdim=True)) 
-        / ranked_tensor1_kg.std(dim=1, unbiased=False, keepdim=True)
+    ranked_tensor1_kg = (ranked_tensor1_kg - ranked_tensor1_kg.mean(dim=1, keepdim=True)) / ranked_tensor1_kg.std(
+        dim=1, unbiased=False, keepdim=True
     )
-    ranked_tensor2_kg = (
-        (ranked_tensor2_kg - ranked_tensor2_kg.mean(dim=1, keepdim=True)) 
-        / ranked_tensor2_kg.std(dim=1, unbiased=False, keepdim=True)
+    ranked_tensor2_kg = (ranked_tensor2_kg - ranked_tensor2_kg.mean(dim=1, keepdim=True)) / ranked_tensor2_kg.std(
+        dim=1, unbiased=False, keepdim=True
     )
 
     # Compute the Pearson correlation (dot product normalized by the number of elements)
     spearman_matrix_kk = ranked_tensor1_kg @ ranked_tensor2_kg.T / ranked_tensor1_kg.shape[1]
-    
+
     return spearman_matrix_kk
 
 
 def pairwise_pearson_correlation(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
-    
     # Normalize (zero mean, unit variance)
-    norm_tensor1_kg = (
-        (tensor1_kg - tensor1_kg.mean(dim=1, keepdim=True)) 
-        / tensor1_kg.std(dim=1, unbiased=False, keepdim=True)
+    norm_tensor1_kg = (tensor1_kg - tensor1_kg.mean(dim=1, keepdim=True)) / tensor1_kg.std(
+        dim=1, unbiased=False, keepdim=True
     )
-    norm_tensor2_kg = (
-        (tensor2_kg - tensor2_kg.mean(dim=1, keepdim=True)) 
-        / tensor2_kg.std(dim=1, unbiased=False, keepdim=True)
+    norm_tensor2_kg = (tensor2_kg - tensor2_kg.mean(dim=1, keepdim=True)) / tensor2_kg.std(
+        dim=1, unbiased=False, keepdim=True
     )
 
     # Compute the Pearson correlation (dot product normalized by the number of elements)
     pearson_matrix_kk = norm_tensor1_kg @ norm_tensor2_kg.T / norm_tensor1_kg.shape[1]
-    
+
     return pearson_matrix_kk
 
 
