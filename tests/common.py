@@ -14,10 +14,18 @@ class BoringDataset(torch.utils.data.Dataset):
     """A simple dataset for testing purposes."""
 
     def __init__(
-        self, data: np.ndarray, var_names: np.ndarray | None = None, total_mrna_umis: np.ndarray | None = None
+        
+        self,
+        data: np.ndarray,
+        var_names: np.ndarray | None = None, 
+        total_mrna_umis: np.ndarray | None = None,
+        y: np.ndarray | None = None,
+        y_categories: np.ndarray | None = None,
     ) -> None:
         self.data = data
         self.var_names = var_names
+        self.y = y
+        self.y_categories = y_categories
         self.total_mrna_umis = total_mrna_umis
 
     def __len__(self) -> int:
@@ -27,6 +35,10 @@ class BoringDataset(torch.utils.data.Dataset):
         data = {"x_ng": self.data[idx, None]}
         if self.var_names is not None:
             data["var_names_g"] = self.var_names
+        if self.y is not None:
+            data["y_n"] = self.y[idx, None]
+        if self.y_categories is not None:
+            data["y_categories"] = self.y_categories
         if self.total_mrna_umis is not None:
             data["total_mrna_umis_n"] = self.total_mrna_umis[idx, None]
         return data

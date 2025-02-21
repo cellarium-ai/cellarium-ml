@@ -12,10 +12,12 @@ import pytest
 import torch
 from anndata import AnnData
 from lightning.pytorch.strategies import DDPStrategy
+from scipy.stats import pearsonr, spearmanr
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.models import OnePassMeanVarStd
+from cellarium.ml.models import OnePassMeanVarStd, WelfordOnlineGeneGeneStats, WelfordOnlineGeneStats
+from cellarium.ml.models.onepass_gene_stats import compute_ranks
 from cellarium.ml.transforms import Log1p, NormalizeTotal
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 from tests.common import BoringDataset
@@ -23,7 +25,7 @@ from tests.common import BoringDataset
 
 @pytest.fixture
 def adata():
-    n_cell, g_gene = 10, 5
+    n_cell, g_gene = 12, 5
     rng = np.random.default_rng(1465)
     X = rng.integers(10, size=(n_cell, g_gene))
     return AnnData(X, dtype=X.dtype)
@@ -32,7 +34,7 @@ def adata():
 @pytest.fixture
 def dadc(adata: AnnData, tmp_path: Path):
     # save anndata files
-    limits = [2, 5, 10]
+    limits = [2, 5, 12]
     for i, limit in enumerate(zip([0] + limits, limits)):
         sliced_adata = adata[slice(*limit)]
         sliced_adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))
@@ -47,6 +49,11 @@ def dadc(adata: AnnData, tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize(
+    "ModelClass",
+    [OnePassMeanVarStd, WelfordOnlineGeneStats, WelfordOnlineGeneGeneStats],
+    ids=["naive", "welford", "welford_cov"],
+)
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_workers", [0, 2])
 @pytest.mark.parametrize("batch_size", [1, 2, 3])
@@ -54,11 +61,14 @@ def dadc(adata: AnnData, tmp_path: Path):
 def test_onepass_mean_var_std_multi_device(
     adata: AnnData,
     dadc: DistributedAnnDataCollection,
+    ModelClass,
     shuffle: bool,
     num_workers: int,
     batch_size: int,
     algorithm: Literal["naive", "shifted_data"],
 ):
+    if ModelClass == WelfordOnlineGeneStats and algorithm == "shifted_data":
+        pytest.skip("WelfordOnlineGeneStats does not support shifted_data algorithm.")
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     # prepare dataloader
     dataset = IterableDistributedAnnDataCollectionDataset(
@@ -78,7 +88,10 @@ def test_onepass_mean_var_std_multi_device(
     transforms = [NormalizeTotal(target_count=10_000), Log1p()]
 
     # fit
-    model = OnePassMeanVarStd(var_names_g=dadc.var_names, algorithm=algorithm)
+    kwargs: dict[str, str | np.ndarray] = {"var_names_g": dadc.var_names}
+    if ModelClass == OnePassMeanVarStd:
+        kwargs |= {"algorithm": algorithm}
+    model = ModelClass(**kwargs)
     module = CellariumModule(transforms=transforms, model=model)
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
     trainer = pl.Trainer(
@@ -95,26 +108,42 @@ def test_onepass_mean_var_std_multi_device(
         return
 
     # actual mean, var, and std
-    actual_mean = model.mean_g
-    actual_var = model.var_g
-    actual_std = model.std_g
+    actual_mean_g = model.mean_g
+    actual_var_g = model.var_g
+    actual_std_g = model.std_g
+    actual_cov_gg = model.covariance_gg
+    actual_corr_gg = model.correlation_gg
 
     # expected mean, var, and std
     batch = {"x_ng": torch.from_numpy(adata.X)}
     for transform in transforms:
         batch = transform(**batch)
-    x = batch["x_ng"]
-    expected_mean = torch.mean(x, dim=0)
-    expected_var = torch.var(x, dim=0, unbiased=False)
-    expected_std = torch.std(x, dim=0, unbiased=False)
+    x_ng = batch["x_ng"]
+    expected_mean_g = torch.mean(x_ng, dim=0)
+    expected_var_g = torch.var(x_ng, dim=0, unbiased=False)
+    expected_std_g = torch.std(x_ng, dim=0, unbiased=False)
 
-    np.testing.assert_allclose(expected_mean, actual_mean, atol=1e-5)
-    np.testing.assert_allclose(expected_var, actual_var, atol=1e-4)
-    np.testing.assert_allclose(expected_std, actual_std, atol=1e-4)
+    np.testing.assert_allclose(expected_mean_g, actual_mean_g, atol=1e-5)
+    np.testing.assert_allclose(expected_var_g, actual_var_g, atol=1e-4)
+    np.testing.assert_allclose(expected_std_g, actual_std_g, atol=1e-4)
+
+    if ModelClass == WelfordOnlineGeneGeneStats:
+        # expected covariance and correlation
+        expected_cov_gg = np.cov(x_ng.T, bias=True)
+        expected_corr_gg = np.corrcoef(x_ng.T)
+        np.testing.assert_allclose(expected_cov_gg, actual_cov_gg, atol=1e-4)
+        np.testing.assert_allclose(expected_corr_gg, actual_corr_gg, atol=1e-4)
 
 
+@pytest.mark.parametrize(
+    "ModelClass",
+    [OnePassMeanVarStd, WelfordOnlineGeneStats, WelfordOnlineGeneGeneStats],
+    ids=["naive", "welford", "welford_cov"],
+)
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
-def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["naive", "shifted_data"]):
+def test_load_from_checkpoint_multi_device(tmp_path: Path, ModelClass, algorithm: Literal["naive", "shifted_data"]):
+    if ModelClass == WelfordOnlineGeneStats and algorithm == "shifted_data":
+        pytest.skip("WelfordOnlineGeneStats does not support shifted_data algorithm.")
     n, g = 3, 2
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -127,7 +156,10 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
         collate_fn=collate_fn,
     )
     # model
-    model = OnePassMeanVarStd(var_names_g=var_names_g, algorithm=algorithm)
+    kwargs: dict[str, str | np.ndarray] = {"var_names_g": var_names_g}
+    if ModelClass == OnePassMeanVarStd:
+        kwargs |= {"algorithm": algorithm}
+    model = ModelClass(**kwargs)
     module = CellariumModule(model=model)
     # trainer
     strategy = DDPStrategy(broadcast_buffers=False) if devices > 1 else "auto"
@@ -149,26 +181,33 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     ckpt_path = tmp_path / f"lightning_logs/version_0/checkpoints/epoch=0-step={math.ceil(n / devices)}.ckpt"
     assert ckpt_path.is_file()
     loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
-    assert isinstance(loaded_model, OnePassMeanVarStd)
+    assert isinstance(loaded_model, ModelClass)
     # assert
     np.testing.assert_allclose(model.mean_g, loaded_model.mean_g, atol=1e-6)
     np.testing.assert_allclose(model.var_g, loaded_model.var_g, atol=1e-6)
     np.testing.assert_allclose(model.std_g, loaded_model.std_g, atol=1e-6)
-    if algorithm == "shifted_data":
-        assert model.x_shift is not None and loaded_model.x_shift is not None
-        np.testing.assert_allclose(model.x_shift, loaded_model.x_shift, atol=1e-6)
-    assert model.algorithm == loaded_model.algorithm
+    if ModelClass == OnePassMeanVarStd and algorithm == "shifted_data":
+        assert model.x_shift_g is not None and loaded_model.x_shift_g is not None
+        np.testing.assert_allclose(model.x_shift_g, loaded_model.x_shift_g, atol=1e-6)
+    if ModelClass == OnePassMeanVarStd:
+        assert model.algorithm == loaded_model.algorithm
 
 
+@pytest.mark.parametrize("ModelClass", [OnePassMeanVarStd, WelfordOnlineGeneStats], ids=["naive", "welford"])
 @pytest.mark.parametrize("mean", [1, 100])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["float32", "float64"])
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
-def test_accuracy(mean: float, dtype: torch.dtype, algorithm: Literal["naive", "shifted_data"]):
+def test_accuracy(ModelClass, mean: float, dtype: torch.dtype, algorithm: Literal["naive", "shifted_data"]):
+    if ModelClass == WelfordOnlineGeneStats and algorithm == "shifted_data":
+        pytest.skip("WelfordOnlineGeneStats does not support shifted_data algorithm.")
     n_trials = 5_000_000
     std = 0.1
     x = mean + std * torch.randn(n_trials, dtype=dtype)
 
-    onepass = OnePassMeanVarStd(var_names_g=np.array(["x"]), algorithm=algorithm)
+    kwargs: dict[str, str | np.ndarray] = {"var_names_g": np.array(["x"])}
+    if ModelClass == OnePassMeanVarStd:
+        kwargs |= {"algorithm": algorithm}
+    onepass = ModelClass(**kwargs)
     for chunk in x.split(1000):
         onepass(x_ng=chunk[:, None], var_names_g=["x"])
 
@@ -178,8 +217,88 @@ def test_accuracy(mean: float, dtype: torch.dtype, algorithm: Literal["naive", "
 
     var_expected = x.var(correction=0).item()
     var_actual = onepass.var_g[0].item()
-    if algorithm == "naive" and dtype == torch.float32 and mean == 100:
+    if ModelClass == OnePassMeanVarStd and algorithm == "naive" and dtype == torch.float32 and mean == 100:
         with pytest.raises(AssertionError):
             assert var_actual == pytest.approx(var_expected, rel=1e-3)
     else:
         assert var_actual == pytest.approx(var_expected, rel=1e-3)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 75, 100], ids=["batch1", "batch2", "batch3", "batch75", "fullbatch"])
+@pytest.mark.parametrize("use_rank", [False], ids=["raw"])  # [False, True], ids=["raw", "ranks"])
+def test_welford_covariance(use_rank: bool, batch_size: int):
+    # Simulated test data: shape [cells, genes]
+    x_ng = torch.randn(100, 5)
+
+    var_names_g = np.array([str(i) for i in range(x_ng.shape[1])])
+    model = WelfordOnlineGeneGeneStats(var_names_g=var_names_g, use_rank=use_rank)
+
+    # Feed rows (cells) into the Welford stats one by one
+    for x_mg in torch.split(x_ng, batch_size, dim=0):
+        model.forward(x_mg, var_names_g=var_names_g)
+
+    # Expected covariance matrix
+    if use_rank:
+        # Compute rank-transformed covariance matrix
+        ranked_x_ng = compute_ranks(x_ng)
+        expected_cov_matrix_gg = np.cov(ranked_x_ng.T, bias=True)
+    else:
+        expected_cov_matrix_gg = np.cov(x_ng.T, bias=True)
+
+    # Assert covariance matrix values are correct
+    computed_cov_matrix_gg = model.covariance_gg
+    assert isinstance(computed_cov_matrix_gg, torch.Tensor)
+    tol = 1e-6
+    assert np.allclose(computed_cov_matrix_gg.numpy(), expected_cov_matrix_gg, atol=tol), (
+        f"Expected covariance matrix:\n{expected_cov_matrix_gg}\nGot:\n{computed_cov_matrix_gg}"
+    )
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3, 75, 100], ids=["batch1", "batch2", "batch3", "batch75", "fullbatch"])
+@pytest.mark.parametrize("use_rank", [False], ids=["raw"])  # [False, True], ids=["raw", "ranks"])
+def test_welford_correlation(use_rank: bool, batch_size: int):
+    # Simulated test data: shape [cells, genes]
+    x_ng = torch.randn(100, 5)
+
+    n_genes = x_ng.shape[1]
+    var_names_g = np.array([str(i) for i in range(x_ng.shape[1])])
+    model = WelfordOnlineGeneGeneStats(var_names_g=var_names_g, use_rank=use_rank)
+
+    # Feed rows (cells) into the Welford stats one by one
+    for x_mg in torch.split(x_ng, batch_size, dim=0):
+        model.forward(x_mg, var_names_g=var_names_g)
+
+    # Expected correlation matrix
+    expected_corr_matrix_gg = np.zeros((n_genes, n_genes))
+    if use_rank:
+        x_ng = compute_ranks(x_ng)
+    for i in range(n_genes):
+        for j in range(n_genes):
+            x = x_ng[:, i]
+            y = x_ng[:, j]
+            expected_corr_matrix_gg[i, j], _ = spearmanr(x, y) if use_rank else pearsonr(x, y)
+
+    # Assert correlation matrix values are correct
+    computed_corr_matrix_gg = model.correlation_gg
+    assert isinstance(computed_corr_matrix_gg, torch.Tensor)
+    tol = 1e-6
+    assert np.allclose(computed_corr_matrix_gg.numpy(), expected_corr_matrix_gg, atol=tol), (
+        f"Expected correlation matrix:\n{expected_corr_matrix_gg}\nGot:\n{computed_corr_matrix_gg}"
+    )
+
+
+def test_compute_ranks():
+    x_ng = torch.tensor([[3.0, 1.0, 2.0], [1.0, 2.0, 3.0], [2.0, 3.0, 1.0]])
+    expected_ranks = torch.tensor([[3.0, 1.0, 2.0], [1.0, 2.0, 3.0], [2.0, 3.0, 1.0]])
+    computed_ranks = compute_ranks(x_ng)
+    assert torch.equal(computed_ranks, expected_ranks), f"Expected {expected_ranks}, but got {computed_ranks}"
+
+    x = torch.tensor([5, 4, 3, 2, 1])
+    ranks = compute_ranks(x)
+    expected_ranks = torch.tensor([4, 3, 2, 1, 0]) + 1
+    assert torch.all(ranks == expected_ranks)
+
+    x = torch.tensor([1, 2, 3, 3, 5])
+    ranks = compute_ranks(x)
+    expected_ranks = torch.tensor([0, 1, 2, 3, 4]) + 1
+    assert torch.all(ranks == expected_ranks)
