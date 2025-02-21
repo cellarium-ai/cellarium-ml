@@ -96,7 +96,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         other_X_size = x_ng.size(0)
         total_X_size = self_X_size + other_X_size
         assert k <= min(other_X_size, g), (
-            f"Rank of svd_lowrank (n_components): {k}" f" must be less than min(n_obs, n_vars): {min(other_X_size, g)}"
+            f"Rank of svd_lowrank (n_components): {k} must be less than min(n_obs, n_vars): {min(other_X_size, g)}"
         )
 
         # compute SVD of new data
@@ -132,10 +132,10 @@ class IncrementalPCA(CellariumModel, PredictMixin):
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
             assert isinstance(trainer.strategy, DDPStrategy), (
-                "Distributed and Incremental PCA requires that " "the trainer uses the DDP strategy."
+                "Distributed and Incremental PCA requires that the trainer uses the DDP strategy."
             )
             assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is False, (
-                "Distributed and Incremental PCA requires that " "broadcast_buffers is set to False."
+                "Distributed and Incremental PCA requires that broadcast_buffers is set to False."
             )
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:

@@ -88,7 +88,6 @@ class PredictTokenizer(torch.nn.Module):
         gene_tokens_nc: dict[str, torch.Tensor],
         gene_prompt_mask_nc: torch.Tensor,
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
-
         # step 1. gene tokens
         gene_value_nc = gene_tokens_nc.pop("gene_value").float()
         total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis").float()
@@ -105,7 +104,7 @@ class PredictTokenizer(torch.nn.Module):
         gene_query_mask_nc = ~gene_prompt_mask_nc
         gene_value_nc3 = torch.stack(
             [
-                torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(), # masked values are set to 0
+                torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(),  # masked values are set to 0
                 gene_query_mask_nc.float(),  # 1 if the gene is queried, 0 if the gene is prompted
                 torch.log1p(total_mrna_umis_nc),
             ],
@@ -123,8 +122,9 @@ class PredictTokenizer(torch.nn.Module):
                 dtype=torch.int,
             )
         # step 2.1 create metadata query and prompt masks
-        metadata_prompt_mask_nm = torch.stack([
-            metadata_prompt_masks_n[key] for key in self.ontology_infos.keys()], dim=1)
+        metadata_prompt_mask_nm = torch.stack(
+            [metadata_prompt_masks_n[key] for key in self.ontology_infos.keys()], dim=1
+        )
         metadata_query_mask_nm = ~metadata_prompt_mask_nm
 
         # clamp unmeasured tokens to 0
@@ -135,8 +135,7 @@ class PredictTokenizer(torch.nn.Module):
         for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
             # for each metadata type, mask token is the last token in the vocabulary
             mask_token_index = self.metadata_vocab_sizes[key]
-            metadata_tokens_n[key] = torch.where(
-                metadata_query_mask_nm[:, i], mask_token_index, metadata_token_n).int()
+            metadata_tokens_n[key] = torch.where(metadata_query_mask_nm[:, i], mask_token_index, metadata_token_n).int()
 
         # step 3. generate the full prompt mask
         prompt_mask_nc = torch.cat([gene_prompt_mask_nc, metadata_prompt_mask_nm], dim=1)
@@ -568,7 +567,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         self.attention_backend = attention_backend
         for block in self.transformer.blocks:
             block.attention.attention_backend = attention_backend
-    
+
     def predict(
         self,
         gene_tokens_nc: dict[str, torch.Tensor],
@@ -593,7 +592,15 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
             n, c = prompt_mask_nc.shape
             attention_mask_ncc = create_block_mask(
-                prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c, BLOCK_SIZE=c, device=prompt_mask_nc.device, _compile=False)
+                prompt_diagonal_mask_mod,
+                B=n,
+                H=None,
+                Q_LEN=c,
+                KV_LEN=c,
+                BLOCK_SIZE=c,
+                device=prompt_mask_nc.device,
+                _compile=False,
+            )
         else:
             attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
 
