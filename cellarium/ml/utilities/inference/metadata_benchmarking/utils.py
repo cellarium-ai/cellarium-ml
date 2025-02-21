@@ -39,6 +39,60 @@ def build_nx_graph_from_owl_ontology(
     return owl_graph
 
 
+PARTOF_RELATIONSHIP = "BFO_0000050"  # part_of
+
+def build_nx_graph_from_owl_ontology_legacy(
+    owl_ontology: owlready2.Ontology,
+    owl_classes: t.List[owlready2.ThingClass],
+    prefix: str,
+    extra_nodes: t.Optional[t.List[str]] = None,
+) -> nx.DiGraph:
+
+    owl_graph = nx.DiGraph(name="OWL graph")
+
+    if extra_nodes is not None:
+        for node in extra_nodes:
+            owl_graph.add_node(node)
+
+    names_set = set(_class.name.replace("_", ":") for _class in owl_classes)
+    classes_set = set(owl_classes)
+
+    for _class in owl_classes:
+        owl_graph.add_node(_class.name.replace("_", ":"))
+
+    for self_class in owl_classes:
+        # parents
+        for parent_class in owl_ontology.get_parents_of(self_class):
+            if parent_class not in classes_set:
+                continue
+            owl_graph.add_edge(parent_class.name.replace("_", ":"), self_class.name.replace("_", ":"))
+        # children
+        for child_class in owl_ontology.get_children_of(self_class):
+            if child_class not in classes_set:
+                continue
+            owl_graph.add_edge(self_class.name.replace("_", ":"), child_class.name.replace("_", ":"))
+        # part of
+        for prop in self_class.get_class_properties():
+            if PARTOF_RELATIONSHIP in prop.name:
+                for related_term in prop[self_class]:
+                    if related_term.name.startswith(prefix):
+                        if related_term.name.replace("_", ":") not in names_set:
+                            continue
+                        owl_graph.add_edge(related_term.name.replace("_", ":"), self_class.name.replace("_", ":"))
+        # deprecated terms (WHY???!!)
+        if "deprecated" in [prop.name for prop in self_class.get_class_properties()]:
+            for prop in self_class.get_class_properties():
+                if "consider" in prop.name:
+                    for substitute in prop[self_class]:
+                        substitute = str(substitute)
+                        if substitute.startswith(prefix):
+                            if substitute.replace("_", ":") not in names_set:
+                                continue
+                            owl_graph.add_edge(substitute.replace("_", ":"), self_class.name.replace("_", ":"))
+
+    return owl_graph
+
+
 def get_n_level_ancestors(graph: nx.DiGraph, node: str, n: int) -> t.Set[str]:
     """
     Return the set of all ancestors of a given node in a directed graph up to `n` levels deep.
