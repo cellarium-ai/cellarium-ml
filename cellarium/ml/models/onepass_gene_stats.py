@@ -18,6 +18,11 @@ from cellarium.ml.utilities.testing import (
 )
 
 
+def _validate_inputs(x_ng: torch.Tensor, var_names_g: np.ndarray, reference_var_names_g: np.ndarray) -> None:
+    assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+    assert_arrays_equal("var_names_g", var_names_g, "var_names_g", reference_var_names_g)
+
+
 class OnePassCellariumModel(CellariumModel, metaclass=ABCMeta):
     """
     Base class for models which take one pass (epoch) through the data to compute statistics.
@@ -50,8 +55,6 @@ class OnePassCellariumModel(CellariumModel, metaclass=ABCMeta):
         Returns:
             An empty dictionary.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
         return {}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
@@ -222,7 +225,7 @@ class NaiveOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
             x_ng: (num_cells, num_genes) matrix of raw values
             var_names_g: The list of the variable names in the input data
         """
-        super().forward(x_ng, var_names_g)
+        _validate_inputs(x_ng, var_names_g, self.var_names_g)
 
         if not self.shifted:
             self.x_sums_g = self.x_sums_g + x_ng.sum(dim=0)
@@ -362,6 +365,7 @@ class WelfordOnlineGeneStats(OnePassCellariumModel, OnlineGeneStats):
 
     @torch.no_grad()
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+        _validate_inputs(x_ng, var_names_g, self.var_names_g)
         if self.use_rank:
             x_ng = compute_ranks(x_ng)
 
@@ -487,6 +491,7 @@ class WelfordOnlineGeneGeneStats(WelfordOnlineGeneStats):
         Args:
             x_ng: (num_cells, num_genes) matrix of raw values
         """
+        _validate_inputs(x_ng, var_names_g, self.var_names_g)
         if self.use_rank:
             x_ng = compute_ranks(x_ng)
 
