@@ -84,7 +84,7 @@ def fixture_alpha_correlated_nk() -> torch.Tensor:
 def x_uncorrelated_mean_nmf_ng(alpha_uncorrelated_nk, d_uncorrelated_kg) -> torch.Tensor:
     """Data created by a sparse NMF process with no correlation between the underlying factors."""
     x_ng = alpha_uncorrelated_nk @ d_uncorrelated_kg
-    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g * 100
+    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g
     return x_ng
 
 
@@ -97,7 +97,7 @@ def x_correlated_mean_nmf_ng(alpha_correlated_nk, d_correlated_kg) -> torch.Tens
     """Data created by a sparse NMF process where the underlying factors are
     drawn from the same dirichlet distribution."""
     x_ng = alpha_correlated_nk @ d_correlated_kg
-    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g * 100
+    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g
     return x_ng
 
 
