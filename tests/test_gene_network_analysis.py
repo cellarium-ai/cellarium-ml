@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from cellarium.ml.utilities.inference.gene_network_analysis import (
+    EmpiricalCorrelationContext,
     GeneNetworkAnalysisBase,
     GeneralContext,
     JacobianContext,
@@ -80,6 +81,7 @@ def gene_ctx(structured_z_qp, gene_info_tsv_path) -> GeneNetworkAnalysisBase:
     gene_ctx = GeneNetworkAnalysisBase(
         adata_obs=adata_obs,
         gene_info_tsv_path=gene_info_tsv_path,
+        total_mrna_umis=None,
         query_var_names=[f"qgene_{i}" for i in range(response_qp.shape[0])],
         prompt_var_names=[f"gene_{i}" for i in range(response_qp.shape[1])],
         response_qp=response_qp,
@@ -296,6 +298,27 @@ def test_gene_network_analysis_base(gene_ctx):
 
     assert max(gene_ctx.query_gene_id_to_idx_map.values()) < gene_ctx.z_qp.shape[0]
     assert max(gene_ctx.query_gene_id_to_idx_map.values()) < len(gene_ctx.processed.query_var_names)
+
+
+def test_empirical_correlation_context(gene_info_tsv_path):
+    ctx = EmpiricalCorrelationContext(
+        gene_info_tsv_path=gene_info_tsv_path,
+        total_mrna_umis=None,
+        var_names_g=[f"gene_{i}" for i in range(20)],
+        correlation_gg=np.random.rand(20, 20),
+        marginal_mean_g=np.abs(np.random.randn(20)),
+        marginal_std_g=np.square(np.random.randn(20)),
+    )
+    print(ctx.z_qp)
+    ctx.compute_adjacency_matrix(
+        adjacency_strategy="positive_correlation",
+        n_neighbors=None,
+        self_loop=False,
+        beta=1.0,
+    )
+    ctx.igraph()
+    ctx.compute_leiden_communites(resolution=0.1)
+    ctx.compute_spectral_dimension()
 
 
 # def test_validation_mixin():

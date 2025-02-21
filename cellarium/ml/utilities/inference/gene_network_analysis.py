@@ -154,7 +154,7 @@ class GeneNetworkAnalysisData:
 
 def process_response_matrix(
     analysis_data: GeneNetworkAnalysisData,
-    total_mrna_umis: float,
+    total_mrna_umis: float | None,
     response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
     feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
     min_prompt_gene_tpm: float = 0.0,
@@ -234,8 +234,13 @@ def process_response_matrix(
         logger.info(f"Maximum value of z_qp: {np.max(z_qp):.3f}")
         logger.info(f"Minimum value of z_qp: {np.min(z_qp):.3f}")
 
-    mask_q = (1e6 * query_marginal_mean_q / total_mrna_umis) >= min_query_gene_tpm
-    mask_p = (1e6 * prompt_marginal_mean_p / total_mrna_umis) >= min_prompt_gene_tpm
+    if total_mrna_umis is not None:
+        mask_q = (1e6 * query_marginal_mean_q / total_mrna_umis) >= min_query_gene_tpm
+        mask_p = (1e6 * prompt_marginal_mean_p / total_mrna_umis) >= min_prompt_gene_tpm
+    else:
+        logger.warning("Total mRNA UMIs not provided, skipping TPM filtering")
+        mask_q = np.ones_like(query_marginal_mean_q, dtype=bool)
+        mask_p = np.ones_like(prompt_marginal_mean_p, dtype=bool)
 
     logger.info(f"Number of query genes after TPM filtering: {np.sum(mask_q)} / {len(mask_q)}")
     logger.info(f"Number of prompt genes after TPM filtering: {np.sum(mask_p)} / {len(mask_p)}")
@@ -776,7 +781,8 @@ class NetworkAnalysisBase:
 class GeneNetworkAnalysisBase(NetworkAnalysisBase):
     def __init__(
         self,
-        adata_obs: pd.DataFrame,
+        adata_obs: pd.DataFrame | None,
+        total_mrna_umis: float | None,
         gene_info_tsv_path: str,
         query_var_names: list[str],
         prompt_var_names: list[str],
@@ -813,6 +819,14 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 
         self.adata_obs = adata_obs
 
+        # handle total mrna umis
+        self.total_mrna_umis_: float | None = None
+        if total_mrna_umis is not None:
+            self.total_mrna_umis_ = total_mrna_umis
+        elif adata_obs is not None:
+            if "total_mrna_umis" in adata_obs.columns:
+                self.total_mrna_umis_ = adata_obs["total_mrna_umis"].values[0]
+
         self.unprocessed = GeneNetworkAnalysisData(
             matrix_qp=response_qp,
             prompt_var_names=prompt_var_names,
@@ -848,28 +862,38 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         super().__init__(z_qp=self.processed.matrix_qp, node_names_p=self.processed.prompt_var_names)
 
     @property
-    def cell_type(self) -> str:
+    def cell_type(self) -> str | None:
+        if self.adata_obs is None:
+            return None
         return self.adata_obs["cell_type"].values[0]
 
     @property
-    def tissue(self) -> str:
+    def tissue(self) -> str | None:
+        if self.adata_obs is None:
+            return None
         return self.adata_obs["tissue"].values[0]
 
     @property
-    def disease(self) -> str:
+    def disease(self) -> str | None:
+        if self.adata_obs is None:
+            return None
         return self.adata_obs["disease"].values[0]
 
     @property
-    def development_stage(self) -> str:
+    def development_stage(self) -> str | None:
+        if self.adata_obs is None:
+            return None
         return self.adata_obs["development_stage"].values[0]
 
     @property
-    def sex(self) -> str:
+    def sex(self) -> str | None:
+        if self.adata_obs is None:
+            return None
         return self.adata_obs["sex"].values[0]
 
     @property
-    def total_mrna_umis(self) -> float:
-        return self.adata_obs["total_mrna_umis"].values[0]
+    def total_mrna_umis(self) -> float | None:
+        return self.total_mrna_umis_
 
     @property
     def query_gene_symbols(self) -> list[str]:
@@ -1056,7 +1080,8 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         )
         ax.set_xlabel(r"ln $\lambda$")
         ax.set_ylabel(r"ln N($\lambda$)")
-        ax.set_title(self.cell_type)
+        if self.cell_type is not None:
+            ax.set_title(self.cell_type)
         ax.legend()
 
 
@@ -1950,6 +1975,7 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         super().__init__(
             adata_obs=adata_obs,
             gene_info_tsv_path=gene_info_tsv_path,
+            total_mrna_umis=None,
             query_var_names=query_var_names,
             prompt_var_names=prompt_var_names,
             response_qp=jacobian_qp,
@@ -2048,5 +2074,113 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             f"JacobianContext({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
             f"n_umi={self.total_mrna_umis:.2f})"
         )
+
+    __repr__ = __str__
+
+
+class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
+    def __init__(
+        self,
+        gene_info_tsv_path: str,
+        total_mrna_umis: float | None,
+        var_names_g: list[str],
+        correlation_gg: np.ndarray,
+        marginal_mean_g: np.ndarray,
+        marginal_std_g: np.ndarray,
+        metadata: dict[str, str] = {},
+        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+        min_prompt_gene_tpm: float = 0.0,
+        min_query_gene_tpm: float = 0.0,
+        query_response_amp_min_pct: float | None = None,
+        feature_max_value: float | None = None,
+        norm_pseudo_count: float = 1e-3,
+        query_hv_top_k: int | None = None,
+        query_hv_n_bins: int | None = 50,
+        query_hv_min_x: float | None = 1e-2,
+        query_hv_max_x: float | None = np.inf,
+        z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
+        eps: float = 1e-8,
+        verbose: bool = True,
+    ):
+        self.metadata = metadata
+
+        super().__init__(
+            adata_obs=None,
+            gene_info_tsv_path=gene_info_tsv_path,
+            total_mrna_umis=total_mrna_umis,
+            query_var_names=var_names_g,
+            prompt_var_names=var_names_g,
+            response_qp=correlation_gg,
+            prompt_marginal_mean_p=marginal_mean_g,
+            prompt_marginal_std_p=marginal_std_g,
+            query_marginal_mean_q=marginal_mean_g,
+            query_marginal_std_q=marginal_std_g,
+            response_normalization_strategy=response_normalization_strategy,
+            feature_normalization_strategy=feature_normalization_strategy,
+            min_prompt_gene_tpm=min_prompt_gene_tpm,
+            min_query_gene_tpm=min_query_gene_tpm,
+            query_response_amp_min_pct=query_response_amp_min_pct,
+            feature_max_value=feature_max_value,
+            norm_pseudo_count=norm_pseudo_count,
+            query_hv_top_k=query_hv_top_k,
+            query_hv_n_bins=query_hv_n_bins,
+            query_hv_min_x=query_hv_min_x,
+            query_hv_max_x=query_hv_max_x,
+            z_trans_func=z_trans_func,
+            eps=eps,
+            verbose=verbose,
+        )
+
+    @staticmethod
+    def from_model_ckpt(
+        ckpt_path: str,
+        gene_info_tsv_path: str,
+        total_mrna_umis: float | None,
+        device: torch.device | str,
+        medata: dict[str, str] = {},
+        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+        min_prompt_gene_tpm: float = 0.0,
+        min_query_gene_tpm: float = 0.0,
+        query_response_amp_min_pct: float | None = None,
+        feature_max_value: float | None = None,
+        norm_pseudo_count: float = 1e-3,
+        query_hv_top_k: int | None = None,
+        query_hv_n_bins: int | None = 50,
+        query_hv_min_x: float | None = 1e-2,
+        query_hv_max_x: float | None = np.inf,
+        z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
+        eps: float = 1e-8,
+        verbose: bool = True,
+    ) -> "EmpiricalCorrelationContext":
+        model = torch.load(ckpt_path, weights_only=False, map_location=device)
+
+        return EmpiricalCorrelationContext(
+            gene_info_tsv_path=gene_info_tsv_path,
+            total_mrna_umis=total_mrna_umis,
+            var_names_g=model.var_names_g,
+            correlation_gg=model.correlation_gg.cpu().numpy(),
+            marginal_mean_g=model.mean_g.cpu().numpy(),
+            marginal_std_g=model.std_g.cpu().numpy(),
+            metadata=medata,
+            response_normalization_strategy=response_normalization_strategy,
+            feature_normalization_strategy=feature_normalization_strategy,
+            min_prompt_gene_tpm=min_prompt_gene_tpm,
+            min_query_gene_tpm=min_query_gene_tpm,
+            query_response_amp_min_pct=query_response_amp_min_pct,
+            feature_max_value=feature_max_value,
+            norm_pseudo_count=norm_pseudo_count,
+            query_hv_top_k=query_hv_top_k,
+            query_hv_n_bins=query_hv_n_bins,
+            query_hv_min_x=query_hv_min_x,
+            query_hv_max_x=query_hv_max_x,
+            z_trans_func=z_trans_func,
+            eps=eps,
+            verbose=verbose,
+        )
+
+    def __str__(self) -> str:
+        return f"EmpiricalCorrelationContext(\n{self.metadata}\n)"
 
     __repr__ = __str__
