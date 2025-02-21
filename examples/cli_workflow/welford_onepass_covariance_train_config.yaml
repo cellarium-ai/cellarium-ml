@@ -30,7 +30,7 @@ trainer:
       param_to_hook_all_reduce: null
       mixed_precision: null
       device_mesh: null
-  devices: auto
+  devices: 1
   num_nodes: 1
   precision: null
   logger: null
@@ -66,19 +66,17 @@ trainer:
   plugins: null
   sync_batchnorm: false
   reload_dataloaders_every_n_epochs: 0
-  default_root_dir: null
+  default_root_dir: /gcs/cellarium-scratch/sfleming/empirical_gene_correlation/all_human_primary_data/
 model:
   cpu_transforms:
     - class_path: cellarium.ml.transforms.Filter
       init_args:
         filter_list:
-          - ENSG00000155657  # TTN
-          - ENSG00000198626  # RYR2
-          - ENSG00000262418  # PTPRC
-          - ENSG00000153563  # CD8A
-          - ENSG00000172116  # CD8B
-          - ENSG00000179915  # NRXN1
-          - ENSG00000021645  # NRXN3
+          !FileLoader
+          file_path: gs://cellarium-scratch/sfleming/empirical_gene_correlation/cellariumgpt_validation_gene_ids.csv
+          loader_fn: pandas.read_csv
+          attr: "feature_id"
+          convert_fn: pandas.Series.to_list
   transforms:
     - class_path: cellarium.ml.transforms.NormalizeTotal
       init_args:
@@ -97,11 +95,10 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      # filenames: gs://cellarium-human-primary-data/curriculum/human_all_primary_20241108/extract_files/extract_{0..4440}.h5ad
-      filenames: gs://cellarium-human-primary-data/curriculum/human_all_primary_20241108/extract_files/extract_{0..10}.h5ad
+      filenames: gs://cellarium-human-primary-data/curriculum/human_all_primary_20241108/extract_files/extract_{0..4440}.h5ad
       limits: null
       shard_size: 10_000
-      # last_shard_size: 6428
+      last_shard_size: 6428
       max_cache_size: 2
       cache_size_strictly_enforced: true
       label: null
@@ -129,7 +126,7 @@ data:
   val_size: null
   worker_seed: null
   test_mode: false
-  num_workers: 0
-  prefetch_factor: null
-  persistent_workers: false
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: true
 ckpt_path: null
