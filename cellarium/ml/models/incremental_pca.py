@@ -94,6 +94,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         self_X_size = self.x_size
         other_X_size = x_ng.size(0)
         total_X_size = self_X_size + other_X_size
+        g = self.x_mean_g.size(0)
         assert k <= min(other_X_size, g), (
             f"Rank of svd_lowrank (n_components): {k} must be less than min(n_obs, n_vars): {min(other_X_size, g)}"
         )

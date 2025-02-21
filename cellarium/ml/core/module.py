@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import warnings
-from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
@@ -323,7 +322,8 @@ class CellariumModule(pl.LightningModule):
                 group_optim_kwargs["lr"] *= self.model.lr_adjustment_groups[lr_group_name].scale
             param_groups.append({"params": params, **group_optim_kwargs})
 
-        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(param_groups)}
+        optimizer = optim_fn(param_groups)
+        # optim_config: OptimizerLRSchedulerConfig = {"optimizer": optimizer}
         # optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
         if scheduler_fn is not None:
             scheduler = scheduler_fn(optimizer, **scheduler_kwargs)
