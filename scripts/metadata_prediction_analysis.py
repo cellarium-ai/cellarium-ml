@@ -118,9 +118,14 @@ def main():
         "--n_cells", type=int, default=1000,
         help="Number of cells to use (default: 1000)"
     )
+    # Updated default for n_genes to match the new notebook and added new argument for gene selection method
     parser.add_argument(
-        "--n_genes", type=int, default=10000,
-        help="Number of highly expressed genes to use (default: 10000). Set to None to use all."
+        "--n_genes", type=int, default=4091,
+        help="Number of genes to use. For 'highly_expressed', selects top genes; for 'random', selects random genes. Set to None to use all."
+    )
+    parser.add_argument(
+        "--gene_selection_method", type=str, default="random",
+        help="Gene selection method: 'random' or 'highly_expressed' (default: random)"
     )
     parser.add_argument(
         "--chunk_size", type=int, default=16,
@@ -185,14 +190,27 @@ def main():
     )
     logger.info(f"Loading the validation AnnData object from {adata_path} ...")
     adata = sc.read_h5ad(adata_path)
+    
+    # Updated gene selection logic to support both "highly_expressed" and "random"
     if args.n_genes is not None:
-        logger.info(f"Using {args.n_genes} highly expressed genes.")
-        X_g = np.asarray(adata.X.sum(0)).flatten()
-        highly_expressed_gene_indices = np.argsort(X_g)[-args.n_genes:]
-        highly_expressed_gene_ids = adata.var_names[highly_expressed_gene_indices]
-        adata = adata[:, highly_expressed_gene_ids]
+        if args.gene_selection_method == "highly_expressed":
+            logger.info(f"Using {args.n_genes} highly expressed genes.")
+            X_g = np.asarray(adata.X.sum(0)).flatten()
+            highly_expressed_gene_indices = np.argsort(X_g)[-args.n_genes:]
+            highly_expressed_gene_ids = adata.var_names[highly_expressed_gene_indices]
+            adata = adata[:, highly_expressed_gene_ids]
+            n_rand_prompt_vars = None
+            torch_rng = None
+        elif args.gene_selection_method == "random":
+            logger.info(f"Using {args.n_genes} random genes (seed = {args.rng_seed}).")
+            torch_rng = torch.Generator().manual_seed(args.rng_seed)
+            n_rand_prompt_vars = args.n_genes
+        else:
+            raise ValueError(f"Unknown gene selection method: {args.gene_selection_method}")
     else:
         logger.info("Using all genes.")
+        n_rand_prompt_vars = None
+        torch_rng = None
 
     if args.n_cells is None:
         logger.info("Using all cells.")
@@ -202,13 +220,20 @@ def main():
         rng = np.random.RandomState(args.rng_seed)
         adata = adata[rng.choice(len(adata), n_cells, replace=False)]
     logger.info(f"Predicting metadata for {len(adata)} cells ...")
-    preds = ctx.predict_metadata_chunked(adata, chunk_size=args.chunk_size)
+    preds = ctx.predict_metadata_chunked(
+        adata, 
+        chunk_size=args.chunk_size,
+        n_rand_prompt_vars=n_rand_prompt_vars,
+        rng=torch_rng
+    )
 
     logger.info("Inserting predictions into an AnnData object ...")
     meta_adata = sc.AnnData(obs=adata.obs.copy())
 
+    # Updated to include logits and compute class probabilities via np.exp()
     for meta_key, meta_preds in preds.items():
-        meta_adata.obsm[meta_key + "_class_probs"] = meta_preds
+        meta_adata.obsm[meta_key + "_class_logits"] = meta_preds
+        meta_adata.obsm[meta_key + "_class_probs"] = np.exp(meta_preds)
         meta_adata.uns[meta_key + "_ontology_term_ids"] = ctx.metadata_ontology_infos[meta_key]["names"]
         meta_adata.uns[meta_key + "_labels"] = ctx.metadata_ontology_infos[meta_key]["labels"]
 

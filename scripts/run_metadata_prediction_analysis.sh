@@ -19,7 +19,8 @@ ONTOLOGY_RESOURCE_PATH="/home/mehrtash/data/data/cellariumgpt_artifacts/ontology
 OUTPUT_PATH="/home/mehrtash/data/data/cellariumgpt_artifacts/metadata_predictions/100M_long_run_last"
 RNG_SEED=42
 N_CELLS=1000
-N_GENES=10000
+N_GENES=4091
+GENE_SELECTION_METHOD="random"
 CHUNK_SIZE=16
 
 # ----------------------------
@@ -51,5 +52,6 @@ for i in $(seq ${START_INDEX} ${END_INDEX}); do
         --rng_seed ${RNG_SEED} \
         --n_cells ${N_CELLS} \
         --n_genes ${N_GENES} \
+        --gene_selection_method ${GENE_SELECTION_METHOD} \
         --chunk_size ${CHUNK_SIZE}
 done
