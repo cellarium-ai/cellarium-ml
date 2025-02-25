@@ -205,7 +205,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 batch_size=self.batch_size,
                 iteration_strategy=self.iteration_strategy,
                 shuffle=self.shuffle,
-                seed=self.shuffle_seed,
+                shuffle_seed=self.shuffle_seed,
                 drop_last_indices=self.drop_last_indices,
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
