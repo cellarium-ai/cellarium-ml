@@ -78,32 +78,29 @@ def test_cpu_transforms(
     print("✓")
 
     # lightning
-    print("Checking pipeline configuration when CellariumModule is used with a lightning Trainer... ")
+    print("Checking pipeline configuration when CellariumModule is used after a lightning Trainer... ")
     module = _new_module()
     trainer = pl.Trainer(accelerator=accelerator, devices=1, max_steps=1, default_root_dir=tmp_path)
     trainer.fit(module, datamodule)
     _check_pipeline(module)
     _check_transform_lists_match(
-        transforms,  # no CPU transforms in lightning
+        (cpu_transforms if cpu_transforms else []) + (transforms if transforms else []),
         module.module_pipeline[:-1],
         "Transforms in CellariumModule.module_pipeline are incorrect when used by lightning",
     )
     print("    ... ✓")
 
-    # ensure the data from the dataloader is filtered if appropriate
-    print("Checking that the data from the dataloader is filtered if appropriate... ", end="")
+    # ensure the data from the dataloader is not filtered
+    print("Checking that the data from the dataloader is not filtered outside of the trainer... ", end="")
     for batch in datamodule.train_dataloader():
         x_ng = batch["x_ng"]
-        if cpu_transforms is not None:
-            assert x_ng.shape[1] == 2
-        else:
-            assert x_ng.shape[1] == 36601  # full number of genes in test dataset
+        assert x_ng.shape[1] == 36601  # full number of genes in test dataset
         break
     print("✓")
 
     # ensure loading from a checkpoint manually results in the correct location of transforms
     print(
-        "Checking whether we can load a module from a checkpoint " "using CellariumModule.load_from_checkpoint()... ",
+        "Checking whether we can load a module from a checkpoint using CellariumModule.load_from_checkpoint()... ",
         end="",
     )
     ckpt_path = str(tmp_path / "lightning_logs/version_0/checkpoints/epoch=0-step=1.ckpt")
@@ -133,9 +130,9 @@ def test_cpu_transforms(
 
     print("\nFull loaded module ---------")
     print(loaded_module)
-    assert (
-        loaded_module._cpu_transforms_in_module_pipeline
-    ), "Upon manual loading, flag for CPU transforms should be True"
+    assert loaded_module._cpu_transforms_in_module_pipeline, (
+        "Upon manual loading, flag for CPU transforms should be True"
+    )
     print("    ... ✓")
 
     # ensure loading from a checkpoint at lightning `fit` time results in the correct location of transforms
@@ -169,9 +166,9 @@ def test_cpu_transforms(
 
     print("\nFull loaded module ---------")
     print(trainer.model)
-    assert (
-        not trainer.model._cpu_transforms_in_module_pipeline
-    ), "Upon Trainer.fit() checkpoint restart, flag for CPU transforms should be False"
+    assert trainer.model._cpu_transforms_in_module_pipeline, (
+        "After Trainer.fit() checkpoint restart, flag for CPU transforms should be True"
+    )
     print("    ... ✓")
 
 

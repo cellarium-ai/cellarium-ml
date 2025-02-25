@@ -22,9 +22,10 @@ from jsonargparse._loaders_dumpers import DefaultLoader
 from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
+from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
-from cellarium.ml.utilities.data import collate_fn
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 cached_loaders = {}
 
@@ -199,6 +200,7 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     """
     adata = data.dadc[0]
     field = data.batch_keys["y_categories"]
+    assert isinstance(field, AnnDataField)
     return field(adata)
 
 
@@ -222,7 +224,7 @@ def compute_var_names_g(
         The variable names.
     """
     adata = data.dadc[0]
-    batch = {key: field(adata) for key, field in data.batch_keys.items()}
+    batch = tree_map(lambda field: field(adata), data.batch_keys)
     pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
@@ -288,6 +290,19 @@ def lightning_cli_factory(
             # disable breaking dependency injection support change introduced in PyTorch Lightning 2.3
             # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
             pass
+
+        def before_instantiate_classes(self):
+            # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
+            if self.subcommand == "predict":
+                return_predictions: bool = self.config["predict"]["return_predictions"]
+                if return_predictions:
+                    warnings.warn(
+                        "The `return_predictions` argument should be set to 'false' when running predict to avoid OOM. "
+                        "This can be set at indent level 0 in the config file. Example:\n"
+                        "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
+                        UserWarning,
+                    )
+            return super().before_instantiate_classes()
 
         def instantiate_classes(self) -> None:
             with torch.device("meta"):
