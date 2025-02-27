@@ -373,7 +373,9 @@ def compute_function_on_gene_sets_given_neighbors(
 
     best_gene_set_dfs: list[pd.DataFrame] = []
 
-    for gene in neighbor_lookup.keys():
+    from tqdm import tqdm
+
+    for gene in tqdm(neighbor_lookup.keys()):
         metric_series = compute_function_on_gene_sets(
             input_gene_set=neighbor_lookup[gene],
             reference_gene_sets=reference_gene_sets,

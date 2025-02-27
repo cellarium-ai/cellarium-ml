@@ -27,6 +27,7 @@ from scipy.stats import linregress, norm
 from skopt import gp_minimize
 from tqdm import tqdm
 
+from cellarium.ml import CellariumModule
 from cellarium.ml.utilities.inference.cellarium_gpt_inference import load_gene_info_table
 from cellarium.ml.utilities.inference.gene_set_utils import (
     compute_function_on_gene_sets_given_clustering,
@@ -155,7 +156,9 @@ class GeneNetworkAnalysisData:
 def process_response_matrix(
     analysis_data: GeneNetworkAnalysisData,
     total_mrna_umis: float | None,
-    response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+    response_normalization_strategy: t.Literal[
+        "mean", "std", "none", "jacobian_to_correlation", "correlation"
+    ] = "mean",
     feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
     min_prompt_gene_tpm: float = 0.0,
     min_query_gene_tpm: float = 0.0,
@@ -187,6 +190,9 @@ def process_response_matrix(
             - "mean": normalize by marginal mean
             - "std": normalize by marginal standard deviation
             - "none": no normalization
+            - "jacobian_to_correlation": convert a jacobian to correlation by std scaling (same as std)
+                but additionally symmetrize the matrix. assumes input is a square matrix
+            - "correlation": no normalization, assume matrix_qp is already a correlation matrix
         feature_normalization_strategy: feature normalization strategy
             - "l2": L2 normalization per query feature
             - "z_score": z-score per feature
@@ -214,20 +220,62 @@ def process_response_matrix(
     query_marginal_mean_q = analysis_data.query_marginal_mean_q
     query_marginal_std_q = analysis_data.query_marginal_std_q
 
-    if response_normalization_strategy == "mean":
-        z_p = prompt_marginal_mean_p
-        z_q = query_marginal_mean_q
-    elif response_normalization_strategy == "std":
-        z_p = prompt_marginal_std_p
-        z_q = query_marginal_std_q
-    elif response_normalization_strategy == "none":
-        z_p = np.ones_like(prompt_marginal_mean_p)
-        z_q = np.ones_like(query_marginal_mean_q)
+    if response_normalization_strategy == "correlation":
+        assert len(query_var_names) == len(prompt_var_names)
+        assert all(q == p for q, p in zip(query_var_names, prompt_var_names))
+        assert min_prompt_gene_tpm == min_query_gene_tpm, (
+            "TPM filtering must be the same for prompt and query genes when using 'correlation' normalization"
+        )
+        assert query_response_amp_min_pct is None, (
+            "Query response amplitude filtering is not supported when using 'correlation' normalization"
+        )
+        assert query_hv_top_k is None, (
+            "Query highly-variable filtering is not supported when using 'correlation' normalization"
+        )
+        assert feature_normalization_strategy == "none", (
+            "Set feature_normalization_strategy='none' when using 'correlation' normalization"
+        )
+        z_qp = response_qp
     else:
-        raise ValueError("Invalid Jacobian normalization strategy")
+        if response_normalization_strategy == "mean":
+            z_p = prompt_marginal_mean_p
+            z_q = query_marginal_mean_q
+        elif response_normalization_strategy == "std":
+            z_p = prompt_marginal_std_p
+            z_q = query_marginal_std_q
+        elif response_normalization_strategy == "none":
+            z_p = np.ones_like(prompt_marginal_mean_p)
+            z_q = np.ones_like(query_marginal_mean_q)
+        elif response_normalization_strategy == "jacobian_to_correlation":
+            # rho_qp = J_qp * std_p / std_q
+            assert len(query_var_names) == len(prompt_var_names), (
+                "respsonse_qp must be a square matrix when using 'jacobian_to_correlation' normalization"
+            )
+            assert all(q == p for q, p in zip(query_var_names, prompt_var_names))
+            assert min_prompt_gene_tpm == min_query_gene_tpm, (
+                "TPM filtering must be the same for prompt and query genes when "
+                "using 'jacobian_to_correlation' normalization"
+            )
+            assert query_response_amp_min_pct is None, (
+                "Query response amplitude filtering is not supported when using 'jacobian_to_correlation' normalization"
+            )
+            assert query_hv_top_k is None, (
+                "Query highly-variable filtering is not supported when using 'jacobian_to_correlation' normalization"
+            )
+            assert feature_normalization_strategy == "none", (
+                "Set feature_normalization_strategy='none' when using 'jacobian_to_correlation' normalization"
+            )
+            z_p = prompt_marginal_std_p
+            z_q = query_marginal_std_q
+        else:
+            raise ValueError("Invalid Jacobian normalization strategy")
 
-    # linear proportional activation
-    z_qp = response_qp * (z_p[None, :] + norm_pseudo_count) / (z_q[:, None] + norm_pseudo_count)
+        # linear proportional activation
+        z_qp = response_qp * (z_p[None, :] + norm_pseudo_count) / (z_q[:, None] + norm_pseudo_count)
+
+        if response_normalization_strategy == "jacobian_to_correlation":
+            z_qp = np.clip(0.5 * (z_qp + z_qp.T), -1, 1)
+
     assert isinstance(z_qp, np.ndarray)
 
     if verbose:
@@ -293,7 +341,7 @@ def process_response_matrix(
         z_qp = z_trans_func(z_qp)
 
     # handle feature normalization
-    pearson = False  # True means that z_qp @ z_qp.T will be the pearson correlation matrix
+    pearson = True  # True means that z_qp @ z_qp.T will be the pearson correlation matrix
     if feature_normalization_strategy == "z_score":
         # z-score each query gene separately in response to prompt genes
         z_qp = (z_qp - np.mean(z_qp, axis=1, keepdims=True)) / (eps + np.std(z_qp, axis=1, keepdims=True))
@@ -321,10 +369,17 @@ def process_response_matrix(
     )
 
 
+# TODO: add the option of using a precomputed rho_pp for adjacency
+
+
 def compute_adjacency_matrix(
-    z_qp: np.ndarray,
+    z_qp: np.ndarray | None = None,
+    rho_pp: np.ndarray | None = None,
     adjacency_strategy: t.Literal[
-        "shifted_correlation", "unsigned_correlation", "positive_correlation", "positive_correlation_binary"
+        "shifted_correlation",
+        "unsigned_correlation",
+        "positive_correlation",
+        "positive_correlation_binary",
     ] = "positive_correlation",
     n_neighbors: int | None = 50,
     self_loop: bool = False,
@@ -335,6 +390,7 @@ def compute_adjacency_matrix(
 
     Args:
         z_qp: query-by-prompt gene matrix of values
+        rho_pp: precomputed correlation matrix (no distinction between prompt and query: same genes)
         adjacency_strategy: adjacency strategy
         n_neighbors: number of neighbors to keep
         self_loop: whether to include self-loops
@@ -345,10 +401,21 @@ def compute_adjacency_matrix(
             tau: threshold for binary adjacency
 
     Returns:
-        query-by-query adjacency matrix for genes
+        prompt-by-prompt adjacency matrix for genes
     """
-    n_query_genes = z_qp.shape[0]
-    rho_pp = z_qp.T @ z_qp / n_query_genes
+    if z_qp is not None:
+        assert rho_pp is None, "Cannot provide both z_qp and rho_pp"
+        n_query_genes = z_qp.shape[0]
+        rho_pp = z_qp.T @ z_qp / n_query_genes
+    else:
+        assert isinstance(rho_pp, np.ndarray), "Must provide rho_pp as a numpy array if z_qp is None"
+        if rho_pp.shape[0] != rho_pp.shape[1]:
+            raise ValueError(f"provided rho_pp must be a square matrix: shape is {rho_pp.shape}")
+        if not np.isclose(rho_pp, rho_pp.T).all():
+            logger.warning("provided rho_pp is not symmetric. symmetrizing...")
+            rho_pp = 0.5 * (rho_pp + rho_pp.T)
+
+    assert isinstance(rho_pp, np.ndarray)
 
     if adjacency_strategy == "shifted_correlation":
         assert "beta" in kwargs, "Must provide beta for shifted correlation"
@@ -475,6 +542,8 @@ def compute_knn_from_adjacency(
         dictionary of k-nearest neighbors for each node
     """
     assert a_pp.shape[0] == len(node_names_p), "Number of node names must match the first dimension of a_qq"
+    assert isinstance(node_names_p, np.ndarray), "node_names_p must be a numpy array"
+    assert a_pp.shape[0] == a_pp.shape[1], "Adjacency matrix must be square"
 
     # compute the k-nearest neighbors
     knn: dict[str, set[str]] = {}
@@ -646,7 +715,8 @@ class NetworkAnalysisBase:
     Provides methods for computing adjacency matrix, graph, Leiden clustering, and spectral dimension.
 
     Attributes:
-        z_qp: input matrix of values
+        z_qp: input matrix of query-prompt responses
+        z_is_correlation: True if z_qp is a matrix of prompt-prompt correlations
         node_names_p: input names of the prompt genes (nodes -- the perturbations)
         leiden_membership: Leiden clustering results
         spectral: dictionary of spectral dimension results
@@ -657,12 +727,18 @@ class NetworkAnalysisBase:
         spectral_dim: computed spectral dimension and related results
     """
 
-    def __init__(self, z_qp: np.ndarray, node_names_p: list[str] | np.ndarray):
-        assert z_qp.shape[-1] == len(node_names_p), "Number of node names must match the second dimension of z_qp"
-        assert np.isnan(z_qp).sum() == 0, "There are NaNs in z_qp, which is not allowed"
-        assert np.isinf(z_qp).sum() == 0, "There are infs in z_qp, which is not allowed"
-        assert (z_qp != 0).sum() > 0, "There are no nonzero values in z_qp, which is not allowed"
+    def __init__(
+        self,
+        node_names_p: list[str] | np.ndarray,
+        z_qp: np.ndarray,
+        z_is_correlation: bool = False,
+    ):
         self.z_qp = z_qp
+        self.z_is_correlation = z_is_correlation
+        assert self.z_qp.shape[-1] == len(node_names_p), "Number of node names must match the second dimension of input"
+        assert np.isnan(self.z_qp).sum() == 0, "There are NaNs in the input, which is not allowed"
+        assert np.isinf(self.z_qp).sum() == 0, "There are infs in the input, which is not allowed"
+        assert (self.z_qp != 0).sum() > 0, "There are no nonzero values in input, which is not allowed"
         self.node_names_p = node_names_p
         self.a_pp: np.ndarray | None = None  # adjacency matrix
         self.adjacency_kwargs: dict[str, t.Any] = {}  # used by validation methods to re-compute adjacency matrix
@@ -708,7 +784,8 @@ class NetworkAnalysisBase:
             "self_loop": self_loop,
         }
         a_pp = compute_adjacency_matrix(
-            z_qp=self.z_qp,
+            z_qp=self.z_qp if not self.z_is_correlation else None,
+            rho_pp=self.z_qp if self.z_is_correlation else None,
             adjacency_strategy=adjacency_strategy,
             n_neighbors=n_neighbors,
             self_loop=self_loop,
@@ -791,7 +868,9 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         prompt_marginal_std_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
-        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        response_normalization_strategy: t.Literal[
+            "mean", "std", "none", "jacobian_to_correlation", "correlation"
+        ] = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -859,7 +938,11 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             eps=eps,
         )
 
-        super().__init__(z_qp=self.processed.matrix_qp, node_names_p=self.processed.prompt_var_names)
+        super().__init__(
+            z_qp=self.processed.matrix_qp,
+            z_is_correlation=response_normalization_strategy in ["jacobian_to_correlation", "correlation"],
+            node_names_p=self.processed.prompt_var_names,
+        )
 
     @property
     def cell_type(self) -> str | None:
@@ -953,7 +1036,9 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 
     def reprocess(
         self,
-        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        response_normalization_strategy: t.Literal[
+            "mean", "std", "none", "jacobian_to_correlation", "correlation"
+        ] = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -999,7 +1084,11 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         ]:
             if hasattr(self, attr):
                 delattr(self, attr)  # clear cached property
-        super().__init__(z_qp=self.processed.matrix_qp, node_names_p=self.processed.prompt_var_names)
+        super().__init__(
+            z_qp=self.processed.matrix_qp,
+            z_is_correlation=response_normalization_strategy in ["jacobian_to_correlation", "correlation"],
+            node_names_p=self.processed.prompt_var_names,
+        )
 
     def plot_mde_embedding(
         self,
@@ -1366,6 +1455,108 @@ class ValidationMixin(BaseClassProtocol):
         # plt.yticks(range(len(gene_inds)), [f"{g}\n{i}" for i, g in enumerate(gene_set)])
         # plt.title("Adjacency matrix for gene set")
         # plt.show()
+
+    def compute_network_network_neighborhood_concordance_metric(
+        self,
+        other: BaseClassProtocol,
+        k: int,
+        metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "iou",
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
+        verbose: bool = False,
+    ) -> tuple[float, pd.DataFrame]:
+        """
+        Compute a metric for the overall concordance between the adjacency matrix in
+        :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and another adjacency matrix
+        in `other.adjacency_matrix`. The metric is based on the adjacency matrix of self
+        and the adjacency matrix of other, and is computed by comparing local neighborhoods
+        of genes in the adjacency matrix of self to the adjacency matrix of other.
+
+        ..note::
+            Genes that are not present in both objects are excluded from the metric.
+
+        Args:
+            other: another instance of the same class
+            k: number of neighbors to consider
+            metric_name: metric to compute
+            gene_naming: whether to use gene IDs or gene symbols
+            verbose: whether to print warnings for excluded genes
+        """
+
+        def _remove_genes(
+            a_pp: np.ndarray,
+            node_names_p: np.ndarray,
+            gene_inds: np.ndarray,
+        ) -> tuple[np.ndarray, np.ndarray]:
+            """Remove entries from adjacency matrix and node names."""
+            a_pp = np.delete(a_pp, gene_inds, axis=0)
+            a_pp = np.delete(a_pp, gene_inds, axis=1)
+            node_names_p = np.delete(node_names_p, gene_inds)
+            return a_pp, node_names_p
+
+        # compute genes to ignore
+        overlapping_gene_num = len(set(self.node_names_p).intersection(set(other.node_names_p)))
+        if overlapping_gene_num == 0:
+            raise ValueError(
+                "No genes in common between the two objects. Ensure node names `node_names_p` use same schema"
+            )
+        else:
+            if verbose:
+                logger.info(f"{overlapping_gene_num} genes in common between the two objects")
+        excluded_gene_names = set(self.node_names_p).symmetric_difference(set(other.node_names_p))
+        excluded_gene_inds_self = np.array(
+            [self.prompt_gene_id_to_idx_map[g] for g in excluded_gene_names if g in self.prompt_gene_id_to_idx_map]
+        )
+        excluded_gene_inds_other = np.array(
+            [other.prompt_gene_id_to_idx_map[g] for g in excluded_gene_names if g in other.prompt_gene_id_to_idx_map]
+        )
+
+        # compute the neighbors in self (cheap given adjacency)
+        self_a_pp, self_node_names_p = _remove_genes(
+            a_pp=self.adjacency_matrix,
+            node_names_p=(
+                np.asarray(self.node_names_p) if (gene_naming == "id") else np.asarray(self.prompt_gene_symbols)
+            ),
+            gene_inds=excluded_gene_inds_self,
+        )
+        self_neighbor_lookup = compute_knn_from_adjacency(
+            a_pp=self_a_pp,
+            node_names_p=self_node_names_p,
+            n_neighbors=k,
+        )
+
+        # compute the neighbors in other (cheap given adjacency)
+        other_a_pp, other_node_names_p = _remove_genes(
+            a_pp=other.adjacency_matrix,
+            node_names_p=(
+                np.asarray(other.node_names_p) if (gene_naming == "id") else np.asarray(other.prompt_gene_symbols)
+            ),
+            gene_inds=excluded_gene_inds_other,
+        )
+        other_neighbor_lookup = compute_knn_from_adjacency(
+            a_pp=other_a_pp,
+            node_names_p=other_node_names_p,
+            n_neighbors=k,
+        )
+
+        # go through each neighborhood in self and compute the metric against all neighborhoods in other
+        best_metrics_df = compute_function_on_gene_sets_given_neighbors(
+            neighbor_lookup=self_neighbor_lookup,
+            reference_gene_sets=other_neighbor_lookup,
+            metric_name=metric_name,
+        ).set_index("gene")
+
+        # make it symmetric
+        best_metrics_df2 = compute_function_on_gene_sets_given_neighbors(
+            neighbor_lookup=other_neighbor_lookup,
+            reference_gene_sets=self_neighbor_lookup,
+            metric_name=metric_name,
+        ).set_index("gene")
+        best_metrics_df = best_metrics_df.join(best_metrics_df2, lsuffix="_self", rsuffix="_other")
+        best_metrics_df[metric_name] = (
+            best_metrics_df[f"{metric_name}_self"] + best_metrics_df[f"{metric_name}_other"]
+        ) / 2
+
+        return best_metrics_df[metric_name].mean(), best_metrics_df
 
     def compute_network_adjacency_concordance_metric(
         self,
@@ -1938,10 +2129,6 @@ class ValidationMixin(BaseClassProtocol):
         return best_resolution, best_clustering, best_metrics_df, best_mean_metric
 
 
-class GeneralContext(NetworkAnalysisBase, ValidationMixin):
-    pass
-
-
 class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
     def __init__(
         self,
@@ -1955,7 +2142,9 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         prompt_marginal_std_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
-        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        response_normalization_strategy: t.Literal[
+            "mean", "std", "none", "jacobian_to_correlation", "correlation"
+        ] = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -2005,7 +2194,9 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         adata_path: str,
         gene_info_tsv_path: str,
         device: torch.device | str,
-        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        response_normalization_strategy: t.Literal[
+            "mean", "std", "none", "jacobian_to_correlation", "correlation"
+        ] = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -2088,7 +2279,9 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         marginal_mean_g: np.ndarray,
         marginal_std_g: np.ndarray,
         metadata: dict[str, str] = {},
-        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        response_normalization_strategy: t.Literal[
+            "mean", "std", "none", "jacobian_to_correlation", "correlation"
+        ] = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -2139,7 +2332,9 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         total_mrna_umis: float | None,
         device: torch.device | str,
         metadata: dict[str, str] = {},
-        response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+        response_normalization_strategy: t.Literal[
+            "mean", "std", "none", "jacobian_to_correlation", "correlation"
+        ] = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -2154,12 +2349,13 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         eps: float = 1e-8,
         verbose: bool = True,
     ) -> "EmpiricalCorrelationContext":
-        model = torch.load(ckpt_path, weights_only=False, map_location=device)
+        module = CellariumModule.load_from_checkpoint(checkpoint_path=ckpt_path, map_location=device)
+        model = module.model
 
         return EmpiricalCorrelationContext(
             gene_info_tsv_path=gene_info_tsv_path,
             total_mrna_umis=total_mrna_umis,
-            var_names_g=model.var_names_g,
+            var_names_g=model.var_names_g.tolist(),
             correlation_gg=model.correlation_gg.cpu().numpy(),
             marginal_mean_g=model.mean_g.cpu().numpy(),
             marginal_std_g=model.std_g.cpu().numpy(),
