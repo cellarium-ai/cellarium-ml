@@ -184,7 +184,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 end_idx=self.n_train + self.n_val,
             )
 
-        if stage == "predict":
+        if stage in {"predict", "test"}:
             self.predict_dataset = IterableDistributedAnnDataCollectionDataset(
                 dadc=self.dadc,
                 batch_keys=self.batch_keys,
@@ -219,6 +219,16 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
+        """Prediction dataloader."""
+        return torch.utils.data.DataLoader(
+            self.predict_dataset,
+            num_workers=self.num_workers,
+            collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
+        )
+
+    def test_dataloader(self) -> torch.utils.data.DataLoader:
         """Prediction dataloader."""
         return torch.utils.data.DataLoader(
             self.predict_dataset,
@@ -276,8 +286,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                     "Cannot resume training with a different batch size. "
                     f"Expected {self.batch_size}, got {state_dict['batch_size']}."
                 )
-            if state_dict["accumulate_grad_batches"] != 1:
-                raise ValueError("Training with gradient accumulation is not supported when resuming training.")
+            # if state_dict["accumulate_grad_batches"] != 1:
+            #     raise ValueError("Training with gradient accumulation is not supported when resuming training.")
             if state_dict["shuffle"] != self.shuffle:
                 raise ValueError(
                     "Cannot resume training with a different shuffle value. "
