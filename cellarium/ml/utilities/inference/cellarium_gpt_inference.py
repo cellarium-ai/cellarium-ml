@@ -1205,7 +1205,7 @@ class GeneNetworkAnalysisBase:
 
     def process(
             self,
-            response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+            response_normalization_strategy: t.Literal["mean", "std", "none", "corr", "log1p"] = "mean",
             feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
             min_prompt_gene_tpm: float = 0.,
             min_query_gene_tpm: float = 0.,
@@ -1217,6 +1217,8 @@ class GeneNetworkAnalysisBase:
             query_hv_min_x: float | None = 1e-2,
             query_hv_max_x: float | None = np.inf,
             eps: float = 1e-8,
+            target_lib_size: float = 10_000,
+            included_gene_biotypes: set[str] | None = None,
             z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
         ) -> None:
 
@@ -1230,6 +1232,18 @@ class GeneNetworkAnalysisBase:
         elif response_normalization_strategy == "none":
             z_p = np.ones_like(self.prompt_marginal_mean_p)
             z_q = np.ones_like(self.query_marginal_mean_q)
+        elif response_normalization_strategy == "corr":
+            assert len(self.query_var_names) == len(self.prompt_var_names)
+            assert all(self.query_var_names[i] == self.prompt_var_names[i] for i in range(len(self.query_var_names)))
+            z_p = self.prompt_marginal_std_p
+            z_q = self.query_marginal_std_q
+            self.corr_pp = self.response_qp * (z_p[None, :] + norm_pseudo_count) / (z_q[:, None] + norm_pseudo_count)
+            self.corr_pp = np.clip(0.5 * (self.corr_pp + self.corr_pp.T), -1, 1)
+        elif response_normalization_strategy == "log1p":
+            prompt_lib_size = self.prompt_marginal_mean_p.sum()
+            query_lib_size = self.query_marginal_mean_q.sum()
+            z_p = 1 + self.prompt_marginal_mean_p * target_lib_size / prompt_lib_size
+            z_q = 1 + self.query_marginal_mean_q * target_lib_size / query_lib_size
         else:
             raise ValueError("Invalid Jacobian normalization strategy")
 
@@ -1268,6 +1282,31 @@ class GeneNetworkAnalysisBase:
             self.mask_q = self.mask_q & hv_mask_q
             logger.info(f"Number of query genes after highly-variable filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
 
+        if included_gene_biotypes is not None:
+            assert isinstance(included_gene_biotypes, set)
+            gene_id_to_gene_biotype_map = {
+                gene_id: biotype
+                for gene_id, biotype in zip(
+                    self.gene_info_df['ENSEMBL Gene ID'].values,
+                    self.gene_info_df['Gene Biotype'].values
+                )
+            }
+            for gene_id in self.query_var_names:
+                if gene_id not in gene_id_to_gene_biotype_map:
+                    gene_id_to_gene_biotype_map[gene_id] = "Unkown"
+            biotype_mask_q = np.array([
+                gene_id_to_gene_biotype_map[gene_id] in included_gene_biotypes
+                for gene_id in self.query_var_names
+            ])
+            biotype_mask_p = np.array([
+                gene_id_to_gene_biotype_map[gene_id] in included_gene_biotypes
+                for gene_id in self.prompt_var_names
+            ])
+            self.mask_q = self.mask_q & biotype_mask_q
+            self.mask_p = self.mask_p & biotype_mask_p
+            logger.info(f"Number of query genes after biotype filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
+            logger.info(f"Number of prompt genes after biotype filtering: {np.sum(self.mask_p)} / {len(self.mask_p)}")
+        
         # apply the mask to everything else
         self.prompt_var_names = [self.prompt_var_names[i] for i in range(len(self.prompt_var_names)) if self.mask_p[i]]
         self.prompt_marginal_mean_p = self.prompt_marginal_mean_p[self.mask_p]
@@ -1279,6 +1318,9 @@ class GeneNetworkAnalysisBase:
 
         # apply the mask to z_qp
         self.z_qp = self.z_qp[self.mask_q, :][:, self.mask_p]
+
+        if hasattr(self, 'corr_pp'):
+            self.corr_pp = self.corr_pp[self.mask_q, :][:, self.mask_p]
 
         # clip and transform features
         self.z_qp[np.isnan(self.z_qp)] = 0.
@@ -1325,7 +1367,12 @@ class GeneNetworkAnalysisBase:
             **kwargs) -> None:
 
         n_query_genes = self.z_qp.shape[0]
-        rho_pp = self.z_qp.T @ self.z_qp / n_query_genes
+        if hasattr(self, 'corr_pp'):
+            logger.info("Using precomputed correlation matrix")
+            rho_pp = self.corr_pp
+        else:
+            logger.info("Computing correlation matrix from z_qp")
+            rho_pp = self.z_qp.T @ self.z_qp / n_query_genes
 
         if adjacency_strategy == "shifted_correlation":
             assert "beta" in kwargs, "Must provide beta for shifted correlation"
