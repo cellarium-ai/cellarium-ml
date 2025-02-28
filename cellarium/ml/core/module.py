@@ -293,7 +293,7 @@ class CellariumModule(pl.LightningModule):
 
     def test_step(self, batch: dict[str, Any], batch_idx: int) -> None:
         """
-        Forward pass for validation step.
+        Forward pass for test step.
 
         Args:
             batch:
