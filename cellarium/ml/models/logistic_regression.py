@@ -48,7 +48,7 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         W_init_scale: float = 1.0,
         seed: int = 0,
         log_metrics: bool = True,
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human_sublist.pkl',
     ) -> None:
         super().__init__()
 
