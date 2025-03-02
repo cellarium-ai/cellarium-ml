@@ -137,6 +137,16 @@ def main():
         help="Gene selection method: 'random' or 'highly_expressed' (default: random)"
     )
     parser.add_argument(
+        "--rand_prompt_vars_sublist_path", type=str,
+        default="/home/mehrtash/data/data/cellariumgpt_artifacts/autosomal_gene_ids.txt",
+        help="Gene list to select random genes from."
+    )
+    parser.add_argument(
+        "--fixed_prompt_vars_sublist_path", type=str,
+        default="/home/mehrtash/data/data/cellariumgpt_artifacts/sex_gene_ids.txt",
+        help="Gene list to select fixed genes from."
+    )
+    parser.add_argument(
         "--chunk_size", type=int, default=16,
         help="Chunk size for processing (default: 16)"
     )
@@ -201,39 +211,59 @@ def main():
     logger.info(f"Loading the validation AnnData object from {args.val_adata_path} ...")
     adata = sc.read_h5ad(args.val_adata_path)
     
-    # Updated gene selection logic to support both "highly_expressed" and "random"
     if args.n_genes is not None:
+
+        with open(args.fixed_prompt_vars_sublist_path, "r") as f:
+            fixed_prompt_var_names_sublist = f.read().splitlines()
+        logger.info(f"Starting with {len(fixed_prompt_var_names_sublist)} fixed genes.")
+
         if args.gene_selection_method == "highly_expressed":
-            logger.info(f"Using {args.n_genes} highly expressed genes.")
+            logger.info(f"In addition, using up to {args.n_genes} highly expressed genes.")
             X_g = np.asarray(adata.X.sum(0)).flatten()
-            highly_expressed_gene_indices = np.argsort(X_g)[-args.n_genes:]
-            highly_expressed_gene_ids = adata.var_names[highly_expressed_gene_indices]
-            adata = adata[:, highly_expressed_gene_ids]
-            n_rand_prompt_vars = None
-            torch_rng = None
+            highly_expressed_gene_indices = np.argsort(X_g)[::-1]
+            selected_gene_set = set(fixed_prompt_var_names_sublist)
+            target_n_genes = args.n_genes + len(fixed_prompt_var_names_sublist)
+            for idx in highly_expressed_gene_indices:
+                if len(selected_gene_set) >= target_n_genes:
+                    break
+                gene_id = adata.var_names[highly_expressed_gene_indices[idx]]
+                selected_gene_set.add(gene_id)
+            logger.info(f"Selected {len(selected_gene_set)} genes.")
+            fixed_prompt_var_names_sublist = list(selected_gene_set)
+            rand_prompt_var_names_sublist = []
+            n_rand_prompt_vars = 0
+            torch_rng = torch.Generator().manual_seed(args.rng_seed)
+        
         elif args.gene_selection_method == "random":
-            logger.info(f"Using {args.n_genes} random genes (seed = {args.rng_seed}).")
+            logger.info(f"In addition, using {args.n_genes} random genes (seed = {args.rng_seed}).")
             torch_rng = torch.Generator().manual_seed(args.rng_seed)
             n_rand_prompt_vars = args.n_genes
+            with open(args.rand_prompt_vars_sublist_path, "r") as f:
+                rand_prompt_var_names_sublist = f.read().splitlines()
+        
         else:
             raise ValueError(f"Unknown gene selection method: {args.gene_selection_method}")
     else:
-        logger.info("Using all genes.")
+        logger.info(f"Using all genes.")
         n_rand_prompt_vars = None
-        torch_rng = None
-
+        rand_prompt_var_names_sublist = None
+        fixed_prompt_var_names_sublist = None
+        
     if args.n_cells is None:
-        logger.info("Using all cells.")
+        logger.info(f"Using all cells.")
     else:
         n_cells = min(args.n_cells, len(adata))
         logger.info(f"Using {n_cells} random cells (seed = {args.rng_seed}).")
         rng = np.random.RandomState(args.rng_seed)
         adata = adata[rng.choice(len(adata), n_cells, replace=False)]
+
     logger.info(f"Predicting metadata for {len(adata)} cells ...")
     preds = ctx.predict_metadata_chunked(
-        adata, 
+        adata=adata,
         chunk_size=args.chunk_size,
         n_rand_prompt_vars=n_rand_prompt_vars,
+        rand_prompt_var_names_sublist=rand_prompt_var_names_sublist,
+        fixed_prompt_var_names_sublist=fixed_prompt_var_names_sublist,
         rng=torch_rng
     )
 
