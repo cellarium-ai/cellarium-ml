@@ -173,6 +173,8 @@ class CellariumGPTInferenceContext:
             obs_index: int | list[int] | None,
             query_var_names: list[str],
             n_rand_prompt_vars: int | None = None,
+            rand_prompt_var_names_sublist: list[str] | None = None,
+            fixed_prompt_var_names_sublist: list[str] | None = None,
             rng: torch.Generator | None = None,
             query_total_mrna_umis: float | None = None,
             metadata_prompt_masks_dict: dict[str, bool] | None = None,
@@ -196,7 +198,6 @@ class CellariumGPTInferenceContext:
         # generate gene ids and masks
         n_cells = len(adata)
         adata_var_names = adata.var_names
-        assert all([var_name in self.var_name_to_index_map for var_name in adata_var_names])
         assert all([var_name in self.var_name_to_index_map for var_name in query_var_names])
         query_var_index = [self.var_name_to_index_map[var_name] for var_name in query_var_names]
 
@@ -204,6 +205,8 @@ class CellariumGPTInferenceContext:
         cpu_device = torch.device("cpu")
 
         if n_rand_prompt_vars is None:  # using all genes in the AnnData as prompt
+
+            assert all([var_name in self.var_name_to_index_map for var_name in adata_var_names])
 
             prompt_var_index = [self.var_name_to_index_map[var_name] for var_name in adata_var_names]
             n_prompt_vars = len(prompt_var_index)
@@ -231,33 +234,55 @@ class CellariumGPTInferenceContext:
 
         else:
 
-            assert 0 <= n_rand_prompt_vars <= adata.shape[1]
+            assert rand_prompt_var_names_sublist is not None
+            assert fixed_prompt_var_names_sublist is not None
+            assert all([var_name in self.var_name_to_index_map for var_name in rand_prompt_var_names_sublist])
+            assert all([var_name in self.var_name_to_index_map for var_name in fixed_prompt_var_names_sublist])
+            assert set(rand_prompt_var_names_sublist) & set(fixed_prompt_var_names_sublist) == set()
+            assert 0 <= n_rand_prompt_vars <= len(rand_prompt_var_names_sublist)
             assert rng is not None
 
-            n_prompt_vars = n_rand_prompt_vars
+            n_fixed_prompt_vars = len(fixed_prompt_var_names_sublist)
+            rand_prompt_sublist_size = len(rand_prompt_var_names_sublist)
+            n_prompt_vars = n_rand_prompt_vars + n_fixed_prompt_vars
             n_query_vars = len(query_var_index)
             n_total_vars = n_prompt_vars + n_query_vars
 
             # gene id
+            rand_prompt_sublist_var_index = torch.tensor(
+                [self.var_name_to_index_map[var_name] for var_name in rand_prompt_var_names_sublist],
+                dtype=torch.int64, device=cpu_device)
+            fixed_prompt_sublist_var_index = torch.tensor(
+                [self.var_name_to_index_map[var_name] for var_name in fixed_prompt_var_names_sublist],
+                dtype=torch.int64, device=cpu_device)
+            rand_prompt_sublist_indices_np = torch.argsort(
+                torch.rand((n_cells, rand_prompt_sublist_size), generator=rng, device=cpu_device), dim=-1)[:, :n_rand_prompt_vars]
+            rand_prompt_vars_nr = rand_prompt_sublist_var_index[rand_prompt_sublist_indices_np]
+            fixed_prompt_vars_nf = fixed_prompt_sublist_var_index[None, :].expand(n_cells, n_fixed_prompt_vars)
+            query_vars_nq = torch.tensor(
+                query_var_index, dtype=torch.int64, device=cpu_device)[None, :].expand(n_cells, n_query_vars)
+            prompt_vars_np = torch.cat([rand_prompt_vars_nr, fixed_prompt_vars_nf], dim=1)
+            gene_ids_nc = torch.cat([prompt_vars_np, query_vars_nq], dim=-1)
+
+            # gene value
             adata_var_index = torch.tensor(
                 [self.var_name_to_index_map[var_name] for var_name in adata_var_names],
                 dtype=torch.int64, device=cpu_device)
-            rand_prompt_adata_indices_np = torch.argsort(
-                torch.rand((n_cells, n_prompt_vars), generator=rng, device=cpu_device), dim=-1)
-            rand_prompt_vars_np = adata_var_index[rand_prompt_adata_indices_np]
-            query_vars_nq = torch.tensor(
-                query_var_index, dtype=torch.int64, device=cpu_device)[None, :].expand(n_cells, n_query_vars)
-            gene_ids_nc = torch.cat([rand_prompt_vars_np, query_vars_nq], dim=1)
-
-            # gene value
+            
             try:
                 _prompt_X_ng = np.asarray(adata.X.todense())
             except AttributeError:
                 _prompt_X_ng = adata.X
+
+            # re-layout the count matrix so that the var dimension is the same as the model var names
             prompt_X_ng = torch.tensor(_prompt_X_ng, dtype=torch.float32, device=cpu_device)
-            prompt_gene_value_np = prompt_X_ng[
+            prompt_X_nv = torch.zeros((n_cells, len(self.model_var_names)), dtype=torch.float32, device=cpu_device)
+            prompt_X_nv[:, adata_var_index] = prompt_X_ng
+            
+            # select values
+            prompt_gene_value_np = prompt_X_nv[
                 torch.arange(n_cells, device=cpu_device)[:, None],
-                rand_prompt_adata_indices_np]
+                prompt_vars_np]
             query_gene_value_nq = torch.zeros(
                 n_cells, n_query_vars, dtype=torch.float32, device=cpu_device)            
             gene_value_nc = torch.cat([prompt_gene_value_np, query_gene_value_nq], dim=1)
@@ -876,6 +901,8 @@ class CellariumGPTInferenceContext:
             adata: sc.AnnData,
             chunk_size: int = 128,
             n_rand_prompt_vars: int | None = None,
+            rand_prompt_var_names_sublist: list[str] | None = None,
+            fixed_prompt_var_names_sublist: list[str] | None = None,
             rng: torch.Generator | None = None
         ) -> dict[str, np.ndarray]:
         metadata_prediction_chunks_dict = []
@@ -887,6 +914,8 @@ class CellariumGPTInferenceContext:
             metadata_prediction_dict = self.predict_metadata(
                 adata=adata[first:last],
                 n_rand_prompt_vars=n_rand_prompt_vars,
+                rand_prompt_var_names_sublist=rand_prompt_var_names_sublist,
+                fixed_prompt_var_names_sublist=fixed_prompt_var_names_sublist,
                 rng=rng)
             metadata_prediction_chunks_dict.append(metadata_prediction_dict)
         metadata_prediction_dict = dict()
@@ -900,6 +929,8 @@ class CellariumGPTInferenceContext:
             self,
             adata: sc.AnnData,
             n_rand_prompt_vars: int | None = None,
+            rand_prompt_var_names_sublist: list[str] | None = None,
+            fixed_prompt_var_names_sublist: list[str] | None = None,
             rng: torch.Generator | None = None,
         ) -> dict[str, np.ndarray]:
         # tokenize the given anndata: no query genes, just metadata (which will be included as query by default)
@@ -908,6 +939,8 @@ class CellariumGPTInferenceContext:
             obs_index=None,
             query_var_names=[],
             n_rand_prompt_vars=n_rand_prompt_vars,
+            rand_prompt_var_names_sublist=rand_prompt_var_names_sublist,
+            fixed_prompt_var_names_sublist=fixed_prompt_var_names_sublist,
             rng=rng,
         )
 
