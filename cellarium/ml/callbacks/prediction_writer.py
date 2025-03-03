@@ -86,8 +86,8 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         pred = prediction["cell_type_probs_nc"]
         if self.prediction_size is not None:
             pred = pred[:, : self.prediction_size]
-        #y_n = batch['y_n'].cpu().numpy()
-        y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
+        y_n = batch['y_n'].cpu().numpy()
+        #y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
         y_n_cell_type_ids = np.take(columns,y_n)
 
         write_prediction(
