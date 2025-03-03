@@ -4,7 +4,7 @@
 """Utility functions for working with gene sets."""
 
 import io
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -20,10 +20,19 @@ class GeneSetRecords:
     Container to hold gene set data and provide utility functions
     """
 
-    def __init__(self, file: str):
+    def __init__(
+        self,
+        msigdb_file: str = "/home/sfleming/msigdb/msigdb.v2024.1.Hs.json",
+        corum_file: str | None = "/home/sfleming/data/ref/corum_humanComplexes.txt",
+        pan_go_file: str | None = "/home/sfleming/data/ref/pan_go_annotations.csv",
+    ) -> None:
         # file obtained from https://www.gsea-msigdb.org/gsea/msigdb/download_file.jsp?filePath=/msigdb/release/2024.1.Hs/msigdb.v2024.1.Hs.json
-        self.df = load_gene_set_json(file)
+        self.df = load_gene_set_json(msigdb_file)
         self._reindex()
+        if corum_file:
+            self.append_from_corum(corum_file)
+        if pan_go_file:
+            self.append_from_pan_go(pan_go_file)
 
     def __repr__(self) -> str:
         collection_names = "\n\t".join(self.get_collections())
@@ -89,6 +98,27 @@ class GeneSetRecords:
         )
         self._reindex()
 
+    def append_from_corum(self, corum_file: str) -> None:
+        df = pd.read_csv(corum_file, sep="\t", index_col=0)
+        self.append_collection(
+            collection="corum",
+            gene_set_names=df["complex_name"].tolist(),
+            gene_sets=df["subunits_gene_name"].apply(lambda x: x.split(";")).tolist(),
+        )
+
+    def append_from_pan_go(self, pan_go_file: str) -> None:
+        df = pd.read_csv(pan_go_file, sep="\t", index_col=0)
+        series = (
+            df[["term_label", "gene_symbol"]]
+            .groupby("term_label")
+            .apply(lambda x: x["gene_symbol"].tolist(), include_groups=False)
+        )
+        self.append_collection(
+            collection="pan_go",
+            gene_set_names=series.index.tolist(),
+            gene_sets=series.values.tolist(),
+        )
+
     def append_random_control_collection(
         self,
         gene_names: np.ndarray,
@@ -103,6 +133,22 @@ class GeneSetRecords:
             sizes=sizes,
             repeats=repeats,
         )
+
+    def get_gene_labels_for_collection(
+        self,
+        collection: str,
+        dropna: bool = True,
+        omit: list[str] = ["Unknown biological process", "Unknown molecular function", "Unknown cellular component"],
+        agg: Callable = lambda x: x.sort_values().tolist(),
+    ) -> pd.Series:
+        """Return a Series with gene symbols as index and gene set labels as values"""
+        df = self.df[self.df["collection"] == collection]["geneSymbols"].explode().reset_index()
+        if omit:
+            df = df[~df["index"].isin(omit)]
+        df = df.groupby("geneSymbols", dropna=dropna).agg(agg)
+        if dropna:
+            df = df.drop("", errors="ignore")
+        return df["index"]
 
     def remove_gene_sets(self, gene_set_names: list[str]) -> None:
         self.df = self.df.drop(gene_set_names)
@@ -373,9 +419,7 @@ def compute_function_on_gene_sets_given_neighbors(
 
     best_gene_set_dfs: list[pd.DataFrame] = []
 
-    from tqdm import tqdm
-
-    for gene in tqdm(neighbor_lookup.keys()):
+    for gene in neighbor_lookup.keys():
         metric_series = compute_function_on_gene_sets(
             input_gene_set=neighbor_lookup[gene],
             reference_gene_sets=reference_gene_sets,

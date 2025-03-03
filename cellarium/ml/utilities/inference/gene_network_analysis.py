@@ -5,6 +5,9 @@
 
 import itertools
 import logging
+import os
+import pickle
+import tempfile
 import typing as t
 import warnings
 from dataclasses import dataclass
@@ -47,6 +50,9 @@ handler.setFormatter(formatter)
 
 # Add the handler to the logger
 logger.addHandler(handler)
+
+# define type of allowed normalization strategies (this is copied in many places)
+response_normalization_strategies = t.Literal["mean", "std", "none", "jacobian_to_correlation", "correlation", "log1p"]
 
 
 def quantile_normalize_select(
@@ -156,9 +162,7 @@ class GeneNetworkAnalysisData:
 def process_response_matrix(
     analysis_data: GeneNetworkAnalysisData,
     total_mrna_umis: float | None,
-    response_normalization_strategy: t.Literal[
-        "mean", "std", "none", "jacobian_to_correlation", "correlation"
-    ] = "mean",
+    response_normalization_strategy: response_normalization_strategies = "mean",
     feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
     min_prompt_gene_tpm: float = 0.0,
     min_query_gene_tpm: float = 0.0,
@@ -170,6 +174,7 @@ def process_response_matrix(
     query_hv_min_x: float | None = 1e-2,
     query_hv_max_x: float | None = np.inf,
     z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
+    target_lib_size: float = 10_000,
     eps: float = 1e-8,
     verbose: bool = True,
 ) -> GeneNetworkAnalysisData:
@@ -193,6 +198,7 @@ def process_response_matrix(
             - "jacobian_to_correlation": convert a jacobian to correlation by std scaling (same as std)
                 but additionally symmetrize the matrix. assumes input is a square matrix
             - "correlation": no normalization, assume matrix_qp is already a correlation matrix
+            - "log1p": normalization of a jacobian / linresponse to match empirical correlation
         feature_normalization_strategy: feature normalization strategy
             - "l2": L2 normalization per query feature
             - "z_score": z-score per feature
@@ -207,6 +213,7 @@ def process_response_matrix(
         query_hv_min_x: minimum x value for histogram equalization
         query_hv_max_x: maximum x value for histogram equalization
         z_trans_func: transformation function for z values
+        target_lib_size: target library size (for log1p normalization only)
         eps: epsilon value for numerical stability
         verbose: whether to print verbose output
     """
@@ -267,6 +274,11 @@ def process_response_matrix(
             )
             z_p = prompt_marginal_std_p
             z_q = query_marginal_std_q
+        elif response_normalization_strategy == "log1p":
+            prompt_lib_size = prompt_marginal_mean_p.sum()
+            query_lib_size = query_marginal_mean_q.sum()
+            z_p = 1 + prompt_marginal_mean_p * target_lib_size / prompt_lib_size
+            z_q = 1 + query_marginal_mean_q * target_lib_size / query_lib_size
         else:
             raise ValueError("Invalid Jacobian normalization strategy")
 
@@ -411,9 +423,6 @@ def compute_adjacency_matrix(
         assert isinstance(rho_pp, np.ndarray), "Must provide rho_pp as a numpy array if z_qp is None"
         if rho_pp.shape[0] != rho_pp.shape[1]:
             raise ValueError(f"provided rho_pp must be a square matrix: shape is {rho_pp.shape}")
-        if not np.isclose(rho_pp, rho_pp.T).all():
-            logger.warning("provided rho_pp is not symmetric. symmetrizing...")
-            rho_pp = 0.5 * (rho_pp + rho_pp.T)
 
     assert isinstance(rho_pp, np.ndarray)
 
@@ -437,7 +446,10 @@ def compute_adjacency_matrix(
     else:
         raise ValueError("Invalid adjacency strategy")
 
-    assert np.isclose(a_pp, a_pp.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
+    # assert np.isclose(a_pp, a_pp.T).all(), "Adjacency matrix must be symmetric -- something is wrong!"
+    if not np.isclose(a_pp, a_pp.T).all():
+        logger.warning("a_pp is not symmetric as computed. symmetrizing manually...")
+        rho_pp = 0.5 * (rho_pp + rho_pp.T)
 
     if n_neighbors is not None:
         assert n_neighbors > 0, "n_neighbors must be positive"
@@ -868,9 +880,7 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         prompt_marginal_std_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
-        response_normalization_strategy: t.Literal[
-            "mean", "std", "none", "jacobian_to_correlation", "correlation"
-        ] = "mean",
+        response_normalization_strategy: response_normalization_strategies = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -966,6 +976,8 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
     def development_stage(self) -> str | None:
         if self.adata_obs is None:
             return None
+        if "development_stage" not in self.adata_obs.columns:
+            return None
         return self.adata_obs["development_stage"].values[0]
 
     @property
@@ -1036,9 +1048,7 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
 
     def reprocess(
         self,
-        response_normalization_strategy: t.Literal[
-            "mean", "std", "none", "jacobian_to_correlation", "correlation"
-        ] = "mean",
+        response_normalization_strategy: response_normalization_strategies = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -1097,18 +1107,28 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         width: int = 800,
         height: int = 800,
         highlight_gene_sets: dict[str, t.Tuple[list[str], list[str], str]] | None = None,
+        color: str | pd.Series = "membership",
     ) -> go.Figure:
         assert self.embedding_p2 is not None, "Must compute MDE embedding first"
-        assert self.leiden_membership is not None, "Must compute Leiden communities first"
+        if isinstance(color, str) and color == "membership":
+            assert self.leiden_membership is not None, "Must compute Leiden communities first"
+        if isinstance(color, pd.Series):
+            assert len(set(color.index).intersection(self.prompt_gene_symbols)) > 0, (
+                "color series index has no overlap with prompt_gene_symbols"
+            )
+            assert isinstance(color.iloc[0], str), "color series must be a string type"
 
         plot_title = f"""{self.cell_type}<br>{self.tissue}<br>{self.disease}"""
 
         # Create a color map for the memberships
-        memberships_p = self.leiden_membership
-        unique_memberships = np.unique(memberships_p)
-
-        # Convert memberships to strings for categorical mapping
-        unique_memberships.astype(str)
+        if isinstance(color, str) and color == "membership":
+            assert isinstance(self.leiden_membership, np.ndarray)
+            memberships_p = self.leiden_membership.astype(str)
+            unique_memberships = np.unique(sorted(memberships_p.astype(int))).astype(str)
+        else:
+            memberships_p = None
+            assert isinstance(color, pd.Series)
+            unique_memberships = color.unique()
 
         # Create the color map with string keys
         colormap = {str(label): cc.glasbey[i % len(cc.glasbey)] for i, label in enumerate(unique_memberships)}
@@ -1119,13 +1139,24 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
                 "x": self.embedding_p2[:, 0],
                 "y": self.embedding_p2[:, 1],
                 "label": self.prompt_gene_symbols,
-                "membership": memberships_p.astype(str),  # Convert to string
-            }
+                "membership": memberships_p,
+            },
+            index=self.prompt_gene_symbols,
         )
+        if isinstance(color, pd.Series):
+            df["color"] = color
+            color = "color"
 
         # Create the scatter plot
         fig = px.scatter(
-            df, x="x", y="y", hover_name="label", title=plot_title, color="membership", color_discrete_map=colormap
+            df,
+            x="x",
+            y="y",
+            hover_name="label",
+            title=plot_title,
+            color=color,
+            color_discrete_map=colormap,
+            category_orders={color: unique_memberships},  # This ensures legend order
         )
 
         # Update marker size
@@ -1745,13 +1776,13 @@ class ValidationMixin(BaseClassProtocol):
         Returns:
             concordance value
         """
-        _, _, _, best_metrics_mean = self.gridsearch_optimal_k_neighbors_given_gene_sets(
+        best_metrics_df = self.gridsearch_optimal_k_neighbors_given_gene_sets(
             reference_gene_sets=reference_gene_sets,
             k_values=k_values,
             metric_name=metric_name,
             gene_naming=gene_naming,
         )
-        return best_metrics_mean
+        return best_metrics_df[metric_name].mean()
 
     def cluster_and_compute_metrics(
         self,
@@ -1868,30 +1899,25 @@ class ValidationMixin(BaseClassProtocol):
         excluded_cluster_labels = clusters_with_no_genes_in_reference_sets
         return metrics_df[metric_name][~metrics_df["cluster"].isin(excluded_cluster_labels)].mean()
 
-    # TODO consider a method which computes the below for (gene, k) and then takes the k for each gene
-    # that maximizes the metric for that gene. (also ignore node genes that do not appear in any reference set).
-    # this could deal with the fact that having the same k everywhere is not ever going to be perfectly concordant
-    # with reference gene sets of multiple sizes.
-
     def gridsearch_optimal_k_neighbors_given_gene_sets(
         self,
         reference_gene_sets: dict[str, set[str]],
         k_values: list[int] | np.ndarray,
         metric_name: t.Literal["iou", "intersection", "precision", "precision_recall", "f1"] = "f1",
         gene_naming: t.Literal["id", "symbol"] = "symbol",
-    ) -> tuple[int, dict[str, set[str]], pd.DataFrame, float]:
+    ) -> pd.DataFrame:  # tuple[int, dict[str, set[str]], pd.DataFrame, float]:
         """
         Compute concordance metrics between the k-nearest-neighbor communities of this graph
         (of which there are n_genes number) and reference gene sets. Use these metrics to
-        determine an optimal value for k which maximizes concordance.
-        Optimization is performed by checking each of the input `k_values` and finding the max.
+        determine an optimal value for k (for each gene) which maximizes concordance.
+        Optimization is performed by checking each of the input `k_values` and finding the best.
 
-        .. note:
-            When computing a mean metric over the computed neighborhoods, instead of averaging
-            over all neighborhoods, we exclude the gene neighborhoods whose gene is not included
-            in the union of all the reference sets. Otherwise large k values would always be
-            favored due to an increased likelihood of containing anything in the union of the
-            reference sets.
+        # .. note:
+        #     When computing a mean metric over the computed neighborhoods, instead of averaging
+        #     over all neighborhoods, we exclude the gene neighborhoods whose gene is not included
+        #     in the union of all the reference sets. Otherwise large k values would always be
+        #     favored due to an increased likelihood of containing anything in the union of the
+        #     reference sets.
 
         Args:
             reference_gene_sets: dictionary of reference gene sets
@@ -1900,16 +1926,17 @@ class ValidationMixin(BaseClassProtocol):
             gene_naming: whether to use gene IDs or gene symbols
 
         Returns:
-            (optimal k, optimal neighborhoods, dataframe with genes and reference gene set metrics, mean metric)
+            dataframe with genes and reference gene set metrics
+            # (optimal k, optimal neighborhoods, dataframe with genes and reference gene set metrics, mean metric)
         """
-        all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
-        mean_metrics_dfs: list[pd.DataFrame] = []
+        # all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
+        # mean_metrics_dfs: list[pd.DataFrame] = []
         metrics_dfs: list[pd.DataFrame] = []
 
         # precompute adjacency matrix once using max k
         a_pp = compute_adjacency_matrix(z_qp=self.z_qp, **self.adjacency_kwargs)  # same kwargs as user invocation
 
-        for k in k_values:
+        for k in tqdm(k_values):
             # compute neighbors and metrics
             _, metrics_df = self.knn_and_compute_metrics(
                 a_pp=a_pp,
@@ -1918,44 +1945,48 @@ class ValidationMixin(BaseClassProtocol):
                 metric_name=metric_name,
                 gene_naming=gene_naming,
             )
+            metrics_df["k"] = k
 
-            # compute mean metric
-            mean_metric = self._mean_metric_knn(
-                metrics_df=metrics_df,
-                metric_name=metric_name,
-                all_genes_in_reference_sets=all_genes_in_reference_sets,
-            )
+            # # compute mean metric
+            # mean_metric = self._mean_metric_knn(
+            #     metrics_df=metrics_df,
+            #     metric_name=metric_name,
+            #     all_genes_in_reference_sets=all_genes_in_reference_sets,
+            # )
 
-            # mean of best matches over all gene neighborhoods
-            mean_metrics_dfs.append(pd.DataFrame({"k": [k], "mean_of_best_match_metric": [mean_metric]}))
+            # # mean of best matches over all gene neighborhoods
+            # mean_metrics_dfs.append(pd.DataFrame({"k": [k], "mean_of_best_match_metric": [mean_metric]}))
 
             # store all metrics for later inspection
             metrics_dfs.append(metrics_df)
 
-        mean_metrics_df = pd.concat(mean_metrics_dfs, axis=0)
-        metrics_df = pd.concat(metrics_dfs, axis=0)
+        # mean_metrics_df = pd.concat(mean_metrics_dfs, axis=0)
+        metrics_df = pd.concat(metrics_dfs, axis=0, ignore_index=True)
+
+        idx = metrics_df.groupby(["gene"])["f1"].idxmax()
+        best_metrics_df = metrics_df.iloc[idx]
 
         # choose the resolution with the highest mean metric
-        best_k = mean_metrics_df.set_index("k")["mean_of_best_match_metric"].idxmax()
+        # best_k = mean_metrics_df.set_index("k")["mean_of_best_match_metric"].idxmax()
 
-        # re-compute the kNN at the best resolution (cached) and metrics
-        best_knn, best_metrics_df = self.knn_and_compute_metrics(
-            a_pp=a_pp,
-            k=best_k,
-            reference_gene_sets=reference_gene_sets,
-            metric_name=metric_name,
-            gene_naming=gene_naming,
-        )
+        # # re-compute the kNN at the best resolution (cached) and metrics
+        # best_knn, best_metrics_df = self.knn_and_compute_metrics(
+        #     a_pp=a_pp,
+        #     k=best_k,
+        #     reference_gene_sets=reference_gene_sets,
+        #     metric_name=metric_name,
+        #     gene_naming=gene_naming,
+        # )
 
-        # compute best mean metric
-        best_mean_metric = self._mean_metric_knn(
-            metrics_df=best_metrics_df,
-            metric_name=metric_name,
-            all_genes_in_reference_sets=all_genes_in_reference_sets,
-        )
+        # # compute best mean metric
+        # best_mean_metric = self._mean_metric_knn(
+        #     metrics_df=best_metrics_df,
+        #     metric_name=metric_name,
+        #     all_genes_in_reference_sets=all_genes_in_reference_sets,
+        # )
 
         # return the best resolution and the Leiden communities
-        return best_k, best_knn, metrics_df, best_mean_metric
+        return best_metrics_df
 
     def gridsearch_optimal_resolution_communities_given_gene_sets(
         self,
@@ -2142,9 +2173,7 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         prompt_marginal_std_p: np.ndarray,
         query_marginal_mean_q: np.ndarray,
         query_marginal_std_q: np.ndarray,
-        response_normalization_strategy: t.Literal[
-            "mean", "std", "none", "jacobian_to_correlation", "correlation"
-        ] = "mean",
+        response_normalization_strategy: response_normalization_strategies = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -2194,9 +2223,7 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
         adata_path: str,
         gene_info_tsv_path: str,
         device: torch.device | str,
-        response_normalization_strategy: t.Literal[
-            "mean", "std", "none", "jacobian_to_correlation", "correlation"
-        ] = "mean",
+        response_normalization_strategy: response_normalization_strategies = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -2260,6 +2287,47 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             verbose=verbose,
         )
 
+    @staticmethod
+    def from_linear_response_pkl(
+        linear_response_path: str,
+        adata_obs: pd.DataFrame,
+        gene_info_tsv_path: str,
+        min_r_squared: float = 0.25,
+        verbose: bool = True,
+    ) -> "JacobianContext":
+        # open file
+        if linear_response_path.startswith("gs://"):
+            with tempfile.TemporaryDirectory() as tempdir:
+                local_path = os.path.join(tempdir, "linear_response.pkl")
+                os.system(f"gsutil cp {linear_response_path} {local_path}")
+                with open(local_path, "rb") as f:
+                    linear_response_dict = pickle.load(f)
+        else:
+            with open(linear_response_path, "rb") as f:
+                linear_response_dict = pickle.load(f)
+
+        response_qp = linear_response_dict["slope_qp"].copy()
+        response_qp[linear_response_dict["r_squared_qp"] < min_r_squared] = 0.0
+
+        # note: prompt and query genes are the same in these experiments
+        var_names = linear_response_dict["query_gene_ids"].tolist()
+        marginal_mean_g = linear_response_dict["gene_marginal_mean_q"]
+        marginal_std_g = linear_response_dict["gene_marginal_std_q"]
+
+        return JacobianContext(
+            adata_obs=adata_obs,
+            gene_info_tsv_path=gene_info_tsv_path,
+            jacobian_point="linear_response",
+            query_var_names=var_names,
+            prompt_var_names=var_names,
+            jacobian_qp=response_qp,
+            prompt_marginal_mean_p=marginal_mean_g,
+            prompt_marginal_std_p=marginal_std_g,
+            query_marginal_mean_q=marginal_mean_g,
+            query_marginal_std_q=marginal_std_g,
+            verbose=verbose,
+        )
+
     def __str__(self) -> str:
         return (
             f"JacobianContext({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
@@ -2279,9 +2347,7 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         marginal_mean_g: np.ndarray,
         marginal_std_g: np.ndarray,
         metadata: dict[str, str] = {},
-        response_normalization_strategy: t.Literal[
-            "mean", "std", "none", "jacobian_to_correlation", "correlation"
-        ] = "mean",
+        response_normalization_strategy: response_normalization_strategies = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
@@ -2332,9 +2398,7 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         total_mrna_umis: float | None,
         device: torch.device | str,
         metadata: dict[str, str] = {},
-        response_normalization_strategy: t.Literal[
-            "mean", "std", "none", "jacobian_to_correlation", "correlation"
-        ] = "mean",
+        response_normalization_strategy: response_normalization_strategies = "mean",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,

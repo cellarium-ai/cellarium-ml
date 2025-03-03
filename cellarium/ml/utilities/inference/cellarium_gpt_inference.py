@@ -4,6 +4,8 @@
 """Inference utilities for the CellariumGPT model."""
 
 import logging
+import os
+import tempfile
 import typing as t
 import warnings
 
@@ -39,7 +41,14 @@ def load_gene_info_table(
     gene_info_tsv_path: str,
     included_gene_ids: list[str] | np.ndarray,
 ) -> t.Tuple[pd.DataFrame, dict, dict]:
-    gene_info_df = pd.read_csv(gene_info_tsv_path, sep="\t")
+    if gene_info_tsv_path.startswith("gs://"):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gene_info_tsv_path_local = os.path.join(tmpdir, "gene_info.tsv")
+            gsutil_cp_cmd = f"gsutil cp {gene_info_tsv_path} {gene_info_tsv_path_local}"
+            os.system(gsutil_cp_cmd)
+            gene_info_df = pd.read_csv(gene_info_tsv_path_local, sep="\t")
+    else:
+        gene_info_df = pd.read_csv(gene_info_tsv_path, sep="\t")
 
     gene_symbol_to_gene_id_map = dict()
     for gene_symbol, gene_id in zip(gene_info_df["Gene Symbol"], gene_info_df["ENSEMBL Gene ID"]):

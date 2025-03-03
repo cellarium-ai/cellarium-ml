@@ -259,20 +259,24 @@ def test_knn_concordance_metric(jac_ctx):
         "set1": {f"node_{i}" for i in range(large_p // 4)},
         "set2": {f"node_{i + large_p // 4}" for i in range(large_p // 4)},
         "set3": {f"node_{i + 2 * large_p // 4}" for i in range(large_p // 4)},
+        "set4": {f"node_{i + 3 * large_p // 4}" for i in range(large_p // 4)},
     }
     k_values = [2, 3, 4, 10, 20, 30, 50, 75]
 
-    best_k, _, df, best_metrics_mean = jac_ctx.gridsearch_optimal_k_neighbors_given_gene_sets(
+    best_metrics_df = jac_ctx.gridsearch_optimal_k_neighbors_given_gene_sets(
         reference_gene_sets=reference_gene_sets,
         k_values=k_values,
         metric_name="f1",
     )
+    best_k = best_metrics_df["k"].value_counts().index[0]
+    print(best_metrics_df["k"].value_counts())
     print(f"best_k: {best_k}")
-    print(df)
+    print(best_metrics_df)
+    best_metrics_mean = best_metrics_df["f1"].mean()
     print(best_metrics_mean)
 
     assert best_k == 20, "expected the optimal k to be 20 which corresponds with simulated cluster sizes"
-    assert best_metrics_mean > 0.5, "expected the optimal k to have a high f1 concordance metric"
+    assert best_metrics_mean > 0.9, "expected the optimal k to have a high f1 concordance metric"
 
     # just ensure this api works
     jac_ctx.compute_network_knn_concordance_metric(
