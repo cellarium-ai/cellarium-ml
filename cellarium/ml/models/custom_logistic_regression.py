@@ -54,7 +54,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         #target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
         target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human.pkl',
         #y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human_sublist.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
@@ -89,6 +89,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.elbo = pyro.infer.Trace_ELBO()
 
         self.log_metrics = log_metrics
+        self.valid_mask = read_pkl_from_gcs('gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/shared_meta/sublist_indices.pkl')
 
     def reset_parameters(self) -> None:
         rng_device = self.W_gc.device.type if self.W_gc.device.type != "meta" else "cpu"
@@ -163,9 +164,11 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
-        logits_nc = x_ng @ self.W_gc + self.b_c
-        activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-        #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+        logits_nc = x_ng @ self.W_gc[:, self.valid_mask] + self.b_c[self.valid_mask]
+        activation_out_filtered = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
+        activation_out = torch.zeros(x_ng.shape[0], self.W_gc.shape[1], device=x_ng.device)
+        activation_out[:, self.valid_mask] = activation_out_filtered
+        activation_out = self.probability_propagation(activation_out_gpu=activation_out)
         return {"y_logits_nc": logits_nc,"cell_type_probs_nc": activation_out}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
