@@ -253,7 +253,8 @@ def test_compute_network_adjacency_concordance_metric(jac_ctx):
     assert ~np.isnan(concordance), "expected the adjacency concordance metric to be a valid number"
 
 
-def test_knn_concordance_metric(jac_ctx):
+@pytest.mark.parametrize("metric_name", ["f1", "precision"])
+def test_knn_concordance_metric(jac_ctx, metric_name):
     # a reference set made to match the structure of the data very well: we expect 4 clusters
     reference_gene_sets = {
         "set1": {f"node_{i}" for i in range(large_p // 4)},
@@ -266,22 +267,24 @@ def test_knn_concordance_metric(jac_ctx):
     best_metrics_df = jac_ctx.gridsearch_optimal_k_neighbors_given_gene_sets(
         reference_gene_sets=reference_gene_sets,
         k_values=k_values,
-        metric_name="f1",
+        metric_name=metric_name,
     )
     best_k = best_metrics_df["k"].value_counts().index[0]
     print(best_metrics_df["k"].value_counts())
     print(f"best_k: {best_k}")
     print(best_metrics_df)
-    best_metrics_mean = best_metrics_df["f1"].mean()
+    best_metrics_mean = best_metrics_df[metric_name].mean()
     print(best_metrics_mean)
 
-    assert best_k == 20, "expected the optimal k to be 20 which corresponds with simulated cluster sizes"
+    if metric_name == "f1":
+        assert best_k == 20, "expected the optimal k to be 20 which corresponds with simulated cluster sizes"
     assert best_metrics_mean > 0.9, "expected the optimal k to have a high f1 concordance metric"
 
     # just ensure this api works
     jac_ctx.compute_network_knn_concordance_metric(
         reference_gene_sets=reference_gene_sets,
         k_values=k_values,
+        metric_name=metric_name,
     )
 
 

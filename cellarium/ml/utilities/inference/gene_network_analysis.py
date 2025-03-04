@@ -1963,7 +1963,7 @@ class ValidationMixin(BaseClassProtocol):
         # mean_metrics_df = pd.concat(mean_metrics_dfs, axis=0)
         metrics_df = pd.concat(metrics_dfs, axis=0, ignore_index=True)
 
-        idx = metrics_df.groupby(["gene"])["f1"].idxmax()
+        idx = metrics_df.groupby(["gene"])[metric_name].idxmax()
         best_metrics_df = metrics_df.iloc[idx]
 
         # choose the resolution with the highest mean metric
