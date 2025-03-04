@@ -54,7 +54,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         #target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
         target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human.pkl',
         #y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
+        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human_sublist.pkl',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
@@ -165,7 +165,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
 
         logits_nc = x_ng @ self.W_gc + self.b_c
         activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-        activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+        #activation_out = self.probability_propagation(activation_out_gpu=activation_out)
         return {"y_logits_nc": logits_nc,"cell_type_probs_nc": activation_out}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
