@@ -1952,7 +1952,12 @@ class ValidationMixin(BaseClassProtocol):
 
         metrics_df = pd.concat(metrics_dfs, axis=0, ignore_index=True)
 
-        idx = metrics_df.groupby(["gene"])[metric_name].idxmax()
+        # find best metric for each gene (breaking ties by choosing larger k)
+        idx = (
+            metrics_df.sort_values(by=["k", metric_name], ascending=[False, False])
+            .groupby(["gene"])[metric_name]
+            .idxmax()
+        )
         best_metrics_df = metrics_df.iloc[idx]
 
         # return the best resolution and the Leiden communities
