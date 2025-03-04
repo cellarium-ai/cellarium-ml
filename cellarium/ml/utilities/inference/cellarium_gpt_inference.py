@@ -41,7 +41,7 @@ def load_gene_info_table(
     gene_info_tsv_path: str,
     included_gene_ids: list[str] | np.ndarray,
 ) -> t.Tuple[pd.DataFrame, dict, dict]:
-    if gene_info_tsv_path.startswith("gs://"):
+    if isinstance(gene_info_tsv_path, str) and gene_info_tsv_path.startswith("gs://"):
         with tempfile.TemporaryDirectory() as tmpdir:
             gene_info_tsv_path_local = os.path.join(tmpdir, "gene_info.tsv")
             gsutil_cp_cmd = f"gsutil cp {gene_info_tsv_path} {gene_info_tsv_path_local}"
