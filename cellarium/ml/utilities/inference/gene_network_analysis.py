@@ -25,6 +25,7 @@ import pymde
 import scanpy as sc
 import scipy.sparse as sp
 import torch
+from joblib import Parallel, delayed
 from scipy.linalg import eigh
 from scipy.stats import linregress, norm
 from skopt import gp_minimize
@@ -1929,14 +1930,12 @@ class ValidationMixin(BaseClassProtocol):
             dataframe with genes and reference gene set metrics
             # (optimal k, optimal neighborhoods, dataframe with genes and reference gene set metrics, mean metric)
         """
-        # all_genes_in_reference_sets = set().union(*reference_gene_sets.values())  # union of all sets
-        # mean_metrics_dfs: list[pd.DataFrame] = []
         metrics_dfs: list[pd.DataFrame] = []
 
         # precompute adjacency matrix once using max k
         a_pp = compute_adjacency_matrix(z_qp=self.z_qp, **self.adjacency_kwargs)  # same kwargs as user invocation
 
-        for k in tqdm(k_values):
+        def _compute_metrics(k: int) -> pd.DataFrame:
             # compute neighbors and metrics
             _, metrics_df = self.knn_and_compute_metrics(
                 a_pp=a_pp,
@@ -1946,44 +1945,15 @@ class ValidationMixin(BaseClassProtocol):
                 gene_naming=gene_naming,
             )
             metrics_df["k"] = k
+            return metrics_df
 
-            # # compute mean metric
-            # mean_metric = self._mean_metric_knn(
-            #     metrics_df=metrics_df,
-            #     metric_name=metric_name,
-            #     all_genes_in_reference_sets=all_genes_in_reference_sets,
-            # )
+        # parallelize with joblib
+        metrics_dfs = Parallel(n_jobs=-1)(delayed(_compute_metrics)(k) for k in k_values)
 
-            # # mean of best matches over all gene neighborhoods
-            # mean_metrics_dfs.append(pd.DataFrame({"k": [k], "mean_of_best_match_metric": [mean_metric]}))
-
-            # store all metrics for later inspection
-            metrics_dfs.append(metrics_df)
-
-        # mean_metrics_df = pd.concat(mean_metrics_dfs, axis=0)
         metrics_df = pd.concat(metrics_dfs, axis=0, ignore_index=True)
 
         idx = metrics_df.groupby(["gene"])[metric_name].idxmax()
         best_metrics_df = metrics_df.iloc[idx]
-
-        # choose the resolution with the highest mean metric
-        # best_k = mean_metrics_df.set_index("k")["mean_of_best_match_metric"].idxmax()
-
-        # # re-compute the kNN at the best resolution (cached) and metrics
-        # best_knn, best_metrics_df = self.knn_and_compute_metrics(
-        #     a_pp=a_pp,
-        #     k=best_k,
-        #     reference_gene_sets=reference_gene_sets,
-        #     metric_name=metric_name,
-        #     gene_naming=gene_naming,
-        # )
-
-        # # compute best mean metric
-        # best_mean_metric = self._mean_metric_knn(
-        #     metrics_df=best_metrics_df,
-        #     metric_name=metric_name,
-        #     all_genes_in_reference_sets=all_genes_in_reference_sets,
-        # )
 
         # return the best resolution and the Leiden communities
         return best_metrics_df
@@ -2022,7 +1992,7 @@ class ValidationMixin(BaseClassProtocol):
         gene_names_p = np.asarray(self.node_names_p) if (gene_naming == "id") else np.asarray(self.prompt_gene_symbols)
         mean_metrics_dfs: list[pd.DataFrame] = []
 
-        for res in resolutions:
+        def _compute_metrics(res: float) -> pd.DataFrame:
             # compute clustering and metrics
             cluster_label_p, metrics_df = self.cluster_and_compute_metrics(
                 resolution=res,
@@ -2041,7 +2011,10 @@ class ValidationMixin(BaseClassProtocol):
             )
 
             # mean of best matches over all clusters in clustering
-            mean_metrics_dfs.append(pd.DataFrame({"resolution": [res], "mean_of_best_match_metric": [mean_metric]}))
+            return pd.DataFrame({"resolution": [res], "mean_of_best_match_metric": [mean_metric]})
+
+        # parallelize with joblib
+        mean_metrics_dfs = Parallel(n_jobs=-1)(delayed(_compute_metrics)(res) for res in resolutions)
 
         mean_metrics_df = pd.concat(mean_metrics_dfs, axis=0)
 
