@@ -159,6 +159,10 @@ class GeneSetRecords:
         collection_df = collection_df.drop(gene_set_names)
         self._reindex()
 
+    def remove_collection(self, collection: str) -> None:
+        self.df = self.df[self.df["collection"] != collection]
+        self._reindex()
+
 
 def gsea(
     df: pd.DataFrame,
