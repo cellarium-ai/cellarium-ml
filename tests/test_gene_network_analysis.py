@@ -95,7 +95,10 @@ def gene_ctx(structured_z_qp, gene_info_tsv_path) -> GeneNetworkAnalysisBase:
 
 @pytest.fixture
 def jac_ctx(structured_z_qp, gene_info_tsv_path) -> JacobianContext:
+    np.random.seed(0)
     response_qp = structured_z_qp  # np.random.randn(large_q, p)
+    marginal_std_q = np.square(np.random.randn(response_qp.shape[0]))
+    marginal_std_p = np.square(np.random.randn(response_qp.shape[1]))
     adata_obs = pd.DataFrame({"total_mrna_umis": [1000.0]})
     jac_ctx = JacobianContext(
         adata_obs=adata_obs,
@@ -105,9 +108,10 @@ def jac_ctx(structured_z_qp, gene_info_tsv_path) -> JacobianContext:
         prompt_var_names=[f"node_{i}" for i in range(response_qp.shape[1])],
         jacobian_qp=response_qp,
         prompt_marginal_mean_p=np.ones(response_qp.shape[1]),
-        prompt_marginal_std_p=np.square(np.random.randn(response_qp.shape[1])),
+        prompt_marginal_std_p=marginal_std_p,
         query_marginal_mean_q=np.ones(response_qp.shape[0]),
-        query_marginal_std_q=np.square(np.random.randn(response_qp.shape[0])),
+        query_marginal_std_q=marginal_std_q,
+        response_normalization_strategy="none",
         min_prompt_gene_tpm=0.0,
         min_query_gene_tpm=0.0,
         feature_max_value=10.0,
@@ -117,7 +121,7 @@ def jac_ctx(structured_z_qp, gene_info_tsv_path) -> JacobianContext:
         n_neighbors=None,
         self_loop=False,
         beta=3.0,
-        scale_by_node_degree=True,
+        scale_by_node_degree=False,
     )
     return jac_ctx
 
@@ -169,34 +173,6 @@ def test_network_analysis_base_with_correlation_provided():
         self_loop=False,
         beta=1.0,
     )
-
-
-def test_gene_network_analysis_base_with_correlation_provided(gene_info_tsv_path):
-    adata_obs = pd.DataFrame({"total_mrna_umis": [1000.0]})
-    gene_ctx = GeneNetworkAnalysisBase(
-        adata_obs=adata_obs,
-        gene_info_tsv_path=gene_info_tsv_path,
-        total_mrna_umis=None,
-        query_var_names=[f"gene_{i}" for i in range(q)],
-        prompt_var_names=[f"gene_{i}" for i in range(q)],
-        response_qp=np.random.randn(q, q),
-        prompt_marginal_mean_p=np.abs(np.random.randn(q)),
-        prompt_marginal_std_p=np.square(np.random.randn(q)),
-        query_marginal_mean_q=np.abs(np.random.randn(q)),
-        query_marginal_std_q=np.square(np.random.randn(q)),
-    )
-
-    gene_ctx.reprocess(
-        response_normalization_strategy="jacobian_to_correlation",
-        feature_normalization_strategy="none",
-    )
-    gene_ctx.compute_adjacency_matrix(adjacency_strategy="positive_correlation", beta=1.0)
-
-    gene_ctx.reprocess(
-        response_normalization_strategy="correlation",
-        feature_normalization_strategy="none",
-    )
-    gene_ctx.compute_adjacency_matrix(adjacency_strategy="positive_correlation", beta=1.0)
 
 
 @pytest.mark.parametrize("optimization_strategy", ["gridsearch", "bayesopt"])
@@ -251,6 +227,66 @@ def test_compute_network_adjacency_concordance_metric(jac_ctx):
     print(df)
     print(concordance)
     assert ~np.isnan(concordance), "expected the adjacency concordance metric to be a valid number"
+
+
+def test_compute_network_adjacency_auc_metric(jac_ctx):
+    reference_gene_sets = {
+        "set1": {f"node_{i}" for i in range(large_p // 4)},
+        "set2": {f"node_{i + large_p // 4}" for i in range(large_p // 4)},
+        "set3": {f"node_{i + 2 * large_p // 4}" for i in range(large_p // 4)},
+        "set4": {f"node_{i + 3 * large_p // 4}" for i in range(large_p // 4)},
+    }
+    auc, df = jac_ctx.compute_network_adjacency_auc_metric(
+        reference_gene_sets=reference_gene_sets,
+        gene_naming="symbol",
+    )
+    assert ~np.isnan(auc), "expected the adjacency concordance metric to be a valid number"
+    assert df["true_positive_rate"].min() >= 0.0
+    assert df["true_positive_rate"].max() <= 1.0
+    assert df["false_positive_rate"].min() >= 0.0
+    assert df["false_positive_rate"].max() <= 1.0
+    assert auc >= 0.0
+    assert auc <= 1.0
+
+    assert auc > 0.95, "expected the adjacency auc metric to be high"
+
+    # run it again
+    auc2, df = jac_ctx.compute_network_adjacency_auc_metric(
+        reference_gene_sets=reference_gene_sets,
+        gene_naming="symbol",
+    )
+    assert auc2 == auc, "non-deterministic behavior in adjacency auc metric"
+
+
+def test_compute_network_adjacency_auc_metric_per_gene(jac_ctx):
+    reference_gene_sets = {
+        "set1": {f"node_{i}" for i in range(large_p // 4)},
+        "set2": {f"node_{i + large_p // 4}" for i in range(large_p // 4)},
+        "set3": {f"node_{i + 2 * large_p // 4}" for i in range(large_p // 4)},
+        "set4": {f"node_{i + 3 * large_p // 4}" for i in range(large_p // 4)},
+    }
+    auc_p, tpr_pp, fpr_pp = jac_ctx.compute_network_adjacency_auc_metric_per_gene(
+        reference_gene_sets=reference_gene_sets,
+        gene_naming="symbol",
+    )
+    print("computed AUCs per gene:")
+    print(auc_p)
+    assert (~np.isnan(auc_p)).any(), "expected the adjacency concordance metrics to be valid numbers"
+    assert tpr_pp.min() >= 0.0
+    assert tpr_pp.max() <= 1.0
+    assert fpr_pp.min() >= 0.0
+    assert fpr_pp.max() <= 1.0
+    assert (auc_p >= 0.0).all()
+    assert (auc_p <= 1.0).all()
+
+    assert auc_p.mean() > 0.95, "expected the mean per-gene adjacency auc metric to be high"
+
+    # run it again
+    auc2_p, _, _ = jac_ctx.compute_network_adjacency_auc_metric_per_gene(
+        reference_gene_sets=reference_gene_sets,
+        gene_naming="symbol",
+    )
+    assert (auc2_p == auc_p).all(), "non-deterministic behavior in per-gene adjacency auc metric"
 
 
 @pytest.mark.parametrize("metric_name", ["f1", "precision"])
@@ -358,7 +394,7 @@ def test_empirical_correlation_context(gene_info_tsv_path):
         gene_info_tsv_path=gene_info_tsv_path,
         total_mrna_umis=None,
         var_names_g=[f"gene_{i}" for i in range(20)],
-        correlation_gg=np.random.rand(20, 20),
+        covariance_gg=np.random.rand(20, 20),
         marginal_mean_g=np.abs(np.random.randn(20)),
         marginal_std_g=np.square(np.random.randn(20)),
     )

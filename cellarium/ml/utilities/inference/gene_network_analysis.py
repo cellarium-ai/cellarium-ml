@@ -23,9 +23,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pymde
 import scanpy as sc
-import scipy.sparse as sp
 import torch
 from joblib import Parallel, delayed
+from scipy import sparse as sp
 from scipy.linalg import eigh
 from scipy.stats import linregress, norm
 from skopt import gp_minimize
@@ -53,7 +53,7 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 # define type of allowed normalization strategies (this is copied in many places)
-response_normalization_strategies = t.Literal["mean", "std", "none", "jacobian_to_correlation", "correlation", "log1p"]
+response_normalization_strategies = t.Literal["mean", "std", "none", "log1p"]
 
 
 def quantile_normalize_select(
@@ -196,10 +196,8 @@ def process_response_matrix(
             - "mean": normalize by marginal mean
             - "std": normalize by marginal standard deviation
             - "none": no normalization
-            - "jacobian_to_correlation": convert a jacobian to correlation by std scaling (same as std)
-                but additionally symmetrize the matrix. assumes input is a square matrix
-            - "correlation": no normalization, assume matrix_qp is already a correlation matrix
-            - "log1p": normalization of a jacobian / linresponse to match empirical correlation
+            - "log1p": normalization of a raw jacobian to match empirical
+                jacobian computed from log1p normalized data
         feature_normalization_strategy: feature normalization strategy
             - "l2": L2 normalization per query feature
             - "z_score": z-score per feature
@@ -228,66 +226,66 @@ def process_response_matrix(
     query_marginal_mean_q = analysis_data.query_marginal_mean_q
     query_marginal_std_q = analysis_data.query_marginal_std_q
 
-    if response_normalization_strategy == "correlation":
-        assert len(query_var_names) == len(prompt_var_names)
-        assert all(q == p for q, p in zip(query_var_names, prompt_var_names))
-        assert min_prompt_gene_tpm == min_query_gene_tpm, (
-            "TPM filtering must be the same for prompt and query genes when using 'correlation' normalization"
-        )
-        assert query_response_amp_min_pct is None, (
-            "Query response amplitude filtering is not supported when using 'correlation' normalization"
-        )
-        assert query_hv_top_k is None, (
-            "Query highly-variable filtering is not supported when using 'correlation' normalization"
-        )
-        assert feature_normalization_strategy == "none", (
-            "Set feature_normalization_strategy='none' when using 'correlation' normalization"
-        )
-        z_qp = response_qp
+    # if response_normalization_strategy == "correlation":
+    #     assert len(query_var_names) == len(prompt_var_names)
+    #     assert all(q == p for q, p in zip(query_var_names, prompt_var_names))
+    #     assert min_prompt_gene_tpm == min_query_gene_tpm, (
+    #         "TPM filtering must be the same for prompt and query genes when using 'correlation' normalization"
+    #     )
+    #     assert query_response_amp_min_pct is None, (
+    #         "Query response amplitude filtering is not supported when using 'correlation' normalization"
+    #     )
+    #     assert query_hv_top_k is None, (
+    #         "Query highly-variable filtering is not supported when using 'correlation' normalization"
+    #     )
+    #     assert feature_normalization_strategy == "none", (
+    #         "Set feature_normalization_strategy='none' when using 'correlation' normalization"
+    #     )
+    #     z_qp = response_qp
+    # else:
+    if response_normalization_strategy == "mean":
+        z_p = prompt_marginal_mean_p
+        z_q = query_marginal_mean_q
+    elif response_normalization_strategy == "std":
+        z_p = prompt_marginal_std_p
+        z_q = query_marginal_std_q
+    elif response_normalization_strategy == "none":
+        z_p = np.ones_like(prompt_marginal_mean_p)
+        z_q = np.ones_like(query_marginal_mean_q)
+    # elif response_normalization_strategy == "jacobian_to_correlation":
+    #     # rho_qp = J_qp * std_p / std_q
+    #     assert len(query_var_names) == len(prompt_var_names), (
+    #         "respsonse_qp must be a square matrix when using 'jacobian_to_correlation' normalization"
+    #     )
+    #     assert all(q == p for q, p in zip(query_var_names, prompt_var_names))
+    #     assert min_prompt_gene_tpm == min_query_gene_tpm, (
+    #         "TPM filtering must be the same for prompt and query genes when "
+    #         "using 'jacobian_to_correlation' normalization"
+    #     )
+    #     assert query_response_amp_min_pct is None, (
+    #         "Query response amplitude filtering is not supported when using 'jacobian_to_correlation' normalization"
+    #     )
+    #     assert query_hv_top_k is None, (
+    #         "Query highly-variable filtering is not supported when using 'jacobian_to_correlation' normalization"
+    #     )
+    #     assert feature_normalization_strategy == "none", (
+    #         "Set feature_normalization_strategy='none' when using 'jacobian_to_correlation' normalization"
+    #     )
+    #     z_p = prompt_marginal_std_p
+    #     z_q = query_marginal_std_q
+    elif response_normalization_strategy == "log1p":
+        prompt_lib_size = prompt_marginal_mean_p.sum()
+        query_lib_size = query_marginal_mean_q.sum()
+        z_p = 1 + prompt_marginal_mean_p * target_lib_size / prompt_lib_size
+        z_q = 1 + query_marginal_mean_q * target_lib_size / query_lib_size
     else:
-        if response_normalization_strategy == "mean":
-            z_p = prompt_marginal_mean_p
-            z_q = query_marginal_mean_q
-        elif response_normalization_strategy == "std":
-            z_p = prompt_marginal_std_p
-            z_q = query_marginal_std_q
-        elif response_normalization_strategy == "none":
-            z_p = np.ones_like(prompt_marginal_mean_p)
-            z_q = np.ones_like(query_marginal_mean_q)
-        elif response_normalization_strategy == "jacobian_to_correlation":
-            # rho_qp = J_qp * std_p / std_q
-            assert len(query_var_names) == len(prompt_var_names), (
-                "respsonse_qp must be a square matrix when using 'jacobian_to_correlation' normalization"
-            )
-            assert all(q == p for q, p in zip(query_var_names, prompt_var_names))
-            assert min_prompt_gene_tpm == min_query_gene_tpm, (
-                "TPM filtering must be the same for prompt and query genes when "
-                "using 'jacobian_to_correlation' normalization"
-            )
-            assert query_response_amp_min_pct is None, (
-                "Query response amplitude filtering is not supported when using 'jacobian_to_correlation' normalization"
-            )
-            assert query_hv_top_k is None, (
-                "Query highly-variable filtering is not supported when using 'jacobian_to_correlation' normalization"
-            )
-            assert feature_normalization_strategy == "none", (
-                "Set feature_normalization_strategy='none' when using 'jacobian_to_correlation' normalization"
-            )
-            z_p = prompt_marginal_std_p
-            z_q = query_marginal_std_q
-        elif response_normalization_strategy == "log1p":
-            prompt_lib_size = prompt_marginal_mean_p.sum()
-            query_lib_size = query_marginal_mean_q.sum()
-            z_p = 1 + prompt_marginal_mean_p * target_lib_size / prompt_lib_size
-            z_q = 1 + query_marginal_mean_q * target_lib_size / query_lib_size
-        else:
-            raise ValueError("Invalid Jacobian normalization strategy")
+        raise ValueError("Invalid Jacobian normalization strategy")
 
-        # linear proportional activation
-        z_qp = response_qp * (z_p[None, :] + norm_pseudo_count) / (z_q[:, None] + norm_pseudo_count)
+    # linear proportional activation
+    z_qp = response_qp * (z_p[None, :] + norm_pseudo_count) / (z_q[:, None] + norm_pseudo_count)
 
-        if response_normalization_strategy == "jacobian_to_correlation":
-            z_qp = np.clip(0.5 * (z_qp + z_qp.T), -1, 1)
+    # if response_normalization_strategy == "jacobian_to_correlation":
+    #     z_qp = np.clip(0.5 * (z_qp + z_qp.T), -1, 1)
 
     assert isinstance(z_qp, np.ndarray)
 
@@ -1301,12 +1299,14 @@ class ValidationMixin(BaseClassProtocol):
         reference_gene_sets: dict[str, set[str]],
         reference_set_exclusion_fraction: float = 0.25,
         min_set_size: int = 3,
-        min_adjacency: float = 1e-5,
+        min_adjacency: float = 0,
+        adjacency_exclusion_fraction: float | None = None,
+        thin_output_to_n: int | None = 10_000,
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         verbose: bool = False,
     ) -> tuple[float, pd.DataFrame]:
         """
-        Compute a metric for the overall concordance between the concordance matrix in
+        Compute a metric for the overall concordance between the adjacency matrix in
         :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and reference gene sets defined by a dictionary.
         The metric is based on the adjacency matrix and the reference gene sets, and is computed
         by calculating an AUC by varying the threshold for the adjacency matrix and considering
@@ -1321,19 +1321,36 @@ class ValidationMixin(BaseClassProtocol):
                 are excluded from the concordance metric
             min_set_size: minimum size of a gene set present in the graph to be included in the concordance metric
             min_adjacency: act as though all adjacencies below this value are zero
+            adjacency_exclusion_fraction: exclude this fraction of smallest adjacency value entries
+            thin_output_to_n: maximum number of data points to include in the output ROC table
             gene_naming: whether to use gene IDs or gene symbols
             verbose: whether to print warnings for excluded gene sets
 
         Returns:
-            concordance AUC, DataFrame of thresholds, true positive rate, false positive rate
+            concordance AUC, DataFrame of true positive rate and false positive rate
         """
-        # adjacency matrix without diagonal elements and with small values set to zero
-        a_qq = self.adjacency_matrix
-        assert isinstance(a_qq, np.ndarray)
-        q = a_qq.shape[0]
-        zero_diag_a_qq = a_qq * (1.0 - np.eye(q))
-        mask_qq = zero_diag_a_qq > min_adjacency
-        zero_diag_a_qq = zero_diag_a_qq * mask_qq  # helps sparse calcs below
+        # adjacency matrix upper triangle with small values set to zero
+        assert isinstance(self.adjacency_matrix, np.ndarray)
+        a_pp = np.triu(self.adjacency_matrix, k=1)
+        if adjacency_exclusion_fraction is not None:
+            min_adjacency = max(
+                min_adjacency,
+                np.percentile(self.adjacency_matrix, 100 * adjacency_exclusion_fraction),
+            )
+        mask_pp = a_pp > min_adjacency
+        a_pp = a_pp * mask_pp
+
+        # limit to genes that appear in any reference gene set
+        genes_in_reference_sets = set.union(*reference_gene_sets.values())
+        gene_ind_lookup = (
+            self.prompt_gene_symbol_to_idx_map if gene_naming == "symbol" else self.prompt_gene_id_to_idx_map
+        )
+        gene_inds_in_reference_sets = sorted(
+            [gene_ind_lookup[g] for g in genes_in_reference_sets if g in gene_ind_lookup.keys()]
+        )  # sorting is critical otherwise gene order gets randomized
+        if len(gene_inds_in_reference_sets) == 0:
+            raise ValueError("No genes are in reference gene sets: is gene_naming correct?")
+        a_pp = a_pp[np.ix_(gene_inds_in_reference_sets, gene_inds_in_reference_sets)]
 
         # decide which gene sets to include and convert to indices
         final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
@@ -1365,13 +1382,13 @@ class ValidationMixin(BaseClassProtocol):
         edges_in_reference_df["reference"] = 1
 
         # set up dataframe used for ROC curve
-        edges_in_adjacency_coo = sp.coo_matrix(zero_diag_a_qq)
-        edges_in_adjacency_coo.eliminate_zeros()
+        row_indices, col_indices = np.triu_indices(a_pp.shape[0], k=1)
+        adjacency_values = a_pp[row_indices, col_indices]
         edges_in_adjacency_df = pd.DataFrame(
             {
-                "row": edges_in_adjacency_coo.row,
-                "col": edges_in_adjacency_coo.col,
-                "adjacency": edges_in_adjacency_coo.data,
+                "row": row_indices,
+                "col": col_indices,
+                "adjacency": adjacency_values,
             }
         )
         edges_in_adjacency_df = pd.merge(
@@ -1394,11 +1411,127 @@ class ValidationMixin(BaseClassProtocol):
         edges_in_adjacency_df["false_positive_rate"] = (
             edges_in_adjacency_df["false_positives"] / (1 - edges_in_adjacency_df["reference"]).sum()
         )
+        if (thin_output_to_n is not None) and (len(edges_in_adjacency_df) > thin_output_to_n):
+            step = len(edges_in_adjacency_df) // thin_output_to_n
+            edges_in_adjacency_df = edges_in_adjacency_df.iloc[::step]
 
         # compute AUC
         auc = np.trapz(edges_in_adjacency_df["true_positive_rate"], edges_in_adjacency_df["false_positive_rate"])
 
-        return auc, edges_in_adjacency_df
+        return auc, edges_in_adjacency_df[["true_positive_rate", "false_positive_rate"]]
+
+    def compute_network_adjacency_auc_metric_per_gene(
+        self,
+        reference_gene_sets: dict[str, set[str]],
+        reference_set_exclusion_fraction: float = 0.25,
+        min_set_size: int = 3,
+        min_adjacency: float = 0,
+        adjacency_exclusion_fraction: float | None = 0.05,
+        thin_output_to_n: int | None = 10_000,
+        gene_naming: t.Literal["id", "symbol"] = "symbol",
+        verbose: bool = False,
+    ) -> tuple[float, np.ndarray, np.ndarray]:
+        """
+        Compute a per-gene metric for the overall concordance between the adjacency matrix in
+        :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and reference gene sets defined by a dictionary.
+        The metric is based on the adjacency matrix and the reference gene sets, and is computed
+        by calculating an AUC by varying the threshold for the adjacency matrix and considering
+        true positives as the number of edges (above the threshold) that are in a reference set,
+        and false positives as the number of edges that are not in a reference set. The adjacency
+        can be considered to be the metric which prioritizes candidate edges, and the union of
+        reference gene sets constitutes ground truth.
+
+        Args:
+            reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
+            reference_set_exclusion_fraction: gene sets with fewer than this fraction of genes present in the graph
+                are excluded from the concordance metric
+            min_set_size: minimum size of a gene set present in the graph to be included in the concordance metric
+            min_adjacency: act as though all adjacencies below this value are zero
+            adjacency_exclusion_fraction: exclude this fraction of smallest adjacency value entries
+            thin_output_to_n: maximum number of data points to include in the output ROC table
+            gene_naming: whether to use gene IDs or gene symbols
+            verbose: whether to print warnings for excluded gene sets
+
+        Returns:
+            concordance AUCs, TPR matrix where each row is a gene, FPR matrix where each row is a gene
+        """
+        # full adjacency matrix with small values set to zero
+        assert isinstance(self.adjacency_matrix, np.ndarray)
+        a_pp = self.adjacency_matrix.copy()
+        if adjacency_exclusion_fraction is not None:
+            min_adjacency = max(
+                min_adjacency,
+                np.percentile(self.adjacency_matrix, 100 * adjacency_exclusion_fraction),
+            )
+        mask_pp = a_pp > min_adjacency
+        a_pp = a_pp * mask_pp
+
+        # limit to genes that appear in any reference gene set
+        genes_in_reference_sets = set.union(*reference_gene_sets.values())
+        gene_ind_lookup = (
+            self.prompt_gene_symbol_to_idx_map if gene_naming == "symbol" else self.prompt_gene_id_to_idx_map
+        )
+        gene_inds_in_reference_sets = sorted(
+            [gene_ind_lookup[g] for g in genes_in_reference_sets if g in gene_ind_lookup.keys()]
+        )  # sorting is critical otherwise gene order gets randomized
+        if len(gene_inds_in_reference_sets) == 0:
+            raise ValueError("No genes are in reference gene sets: is gene_naming correct?")
+        a_pp = a_pp[np.ix_(gene_inds_in_reference_sets, gene_inds_in_reference_sets)]
+
+        # decide which gene sets to include and convert to indices
+        final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
+            reference_gene_sets=reference_gene_sets,
+            gene_naming=gene_naming,
+            reference_set_exclusion_fraction=reference_set_exclusion_fraction,
+            min_set_size=min_set_size,
+            verbose=False,
+        )
+        if verbose:
+            logger.info(f"{len(final_ref_gene_sets_as_inds)} gene sets meet criteria")
+
+        # compute ground truth for edge evidence in any reference gene set
+        row: list[int] = []
+        col: list[int] = []
+        for _, gene_set_inds in final_ref_gene_sets_as_inds.items():
+            # all pairs of inds in the gene set
+            gene_set_pairs = list(itertools.combinations(gene_set_inds, 2))
+            # convert list of tuples to row list and column list, and append
+            row_inds, col_inds = zip(*gene_set_pairs)
+            row.extend(row_inds)
+            col.extend(col_inds)
+        edges_in_reference_csr = sp.csr_matrix(
+            (np.ones_like(row, dtype=np.bool_), (row, col)), shape=(a_pp.shape[0], a_pp.shape[0])
+        )
+        edges_in_reference_pp = edges_in_reference_csr.toarray()
+        edges_in_reference_pp = edges_in_reference_pp + edges_in_reference_pp.T  # not just upper triangle
+
+        # transform the adjacency matrix to per-gene rank orderings of neighbors
+        gene_ranks_pp = np.argsort(a_pp, axis=1)[:, ::-1]
+
+        # sort each row of edges_in_reference_pp by the order in that row of gene_ranks_pp
+        row_idx = np.arange(edges_in_reference_pp.shape[0])[:, None]
+        sorted_tp_pp = edges_in_reference_pp[row_idx, gene_ranks_pp]
+
+        # compute tpr and fpr per row (gene)
+        # tpr = tp / (tp + fn) = tp / total positives
+        # fpr = fp / (fp + tn) = fp / total negatives
+        true_positives_pp = sorted_tp_pp.cumsum(axis=1)
+        false_positives_pp = np.cumsum(1 - sorted_tp_pp, axis=1)
+        total_positives_p = sorted_tp_pp.sum(axis=1)
+        total_negatives_p = (1 - sorted_tp_pp).sum(axis=1)
+        true_positive_rate_pp = true_positives_pp / total_positives_p[:, None]
+        false_positive_rate_pp = false_positives_pp / total_negatives_p[:, None]
+
+        # thin the output to n data points
+        if (thin_output_to_n is not None) and (true_positive_rate_pp.shape[1] > thin_output_to_n):
+            step = true_positive_rate_pp.shape[1] // thin_output_to_n
+            true_positive_rate_pp = true_positive_rate_pp[:, ::step]
+            false_positive_rate_pp = false_positive_rate_pp[:, ::step]
+
+        # compute AUC per gene
+        auc_p = np.trapz(true_positive_rate_pp, false_positive_rate_pp, axis=1)
+
+        return auc_p, true_positive_rate_pp, false_positive_rate_pp
 
     @staticmethod
     def plot_roc(
@@ -2265,14 +2398,124 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             verbose=verbose,
         )
 
+    def __str__(self) -> str:
+        return (
+            f"JacobianContext({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
+            f"n_umi={self.total_mrna_umis:.2f})"
+        )
+
+    __repr__ = __str__
+
+
+class LinearResponseContext(GeneNetworkAnalysisBase, ValidationMixin):
+    def __init__(
+        self,
+        adata_obs: pd.DataFrame,
+        gene_info_tsv_path: str,
+        total_mrna_umis: float | None,
+        query_var_names: list[str],
+        prompt_var_names: list[str],
+        jacobian_qp: np.ndarray,
+        prompt_marginal_mean_p: np.ndarray,
+        prompt_marginal_std_p: np.ndarray,
+        query_marginal_mean_q: np.ndarray,
+        query_marginal_std_q: np.ndarray,
+        metadata: dict[str, str] = {},
+        response_normalization_strategy: response_normalization_strategies = "log1p",
+        feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+        min_prompt_gene_tpm: float = 0.0,
+        min_query_gene_tpm: float = 0.0,
+        query_response_amp_min_pct: float | None = None,
+        feature_max_value: float | None = None,
+        norm_pseudo_count: float = 0,
+        query_hv_top_k: int | None = None,
+        query_hv_n_bins: int | None = 50,
+        query_hv_min_x: float | None = 1e-2,
+        query_hv_max_x: float | None = np.inf,
+        z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
+        eps: float = 1e-8,
+        verbose: bool = True,
+    ):
+        self.metadata = metadata
+
+        super().__init__(
+            adata_obs=adata_obs,
+            gene_info_tsv_path=gene_info_tsv_path,
+            total_mrna_umis=total_mrna_umis,
+            query_var_names=query_var_names,
+            prompt_var_names=prompt_var_names,
+            response_qp=jacobian_qp,
+            prompt_marginal_mean_p=prompt_marginal_mean_p,
+            prompt_marginal_std_p=prompt_marginal_std_p,
+            query_marginal_mean_q=query_marginal_mean_q,
+            query_marginal_std_q=query_marginal_std_q,
+            response_normalization_strategy=response_normalization_strategy,
+            feature_normalization_strategy=feature_normalization_strategy,
+            min_prompt_gene_tpm=min_prompt_gene_tpm,
+            min_query_gene_tpm=min_query_gene_tpm,
+            query_response_amp_min_pct=query_response_amp_min_pct,
+            feature_max_value=feature_max_value,
+            norm_pseudo_count=norm_pseudo_count,
+            query_hv_top_k=query_hv_top_k,
+            query_hv_n_bins=query_hv_n_bins,
+            query_hv_min_x=query_hv_min_x,
+            query_hv_max_x=query_hv_max_x,
+            z_trans_func=z_trans_func,
+            eps=eps,
+            verbose=verbose,
+        )
+
     @staticmethod
     def from_linear_response_pkl(
         linear_response_path: str,
         adata_obs: pd.DataFrame,
         gene_info_tsv_path: str,
         min_r_squared: float = 0.25,
+        marginal_mean_g: pd.Series | None = None,
+        marginal_std_g: pd.Series | None = None,
+        response_normalization_strategy: response_normalization_strategies = "log1p",
+        feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
+        min_prompt_gene_tpm: float = 0.1,
+        min_query_gene_tpm: float = 0.1,
+        query_response_amp_min_pct: float | None = None,
+        feature_max_value: float | None = None,
+        norm_pseudo_count: float = 0,
+        query_hv_top_k: int | None = None,
+        query_hv_n_bins: int | None = 50,
+        query_hv_min_x: float | None = 1e-2,
+        query_hv_max_x: float | None = np.inf,
+        z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
+        eps: float = 1e-8,
         verbose: bool = True,
-    ) -> "JacobianContext":
+    ) -> "LinearResponseContext":
+        """
+        Load a linear response pickle file and create a LinearResponseContext object.
+
+        Args:
+            linear_response_path: path to linear response pickle file
+            adata_obs: adata.obs dataframe
+            gene_info_tsv_path: path to gene info tsv
+            min_r_squared: minimum r squared value to consider
+            marginal_mean_g: marginal mean of genes (if not given, defaults to model marginals from pkl)
+            marginal_std_g: marginal std of genes (if not given, defaults to model marginals from pkl)
+            response_normalization_strategy: response normalization strategy
+            feature_normalization_strategy: feature normalization strategy
+            min_prompt_gene_tpm: minimum prompt gene TPM
+            min_query_gene_tpm: minimum query gene TPM
+            query_response_amp_min_pct: minimum query response amplitude percentage
+            feature_max_value: maximum feature value
+            norm_pseudo_count: normalization pseudo count
+            query_hv_top_k: query high variance top k
+            query_hv_n_bins: query high variance number of bins
+            query_hv_min_x: query high variance minimum x
+            query_hv_max_x: query high variance maximum x
+            z_trans_func: z transform function
+            eps: epsilon value
+            verbose: whether to print verbose output
+
+        Returns:
+            LinearResponseContext object
+        """
         # open file
         if linear_response_path.startswith("gs://"):
             with tempfile.TemporaryDirectory() as tempdir:
@@ -2284,31 +2527,57 @@ class JacobianContext(GeneNetworkAnalysisBase, ValidationMixin):
             with open(linear_response_path, "rb") as f:
                 linear_response_dict = pickle.load(f)
 
-        response_qp = linear_response_dict["slope_qp"].copy()
-        response_qp[linear_response_dict["r_squared_qp"] < min_r_squared] = 0.0
+        jacobian_qp = linear_response_dict["slope_qp"].copy()
+        jacobian_qp[linear_response_dict["r_squared_qp"] < min_r_squared] = 0.0
 
         # note: prompt and query genes are the same in these experiments
         var_names = linear_response_dict["query_gene_ids"].tolist()
-        marginal_mean_g = linear_response_dict["gene_marginal_mean_q"]
-        marginal_std_g = linear_response_dict["gene_marginal_std_q"]
+        if marginal_mean_g is None:
+            marginal_mean_g = linear_response_dict["gene_marginal_mean_q"]
+        else:
+            try:
+                marginal_mean_g = marginal_mean_g.loc[var_names].values
+            except Exception as e:
+                logger.warning(
+                    f"marginal_mean_g must be a pandas Series with index like: {var_names[:3]}"
+                    f"\nindex = {marginal_mean_g.index[:3]}"
+                )
+                raise e
+        if marginal_std_g is None:
+            marginal_std_g = linear_response_dict["gene_marginal_std_q"]
+        else:
+            marginal_std_g = marginal_std_g.loc[var_names].values
 
-        return JacobianContext(
+        return LinearResponseContext(
             adata_obs=adata_obs,
             gene_info_tsv_path=gene_info_tsv_path,
-            jacobian_point="linear_response",
             query_var_names=var_names,
             prompt_var_names=var_names,
-            jacobian_qp=response_qp,
+            total_mrna_umis=adata_obs["total_mrna_umis"].mean(),
+            jacobian_qp=jacobian_qp,
             prompt_marginal_mean_p=marginal_mean_g,
             prompt_marginal_std_p=marginal_std_g,
             query_marginal_mean_q=marginal_mean_g,
             query_marginal_std_q=marginal_std_g,
+            response_normalization_strategy=response_normalization_strategy,
+            feature_normalization_strategy=feature_normalization_strategy,
+            min_prompt_gene_tpm=min_prompt_gene_tpm,
+            min_query_gene_tpm=min_query_gene_tpm,
+            query_response_amp_min_pct=query_response_amp_min_pct,
+            feature_max_value=feature_max_value,
+            norm_pseudo_count=norm_pseudo_count,
+            query_hv_top_k=query_hv_top_k,
+            query_hv_n_bins=query_hv_n_bins,
+            query_hv_min_x=query_hv_min_x,
+            query_hv_max_x=query_hv_max_x,
+            z_trans_func=z_trans_func,
+            eps=eps,
             verbose=verbose,
         )
 
     def __str__(self) -> str:
         return (
-            f"JacobianContext({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
+            f"LinearResponseContext({self.cell_type}, {self.tissue}, {self.disease}, {self.development_stage}, "
             f"n_umi={self.total_mrna_umis:.2f})"
         )
 
@@ -2321,17 +2590,17 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         gene_info_tsv_path: str,
         total_mrna_umis: float | None,
         var_names_g: list[str],
-        correlation_gg: np.ndarray,
+        covariance_gg: np.ndarray,
         marginal_mean_g: np.ndarray,
         marginal_std_g: np.ndarray,
         metadata: dict[str, str] = {},
-        response_normalization_strategy: response_normalization_strategies = "mean",
+        response_normalization_strategy: response_normalization_strategies = "none",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
         min_prompt_gene_tpm: float = 0.0,
         min_query_gene_tpm: float = 0.0,
         query_response_amp_min_pct: float | None = None,
         feature_max_value: float | None = None,
-        norm_pseudo_count: float = 1e-3,
+        norm_pseudo_count: float = 0,
         query_hv_top_k: int | None = None,
         query_hv_n_bins: int | None = 50,
         query_hv_min_x: float | None = 1e-2,
@@ -2342,13 +2611,16 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
     ):
         self.metadata = metadata
 
+        # the conversion from covariance to jacobian
+        jacobian_qp = covariance_gg / marginal_std_g[None, :]
+
         super().__init__(
             adata_obs=None,
             gene_info_tsv_path=gene_info_tsv_path,
             total_mrna_umis=total_mrna_umis,
             query_var_names=var_names_g,
             prompt_var_names=var_names_g,
-            response_qp=correlation_gg,
+            response_qp=jacobian_qp,
             prompt_marginal_mean_p=marginal_mean_g,
             prompt_marginal_std_p=marginal_std_g,
             query_marginal_mean_q=marginal_mean_g,
@@ -2374,15 +2646,15 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         ckpt_path: str,
         gene_info_tsv_path: str,
         total_mrna_umis: float | None,
-        device: torch.device | str,
+        device: torch.device | str = "cpu",
         metadata: dict[str, str] = {},
-        response_normalization_strategy: response_normalization_strategies = "mean",
+        response_normalization_strategy: response_normalization_strategies = "none",
         feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
-        min_prompt_gene_tpm: float = 0.0,
-        min_query_gene_tpm: float = 0.0,
+        min_prompt_gene_tpm: float = 0.1,
+        min_query_gene_tpm: float = 0.1,
         query_response_amp_min_pct: float | None = None,
         feature_max_value: float | None = None,
-        norm_pseudo_count: float = 1e-3,
+        norm_pseudo_count: float = 0,
         query_hv_top_k: int | None = None,
         query_hv_n_bins: int | None = 50,
         query_hv_min_x: float | None = 1e-2,
@@ -2392,15 +2664,14 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         verbose: bool = True,
     ) -> "EmpiricalCorrelationContext":
         module = CellariumModule.load_from_checkpoint(checkpoint_path=ckpt_path, map_location=device)
-        model = module.model
 
         return EmpiricalCorrelationContext(
             gene_info_tsv_path=gene_info_tsv_path,
             total_mrna_umis=total_mrna_umis,
-            var_names_g=model.var_names_g.tolist(),
-            correlation_gg=model.correlation_gg.cpu().numpy(),
-            marginal_mean_g=model.mean_g.cpu().numpy(),
-            marginal_std_g=model.std_g.cpu().numpy(),
+            var_names_g=module.model.var_names_g.tolist(),
+            covariance_gg=module.model.covariance_gg.cpu().numpy(),
+            marginal_mean_g=module.model.mean_g.cpu().numpy(),
+            marginal_std_g=module.model.std_g.cpu().numpy(),
             metadata=metadata,
             response_normalization_strategy=response_normalization_strategy,
             feature_normalization_strategy=feature_normalization_strategy,
