@@ -2658,7 +2658,7 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         self.metadata = metadata
 
         # the conversion from covariance to jacobian
-        jacobian_qp = covariance_gg / marginal_std_g[None, :]
+        jacobian_qp = covariance_gg / (np.diag(covariance_gg)[None, :] + 1e-10)
 
         super().__init__(
             adata_obs=None,
