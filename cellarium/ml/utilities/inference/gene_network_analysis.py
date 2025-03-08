@@ -2714,7 +2714,7 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
             with tempfile.TemporaryDirectory() as tempdir:
                 local_path = os.path.join(tempdir, "local.ckpt")
                 os.system(f"gcloud storage cp {ckpt_path} {local_path}")
-                module = CellariumModule.load_from_checkpoint(checkpoint_path=ckpt_path, map_location=device)
+                module = CellariumModule.load_from_checkpoint(checkpoint_path=local_path, map_location=device)
         else:
             module = CellariumModule.load_from_checkpoint(checkpoint_path=ckpt_path, map_location=device)
 

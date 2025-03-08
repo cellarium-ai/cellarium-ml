@@ -14,7 +14,7 @@ from cellarium.ml.utilities.inference.gene_network_analysis import EmpiricalCorr
 from cellarium.ml.utilities.inference.gene_set_utils import GeneSetRecords
 
 DEVICE = "cpu"
-output_dir = "/home/sfleming/data/linear_response_metrics"
+output_dir = "/home/sfleming/data/linear_response_metrics2"
 os.system(f"mkdir -p {output_dir}")
 
 # gene_info_tsv_path = "gs://cellarium-scratch/mb-ml-dev-vm/gene_info/gene_info.tsv"
@@ -127,7 +127,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # go through each cell type
 for metacell_index in adata.obs[adata.obs["cell_type"].isin(selected_cell_types)].index:
     cell_type = adata.obs.loc[metacell_index, "cell_type"]
-    tissue = adata.obs.loc[metacell_index, "tissue_coarse"]
+    tissue = adata.obs.loc[metacell_index, "tissue"]
 
     # load empirical correlation model
     trained_model_path_str = (
@@ -155,19 +155,16 @@ for metacell_index in adata.obs[adata.obs["cell_type"].isin(selected_cell_types)
     # download the checkpoint and load it
     print(f"Processing empirical__cell_{metacell_index}", flush=True)
     print(adata.obs.iloc[int(metacell_index)])
-    with tempfile.TemporaryDirectory() as tmpdir:
-        trained_model_tmp_path = os.path.join(tmpdir, os.path.basename(trained_model_path))
-        os.system(f"gsutil cp {trained_model_path} {trained_model_tmp_path}")
-        empirical_ctx = EmpiricalCorrelationContext.from_trained_model(
-            ckpt_path=trained_model_tmp_path,
-            gene_info_tsv_path=gene_info_tsv_path,
-            total_mrna_umis=adata.obs.iloc[[metacell_index]]["total_mrna_umis"].mean(),
-            device="cpu",
-            response_normalization_strategy="none",
-            feature_normalization_strategy="z_score",
-            min_prompt_gene_tpm=min_tpm,
-            min_query_gene_tpm=min_tpm,
-        )
+    empirical_ctx = EmpiricalCorrelationContext.from_model_ckpt(
+        ckpt_path=trained_model_path,
+        gene_info_tsv_path=gene_info_tsv_path,
+        total_mrna_umis=adata.obs.iloc[[metacell_index]]["total_mrna_umis"].mean(),
+        device="cpu",
+        response_normalization_strategy="none",
+        feature_normalization_strategy="z_score",
+        min_prompt_gene_tpm=min_tpm,
+        min_query_gene_tpm=min_tpm,
+    )
 
     # process and compute metrics and save
     process_and_compute_metrics(
