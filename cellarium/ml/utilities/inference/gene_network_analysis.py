@@ -1107,6 +1107,10 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         height: int = 800,
         highlight_gene_sets: dict[str, t.Tuple[list[str], list[str], str]] | None = None,
         color: str | pd.Series = "membership",
+        vmin: float | None = None,
+        vmax: float | None = None,
+        continuous_colormap: str = "PiYG",
+        exclude_points_missing_color: bool = False,
     ) -> go.Figure:
         assert self.embedding_p2 is not None, "Must compute MDE embedding first"
         if isinstance(color, str) and color == "membership":
@@ -1115,7 +1119,9 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             assert len(set(color.index).intersection(self.prompt_gene_symbols)) > 0, (
                 "color series index has no overlap with prompt_gene_symbols"
             )
-            assert isinstance(color.iloc[0], str), "color series must be a string type"
+            assert isinstance(color.iloc[0], str) or isinstance(color.iloc[0], float), (
+                "color series must be a string or float type"
+            )
 
         plot_title = f"""{self.cell_type}<br>{self.tissue}<br>{self.disease}"""
 
@@ -1145,6 +1151,8 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
         if isinstance(color, pd.Series):
             df["color"] = color
             color = "color"
+            if exclude_points_missing_color:
+                df = df.dropna(subset=[color])
 
         # Create the scatter plot
         fig = px.scatter(
@@ -1155,6 +1163,8 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             title=plot_title,
             color=color,
             color_discrete_map=colormap,
+            color_continuous_scale=continuous_colormap,
+            range_color=[vmin, vmax],
             category_orders={color: unique_memberships},  # This ensures legend order
         )
 
@@ -1232,6 +1242,9 @@ class BaseClassProtocol(t.Protocol):
     @property
     def prompt_gene_symbols(self) -> list[str]: ...
 
+    @property
+    def prompt_gene_ids(self) -> list[str]: ...
+
     compute_leiden_communites: t.Callable[..., np.ndarray]
 
 
@@ -1241,6 +1254,7 @@ class ValidationMixin(BaseClassProtocol):
     def _get_reference_gene_sets_as_inds_and_filter(
         self,
         reference_gene_sets: dict[str, set[str]],
+        gene_inds_in_reference_sets: list[int],
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         reference_set_exclusion_fraction: float = 0.25,
         min_set_size: int = 3,
@@ -1253,6 +1267,7 @@ class ValidationMixin(BaseClassProtocol):
         Args:
             reference_gene_sets: dictionary of reference gene sets {set1_name: {gene_A, gene_B, ...}, ...}
             gene_naming: whether the genes in the reference sets are gene IDs or gene symbols
+            gene_inds_in_reference_sets: set of gene indices that are in any reference set
             reference_set_exclusion_fraction: gene sets with fewer than this fraction in graph are excluded
             min_set_size: minimum size of a gene set present in the graph to be included
 
@@ -1267,9 +1282,12 @@ class ValidationMixin(BaseClassProtocol):
         else:
             raise ValueError("Invalid gene_naming")
 
+        # map full gene inds to gene inds after filtering to those in reference sets
+        filtered_ind_map = {gene_ind: i for i, gene_ind in enumerate(gene_inds_in_reference_sets)}
+
         # convert reference gene sets to indices
         reference_gene_sets_as_inds = {
-            set_name: {gene_ind_lookup[g] for g in gene_set if g in gene_ind_lookup.keys()}
+            set_name: {filtered_ind_map[gene_ind_lookup[g]] for g in gene_set if g in gene_ind_lookup.keys()}
             for set_name, gene_set in reference_gene_sets.items()
         }
 
@@ -1293,6 +1311,31 @@ class ValidationMixin(BaseClassProtocol):
             final_ref_gene_sets_as_inds[set_name] = gene_set_inds
 
         return final_ref_gene_sets_as_inds
+
+    @staticmethod
+    def _get_combinations_fast(ref_gene_sets: dict[str, set[int]]):
+        # Pre-calculate size needed for output arrays
+        total_pairs = sum(len(list(itertools.combinations(gene_set, 2))) for gene_set in ref_gene_sets.values())
+
+        # Pre-allocate output arrays
+        row = np.zeros(total_pairs, dtype=np.int32)
+        col = np.zeros(total_pairs, dtype=np.int32)
+
+        # Fill arrays
+        idx = 0
+        for gset in ref_gene_sets.values():
+            gene_set = np.array(list(gset))
+            n = len(gene_set)
+            # Create indices for all combinations
+            r_idx, c_idx = np.triu_indices(n, k=1)
+            pairs_count = len(r_idx)
+
+            # Assign to output arrays
+            row[idx : idx + pairs_count] = gene_set[r_idx]
+            col[idx : idx + pairs_count] = gene_set[c_idx]
+            idx += pairs_count
+
+        return row, col
 
     def compute_network_adjacency_auc_metric(
         self,
@@ -1356,6 +1399,7 @@ class ValidationMixin(BaseClassProtocol):
         final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
             reference_gene_sets=reference_gene_sets,
             gene_naming=gene_naming,
+            gene_inds_in_reference_sets=gene_inds_in_reference_sets,
             reference_set_exclusion_fraction=reference_set_exclusion_fraction,
             min_set_size=min_set_size,
             verbose=False,
@@ -1364,15 +1408,7 @@ class ValidationMixin(BaseClassProtocol):
             logger.info(f"{len(final_ref_gene_sets_as_inds)} gene sets meet criteria")
 
         # compute ground truth for edge evidence in any reference gene set
-        row: list[int] = []
-        col: list[int] = []
-        for _, gene_set_inds in final_ref_gene_sets_as_inds.items():
-            # all pairs of inds in the gene set
-            gene_set_pairs = list(itertools.combinations(gene_set_inds, 2))
-            # convert list of tuples to row list and column list, and append
-            row_inds, col_inds = zip(*gene_set_pairs)
-            row.extend(row_inds)
-            col.extend(col_inds)
+        row, col = self._get_combinations_fast(final_ref_gene_sets_as_inds)
         edges_in_reference_df = pd.DataFrame(
             {
                 "row": row,
@@ -1405,15 +1441,19 @@ class ValidationMixin(BaseClassProtocol):
         edges_in_adjacency_df = edges_in_adjacency_df.sort_values("adjacency", ascending=False)
         edges_in_adjacency_df["true_positives"] = edges_in_adjacency_df["reference"].cumsum().astype(int)
         edges_in_adjacency_df["false_positives"] = (1 - edges_in_adjacency_df["reference"]).cumsum().astype(int)
-        edges_in_adjacency_df["true_positive_rate"] = (
-            edges_in_adjacency_df["true_positives"] / edges_in_adjacency_df["reference"].sum()
+        edges_in_adjacency_df["true_positive_rate"] = edges_in_adjacency_df["true_positives"] / (
+            edges_in_adjacency_df["reference"].sum() + 1e-10
         )
-        edges_in_adjacency_df["false_positive_rate"] = (
-            edges_in_adjacency_df["false_positives"] / (1 - edges_in_adjacency_df["reference"]).sum()
+        edges_in_adjacency_df["false_positive_rate"] = edges_in_adjacency_df["false_positives"] / (
+            (1 - edges_in_adjacency_df["reference"]).sum() + 1e-10
         )
         if (thin_output_to_n is not None) and (len(edges_in_adjacency_df) > thin_output_to_n):
             step = len(edges_in_adjacency_df) // thin_output_to_n
             edges_in_adjacency_df = edges_in_adjacency_df.iloc[::step]
+
+        # if these endpoints end up missing, auc could be far off
+        edges_in_adjacency_df.loc[edges_in_adjacency_df.index[-1], "true_positive_rate"] = 1.0
+        edges_in_adjacency_df.loc[edges_in_adjacency_df.index[-1], "false_positive_rate"] = 1.0
 
         # compute AUC
         auc = np.trapz(edges_in_adjacency_df["true_positive_rate"], edges_in_adjacency_df["false_positive_rate"])
@@ -1430,7 +1470,7 @@ class ValidationMixin(BaseClassProtocol):
         thin_output_to_n: int | None = 10_000,
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         verbose: bool = False,
-    ) -> tuple[float, np.ndarray, np.ndarray]:
+    ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
         """
         Compute a per-gene metric for the overall concordance between the adjacency matrix in
         :meth:`GeneNetworkAnalysisBase.adjacency_matrix` and reference gene sets defined by a dictionary.
@@ -1482,6 +1522,7 @@ class ValidationMixin(BaseClassProtocol):
         final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
             reference_gene_sets=reference_gene_sets,
             gene_naming=gene_naming,
+            gene_inds_in_reference_sets=gene_inds_in_reference_sets,
             reference_set_exclusion_fraction=reference_set_exclusion_fraction,
             min_set_size=min_set_size,
             verbose=False,
@@ -1490,15 +1531,7 @@ class ValidationMixin(BaseClassProtocol):
             logger.info(f"{len(final_ref_gene_sets_as_inds)} gene sets meet criteria")
 
         # compute ground truth for edge evidence in any reference gene set
-        row: list[int] = []
-        col: list[int] = []
-        for _, gene_set_inds in final_ref_gene_sets_as_inds.items():
-            # all pairs of inds in the gene set
-            gene_set_pairs = list(itertools.combinations(gene_set_inds, 2))
-            # convert list of tuples to row list and column list, and append
-            row_inds, col_inds = zip(*gene_set_pairs)
-            row.extend(row_inds)
-            col.extend(col_inds)
+        row, col = self._get_combinations_fast(final_ref_gene_sets_as_inds)
         edges_in_reference_csr = sp.csr_matrix(
             (np.ones_like(row, dtype=np.bool_), (row, col)), shape=(a_pp.shape[0], a_pp.shape[0])
         )
@@ -1519,8 +1552,8 @@ class ValidationMixin(BaseClassProtocol):
         false_positives_pp = np.cumsum(1 - sorted_tp_pp, axis=1)
         total_positives_p = sorted_tp_pp.sum(axis=1)
         total_negatives_p = (1 - sorted_tp_pp).sum(axis=1)
-        true_positive_rate_pp = true_positives_pp / total_positives_p[:, None]
-        false_positive_rate_pp = false_positives_pp / total_negatives_p[:, None]
+        true_positive_rate_pp = true_positives_pp / (total_positives_p[:, None] + 1e-10)
+        false_positive_rate_pp = false_positives_pp / (total_negatives_p[:, None] + 1e-10)
 
         # thin the output to n data points
         if (thin_output_to_n is not None) and (true_positive_rate_pp.shape[1] > thin_output_to_n):
@@ -1528,10 +1561,22 @@ class ValidationMixin(BaseClassProtocol):
             true_positive_rate_pp = true_positive_rate_pp[:, ::step]
             false_positive_rate_pp = false_positive_rate_pp[:, ::step]
 
+        # if these endpoints end up missing, auc could be far off
+        false_positive_rate_pp[:, -1] = 1.0
+        true_positive_rate_pp[:, -1] = 1.0
+
         # compute AUC per gene
         auc_p = np.trapz(true_positive_rate_pp, false_positive_rate_pp, axis=1)
 
-        return auc_p, true_positive_rate_pp, false_positive_rate_pp
+        # gene names
+        var_names_p = np.array(
+            [
+                self.prompt_gene_symbols[i] if (gene_naming == "symbol") else self.prompt_gene_ids[i]
+                for i in gene_inds_in_reference_sets
+            ]
+        )
+
+        return auc_p, var_names_p, true_positive_rate_pp, false_positive_rate_pp
 
     @staticmethod
     def plot_roc(
@@ -1765,6 +1810,7 @@ class ValidationMixin(BaseClassProtocol):
         final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
             reference_gene_sets=reference_gene_sets,
             gene_naming=gene_naming,
+            gene_inds_in_reference_sets=list(range(q)),
             reference_set_exclusion_fraction=reference_set_exclusion_fraction,
             min_set_size=min_set_size,
             verbose=False,
@@ -2520,7 +2566,7 @@ class LinearResponseContext(GeneNetworkAnalysisBase, ValidationMixin):
         if linear_response_path.startswith("gs://"):
             with tempfile.TemporaryDirectory() as tempdir:
                 local_path = os.path.join(tempdir, "linear_response.pkl")
-                os.system(f"gsutil cp {linear_response_path} {local_path}")
+                os.system(f"gcloud storage cp {linear_response_path} {local_path}")
                 with open(local_path, "rb") as f:
                     linear_response_dict = pickle.load(f)
         else:
@@ -2663,7 +2709,14 @@ class EmpiricalCorrelationContext(GeneNetworkAnalysisBase, ValidationMixin):
         eps: float = 1e-8,
         verbose: bool = True,
     ) -> "EmpiricalCorrelationContext":
-        module = CellariumModule.load_from_checkpoint(checkpoint_path=ckpt_path, map_location=device)
+        # open file
+        if ckpt_path.startswith("gs://"):
+            with tempfile.TemporaryDirectory() as tempdir:
+                local_path = os.path.join(tempdir, "local.ckpt")
+                os.system(f"gcloud storage cp {ckpt_path} {local_path}")
+                module = CellariumModule.load_from_checkpoint(checkpoint_path=ckpt_path, map_location=device)
+        else:
+            module = CellariumModule.load_from_checkpoint(checkpoint_path=ckpt_path, map_location=device)
 
         return EmpiricalCorrelationContext(
             gene_info_tsv_path=gene_info_tsv_path,

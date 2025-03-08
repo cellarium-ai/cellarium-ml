@@ -257,6 +257,24 @@ def test_compute_network_adjacency_auc_metric(jac_ctx):
     )
     assert auc2 == auc, "non-deterministic behavior in adjacency auc metric"
 
+    # missing some genes from reference sets
+    reference_gene_sets = {
+        "set1": {f"node_{i}" for i in range(large_p // 4)},
+    }
+    auc, df = jac_ctx.compute_network_adjacency_auc_metric(
+        reference_gene_sets=reference_gene_sets,
+        gene_naming="symbol",
+    )
+    assert ~np.isnan(auc), "expected the adjacency concordance metric to be a valid number"
+    assert df["true_positive_rate"].min() >= 0.0
+    assert df["true_positive_rate"].max() <= 1.0
+    assert df["false_positive_rate"].min() >= 0.0
+    assert df["false_positive_rate"].max() <= 1.0
+    assert auc >= 0.0
+    assert auc <= 1.0
+
+    assert auc > 0.95, "expected the adjacency auc metric to be high"
+
 
 def test_compute_network_adjacency_auc_metric_per_gene(jac_ctx):
     reference_gene_sets = {
@@ -265,7 +283,7 @@ def test_compute_network_adjacency_auc_metric_per_gene(jac_ctx):
         "set3": {f"node_{i + 2 * large_p // 4}" for i in range(large_p // 4)},
         "set4": {f"node_{i + 3 * large_p // 4}" for i in range(large_p // 4)},
     }
-    auc_p, tpr_pp, fpr_pp = jac_ctx.compute_network_adjacency_auc_metric_per_gene(
+    auc_p, var_names_p, tpr_pp, fpr_pp = jac_ctx.compute_network_adjacency_auc_metric_per_gene(
         reference_gene_sets=reference_gene_sets,
         gene_naming="symbol",
     )
@@ -282,11 +300,35 @@ def test_compute_network_adjacency_auc_metric_per_gene(jac_ctx):
     assert auc_p.mean() > 0.95, "expected the mean per-gene adjacency auc metric to be high"
 
     # run it again
-    auc2_p, _, _ = jac_ctx.compute_network_adjacency_auc_metric_per_gene(
+    auc2_p, _, _, _ = jac_ctx.compute_network_adjacency_auc_metric_per_gene(
         reference_gene_sets=reference_gene_sets,
         gene_naming="symbol",
     )
     assert (auc2_p == auc_p).all(), "non-deterministic behavior in per-gene adjacency auc metric"
+
+    # missing some genes from reference sets
+    reference_gene_sets = {
+        "set1": {f"node_{i}" for i in range(large_p // 4)},
+    }
+    auc_p, var_names_p, tpr_pp, fpr_pp = jac_ctx.compute_network_adjacency_auc_metric_per_gene(
+        reference_gene_sets=reference_gene_sets,
+        gene_naming="symbol",
+    )
+    assert len(var_names_p) == len(auc_p), "number of genes should match number of computed AUCs"
+    assert all([g in var_names_p for g in reference_gene_sets["set1"]]), (
+        "expected to exclude genes not in any reference set"
+    )
+    print("computed AUCs per gene:")
+    print(auc_p)
+    assert (~np.isnan(auc_p)).any(), "expected the adjacency concordance metrics to be valid numbers"
+    assert tpr_pp.min() >= 0.0
+    assert tpr_pp.max() <= 1.0
+    assert fpr_pp.min() >= 0.0
+    assert fpr_pp.max() <= 1.0
+    assert (auc_p >= 0.0).all()
+    assert (auc_p <= 1.0).all()
+
+    assert auc_p.mean() > 0.95, "expected the mean per-gene adjacency auc metric to be high"
 
 
 @pytest.mark.parametrize("metric_name", ["f1", "precision"])
