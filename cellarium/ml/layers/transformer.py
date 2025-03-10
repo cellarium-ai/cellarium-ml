@@ -178,6 +178,28 @@ class Transformer(nn.Module):
     def _reset_parameters(self) -> None:
         self.ln.reset_parameters()
 
+    def forward_all_hidden_states(
+        self,
+        hidden_state_ncd,
+        attention_mask_ncc,
+        to_cpu=True
+    ):
+        hidden_states = []
+        for block in self.blocks:
+            hidden_state_ncd = block(hidden_state_ncd, attention_mask_ncc)
+            if to_cpu:
+                hidden_states.append(hidden_state_ncd.detach().cpu())
+            else:
+                hidden_states.append(hidden_state_ncd.detach())
+
+        if to_cpu:
+            hidden_states.append(self.ln(hidden_state_ncd).detach().cpu())
+        else:
+            hidden_states.append(self.ln(hidden_state_ncd).detach())
+
+        return hidden_states
+
+
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,

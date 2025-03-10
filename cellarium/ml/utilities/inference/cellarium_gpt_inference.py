@@ -555,6 +555,45 @@ class CellariumGPTInferenceContext:
 
         return gene_logits_nqk
      
+    def get_embeddings_from_tokens(
+            self,
+            tokens_dict: dict,
+            context_indices: dict,
+            max_counts: int | None = None,
+            to_cpu = True
+        ) -> t.Tuple[torch.Tensor, torch.Tensor]:
+    
+        # convert to cuda
+        tokens_dict = self.gpt_pipeline.transfer_batch_to_device(tokens_dict, self.device, 0)
+        
+        # get model predictions
+        hidden_states = self.gpt_pipeline.model.get_embeddings(
+            gene_tokens_nc=tokens_dict["gene_tokens_nc"],
+            metadata_tokens_n=tokens_dict["metadata_tokens_n"],
+            prompt_mask_nc=tokens_dict["prompt_mask_nc"],
+            to_cpu = to_cpu
+        )
+
+        # note: we use `q` to denote query genes
+        # query_gene_indices = torch.tensor(context_indices['query_genes'], device=self.device, dtype=torch.int64)
+        # gene_hidden_states_nqd = hidden_states_ncd[:, query_gene_indices, :]
+
+        return hidden_states
+
+        # gene_logits_nqk = logits_dict['gene_value'][:, query_gene_indices, :]
+        
+        # if max_counts is None:
+        #     max_counts = gene_logits_nqk.shape[-1]
+        # else:
+        #     assert max_counts > 0
+        # gene_logits_nqk = gene_logits_nqk[:, :, :max_counts]  # truncate to max_counts
+        # gene_logits_nqk = gene_logits_nqk - torch.logsumexp(gene_logits_nqk, dim=-1, keepdim=True)  # renormalize
+
+        # return gene_logits_nqk
+
+        # gene_logits_nqk = self.get_gene_value_logits_from_tokens(tokens_dict, context_indices, max_counts)
+
+        # pass
 
     def get_marginal_mean_std_from_tokens(
             self,
