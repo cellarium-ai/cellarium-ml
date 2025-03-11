@@ -100,7 +100,7 @@ class CellariumGPTInferenceContext:
         self._adata = sc.read_h5ad(ref_adata_path)
 
         # get gene ontology infos from the reference anndata
-        self.gene_ontology_infos = self._get_gene_ontology_infos(self._adata)
+        self.gene_ontology_infos = self._get_gene_ontology_infos()
 
         # load the model
         self.device = device
@@ -153,16 +153,60 @@ class CellariumGPTInferenceContext:
             ontology_infos=self.metadata_ontology_infos,
         )    
             
-    def _get_gene_ontology_infos(self, adata: AnnData) -> dict:
+    def _get_gene_ontology_infos(self) -> dict:
         gene_ontology_infos = dict()
 
+        assay_labels = [
+            "Seq-Well",
+            "10x 3' v3",
+            "SPLiT-seq",
+            "Smart-seq v4",
+            "Drop-seq",
+            "sci-RNA-seq",
+            "10x 5' v2",
+            "10x 5' transcription profiling",
+            "inDrop",
+            "microwell-seq",
+            "10x multiome",
+            "10x 3' v1",
+            "ScaleBio single cell RNA sequencing",
+            "Smart-seq2",
+            "10x 3' transcription profiling",
+            "Seq-Well S3",
+            "10x 3' v2",
+            "MARS-seq",
+            "10x 5' v1"
+        ]
+
+        assay_ontology_term_ids = [
+            "EFO:0008919",
+            "EFO:0009922",
+            "EFO:0009919",
+            "EFO:0700016",
+            "EFO:0008722",
+            "EFO:0010550",
+            "EFO:0009900",
+            "EFO:0030004",
+            "EFO:0008780",
+            "EFO:0030002",
+            "EFO:0030059",
+            "EFO:0009901",
+            "EFO:0022490",
+            "EFO:0008931",
+            "EFO:0030003",
+            "EFO:0030019",
+            "EFO:0009899",
+            "EFO:0008796",
+            "EFO:0011025"
+        ]
+
         gene_ontology_infos["assay_ontology_term_id"] = dict()
-        gene_ontology_infos["assay_ontology_term_id"]["names"] = list(adata.obs['assay_ontology_term_id'].cat.categories)
-        gene_ontology_infos["assay_ontology_term_id"]["labels"] = list(adata.obs['assay'].cat.categories)
+        gene_ontology_infos["assay_ontology_term_id"]["names"] = assay_ontology_term_ids
+        gene_ontology_infos["assay_ontology_term_id"]["labels"] = assay_labels
 
         gene_ontology_infos["suspension_type"] = dict()
-        gene_ontology_infos["suspension_type"]["names"] = list(adata.obs['suspension_type'].cat.categories)
-        gene_ontology_infos["suspension_type"]["labels"] = list(adata.obs['suspension_type'].cat.categories)
+        gene_ontology_infos["suspension_type"]["names"] = ["nucleus", "cell"]
+        gene_ontology_infos["suspension_type"]["labels"] = ["nucleus", "cell"]
 
         return gene_ontology_infos
 
