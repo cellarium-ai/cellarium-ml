@@ -124,12 +124,12 @@ def main():
         help="Random number generator seed (default: 42)"
     )
     parser.add_argument(
-        "--n_cells", type=int, default=1000,
-        help="Number of cells to use (default: 1000)"
+        "--n_cells", type=int, default=None,
+        help="Number of cells to use (default: None, meaning all)"
     )
     # Updated default for n_genes to match the new notebook and added new argument for gene selection method
     parser.add_argument(
-        "--n_genes", type=int, default=4091,
+        "--n_genes", type=int, default=None,
         help="Number of genes to use. For 'highly_expressed', selects top genes; for 'random', selects random genes. Set to None to use all."
     )
     parser.add_argument(
