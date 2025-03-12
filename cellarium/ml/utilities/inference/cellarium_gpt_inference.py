@@ -90,7 +90,7 @@ class CellariumGPTInferenceContext:
             ref_adata_path: str,
             gene_info_tsv_path: str,
             device: torch.device,
-            attention_backend: str = "mem_efficient",
+            attention_backend: str | None = "mem_efficient",
             verbose: bool = True):
         
         # for logging
@@ -110,7 +110,8 @@ class CellariumGPTInferenceContext:
         self.gpt_pipeline.model.gene_categories = np.asarray(self._adata.var_names)
         
         # change attention backend to memory efficient
-        self.gpt_pipeline.model.set_attention_backend(attention_backend)
+        if attention_backend is not None:
+            self.gpt_pipeline.model.set_attention_backend(attention_backend)
 
         # gene info related
         self.model_var_names = np.asarray(self._adata.var_names)
