@@ -19,7 +19,7 @@ except ImportError:
         return False
 
 
-compiled_flex_attention = torch.compile(flex_attention, dynamic=False)
+compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
 
 
 class MultiHeadAttention(nn.Module):
