@@ -70,7 +70,6 @@ def process_arg_on_gpu(arg):
         # shape: (layers, batch_size, context_length, hidden_dim)
         hidden_states = np.stack(hidden_states)
 
-        import ipdb; ipdb.set_trace()
         if os.path.exists(output_fp):
             curr_data = np.load(output_fp, allow_pickle=True)
 
