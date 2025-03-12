@@ -382,6 +382,7 @@ class CellariumGPTInferenceContext:
             expanded_metadata_prompt_masks_dict[key] = torch.tensor(
                 [metadata_prompt_masks_dict[key]] * n_cells, dtype=torch.bool, device=cpu_device)
         
+        # import ipdb; ipdb.set_trace()
         # generate metadata tokens dicts; `PredictTokenizer` will convert these to codes
         metadata_token_n_dict = {
             "cell_type": adata.obs["cell_type_ontology_term_id"].values,  # categorical
@@ -394,7 +395,10 @@ class CellariumGPTInferenceContext:
         # apply the mask on metadata tokens
         for metadata_key, value in metadata_token_n_dict.items():
             mask = expanded_metadata_prompt_masks_dict[metadata_key].numpy()
-            value[~mask] = "<MASK>"
+            tmp_value = value.to_numpy()
+            tmp_value[~mask] = "<MASK>"
+            # value[~mask] = "<MASK>"
+            metadata_token_n_dict[metadata_key] = tmp_value
 
         # where to find each thing in the context?
         context_indices = dict()
@@ -675,8 +679,6 @@ class CellariumGPTInferenceContext:
     def get_embeddings_from_tokens(
             self,
             tokens_dict: dict,
-            context_indices: dict,
-            max_counts: int | None = None,
             to_cpu = True
         ) -> t.Tuple[torch.Tensor, torch.Tensor]:
     
@@ -685,32 +687,13 @@ class CellariumGPTInferenceContext:
         
         # get model predictions
         hidden_states = self.gpt_pipeline.model.get_embeddings(
-            gene_tokens_nc=tokens_dict["gene_tokens_nc"],
-            metadata_tokens_n=tokens_dict["metadata_tokens_n"],
+            token_value_nc_dict=tokens_dict["token_value_nc_dict"],
+            token_mask_nc_dict=tokens_dict["token_mask_nc_dict"],
             prompt_mask_nc=tokens_dict["prompt_mask_nc"],
             to_cpu = to_cpu
         )
 
-        # note: we use `q` to denote query genes
-        # query_gene_indices = torch.tensor(context_indices['query_genes'], device=self.device, dtype=torch.int64)
-        # gene_hidden_states_nqd = hidden_states_ncd[:, query_gene_indices, :]
-
         return hidden_states
-
-        # gene_logits_nqk = logits_dict['gene_value'][:, query_gene_indices, :]
-        
-        # if max_counts is None:
-        #     max_counts = gene_logits_nqk.shape[-1]
-        # else:
-        #     assert max_counts > 0
-        # gene_logits_nqk = gene_logits_nqk[:, :, :max_counts]  # truncate to max_counts
-        # gene_logits_nqk = gene_logits_nqk - torch.logsumexp(gene_logits_nqk, dim=-1, keepdim=True)  # renormalize
-
-        # return gene_logits_nqk
-
-        # gene_logits_nqk = self.get_gene_value_logits_from_tokens(tokens_dict, context_indices, max_counts)
-
-        # pass
 
     def get_marginal_mean_std_from_tokens(
             self,

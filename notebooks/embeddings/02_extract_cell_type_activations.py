@@ -27,7 +27,8 @@ DEVICES = [torch.device(f'cuda:{idx}') for idx in range(torch.cuda.device_count(
 
 ROOT_PATH = "/work/hdd/bbjr/mallina1/data/mb-ml-dev-vm"
 TRAIN_ROOT_PATH = "/work/hdd/bbjr/mallina1/data/human_cellariumgpt_v2/extract_files"
-CHECKPOINT_PATH = "/work/hdd/bbjr/mallina1/cellarium/models/latest/epoch=5-step=504000.ckpt"
+# CHECKPOINT_PATH = "/work/hdd/bbjr/mallina1/cellarium/models/latest/epoch=5-step=504000.ckpt"
+CHECKPOINT_PATH = "/work/hdd/bbjr/mallina1/cellarium/models/compute_optimal_checkpoints/epoch=6-step=63560.ckpt"
 OUTPUT_PATH = "/work/hdd/bbjr/mallina1/data/human_cellariumgpt_v2/activations"
 
 REF_ADATA_PATH = os.path.join(ROOT_PATH, "data", "extract_0.h5ad")
@@ -44,13 +45,16 @@ def process_arg_on_gpu(arg):
     (train_fname, ctx, tr_adata, indices, batch_size, output_fp) = arg
 
     for batch_idx in tqdm(range(0, len(indices), batch_size)):
-        obs_index = [indices[batch_idx]]
-        if len(indices) > batch_idx + 1:
-            obs_index.append(indices[batch_idx+1])
-        if len(indices) > batch_idx + 2:
-            obs_index.append(indices[batch_idx+2])
+        if batch_idx > 0:
+            obs_index = [indices[batch_idx]]
+        else:
+            obs_index = [indices[batch_idx]]
+            if len(indices) > batch_idx + 1:
+                obs_index.append(indices[batch_idx+1])
+            if len(indices) > batch_idx + 2:
+                obs_index.append(indices[batch_idx+2])
 
-        tokens_dict, context_indices = ctx.generate_tokens_from_adata(tr_adata, 
+        tokens_dict, context_indices = ctx.generate_tokens_from_adata(adata = tr_adata, 
                                                                       obs_index=obs_index, 
                                                                       query_var_names=[],
                                                                       metadata_prompt_masks_dict=metadata_prompt_dict)
@@ -61,11 +65,12 @@ def process_arg_on_gpu(arg):
         query_development_stage_idx = context_indices['query_development_stage']
 
         with torch.inference_mode():
-            hidden_states = ctx.get_embeddings_from_tokens(tokens_dict, context_indices, to_cpu=True)
+            hidden_states = ctx.get_embeddings_from_tokens(tokens_dict, to_cpu=True)
 
         # shape: (layers, batch_size, context_length, hidden_dim)
         hidden_states = np.stack(hidden_states)
 
+        import ipdb; ipdb.set_trace()
         if os.path.exists(output_fp):
             curr_data = np.load(output_fp, allow_pickle=True)
 
@@ -76,26 +81,26 @@ def process_arg_on_gpu(arg):
             curr_development_stage_activations = curr_data['development_stage_activations']
             
             curr_metadata = curr_data['metadata'].item()
-            
-            curr_cell_type_activations = np.concatenate((curr_cell_type_activations, hidden_states[:, :, query_cell_type_idx, :].squeeze()), axis=1)
-            curr_disease_activations = np.concatenate((curr_disease_activations, hidden_states[:, :, query_disease_idx, :].squeeze()), axis=1)
-            curr_tissue_activations = np.concatenate((curr_tissue_activations, hidden_states[:, :, query_tissue_idx, :].squeeze()), axis=1)
-            curr_sex_activations = np.concatenate((curr_sex_activations, hidden_states[:, :, query_sex_idx, :].squeeze()), axis=1)
-            curr_development_stage_activations = np.concatenate((curr_development_stage_activations, hidden_states[:, :, query_development_stage_idx, :].squeeze()), axis=1)            
+            curr_cell_type_activations = np.concatenate((curr_cell_type_activations, hidden_states[:, :, query_cell_type_idx, :]), axis=1)
+            curr_disease_activations = np.concatenate((curr_disease_activations, hidden_states[:, :, query_disease_idx, :]), axis=1)
+            curr_tissue_activations = np.concatenate((curr_tissue_activations, hidden_states[:, :, query_tissue_idx, :]), axis=1)
+            curr_sex_activations = np.concatenate((curr_sex_activations, hidden_states[:, :, query_sex_idx, :]), axis=1)
+            curr_development_stage_activations = np.concatenate((curr_development_stage_activations, hidden_states[:, :, query_development_stage_idx, :]), axis=1)            
             
             curr_data.close()
         else:
-            curr_cell_type_activations = hidden_states[:, :, query_cell_type_idx, :].squeeze()
-            curr_disease_activations = hidden_states[:, :, query_disease_idx, :].squeeze()
-            curr_tissue_activations = hidden_states[:, :, query_tissue_idx, :].squeeze()
-            curr_sex_activations = hidden_states[:, :, query_sex_idx, :].squeeze()
-            curr_development_stage_activations = hidden_states[:, :, query_development_stage_idx, :].squeeze()
+            curr_cell_type_activations = hidden_states[:, :, query_cell_type_idx, :]
+            curr_disease_activations = hidden_states[:, :, query_disease_idx, :]
+            curr_tissue_activations = hidden_states[:, :, query_tissue_idx, :]
+            curr_sex_activations = hidden_states[:, :, query_sex_idx, :]
+            curr_development_stage_activations = hidden_states[:, :, query_development_stage_idx, :]
             curr_metadata = {
                 'cell_type_labels': [],
                 'disease_labels': [],
                 'suspension_type_labels': [],
                 'assay_labels': [],
-                'sex_labels': []
+                'sex_labels': [],
+                'obs_idx': []
             }
 
         for idx, jdx in enumerate(obs_index):
@@ -110,6 +115,7 @@ def process_arg_on_gpu(arg):
             curr_metadata['suspension_type_labels'].append(susp_type_label)
             curr_metadata['assay_labels'].append(assay_label)
             curr_metadata['sex_labels'].append(sex_label)
+            curr_metadata['obs_idx'].append(jdx)
 
         np.savez(output_fp, cell_type_activations=curr_cell_type_activations, 
                             disease_activations=curr_disease_activations,
@@ -160,8 +166,11 @@ def main():
 
             args.append(arg)
 
+        # run without multiprocessing
+        # for arg in args:
+        #   process_arg_on_gpu(arg)
+
         with mp.Pool(len(DEVICES)) as p:
-            # results = list(tqdm(p.imap(process_arg_on_gpu, args), total=len(DEVICES)))
             p.map(process_arg_on_gpu, args)
 
 if __name__=='__main__':
