@@ -111,7 +111,7 @@ class GeneSetRecords:
         series = (
             df[["term_label", "gene_symbol"]]
             .groupby("term_label")
-            .apply(lambda x: x["gene_symbol"].tolist())
+            .apply(lambda x: x["gene_symbol"].tolist(), include_groups=False)
         )
         self.append_collection(
             collection="pan_go",
