@@ -32,7 +32,7 @@ dependencies = [
   "pyro-ppl>=1.9.1",
   "pytest",
   "torch==2.6.0",
-  "torchvision==0.21.1",
+  "torchvision",
   "transformers",
   "scikit-optimize==0.10.2",
   "pymde==0.1.18",
