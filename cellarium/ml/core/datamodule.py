@@ -113,6 +113,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         drop_incomplete_batch: bool = False,
         train_size: float | int | None = None,
         val_size: float | int | None = None,
+        pred_size: float | int | None = None,
         worker_seed: int | None = None,
         test_mode: bool = False,
         # DataLoader args
@@ -134,6 +135,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.shuffle_seed = shuffle_seed
         self.drop_last_indices = drop_last_indices
         self.n_train, self.n_val = train_val_split(len(dadc), train_size, val_size)
+        if pred_size is not None:
+            _, self.n_pred = train_val_split(len(dadc), None, pred_size)
+        else:
+            self.n_pred = len(dadc)
         self.worker_seed = worker_seed
         self.test_mode = test_mode
         # DataLoader args
@@ -196,6 +201,22 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                start_idx=len(self.dadc) - self.n_pred,
+                end_idx=len(self.dadc),
+            )
+
+        if stage == "test":
+            self.test_dataset = IterableDistributedAnnDataCollectionDataset(
+                dadc=self.dadc,
+                batch_keys=self.batch_keys,
+                batch_size=self.batch_size,
+                iteration_strategy=self.iteration_strategy,
+                shuffle=self.shuffle,
+                shuffle_seed=self.shuffle_seed,
+                drop_last_indices=self.drop_last_indices,
+                drop_incomplete_batch=self.drop_incomplete_batch,
+                worker_seed=self.worker_seed,
+                test_mode=self.test_mode,
             )
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
@@ -222,6 +243,16 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         """Prediction dataloader."""
         return torch.utils.data.DataLoader(
             self.predict_dataset,
+            num_workers=self.num_workers,
+            collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
+        )
+
+    def test_dataloader(self) -> torch.utils.data.DataLoader:
+        """Test dataloader."""
+        return torch.utils.data.DataLoader(
+            self.test_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
@@ -276,8 +307,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                     "Cannot resume training with a different batch size. "
                     f"Expected {self.batch_size}, got {state_dict['batch_size']}."
                 )
-            if state_dict["accumulate_grad_batches"] != 1:
-                raise ValueError("Training with gradient accumulation is not supported when resuming training.")
+            # if state_dict["accumulate_grad_batches"] != 1:
+            #     raise ValueError("Training with gradient accumulation is not supported when resuming training.")
             if state_dict["shuffle"] != self.shuffle:
                 raise ValueError(
                     "Cannot resume training with a different shuffle value. "

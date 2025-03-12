@@ -181,24 +181,24 @@ def main():
         "cell_index": args.cell_index,
         
         # Expression range outputs
-        "x_lo_q": gex_range_dict['x_lo_q'].cpu().numpy(),
-        "x_hi_q": gex_range_dict['x_hi_q'].cpu().numpy(),
-        "range_q": gex_range_dict['range_q'].cpu().numpy(),
-        "gene_logits_qk": gex_range_dict['gene_logits_qk'].cpu().numpy(),
-        "gene_logits_mode_q": gex_range_dict['gene_logits_mode_q'].cpu().numpy(),
-        "gene_marginal_mean_q": gex_range_dict['gene_marginal_mean_q'].cpu().numpy(),
-        "gene_marginal_std_q": gex_range_dict['gene_marginal_std_q'].cpu().numpy(),
+        "x_lo_q": gex_range_dict['x_lo_q'].cpu().numpy().astype(np.float32),
+        "x_hi_q": gex_range_dict['x_hi_q'].cpu().numpy().astype(np.float32),
+        "range_q": gex_range_dict['range_q'].cpu().numpy().astype(np.float32),
+        "gene_logits_qk": gex_range_dict['gene_logits_qk'].cpu().numpy().astype(np.float32),
+        "gene_logits_mode_q": gex_range_dict['gene_logits_mode_q'].cpu().numpy().astype(np.float32),
+        "gene_marginal_mean_q": gex_range_dict['gene_marginal_mean_q'].cpu().numpy().astype(np.float32),
+        "gene_marginal_std_q": gex_range_dict['gene_marginal_std_q'].cpu().numpy().astype(np.float32),
         
         # Dose response outputs
         "query_gene_ids": query_gene_ids,
         "perturb_gene_ids": query_gene_ids,
-        "doses_pi": dose_response_dict['doses_pi'],
-        "responses_mean_pqi": dose_response_dict['responses_mean_pqi'],
+        # "doses_pi": dose_response_dict['doses_pi'],
+        # "responses_mean_pqi": dose_response_dict['responses_mean_pqi'],
         
         # Linear regression outputs
-        "slope_qp": slope_qp,
-        "intercept_qp": intercept_qp,
-        "r_squared_qp": r_squared_qp,
+        "slope_qp": slope_qp.astype(np.float32),
+        # "intercept_qp": intercept_qp,
+        "r_squared_qp": r_squared_qp.astype(np.float32),
     }
     
     print("Saving output ...")

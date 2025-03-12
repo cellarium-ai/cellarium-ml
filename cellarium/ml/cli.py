@@ -291,6 +291,19 @@ def lightning_cli_factory(
             # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
             pass
 
+        def before_instantiate_classes(self):
+            # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
+            if self.subcommand == "predict":
+                return_predictions: bool = self.config["predict"]["return_predictions"]
+                if return_predictions:
+                    warnings.warn(
+                        "The `return_predictions` argument should be set to 'false' when running predict to avoid OOM. "
+                        "This can be set at indent level 0 in the config file. Example:\n"
+                        "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
+                        UserWarning,
+                    )
+            return super().before_instantiate_classes()
+
         def instantiate_classes(self) -> None:
             with torch.device("meta"):
                 # skip the initialization of model parameters
@@ -316,16 +329,10 @@ def lightning_cli_factory(
 def cellarium_gpt(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.CellariumGPT` model.
-
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    cli = lightning_cli_factory(
-        "cellarium.ml.models.CellariumGPT",
-        link_arguments=[
-            LinkArguments("data.dadc", "model.model.init_args.gene_categories", lambda x: x.var_names.values)
-        ],
-    )
+    cli = lightning_cli_factory("cellarium.ml.models.CellariumGPT")
     cli(args=args)
 
 

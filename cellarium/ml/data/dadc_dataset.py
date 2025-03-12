@@ -563,4 +563,4 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         # trainer.fit_loop.epoch_progress.current.completed
         self.epoch = state_dict["epoch"]
         # trainer.fit_loop.epoch_loop.automatic_optimization.optim_progress.optimizer_steps
-        self.resume_step = state_dict["resume_step"]
+        self.resume_step = state_dict["resume_step"] * state_dict["accumulate_grad_batches"]

@@ -50,21 +50,29 @@ def propagate_probs_over_ontology(
 
 def convert_meta_adata_to_query_obj_for_scoring(
         meta_adata: sc.AnnData,
-        metadata_key: str):
-    assert metadata_key + "_propagated_class_probs" in meta_adata.obsm
-    assert metadata_key + "_propagated_ontology_term_ids" in meta_adata.uns
+        metadata_key: str,
+        scores_col_name_suffix: str = "class_probs",
+        ontology_term_ids_uns_key_name_suffix: str = "ontology_term_ids",
+        ontology_term_id_obs_col_name_suffix: str = "ontology_term_id",
+    ) -> t.Tuple[t.List[dict], t.List[str]]:
+    scores_col_name = f"{metadata_key}_{scores_col_name_suffix}"
+    ontology_term_ids_uns_key_name = f"{metadata_key}_{ontology_term_ids_uns_key_name_suffix}"
+    ontology_term_id_obs_col_name = f"{metadata_key}_{ontology_term_id_obs_col_name_suffix}"
+    assert scores_col_name in meta_adata.obsm
+    assert ontology_term_ids_uns_key_name in meta_adata.uns
+    assert ontology_term_id_obs_col_name in meta_adata.obs.columns
     query_objs = []
     ground_truth_ontology_term_ids = []
     obs_index = meta_adata.obs.index.values
     for i_cell in range(len(meta_adata)):
         obs_row = meta_adata.obs.iloc[i_cell]
-        ground_truth_ontology_term_id = obs_row[metadata_key + "_ontology_term_id"]
+        ground_truth_ontology_term_id = obs_row[ontology_term_id_obs_col_name]
         query_obj = dict()
         query_obj["query_cell_id"] = obs_index[i_cell]
         query_obj["matches"] = []
         for ontology_term_id, score in zip(
-                meta_adata.uns[metadata_key + "_propagated_ontology_term_ids"],
-                meta_adata.obsm[metadata_key + "_propagated_class_probs"][i_cell]):
+                meta_adata.uns[ontology_term_ids_uns_key_name],
+                meta_adata.obsm[scores_col_name][i_cell, :]):
             query_obj["matches"].append({
                 "ontology_term_id": ontology_term_id,
                 "score": score,
@@ -82,8 +90,9 @@ def main():
         help="CUDA device index to use (default: 0)"
     )
     parser.add_argument(
-        "--val_adata_index", type=int, default=1,
-        help="Index to choose the validation AnnData file (default: 1)"
+        "--val_adata_path", type=str,
+        default="/home/mehrtash/data/data/extract_0.h5ad",
+        help="Validation AnnData path"
     )
     parser.add_argument(
         "--checkpoint_path", type=str,
@@ -115,22 +124,38 @@ def main():
         help="Random number generator seed (default: 42)"
     )
     parser.add_argument(
-        "--n_cells", type=int, default=1000,
-        help="Number of cells to use (default: 1000)"
+        "--n_cells", type=int, default=None,
+        help="Number of cells to use (default: None, meaning all)"
+    )
+    # Updated default for n_genes to match the new notebook and added new argument for gene selection method
+    parser.add_argument(
+        "--n_genes", type=int, default=None,
+        help="Number of genes to use. For 'highly_expressed', selects top genes; for 'random', selects random genes. Set to None to use all."
     )
     parser.add_argument(
-        "--n_genes", type=int, default=10000,
-        help="Number of highly expressed genes to use (default: 10000). Set to None to use all."
+        "--gene_selection_method", type=str, default="random",
+        help="Gene selection method: 'random' or 'highly_expressed' (default: random)"
+    )
+    parser.add_argument(
+        "--rand_prompt_vars_sublist_path", type=str,
+        default="/home/mehrtash/data/data/cellariumgpt_artifacts/autosomal_gene_ids.txt",
+        help="Gene list to select random genes from."
+    )
+    parser.add_argument(
+        "--fixed_prompt_vars_sublist_path", type=str,
+        default="/home/mehrtash/data/data/cellariumgpt_artifacts/sex_gene_ids.txt",
+        help="Gene list to select fixed genes from."
     )
     parser.add_argument(
         "--chunk_size", type=int, default=16,
         help="Chunk size for processing (default: 16)"
     )
+    parser.add_argument(
+        "--metric_style", type=str, default="hop_k_call",
+        help="Performance metric style: 'hop_k_sensitivity_precision', 'hop_k_inclusion', or 'hop_k_call' (default: hop_k_call)"
+    )
 
     args = parser.parse_args()
-
-    # Compute the validation AnnData file path using the provided index
-    adata_path = f"/home/mehrtash/data/data/cellariumgpt_validation/extract_{args.val_adata_index}.h5ad"
 
     os.makedirs(args.output_path, exist_ok=True)
 
@@ -183,32 +208,72 @@ def main():
         attention_backend="mem_efficient",
         verbose=False
     )
-    logger.info(f"Loading the validation AnnData object from {adata_path} ...")
-    adata = sc.read_h5ad(adata_path)
+    logger.info(f"Loading the validation AnnData object from {args.val_adata_path} ...")
+    adata = sc.read_h5ad(args.val_adata_path)
+    
     if args.n_genes is not None:
-        logger.info(f"Using {args.n_genes} highly expressed genes.")
-        X_g = np.asarray(adata.X.sum(0)).flatten()
-        highly_expressed_gene_indices = np.argsort(X_g)[-args.n_genes:]
-        highly_expressed_gene_ids = adata.var_names[highly_expressed_gene_indices]
-        adata = adata[:, highly_expressed_gene_ids]
-    else:
-        logger.info("Using all genes.")
 
+        with open(args.fixed_prompt_vars_sublist_path, "r") as f:
+            fixed_prompt_var_names_sublist = f.read().splitlines()
+        logger.info(f"Starting with {len(fixed_prompt_var_names_sublist)} fixed genes.")
+
+        if args.gene_selection_method == "highly_expressed":
+            logger.info(f"In addition, using up to {args.n_genes} highly expressed genes.")
+            X_g = np.asarray(adata.X.sum(0)).flatten()
+            highly_expressed_gene_indices = np.argsort(X_g)[::-1]
+            selected_gene_set = set(fixed_prompt_var_names_sublist)
+            target_n_genes = args.n_genes + len(fixed_prompt_var_names_sublist)
+            for idx in highly_expressed_gene_indices:
+                if len(selected_gene_set) >= target_n_genes:
+                    break
+                gene_id = adata.var_names[highly_expressed_gene_indices[idx]]
+                selected_gene_set.add(gene_id)
+            logger.info(f"Selected {len(selected_gene_set)} genes.")
+            fixed_prompt_var_names_sublist = list(selected_gene_set)
+            rand_prompt_var_names_sublist = []
+            n_rand_prompt_vars = 0
+            torch_rng = torch.Generator().manual_seed(args.rng_seed)
+        
+        elif args.gene_selection_method == "random":
+            logger.info(f"In addition, using {args.n_genes} random genes (seed = {args.rng_seed}).")
+            torch_rng = torch.Generator().manual_seed(args.rng_seed)
+            n_rand_prompt_vars = args.n_genes
+            with open(args.rand_prompt_vars_sublist_path, "r") as f:
+                rand_prompt_var_names_sublist = f.read().splitlines()
+        
+        else:
+            raise ValueError(f"Unknown gene selection method: {args.gene_selection_method}")
+    else:
+        logger.info(f"Using all genes.")
+        n_rand_prompt_vars = None
+        rand_prompt_var_names_sublist = None
+        fixed_prompt_var_names_sublist = None
+        
     if args.n_cells is None:
-        logger.info("Using all cells.")
+        logger.info(f"Using all cells.")
     else:
         n_cells = min(args.n_cells, len(adata))
         logger.info(f"Using {n_cells} random cells (seed = {args.rng_seed}).")
         rng = np.random.RandomState(args.rng_seed)
         adata = adata[rng.choice(len(adata), n_cells, replace=False)]
+
     logger.info(f"Predicting metadata for {len(adata)} cells ...")
-    preds = ctx.predict_metadata_chunked(adata, chunk_size=args.chunk_size)
+    preds = ctx.predict_metadata_chunked(
+        adata=adata,
+        chunk_size=args.chunk_size,
+        n_rand_prompt_vars=n_rand_prompt_vars,
+        rand_prompt_var_names_sublist=rand_prompt_var_names_sublist,
+        fixed_prompt_var_names_sublist=fixed_prompt_var_names_sublist,
+        rng=torch_rng
+    )
 
     logger.info("Inserting predictions into an AnnData object ...")
     meta_adata = sc.AnnData(obs=adata.obs.copy())
 
+    # Updated to include logits and compute class probabilities via np.exp()
     for meta_key, meta_preds in preds.items():
-        meta_adata.obsm[meta_key + "_class_probs"] = meta_preds
+        meta_adata.obsm[meta_key + "_class_logits"] = meta_preds
+        meta_adata.obsm[meta_key + "_class_probs"] = np.exp(meta_preds)
         meta_adata.uns[meta_key + "_ontology_term_ids"] = ctx.metadata_ontology_infos[meta_key]["names"]
         meta_adata.uns[meta_key + "_labels"] = ctx.metadata_ontology_infos[meta_key]["labels"]
 
@@ -226,17 +291,34 @@ def main():
         )
     meta_keys = ontology_benchmarking_resource_dicts.keys()
 
+    if args.metric_style in {"hop_k_sensitivity_precision"}:
+        logger.info(f"Calculating performance metrics using {args.metric_style} style ...")
+        scores_col_name_suffix = "propagated_class_probs"
+        ontology_term_ids_uns_key_name_suffix = "propagated_ontology_term_ids"
+        ontology_term_id_obs_col_name_suffix: str = "ontology_term_id"
+    elif args.metric_style in {"hop_k_inclusion", "hop_k_call"}:
+        logger.info(f"Calculating performance metrics using {args.metric_style} style ...")
+        scores_col_name_suffix = "class_probs"
+        ontology_term_ids_uns_key_name_suffix = "ontology_term_ids"
+        ontology_term_id_obs_col_name_suffix: str = "ontology_term_id"
+    else:
+        raise ValueError(f"Unknown metric style: {args.metric_style}")
+
     results_dfs = []
     for meta_key in meta_keys:
         logger.info(f"Calculating performance metrics for {meta_key} ...")
         query_objs, ground_truth_ontology_term_ids = convert_meta_adata_to_query_obj_for_scoring(
             meta_adata=meta_adata,
-            metadata_key=meta_key)
+            metadata_key=meta_key,
+            scores_col_name_suffix=scores_col_name_suffix,
+            ontology_term_ids_uns_key_name_suffix=ontology_term_ids_uns_key_name_suffix,
+            ontology_term_id_obs_col_name_suffix=ontology_term_id_obs_col_name_suffix)
         results_df = calculate_metrics_for_prediction_output(
             model_predictions=query_objs,
             ground_truth_ontology_term_ids=ground_truth_ontology_term_ids,
             ontology_resource=ontology_benchmarking_resource_dicts[meta_key],
-            num_hops=n_hops_dict[meta_key])
+            num_hops=n_hops_dict[meta_key],
+            metric_style=args.metric_style)
         results_df.columns = [
             f"{meta_key}_{col}" if col != "query_cell_id" else col 
             for col in results_df.columns
@@ -246,8 +328,9 @@ def main():
     final_results_df = pd.concat(results_dfs, axis=1)
     meta_adata.obs.index.name = "query_cell_id"
     meta_adata.obs = pd.concat([meta_adata.obs, final_results_df], axis=1)
+    output_prefix = os.path.splitext(os.path.basename(args.val_adata_path))[0]
     meta_adata_output_file_path = os.path.join(
-        args.output_path, f"extract_{args.val_adata_index}_metadata_prediction_scores.h5ad"
+        args.output_path, f"{output_prefix}_metadata_prediction_scores.h5ad"
     )
     logger.info(f"Saving the results to {meta_adata_output_file_path} ...")
     meta_adata.write_h5ad(meta_adata_output_file_path)

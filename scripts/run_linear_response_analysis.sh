@@ -12,11 +12,11 @@ fi
 CUDA_DEVICE_INDEX="$1"
 
 # Default parameters (feel free to modify these defaults)
-CHECKPOINT_PATH="/home/mehrtash/data/100M_long_run/run_001/lightning_logs/version_3/checkpoints/epoch=5-step=504000.ckpt"
-REF_ADATA_PATH="/home/mehrtash/data/data/extract_0.h5ad"
-GENE_INFO_TSV_PATH="/home/mehrtash/data/gene_info/gene_info.tsv"
-VALIDATION_ADATA_PATH="/home/mehrtash/data/data/cellariumgpt_artifacts/cell_types_for_validation_filtered.h5ad"
-OUTPUT_PATH="/home/mehrtash/data/data/linear_response/100M_long_run_last_checkpoint"
+CHECKPOINT_PATH="/mnt/cellariumgpt-xfer/mb_checkpoints/59M_001_bs3072/epoch=3-step=53770__updated.ckpt"
+REF_ADATA_PATH="/mnt/cellariumgpt-xfer/mb-ml-dev-vm/data/extract_0.h5ad"
+GENE_INFO_TSV_PATH="/mnt/cellariumgpt-xfer/mb-ml-dev-vm/gene_info/gene_info.tsv"
+VALIDATION_ADATA_PATH="/mnt/cellariumgpt-xfer/mb-ml-dev-vm/cellariumgpt_artifacts/cell_types_for_validation_filtered.h5ad"
+OUTPUT_PATH="/mnt/cellariumgpt-inference/linear_response/59M_001_bs3072"
 
 QUERY_CHUNK_SIZE=1000
 TOTAL_PROB_MASS=0.5

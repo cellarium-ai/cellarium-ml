@@ -15,7 +15,7 @@ from functools import cached_property
 from more_itertools import chunked
 
 from cellarium.ml import CellariumModule, CellariumPipeline
-from cellarium.ml.models.cellarium_gpt import PredictTokenizer
+from cellarium.ml.transforms.cellarium_gpt_tokenizer import CellariumGPTPredictTokenizer
 
 import matplotlib.pyplot as plt
 import plotly.express as px
@@ -90,7 +90,7 @@ class CellariumGPTInferenceContext:
             ref_adata_path: str,
             gene_info_tsv_path: str,
             device: torch.device,
-            attention_backend: str = "mem_efficient",
+            attention_backend: str | None = "mem_efficient",
             verbose: bool = True):
         
         # for logging
@@ -110,7 +110,8 @@ class CellariumGPTInferenceContext:
         self.gpt_pipeline.model.gene_categories = np.asarray(self._adata.var_names)
         
         # change attention backend to memory efficient
-        self.gpt_pipeline.model.set_attention_backend(attention_backend)
+        if attention_backend is not None:
+            self.gpt_pipeline.model.attention_backend = attention_backend
 
         # gene info related
         self.model_var_names = np.asarray(self._adata.var_names)
@@ -134,8 +135,8 @@ class CellariumGPTInferenceContext:
         if self.verbose:
             logger.info(message)
 
-    def _instantiate_predict_tokenizer(self) -> PredictTokenizer:
-        return PredictTokenizer(
+    def _instantiate_predict_tokenizer(self) -> CellariumGPTPredictTokenizer:
+        return CellariumGPTPredictTokenizer(
             max_total_mrna_umis=self.MAX_TOTAL_MRNA_UMIS,
             gene_vocab_sizes={
                 "assay": self.ASSAY_VOCAB_SIZE,
@@ -216,6 +217,10 @@ class CellariumGPTInferenceContext:
             adata: sc.AnnData,
             obs_index: int | list[int] | None,
             query_var_names: list[str],
+            n_rand_prompt_vars: int | None = None,
+            rand_prompt_var_names_sublist: list[str] | None = None,
+            fixed_prompt_var_names_sublist: list[str] | None = None,
+            rng: torch.Generator | None = None,
             query_total_mrna_umis: float | None = None,
             metadata_prompt_masks_dict: dict[str, bool] | None = None,
         ) -> tuple[dict, dict]:
@@ -238,36 +243,100 @@ class CellariumGPTInferenceContext:
         # generate gene ids and masks
         n_cells = len(adata)
         adata_var_names = adata.var_names
-        assert all([var_name in self.var_name_to_index_map for var_name in adata_var_names])
         assert all([var_name in self.var_name_to_index_map for var_name in query_var_names])
-        prompt_var_index = [self.var_name_to_index_map[var_name] for var_name in adata_var_names]
         query_var_index = [self.var_name_to_index_map[var_name] for var_name in query_var_names]
-        n_prompt_vars = len(prompt_var_index)
-        n_query_vars = len(query_var_index)
-        n_total_vars = n_prompt_vars + n_query_vars
 
         # cpu device for intermediate
         cpu_device = torch.device("cpu")
-        
-        # gene id
-        gene_ids_nc = torch.tensor(
-            prompt_var_index + query_var_index,
-            dtype=torch.int64, device=cpu_device)[None, :].expand(n_cells, n_total_vars)
-        
-        # gene prompt mask
-        gene_prompt_mask_nc = torch.tensor(
-            [1] * n_prompt_vars + [0] * n_query_vars,
-            dtype=torch.bool, device=cpu_device)[None, :].expand(n_cells, n_total_vars)
-        
-        # gene value
-        try:
-            prompt_X_ng = np.asarray(adata.X.todense())
-        except AttributeError:
-            prompt_X_ng = adata.X
-        prompt_gene_value_nc = torch.tensor(prompt_X_ng, dtype=torch.float32, device=cpu_device)
-        query_gene_value_nc = torch.zeros(n_cells, n_query_vars, dtype=torch.float32, device=cpu_device)
-        gene_value_nc = torch.cat([prompt_gene_value_nc, query_gene_value_nc], dim=1)
 
+        if n_rand_prompt_vars is None:  # using all genes in the AnnData as prompt
+
+            assert all([var_name in self.var_name_to_index_map for var_name in adata_var_names])
+
+            prompt_var_index = [self.var_name_to_index_map[var_name] for var_name in adata_var_names]
+            n_prompt_vars = len(prompt_var_index)
+            n_query_vars = len(query_var_index)
+            n_total_vars = n_prompt_vars + n_query_vars
+
+            # gene id
+            gene_ids_nc = torch.tensor(
+                prompt_var_index + query_var_index,
+                dtype=torch.int64, device=cpu_device)[None, :].expand(n_cells, n_total_vars)
+            
+            # gene prompt mask
+            gene_prompt_mask_nc = torch.tensor(
+                [1] * n_prompt_vars + [0] * n_query_vars,
+                dtype=torch.bool, device=cpu_device)[None, :].expand(n_cells, n_total_vars)
+            
+            # gene value
+            try:
+                prompt_X_ng = np.asarray(adata.X.todense())
+            except AttributeError:
+                prompt_X_ng = adata.X
+            prompt_gene_value_nc = torch.tensor(prompt_X_ng, dtype=torch.float32, device=cpu_device)
+            query_gene_value_nc = torch.zeros(n_cells, n_query_vars, dtype=torch.float32, device=cpu_device)
+            gene_value_nc = torch.cat([prompt_gene_value_nc, query_gene_value_nc], dim=1)
+
+        else:
+
+            assert rand_prompt_var_names_sublist is not None
+            assert fixed_prompt_var_names_sublist is not None
+            assert all([var_name in self.var_name_to_index_map for var_name in rand_prompt_var_names_sublist])
+            assert all([var_name in self.var_name_to_index_map for var_name in fixed_prompt_var_names_sublist])
+            assert set(rand_prompt_var_names_sublist) & set(fixed_prompt_var_names_sublist) == set()
+            assert 0 <= n_rand_prompt_vars <= len(rand_prompt_var_names_sublist)
+            assert rng is not None
+
+            n_fixed_prompt_vars = len(fixed_prompt_var_names_sublist)
+            rand_prompt_sublist_size = len(rand_prompt_var_names_sublist)
+            n_prompt_vars = n_rand_prompt_vars + n_fixed_prompt_vars
+            n_query_vars = len(query_var_index)
+            n_total_vars = n_prompt_vars + n_query_vars
+
+            # gene id
+            rand_prompt_sublist_var_index = torch.tensor(
+                [self.var_name_to_index_map[var_name] for var_name in rand_prompt_var_names_sublist],
+                dtype=torch.int64, device=cpu_device)
+            fixed_prompt_sublist_var_index = torch.tensor(
+                [self.var_name_to_index_map[var_name] for var_name in fixed_prompt_var_names_sublist],
+                dtype=torch.int64, device=cpu_device)
+            rand_prompt_sublist_indices_np = torch.argsort(
+                torch.rand((n_cells, rand_prompt_sublist_size), generator=rng, device=cpu_device), dim=-1)[:, :n_rand_prompt_vars]
+            rand_prompt_vars_nr = rand_prompt_sublist_var_index[rand_prompt_sublist_indices_np]
+            fixed_prompt_vars_nf = fixed_prompt_sublist_var_index[None, :].expand(n_cells, n_fixed_prompt_vars)
+            query_vars_nq = torch.tensor(
+                query_var_index, dtype=torch.int64, device=cpu_device)[None, :].expand(n_cells, n_query_vars)
+            prompt_vars_np = torch.cat([rand_prompt_vars_nr, fixed_prompt_vars_nf], dim=-1)
+            gene_ids_nc = torch.cat([prompt_vars_np, query_vars_nq], dim=-1)
+
+            # gene value
+            adata_var_index = torch.tensor(
+                [self.var_name_to_index_map[var_name] for var_name in adata_var_names],
+                dtype=torch.int64, device=cpu_device)
+            
+            try:
+                _prompt_X_ng = np.asarray(adata.X.todense())
+            except AttributeError:
+                _prompt_X_ng = adata.X
+
+            # re-layout the count matrix so that the var dimension is the same as the model var names
+            prompt_X_ng = torch.tensor(_prompt_X_ng, dtype=torch.float32, device=cpu_device)
+            prompt_X_nv = torch.zeros((n_cells, len(self.model_var_names)), dtype=torch.float32, device=cpu_device)
+            prompt_X_nv[:, adata_var_index] = prompt_X_ng
+            
+            # select values
+            prompt_gene_value_np = prompt_X_nv[
+                torch.arange(n_cells, device=cpu_device)[:, None],
+                prompt_vars_np]
+            query_gene_value_nq = torch.zeros(
+                n_cells, n_query_vars, dtype=torch.float32, device=cpu_device)            
+            gene_value_nc = torch.cat([prompt_gene_value_np, query_gene_value_nq], dim=1)
+
+            # gene prompt mask
+            gene_prompt_mask_nc = torch.tensor(
+                [1] * n_prompt_vars + [0] * n_query_vars,
+                dtype=torch.bool, device=cpu_device)[None, :].expand(n_cells, n_total_vars)
+            
         # total mrna umis
         prompt_total_mrna_umis_nc = torch.tensor(
             adata.obs["total_mrna_umis"].values,
@@ -295,7 +364,9 @@ class CellariumGPTInferenceContext:
                 categories=self.gene_ontology_infos["suspension_type"]["names"]).codes,
             dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_total_vars)
 
-        gene_tokens_dict = {
+        # apply the mask
+        gene_value_nc[~gene_prompt_mask_nc] = -1
+        gene_token_nj_dict = {
             "assay": assay_nc,  # categorical
             "suspension_type": suspension_type_nc,  # categorical
             "gene_id": gene_ids_nc,  # categorical
@@ -312,13 +383,18 @@ class CellariumGPTInferenceContext:
                 [metadata_prompt_masks_dict[key]] * n_cells, dtype=torch.bool, device=cpu_device)
         
         # generate metadata tokens dicts; `PredictTokenizer` will convert these to codes
-        metadata_tokens_dict = {
+        metadata_token_n_dict = {
             "cell_type": adata.obs["cell_type_ontology_term_id"].values,  # categorical
             "tissue": adata.obs["tissue_ontology_term_id"].values,  # categorical
             "development_stage": adata.obs["development_stage_ontology_term_id"].values,  # categorical
             "disease": adata.obs["disease_ontology_term_id"].values,  # categorical
             "sex": adata.obs["sex_ontology_term_id"].values,  # categorical
         }
+
+        # apply the mask on metadata tokens
+        for metadata_key, value in metadata_token_n_dict.items():
+            mask = expanded_metadata_prompt_masks_dict[metadata_key].numpy()
+            value[~mask] = "<MASK>"
 
         # where to find each thing in the context?
         context_indices = dict()
@@ -335,10 +411,8 @@ class CellariumGPTInferenceContext:
 
         # return gene_tokens_dict, metadata_tokens_dict
         tokens_dict = self.predict_tokenizer(
-            metadata_tokens_n=metadata_tokens_dict,
-            metadata_prompt_masks_n=expanded_metadata_prompt_masks_dict,
-            gene_tokens_nc=gene_tokens_dict,
-            gene_prompt_mask_nc=gene_prompt_mask_nc,
+            gene_token_nj_dict=gene_token_nj_dict,
+            metadata_token_n_dict=metadata_token_n_dict,
         )
 
         return tokens_dict, context_indices
@@ -536,21 +610,21 @@ class CellariumGPTInferenceContext:
         # get a reference to prompt gene values
         FIRST_CELL_DIM = 0
         GENE_VALUE_DIM = 0
-        prompt_gene_log1p_values_g = tokens_dict['gene_tokens_nc']['gene_value'][
-            FIRST_CELL_DIM, context_indices['prompt_genes'], GENE_VALUE_DIM]
+        prompt_gene_log1p_values_g = tokens_dict['token_value_nc_dict']['gene_value'][
+            FIRST_CELL_DIM, context_indices['prompt_genes']]
         
         # this is the "source", in case it is provided, e.g., for Jacobian calculation
         if prompt_gene_values_g is None:
             prompt_gene_values_g = torch.expm1(prompt_gene_log1p_values_g).clone()
         
         # inject back to tokens_dict to re-establish the reference for Jacobian calculation
-        tokens_dict['gene_tokens_nc']['gene_value'][
-            FIRST_CELL_DIM, context_indices['prompt_genes'], GENE_VALUE_DIM] = torch.log1p(prompt_gene_values_g)
+        tokens_dict['token_value_nc_dict']['gene_value'][
+            FIRST_CELL_DIM, context_indices['prompt_genes']] = torch.log1p(prompt_gene_values_g)
 
         # get model predictions
         logits_dict = self.gpt_pipeline.model.predict(
-            gene_tokens_nc=tokens_dict["gene_tokens_nc"],
-            metadata_tokens_n=tokens_dict["metadata_tokens_n"],
+            token_value_nc_dict=tokens_dict["token_value_nc_dict"],
+            token_mask_nc_dict=tokens_dict["token_mask_nc_dict"],
             prompt_mask_nc=tokens_dict["prompt_mask_nc"],
         )
 
@@ -580,10 +654,9 @@ class CellariumGPTInferenceContext:
         
         # get model predictions
         logits_dict = self.gpt_pipeline.model.predict(
-            gene_tokens_nc=tokens_dict["gene_tokens_nc"],
-            metadata_tokens_n=tokens_dict["metadata_tokens_n"],
-            prompt_mask_nc=tokens_dict["prompt_mask_nc"],
-            predict_keys=['gene_value']
+            token_value_nc_dict=tokens_dict["token_value_nc_dict"],
+            token_mask_nc_dict=tokens_dict["token_mask_nc_dict"],
+            prompt_mask_nc=tokens_dict["prompt_mask_nc"]
         )
 
         # note: we use `q` to denote query genes
@@ -911,14 +984,27 @@ class CellariumGPTInferenceContext:
         }
     
 
-    def predict_metadata_chunked(self, adata: sc.AnnData, chunk_size: int = 128) -> dict[str, np.ndarray]:
+    def predict_metadata_chunked(
+            self,
+            adata: sc.AnnData,
+            chunk_size: int = 128,
+            n_rand_prompt_vars: int | None = None,
+            rand_prompt_var_names_sublist: list[str] | None = None,
+            fixed_prompt_var_names_sublist: list[str] | None = None,
+            rng: torch.Generator | None = None
+        ) -> dict[str, np.ndarray]:
         metadata_prediction_chunks_dict = []
         for i in tqdm(range(0, len(adata), chunk_size)):
             first = i
             last = min(len(adata), i + chunk_size)
             if last == first:
                 continue
-            metadata_prediction_dict = self.predict_metadata(adata[first:last])
+            metadata_prediction_dict = self.predict_metadata(
+                adata=adata[first:last],
+                n_rand_prompt_vars=n_rand_prompt_vars,
+                rand_prompt_var_names_sublist=rand_prompt_var_names_sublist,
+                fixed_prompt_var_names_sublist=fixed_prompt_var_names_sublist,
+                rng=rng)
             metadata_prediction_chunks_dict.append(metadata_prediction_dict)
         metadata_prediction_dict = dict()
         for key in self.metadata_ontology_infos.keys():
@@ -927,12 +1013,23 @@ class CellariumGPTInferenceContext:
         return metadata_prediction_dict
 
 
-    def predict_metadata(self, adata: sc.AnnData) -> dict[str, np.ndarray]:
+    def predict_metadata(
+            self,
+            adata: sc.AnnData,
+            n_rand_prompt_vars: int | None = None,
+            rand_prompt_var_names_sublist: list[str] | None = None,
+            fixed_prompt_var_names_sublist: list[str] | None = None,
+            rng: torch.Generator | None = None,
+        ) -> dict[str, np.ndarray]:
         # tokenize the given anndata: no query genes, just metadata (which will be included as query by default)
         tokens_dict, context_indices = self.generate_tokens_from_adata(
             adata=adata,
             obs_index=None,
             query_var_names=[],
+            n_rand_prompt_vars=n_rand_prompt_vars,
+            rand_prompt_var_names_sublist=rand_prompt_var_names_sublist,
+            fixed_prompt_var_names_sublist=fixed_prompt_var_names_sublist,
+            rng=rng,
         )
 
         # convert to cuda
@@ -942,14 +1039,13 @@ class CellariumGPTInferenceContext:
         metadata_prediction_dict = dict()
         with torch.inference_mode():
             logits_dict = self.gpt_pipeline.model.predict(
-                gene_tokens_nc=tokens_dict["gene_tokens_nc"],
-                metadata_tokens_n=tokens_dict["metadata_tokens_n"],
+                token_value_nc_dict=tokens_dict["token_value_nc_dict"],
+                token_mask_nc_dict=tokens_dict["token_mask_nc_dict"],
                 prompt_mask_nc=tokens_dict["prompt_mask_nc"])
             for metadata_key in self.metadata_ontology_infos.keys():
                 metadata_logits_nk = logits_dict[metadata_key][:, context_indices[f'query_{metadata_key}'], :]
                 metadata_logits_nk = metadata_logits_nk - torch.logsumexp(metadata_logits_nk, dim=1, keepdim=True)
-                metadata_probs_nk = torch.exp(metadata_logits_nk)
-                metadata_prediction_dict[metadata_key] = metadata_probs_nk.cpu().numpy()
+                metadata_prediction_dict[metadata_key] = metadata_logits_nk.cpu().numpy()
 
         return metadata_prediction_dict
 
@@ -1230,7 +1326,7 @@ class GeneNetworkAnalysisBase:
 
     def process(
             self,
-            response_normalization_strategy: t.Literal["mean", "std", "none"] = "mean",
+            response_normalization_strategy: t.Literal["mean", "std", "none", "corr", "log1p"] = "mean",
             feature_normalization_strategy: t.Literal["l2", "z_score", "none"] = "z_score",
             min_prompt_gene_tpm: float = 0.,
             min_query_gene_tpm: float = 0.,
@@ -1242,6 +1338,8 @@ class GeneNetworkAnalysisBase:
             query_hv_min_x: float | None = 1e-2,
             query_hv_max_x: float | None = np.inf,
             eps: float = 1e-8,
+            target_lib_size: float = 10_000,
+            included_gene_biotypes: set[str] | None = None,
             z_trans_func: t.Callable[[np.ndarray], np.ndarray] | None = None,
         ) -> None:
 
@@ -1255,6 +1353,18 @@ class GeneNetworkAnalysisBase:
         elif response_normalization_strategy == "none":
             z_p = np.ones_like(self.prompt_marginal_mean_p)
             z_q = np.ones_like(self.query_marginal_mean_q)
+        elif response_normalization_strategy == "corr":
+            assert len(self.query_var_names) == len(self.prompt_var_names)
+            assert all(self.query_var_names[i] == self.prompt_var_names[i] for i in range(len(self.query_var_names)))
+            z_p = self.prompt_marginal_std_p
+            z_q = self.query_marginal_std_q
+            self.corr_pp = self.response_qp * (z_p[None, :] + norm_pseudo_count) / (z_q[:, None] + norm_pseudo_count)
+            self.corr_pp = np.clip(0.5 * (self.corr_pp + self.corr_pp.T), -1, 1)
+        elif response_normalization_strategy == "log1p":
+            prompt_lib_size = self.prompt_marginal_mean_p.sum()
+            query_lib_size = self.query_marginal_mean_q.sum()
+            z_p = 1 + self.prompt_marginal_mean_p * target_lib_size / prompt_lib_size
+            z_q = 1 + self.query_marginal_mean_q * target_lib_size / query_lib_size
         else:
             raise ValueError("Invalid Jacobian normalization strategy")
 
@@ -1293,6 +1403,31 @@ class GeneNetworkAnalysisBase:
             self.mask_q = self.mask_q & hv_mask_q
             logger.info(f"Number of query genes after highly-variable filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
 
+        if included_gene_biotypes is not None:
+            assert isinstance(included_gene_biotypes, set)
+            gene_id_to_gene_biotype_map = {
+                gene_id: biotype
+                for gene_id, biotype in zip(
+                    self.gene_info_df['ENSEMBL Gene ID'].values,
+                    self.gene_info_df['Gene Biotype'].values
+                )
+            }
+            for gene_id in self.query_var_names:
+                if gene_id not in gene_id_to_gene_biotype_map:
+                    gene_id_to_gene_biotype_map[gene_id] = "Unkown"
+            biotype_mask_q = np.array([
+                gene_id_to_gene_biotype_map[gene_id] in included_gene_biotypes
+                for gene_id in self.query_var_names
+            ])
+            biotype_mask_p = np.array([
+                gene_id_to_gene_biotype_map[gene_id] in included_gene_biotypes
+                for gene_id in self.prompt_var_names
+            ])
+            self.mask_q = self.mask_q & biotype_mask_q
+            self.mask_p = self.mask_p & biotype_mask_p
+            logger.info(f"Number of query genes after biotype filtering: {np.sum(self.mask_q)} / {len(self.mask_q)}")
+            logger.info(f"Number of prompt genes after biotype filtering: {np.sum(self.mask_p)} / {len(self.mask_p)}")
+        
         # apply the mask to everything else
         self.prompt_var_names = [self.prompt_var_names[i] for i in range(len(self.prompt_var_names)) if self.mask_p[i]]
         self.prompt_marginal_mean_p = self.prompt_marginal_mean_p[self.mask_p]
@@ -1304,6 +1439,9 @@ class GeneNetworkAnalysisBase:
 
         # apply the mask to z_qp
         self.z_qp = self.z_qp[self.mask_q, :][:, self.mask_p]
+
+        if hasattr(self, 'corr_pp'):
+            self.corr_pp = self.corr_pp[self.mask_q, :][:, self.mask_p]
 
         # clip and transform features
         self.z_qp[np.isnan(self.z_qp)] = 0.
@@ -1350,7 +1488,12 @@ class GeneNetworkAnalysisBase:
             **kwargs) -> None:
 
         n_query_genes = self.z_qp.shape[0]
-        rho_pp = self.z_qp.T @ self.z_qp / n_query_genes
+        if hasattr(self, 'corr_pp'):
+            logger.info("Using precomputed correlation matrix")
+            rho_pp = self.corr_pp
+        else:
+            logger.info("Computing correlation matrix from z_qp")
+            rho_pp = self.z_qp.T @ self.z_qp / n_query_genes
 
         if adjacency_strategy == "shifted_correlation":
             assert "beta" in kwargs, "Must provide beta for shifted correlation"

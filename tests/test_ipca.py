@@ -19,7 +19,7 @@ from tests.common import BoringDataset
 
 @pytest.fixture
 def x_ng():
-    n, g = 10000, 100
+    n, g = 10002, 100
     rng = torch.Generator()
     rng.manual_seed(1465)
     mean_g = torch.randn((g,), generator=rng)
