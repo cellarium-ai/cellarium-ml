@@ -276,6 +276,43 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
             # assert isinstance(block, TransformerBlock)
             block.attention.attention_backend = value
 
+    def get_embeddings(
+        self,
+        gene_tokens_nc: dict[str, torch.Tensor],
+        metadata_tokens_n: dict[str, torch.Tensor],
+        prompt_mask_nc: torch.Tensor | None,
+        to_cpu = True
+    ) -> dict[str, torch.Tensor]:
+        # embed the gene IDs, values, and total mRNA UMIs
+        embedding_ncd = torch.cat(
+            [
+                self.gene_embedding(gene_tokens_nc),
+                self.metadata_embedding(metadata_tokens_n),
+            ],
+            dim=1,
+        )
+
+        # create attention mask
+        if self.attention_backend == "flex":
+
+            def prompt_diagonal_mask_mod(b, h, q_idx, kv_idx):
+                return prompt_mask_nc[b, kv_idx] | (q_idx == kv_idx)
+
+            n, c = prompt_mask_nc.shape
+            attention_mask_ncc = create_block_mask(
+                prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c, BLOCK_SIZE=c, device=prompt_mask_nc.device, _compile=False)
+        else:
+            attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
+
+        # transformer blocks
+        hidden_state_ncd = embedding_ncd * self.embeddings_scale
+
+        hidden_states = self.transformer.forward_all_hidden_states(hidden_state_ncd, attention_mask_ncc, 
+                                                                   to_cpu=to_cpu)
+        # hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
+
+        return hidden_states
+
     def predict(
         self,
         token_value_nc_dict: dict[str, torch.Tensor],
