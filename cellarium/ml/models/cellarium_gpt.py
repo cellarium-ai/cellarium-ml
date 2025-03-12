@@ -276,7 +276,7 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
             # assert isinstance(block, TransformerBlock)
             block.attention.attention_backend = value
 
-    def get_embeddings(
+    def get_activations(
         self,
         token_value_nc_dict: dict[str, torch.Tensor],
         token_mask_nc_dict: dict[str, torch.Tensor],

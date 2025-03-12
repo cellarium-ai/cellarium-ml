@@ -65,7 +65,7 @@ def process_arg_on_gpu(arg):
         query_development_stage_idx = context_indices['query_development_stage']
 
         with torch.inference_mode():
-            hidden_states = ctx.get_embeddings_from_tokens(tokens_dict, to_cpu=True)
+            hidden_states = ctx.get_activations_from_tokens(tokens_dict, to_cpu=True)
 
         # shape: (layers, batch_size, context_length, hidden_dim)
         hidden_states = np.stack(hidden_states)

@@ -676,7 +676,7 @@ class CellariumGPTInferenceContext:
 
         return gene_logits_nqk
      
-    def get_embeddings_from_tokens(
+    def get_activations_from_tokens(
             self,
             tokens_dict: dict,
             to_cpu = True
@@ -686,7 +686,7 @@ class CellariumGPTInferenceContext:
         tokens_dict = self.gpt_pipeline.transfer_batch_to_device(tokens_dict, self.device, 0)
         
         # get model predictions
-        hidden_states = self.gpt_pipeline.model.get_embeddings(
+        hidden_states = self.gpt_pipeline.model.get_activations(
             token_value_nc_dict=tokens_dict["token_value_nc_dict"],
             token_mask_nc_dict=tokens_dict["token_mask_nc_dict"],
             prompt_mask_nc=tokens_dict["prompt_mask_nc"],
