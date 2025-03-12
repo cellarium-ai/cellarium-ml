@@ -7,10 +7,10 @@
 #SBATCH --nodes 1
 #SBATCH --tasks 1
 #SBATCH --tasks-per-node 1
-#SBATCH --cpus-per-task 16
-#SBATCH --mem 32G
+#SBATCH --cpus-per-task 24
+#SBATCH --mem 96G
 #SBATCH --gpus-per-node 4
-#SBATCH --time 05:00:00
+#SBATCH --time 06:00:00
 
 source /u/mallina1/envs/torch_jax2/bin/activate
 cd /u/mallina1/research/cellarium-ml/notebooks/embeddings
