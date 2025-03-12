@@ -15,7 +15,7 @@ from functools import cached_property
 from more_itertools import chunked
 
 from cellarium.ml import CellariumModule, CellariumPipeline
-from cellarium.ml.models.cellarium_gpt import PredictTokenizer
+from cellarium.ml.transforms.cellarium_gpt_tokenizer import CellariumGPTPredictTokenizer
 
 import matplotlib.pyplot as plt
 import plotly.express as px
@@ -111,7 +111,7 @@ class CellariumGPTInferenceContext:
         
         # change attention backend to memory efficient
         if attention_backend is not None:
-            self.gpt_pipeline.model.set_attention_backend(attention_backend)
+            self.gpt_pipeline.model.attention_backend = attention_backend
 
         # gene info related
         self.model_var_names = np.asarray(self._adata.var_names)
@@ -135,8 +135,8 @@ class CellariumGPTInferenceContext:
         if self.verbose:
             logger.info(message)
 
-    def _instantiate_predict_tokenizer(self) -> PredictTokenizer:
-        return PredictTokenizer(
+    def _instantiate_predict_tokenizer(self) -> CellariumGPTPredictTokenizer:
+        return CellariumGPTPredictTokenizer(
             max_total_mrna_umis=self.MAX_TOTAL_MRNA_UMIS,
             gene_vocab_sizes={
                 "assay": self.ASSAY_VOCAB_SIZE,
@@ -364,7 +364,9 @@ class CellariumGPTInferenceContext:
                 categories=self.gene_ontology_infos["suspension_type"]["names"]).codes,
             dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_total_vars)
 
-        gene_tokens_dict = {
+        # apply the mask
+        gene_value_nc[~gene_prompt_mask_nc] = -1
+        gene_token_nj_dict = {
             "assay": assay_nc,  # categorical
             "suspension_type": suspension_type_nc,  # categorical
             "gene_id": gene_ids_nc,  # categorical
@@ -381,13 +383,18 @@ class CellariumGPTInferenceContext:
                 [metadata_prompt_masks_dict[key]] * n_cells, dtype=torch.bool, device=cpu_device)
         
         # generate metadata tokens dicts; `PredictTokenizer` will convert these to codes
-        metadata_tokens_dict = {
+        metadata_token_n_dict = {
             "cell_type": adata.obs["cell_type_ontology_term_id"].values,  # categorical
             "tissue": adata.obs["tissue_ontology_term_id"].values,  # categorical
             "development_stage": adata.obs["development_stage_ontology_term_id"].values,  # categorical
             "disease": adata.obs["disease_ontology_term_id"].values,  # categorical
             "sex": adata.obs["sex_ontology_term_id"].values,  # categorical
         }
+
+        # apply the mask on metadata tokens
+        for metadata_key, value in metadata_token_n_dict.items():
+            mask = expanded_metadata_prompt_masks_dict[metadata_key].numpy()
+            value[~mask] = "<MASK>"
 
         # where to find each thing in the context?
         context_indices = dict()
@@ -404,10 +411,8 @@ class CellariumGPTInferenceContext:
 
         # return gene_tokens_dict, metadata_tokens_dict
         tokens_dict = self.predict_tokenizer(
-            metadata_tokens_n=metadata_tokens_dict,
-            metadata_prompt_masks_n=expanded_metadata_prompt_masks_dict,
-            gene_tokens_nc=gene_tokens_dict,
-            gene_prompt_mask_nc=gene_prompt_mask_nc,
+            gene_token_nj_dict=gene_token_nj_dict,
+            metadata_token_n_dict=metadata_token_n_dict,
         )
 
         return tokens_dict, context_indices
@@ -605,21 +610,21 @@ class CellariumGPTInferenceContext:
         # get a reference to prompt gene values
         FIRST_CELL_DIM = 0
         GENE_VALUE_DIM = 0
-        prompt_gene_log1p_values_g = tokens_dict['gene_tokens_nc']['gene_value'][
-            FIRST_CELL_DIM, context_indices['prompt_genes'], GENE_VALUE_DIM]
+        prompt_gene_log1p_values_g = tokens_dict['token_value_nc_dict']['gene_value'][
+            FIRST_CELL_DIM, context_indices['prompt_genes']]
         
         # this is the "source", in case it is provided, e.g., for Jacobian calculation
         if prompt_gene_values_g is None:
             prompt_gene_values_g = torch.expm1(prompt_gene_log1p_values_g).clone()
         
         # inject back to tokens_dict to re-establish the reference for Jacobian calculation
-        tokens_dict['gene_tokens_nc']['gene_value'][
-            FIRST_CELL_DIM, context_indices['prompt_genes'], GENE_VALUE_DIM] = torch.log1p(prompt_gene_values_g)
+        tokens_dict['token_value_nc_dict']['gene_value'][
+            FIRST_CELL_DIM, context_indices['prompt_genes']] = torch.log1p(prompt_gene_values_g)
 
         # get model predictions
         logits_dict = self.gpt_pipeline.model.predict(
-            gene_tokens_nc=tokens_dict["gene_tokens_nc"],
-            metadata_tokens_n=tokens_dict["metadata_tokens_n"],
+            token_value_nc_dict=tokens_dict["token_value_nc_dict"],
+            token_mask_nc_dict=tokens_dict["token_mask_nc_dict"],
             prompt_mask_nc=tokens_dict["prompt_mask_nc"],
         )
 
@@ -649,10 +654,9 @@ class CellariumGPTInferenceContext:
         
         # get model predictions
         logits_dict = self.gpt_pipeline.model.predict(
-            gene_tokens_nc=tokens_dict["gene_tokens_nc"],
-            metadata_tokens_n=tokens_dict["metadata_tokens_n"],
-            prompt_mask_nc=tokens_dict["prompt_mask_nc"],
-            predict_keys=['gene_value']
+            token_value_nc_dict=tokens_dict["token_value_nc_dict"],
+            token_mask_nc_dict=tokens_dict["token_mask_nc_dict"],
+            prompt_mask_nc=tokens_dict["prompt_mask_nc"]
         )
 
         # note: we use `q` to denote query genes
@@ -996,8 +1000,8 @@ class CellariumGPTInferenceContext:
         metadata_prediction_dict = dict()
         with torch.inference_mode():
             logits_dict = self.gpt_pipeline.model.predict(
-                gene_tokens_nc=tokens_dict["gene_tokens_nc"],
-                metadata_tokens_n=tokens_dict["metadata_tokens_n"],
+                token_value_nc_dict=tokens_dict["token_value_nc_dict"],
+                token_mask_nc_dict=tokens_dict["token_mask_nc_dict"],
                 prompt_mask_nc=tokens_dict["prompt_mask_nc"])
             for metadata_key in self.metadata_ontology_infos.keys():
                 metadata_logits_nk = logits_dict[metadata_key][:, context_indices[f'query_{metadata_key}'], :]

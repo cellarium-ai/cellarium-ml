@@ -1,7 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -687,3 +689,135 @@ def test_compute_var_names_g(tmp_path: Path) -> None:
     with open(tmp_path / "onepass_config_with_cpu_filter.yaml", "w") as f:
         f.write(onepass_config_with_cpu_filter)
     main(["onepass_mean_var_std", "fit", "--config", str(tmp_path / "onepass_config_with_cpu_filter.yaml")])
+
+
+def test_return_predictions_userwarning(tmp_path: Path):
+    """Ensure a warning is emitted when return_predictions is set to true and the subcommand is predict."""
+
+    # using a pre-parsed config
+    config: dict[str, Any] = {
+        "model_name": "geneformer",
+        "subcommand": "predict",
+        "predict": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.Geneformer",
+                    "init_args": {
+                        "hidden_size": "2",
+                        "num_hidden_layers": "1",
+                        "num_attention_heads": "1",
+                        "intermediate_size": "4",
+                        "max_position_embeddings": "2",
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                },
+                "batch_size": "5",
+                "num_workers": "1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "1",
+                "limit_predict_batches": "1",
+            },
+            "return_predictions": "true",
+        },
+    }
+
+    match_str = r"`return_predictions` argument should"
+
+    with pytest.warns(UserWarning, match=match_str):
+        main(copy.deepcopy(config))  # running main modifies the config dict
+
+    config["predict"]["return_predictions"] = "false"
+    with pytest.warns(UserWarning, match=match_str) as record:
+        warnings.warn("we need one warning: " + match_str, UserWarning)
+        main(copy.deepcopy(config))
+    n = 0
+    for r in record:
+        assert isinstance(r.message, Warning)
+        warning_message = r.message.args[0]
+        if match_str in warning_message:
+            n += 1
+    assert n < 2, "Unexpected UserWarning when running predict with return_predictions=false"
+
+    # using a config file
+    config_file_text = f"""
+    # lightning.pytorch==2.5.0.post0
+    seed_everything: true
+    trainer:
+      accelerator: cpu
+      devices: 1
+      max_steps: 1
+      limit_predict_batches: 1
+      default_root_dir: {tmp_path}
+    model:
+      cpu_transforms: null
+      transforms: null
+      model:
+        class_path: cellarium.ml.models.Geneformer
+        init_args:
+          hidden_size: 2
+          num_hidden_layers: 1
+          num_attention_heads: 1
+          intermediate_size: 4
+          max_position_embeddings: 2
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
+          shard_size: 100
+          max_cache_size: 2
+          obs_columns_to_validate: []
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+      batch_size: 5
+      num_workers: 1
+    return_predictions: RETURN_PREDICTIONS_VALUE
+    ckpt_path: null
+    """
+
+    # there should be a warning with return_predictions=true
+    with open(config_file_path := tmp_path / "config.yaml", "w") as f:
+        f.write(config_file_text.replace("RETURN_PREDICTIONS_VALUE", "true"))
+
+    with pytest.warns(UserWarning, match=match_str):
+        main(["geneformer", "predict", "--config", str(config_file_path)])
+
+    # there should be no warning with return_predictions=false
+    with open(config_file_path, "w") as f:
+        f.write(config_file_text.replace("RETURN_PREDICTIONS_VALUE", "false"))
+
+    with pytest.warns(UserWarning, match=match_str) as record:
+        warnings.warn("we need one warning: " + match_str, UserWarning)
+        main(["geneformer", "predict", "--config", str(config_file_path)])
+    n = 0
+    for r in record:
+        assert isinstance(r.message, Warning)
+        warning_message = r.message.args[0]
+        if match_str in warning_message:
+            print(warning_message)
+            n += 1
+    assert n < 2, "Unexpected UserWarning when running predict with return_predictions=false"
