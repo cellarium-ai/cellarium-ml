@@ -8,7 +8,7 @@ from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
-from gseapy.algorithm import enrichment_score, gsea_pval
+# from gseapy.algorithm import enrichment_score, gsea_pval
 
 
 def load_gene_set_json(file: str | bytes) -> pd.DataFrame:
@@ -164,43 +164,43 @@ class GeneSetRecords:
         self._reindex()
 
 
-def gsea(
-    df: pd.DataFrame,
-    gene_group: list[str],
-    gene_name_key: str = "gene_name",
-    value_key: str = "gene_power",
-    n_perm: int = 10_000,
-    seed: int = 0,
-) -> dict[str, float]:
-    """
-    Use GSEApy to come up with an enrichment score and a p-value
+# def gsea(
+#     df: pd.DataFrame,
+#     gene_group: list[str],
+#     gene_name_key: str = "gene_name",
+#     value_key: str = "gene_power",
+#     n_perm: int = 10_000,
+#     seed: int = 0,
+# ) -> dict[str, float]:
+#     """
+#     Use GSEApy to come up with an enrichment score and a p-value
 
-    Args:
-        df: DataFrame with gene names and values
-        gene_group: list of gene names
-        gene_name_key: column name for gene names
-        value_key: column name for values
-        n_perm: number of permutations
-        seed: random seed
+#     Args:
+#         df: DataFrame with gene names and values
+#         gene_group: list of gene names
+#         gene_name_key: column name for gene names
+#         value_key: column name for values
+#         n_perm: number of permutations
+#         seed: random seed
 
-    Returns:
-        dict with 'pval' p-value, 'es' enrichment score
-    """
-    # check for a failure condition: all the genes in the group have a zero loading
-    n_genes_with_nonzero_loading = sum([g in gene_group for g in df[df[value_key] != 0][gene_name_key].unique()])
-    if n_genes_with_nonzero_loading == 0:
-        return {"pval": 1.0, "es": np.nan}
+#     Returns:
+#         dict with 'pval' p-value, 'es' enrichment score
+#     """
+#     # check for a failure condition: all the genes in the group have a zero loading
+#     n_genes_with_nonzero_loading = sum([g in gene_group for g in df[df[value_key] != 0][gene_name_key].unique()])
+#     if n_genes_with_nonzero_loading == 0:
+#         return {"pval": 1.0, "es": np.nan}
 
-    es, es_null, hit_ind, es_g = enrichment_score(
-        gene_list=df[gene_name_key].unique(),
-        correl_vector=df[value_key],
-        gene_set=np.unique(gene_group),
-        weight=1.0,
-        nperm=n_perm,
-        seed=seed,
-    )
-    pval = gsea_pval(np.array([es]), np.array([es_null])).item()
-    return {"pval": pval, "es": es}
+#     es, es_null, hit_ind, es_g = enrichment_score(
+#         gene_list=df[gene_name_key].unique(),
+#         correl_vector=df[value_key],
+#         gene_set=np.unique(gene_group),
+#         weight=1.0,
+#         nperm=n_perm,
+#         seed=seed,
+#     )
+#     pval = gsea_pval(np.array([es]), np.array([es_null])).item()
+#     return {"pval": pval, "es": es}
 
 
 def permutation_test(

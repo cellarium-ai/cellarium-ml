@@ -21,14 +21,14 @@ classifiers = [
 ]
 
 dependencies = [
-  "anndata",
+  "anndata==0.11.3",
   "boltons",
   "braceexpand",
   "crick>=0.0.4",
   "google-cloud-storage",
   "jsonargparse[signatures]==4.27.7",
   "lightning>=2.2.0",
-  "numpy<=1.26.4",
+  "numpy==1.26.4",
   "pyro-ppl>=1.9.1",
   "pytest",
   "torch>=2.5.0",
@@ -55,9 +55,21 @@ docs = [
   "sphinx-copybutton",
 ]
 inference = [
-  "scikit-optimize",
-  "pymde",
+  "scikit-optimize==0.10.2",
+  "pymde==0.1.18",
   "pynndescent!=0.5.10",  # https://github.com/lmcinnes/umap/issues/1032
+  "scipy==1.15.1",
+  "igraph==0.11.8",
+  "colorcet==3.1.0",
+  "leidenalg==0.10.2",
+  "networkx==3.4.2",
+  "plotly==6.0.0",
+  "scanpy==1.10.4",
+  "h5py==3.12.1",
+  "joblib==1.4.2",
+  "tqdm==4.67.1",
+  "more_itertools",
+  "pandas==2.2.3",
 ]
 dev = ["cellarium-ml[docs,lint,mypy,test,inference]"]
 
