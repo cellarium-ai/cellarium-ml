@@ -88,12 +88,13 @@ def main():
         verbose=False
     )
     
-    all_query_gene_ids = val_adata.var['feature_id'].values
+    all_query_gene_ids = val_adata.var['feature_id'].to_numpy()
     print(f"Total number of query genes from validation AnnData: {len(all_query_gene_ids)}")
     
     if args.max_query_genes is not None:
-        query_gene_ids = all_query_gene_ids[:args.max_query_genes]
-        print(f"Limiting to {args.max_query_genes} first query genes for linear response analysis.")
+        highly_expressed_gene_indices = np.argsort(val_adata.X[args.cell_index, :])[::-1]
+        query_gene_ids = all_query_gene_ids[highly_expressed_gene_indices[:args.max_query_genes]]
+        print(f"Limiting to {args.max_query_genes} highly-expressed query genes for linear response analysis.")
     else:
         query_gene_ids = all_query_gene_ids
         print(f"Using all {len(all_query_gene_ids)} query genes for linear response analysis.")
