@@ -1467,7 +1467,7 @@ class ValidationMixin(BaseClassProtocol):
         min_set_size: int = 3,
         min_adjacency: float = 0,
         adjacency_exclusion_fraction: float | None = 0.05,
-        thin_output_to_n: int | None = 10_000,
+        thin_output_to_n: int | None = 1000,
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         verbose: bool = False,
     ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
@@ -2578,21 +2578,23 @@ class LinearResponseContext(GeneNetworkAnalysisBase, ValidationMixin):
 
         # note: prompt and query genes are the same in these experiments
         var_names = linear_response_dict["query_gene_ids"].tolist()
+        marginals_df = pd.DataFrame(index=var_names)
         if marginal_mean_g is None:
-            marginal_mean_g = linear_response_dict["gene_marginal_mean_q"]
+            marginals_df["mean"] = linear_response_dict["gene_marginal_mean_q"]
         else:
-            try:
-                marginal_mean_g = marginal_mean_g.loc[var_names].values
-            except Exception as e:
-                logger.warning(
+            if len(set(var_names).intersection(set(marginal_mean_g.index))) == 0:
+                logger.error(
                     f"marginal_mean_g must be a pandas Series with index like: {var_names[:3]}"
                     f"\nindex = {marginal_mean_g.index[:3]}"
                 )
-                raise e
+                raise ValueError("marginal_mean_g appears not to have the same index as the prompt genes")
+            marginals_df["mean"] = marginal_mean_g
         if marginal_std_g is None:
-            marginal_std_g = linear_response_dict["gene_marginal_std_q"]
+            marginals_df["std"] = linear_response_dict["gene_marginal_std_q"]
         else:
-            marginal_std_g = marginal_std_g.loc[var_names].values
+            marginals_df["std"] = marginal_std_g
+        marginals_df["mean"] = marginals_df["mean"].fillna(0)
+        marginals_df["std"] = marginals_df["std"].fillna(1)
 
         return LinearResponseContext(
             adata_obs=adata_obs,
@@ -2601,10 +2603,10 @@ class LinearResponseContext(GeneNetworkAnalysisBase, ValidationMixin):
             prompt_var_names=var_names,
             total_mrna_umis=adata_obs["total_mrna_umis"].mean(),
             jacobian_qp=jacobian_qp,
-            prompt_marginal_mean_p=marginal_mean_g,
-            prompt_marginal_std_p=marginal_std_g,
-            query_marginal_mean_q=marginal_mean_g,
-            query_marginal_std_q=marginal_std_g,
+            prompt_marginal_mean_p=marginals_df["mean"].values,
+            prompt_marginal_std_p=marginals_df["std"].values,
+            query_marginal_mean_q=marginals_df["mean"].values,
+            query_marginal_std_q=marginals_df["std"].values,
             response_normalization_strategy=response_normalization_strategy,
             feature_normalization_strategy=feature_normalization_strategy,
             min_prompt_gene_tpm=min_prompt_gene_tpm,
