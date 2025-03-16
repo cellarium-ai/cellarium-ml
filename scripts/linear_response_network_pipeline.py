@@ -41,6 +41,13 @@ def run_analysis(cell_type: str):
     DEVICE = "cpu"
     output_dir = "/gcs/cellarium-scratch/sfleming/empirical_gene_correlation2"
 
+    # linear_response_path_fn = lambda model, metacell_index: (
+    #     f"gs://cellarium-scratch/linear_response/{model}/linear_response_cell_index_{metacell_index}.pkl"
+    # )
+    linear_response_path_fn = lambda model, metacell_index: (
+        f"gs://cellarium-scratch/linear_response_compute_optimal/{model}/linear_response_cell_index_{metacell_index}.pkl"
+    )
+
     gene_info_tsv_path = "gs://cellarium-scratch/mb-ml-dev-vm/gene_info/gene_info.tsv"
     val_adata_path = "gs://cellarium-scratch/cellariumgpt_artifacts/cell_types_for_validation_filtered.h5ad"
     empirical_corr_base_path = "gs://cellarium-scratch/sfleming/empirical_gene_correlation2"
@@ -50,7 +57,7 @@ def run_analysis(cell_type: str):
     pango_path = "gs://cellarium-scratch/sfleming/references/pan_go_annotations.csv"
 
     # choose cell types and models
-    models = ["10M_001_bs1536", "19M_001_bs2048", "30M_001_bs2560"]  #, "59M_001_bs3072"]
+    models = ["10M_001_bs1536", "19M_001_bs2048", "30M_001_bs2560", "59M_001_bs3072"]  #, "98M_001_bs4608"]
 
     # optionally limit to specific gene set collections
     specific_collections = None
@@ -230,9 +237,7 @@ def run_analysis(cell_type: str):
             print(f"Processing {model}__cell_{metacell_index}", flush=True)
             print(adata.obs.iloc[int(metacell_index)])
 
-            linear_response_gsurl = (
-                f"gs://cellarium-scratch/linear_response/{model}/linear_response_cell_index_{metacell_index}.pkl"
-            )
+            linear_response_gsurl = linear_response_path_fn(model, metacell_index)
 
             # make marginal means and stds into pandas series
             marginal_mean_g = pd.Series(
@@ -264,8 +269,15 @@ def run_analysis(cell_type: str):
             )
 
 
-def main():
-    cell_type = sys.argv[1]
+def main(cell_type=None):
+    """Run the pipeline for a specific cell type.
+    If no cell type is provided, it will read from the command line arguments.
+    """
+    if cell_type is None:
+        if len(sys.argv) != 2:
+            print("Usage: python linear_response_network_pipeline.py '<cell_type>'")
+            sys.exit(1)
+        cell_type = sys.argv[1]
     print(cell_type)
 
     project = "dsp-cell-annotation-service"
