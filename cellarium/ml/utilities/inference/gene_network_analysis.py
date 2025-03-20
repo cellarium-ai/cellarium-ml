@@ -467,7 +467,7 @@ def compute_adjacency_matrix(
         np.fill_diagonal(a_pp, 0)
 
     if scale_by_node_degree:
-        d_p = np.sum(a_pp, axis=1)
+        d_p = np.sum(a_pp, axis=1) + 1e-10  # avoid division by zero
         a_pp = a_pp / np.sqrt(d_p[:, None] * d_p[None, :])
 
     return a_pp
@@ -1149,10 +1149,11 @@ class GeneNetworkAnalysisBase(NetworkAnalysisBase):
             index=self.prompt_gene_symbols,
         )
         if isinstance(color, pd.Series):
-            df["color"] = color
-            color = "color"
+            df[color.name] = color
+            color = color.name
             if exclude_points_missing_color:
                 df = df.dropna(subset=[color])
+            df = df.sort_values(color, ascending=True)
 
         # Create the scatter plot
         fig = px.scatter(
@@ -1258,6 +1259,7 @@ class ValidationMixin(BaseClassProtocol):
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         reference_set_exclusion_fraction: float = 0.25,
         min_set_size: int = 3,
+        max_set_size: int = 200,
         verbose: bool = False,
     ) -> dict[str, set[int]]:
         """
@@ -1270,6 +1272,7 @@ class ValidationMixin(BaseClassProtocol):
             gene_inds_in_reference_sets: set of gene indices that are in any reference set
             reference_set_exclusion_fraction: gene sets with fewer than this fraction in graph are excluded
             min_set_size: minimum size of a gene set present in the graph to be included
+            max_set_size: maximum size of a gene set to be included
 
         Returns:
             dictionary of reference gene sets as indices {set1_name: {gene_A_idx, gene_B_idx, ...}, ...}
@@ -1298,6 +1301,12 @@ class ValidationMixin(BaseClassProtocol):
                 if verbose:
                     logger.warning(
                         f"Reference gene set {set_name} has < {min_set_size} members in graph and will be skipped"
+                    )
+                continue
+            if len(gene_set_inds) > max_set_size:
+                if verbose:
+                    logger.warning(
+                        f"Reference gene set {set_name} has > {max_set_size} members in graph and will be skipped"
                     )
                 continue
             fraction_of_set_in_graph = len(gene_set_inds) / len(reference_gene_sets[set_name])
@@ -1613,6 +1622,12 @@ class ValidationMixin(BaseClassProtocol):
         gene_set: set[str],
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         n_random_control_genes: int = 0,
+        z_score: bool = True,
+        set_diagonal_to_one: bool = False,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        figsize: tuple[int, int] = (4, 4),
+        manual_renaming_dict: dict[str, str] = {},
     ) -> None:
         """
         Plot a heatmap of the adjacency matrix for a set of genes.
@@ -1621,6 +1636,12 @@ class ValidationMixin(BaseClassProtocol):
             gene_set: set of gene names
             gene_naming: whether to use gene IDs or gene symbols
             n_random_control_genes: number of random genes to include as a control
+            z_score: whether to z-score the log of the adjacency matrix before plotting as z-scores
+            set_diagonal_to_one: whether to set the diagonal of the adjacency matrix to 1
+            vmin: minimum value for the color scale
+            vmax: maximum value for the color scale
+            figsize: size of the figure
+            manual_renaming_dict: dictionary to rename genes in the heatmap
         """
         import seaborn as sns
 
@@ -1650,13 +1671,27 @@ class ValidationMixin(BaseClassProtocol):
         a_qq = self.adjacency_matrix
         a_qq = a_qq[gene_inds][:, gene_inds]
 
+        if set_diagonal_to_one:
+            np.fill_diagonal(a_qq, 1.0)
+
+        if z_score:
+            smallest_nonzero_val = np.nanmin(self.adjacency_matrix[self.adjacency_matrix > 0])
+            mean = np.nanmean(np.log(self.adjacency_matrix + smallest_nonzero_val))
+            std = np.nanstd(np.log(self.adjacency_matrix + smallest_nonzero_val))
+            a_qq = (np.log(a_qq + smallest_nonzero_val) - mean) / std
+            cmap = "coolwarm"
+        else:
+            cmap = "Oranges"
+
         # seaborn clustermap that labels the genes
         g = sns.clustermap(
             a_qq,
-            cmap="Oranges",
-            figsize=(4, 4),
-            xticklabels=gene_list,
-            yticklabels=gene_list,
+            cmap=cmap,
+            figsize=figsize,
+            xticklabels=[manual_renaming_dict.get(x, x) for x in gene_list],
+            yticklabels=[manual_renaming_dict.get(x, x) for x in gene_list],
+            vmin=vmin,
+            vmax=vmax,
         )
         g.ax_heatmap.grid(False)
         # plt.imshow(a_qq, cmap="Oranges", aspect="auto")
@@ -1773,6 +1808,7 @@ class ValidationMixin(BaseClassProtocol):
         reference_gene_sets: dict[str, set[str]],
         reference_set_exclusion_fraction: float = 0.25,
         min_set_size: int = 3,
+        max_set_size: int = 200,
         p_value_threshold: float = 0.5,
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         verbose: bool = False,
@@ -1790,6 +1826,7 @@ class ValidationMixin(BaseClassProtocol):
             reference_set_exclusion_fraction: gene sets with fewer than this fraction of genes present in the graph
                 are excluded from the concordance metric
             min_set_size: minimum size of a gene set present in the graph to be included in the concordance metric
+            max_set_size: maximum size of a gene set present in the graph to be included in the concordance metric
             adjacency_strategy: adjacency strategy
             p_value_threshold: p-values above this threshold are considered totally insignificant
                 and are not included in the final concordance metric, which is the sum of -log10(p-value)
@@ -1813,40 +1850,62 @@ class ValidationMixin(BaseClassProtocol):
             gene_inds_in_reference_sets=list(range(q)),
             reference_set_exclusion_fraction=reference_set_exclusion_fraction,
             min_set_size=min_set_size,
+            max_set_size=max_set_size,
             verbose=False,
         )
 
         if verbose:
             logger.info(f"{len(final_ref_gene_sets_as_inds)} gene sets meet criteria")
 
-        def _effect_of_set(gene_inds: set[int]) -> float:
+        def _effect_of_set(shared_data_qq, gene_inds: set[int]) -> float:
             assert len(gene_inds) > 1, "Gene set must have at least 2 members"
             # compute the mean adjacency element for a set of genes
             inds = np.array(list(gene_inds))
-            element_sum = zero_diag_a_qq[inds][:, inds].sum()
+            element_sum = shared_data_qq[np.ix_(inds, inds)].sum()
             effect = element_sum / (len(gene_inds) * len(gene_inds) - len(gene_inds))
             return effect
 
         n_samples = 1000
 
-        @lru_cache(maxsize=1000)
-        def _random_set_effects(size_of_random_set: int, n_samples: int = n_samples) -> np.ndarray:
-            # compute the standard deviation of the effect of a random set of genes
-            effects = [
-                _effect_of_set(set(np.random.choice(a_qq.shape[0], size_of_random_set, replace=False)))
-                for _ in range(n_samples)
-            ]
-            return np.array(effects)
+        # # @lru_cache(maxsize=1000)
+        # def _random_set_effects(shared_data_qq, size_of_random_set: int, n_samples: int = n_samples) -> np.ndarray:
+        #     # compute the standard deviation of the effect of a random set of genes
+        #     effects = [
+        #         _effect_of_set(
+        #             shared_data_qq, 
+        #             set(np.random.choice(a_qq.shape[0], size_of_random_set, replace=False))
+        #         ) for _ in range(n_samples)
+        #     ]
+        #     return np.array(effects)
+        
+        def _random_set_effects(shared_data_qq, size_of_random_set: int, n_samples: int = 1000) -> np.ndarray:
+            """Compute effects for random sets of genes efficiently."""
+            # Pre-allocate results array
+            effects = np.zeros(n_samples)
+            
+            # Generate all random indices at once (n_samples x size_of_random_set)
+            random_indices = np.random.choice(
+                shared_data_qq.shape[0], 
+                size=(n_samples, size_of_random_set), 
+                replace=True
+            )
+            
+            # Compute effects in a vectorized way
+            for i in range(n_samples):
+                inds = random_indices[i]
+                idx = np.ix_(inds, inds)
+                element_sum = shared_data_qq[idx].sum()
+                effects[i] = element_sum / (size_of_random_set * size_of_random_set - size_of_random_set)
+            
+            return effects
 
-        # go through each reference gene set and compute the effect
-        dfs = []
-        for set_name, gene_set_inds in tqdm(final_ref_gene_sets_as_inds.items()):
+        def _process_gene_set(shared_data_qq, set_name, gene_set_inds) -> pd.DataFrame | None:
             if len(gene_set_inds) < min_set_size:
                 if verbose:
                     logger.warning(
                         f"Reference gene set {set_name} has < {min_set_size} members in graph and will be skipped"
                     )
-                continue
+                return
             fraction_of_set_in_graph = len(gene_set_inds) / len(reference_gene_sets[set_name])
             if fraction_of_set_in_graph < reference_set_exclusion_fraction:
                 if verbose:
@@ -1854,37 +1913,47 @@ class ValidationMixin(BaseClassProtocol):
                         f"Reference gene set {set_name} has < {reference_set_exclusion_fraction:.2f} "
                         "fraction of members in graph and will be skipped"
                     )
-                continue
-            effect = _effect_of_set(gene_set_inds)
+                return
+            effect = _effect_of_set(shared_data_qq, gene_set_inds)
             normalized_effect = effect - mean_element_value
 
             # p-value via permutation test
-            random_control_effects = _random_set_effects(size_of_random_set=len(gene_set_inds))
+            random_control_effects = _random_set_effects(shared_data_qq, size_of_random_set=len(gene_set_inds))
             pval = (random_control_effects > effect).mean()
             pval = np.clip(pval, a_min=1.0 / n_samples, a_max=None)  # cannot be less than 1/n_samples
 
-            # p-value via analytical approximation using law of large numbers
-            scale = 1 / len(gene_set_inds) / 22  # the factor 1/22 is empirical
-            pval_analytic = 1.0 - norm.cdf(effect, loc=mean_element_value, scale=scale)
+            # # p-value via analytical approximation using law of large numbers
+            # scale = 1 / len(gene_set_inds) / 22  # the factor 1/22 is empirical
+            # pval_analytic = 1.0 - norm.cdf(effect, loc=mean_element_value, scale=scale)
 
-            # TODO permutation test for small gene sets, then analytic approx for large gene sets
+            # # TODO permutation test for small gene sets, then analytic approx for large gene sets
 
-            dfs.append(
-                pd.DataFrame(
-                    {
-                        "gene_set": [set_name],
-                        "effect": [effect],
-                        "normalized_effect": [normalized_effect],
-                        "pval": [pval],
-                        "pval_analytic": [pval_analytic],
-                        "fraction_of_set_in_graph": [fraction_of_set_in_graph],
-                        "n_genes_in_set": [len(reference_gene_sets[set_name])],
-                        "n_genes_in_set_in_graph": [len(gene_set_inds)],
-                    }
-                )
+            return pd.DataFrame(
+                {
+                    "gene_set": [set_name],
+                    "effect": [effect],
+                    "normalized_effect": [normalized_effect],
+                    "pval": [pval],
+                    # "pval_analytic": [pval_analytic],
+                    "fraction_of_set_in_graph": [fraction_of_set_in_graph],
+                    "n_genes_in_set": [len(reference_gene_sets[set_name])],
+                    "n_genes_in_set_in_graph": [len(gene_set_inds)],
+                }
             )
 
-        df = pd.concat(dfs, axis=0, ignore_index=True)
+        # go through each reference gene set and compute the effect
+        dfs = []
+        try:
+            for set_name, gene_set_inds in tqdm(final_ref_gene_sets_as_inds.items()):
+                dfs.append(_process_gene_set(zero_diag_a_qq, set_name, gene_set_inds))
+        except KeyboardInterrupt:
+            pass
+        # dfs = Parallel()(
+        #     delayed(_process_gene_set)(shared_data, set_name, gene_set_inds) 
+        #     for set_name, gene_set_inds in tqdm(final_ref_gene_sets_as_inds.items())
+        # )
+
+        df = pd.concat([d for d in dfs if (d is not None)], axis=0, ignore_index=True)
         concordance = (
             df["pval"][df["pval"] < p_value_threshold].apply(lambda x: -1 * np.log10(x)).sum()
         )  # sum of negative log p-values
