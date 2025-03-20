@@ -1802,6 +1802,28 @@ class ValidationMixin(BaseClassProtocol):
         ) / 2
 
         return best_metrics_df[metric_name].mean(), best_metrics_df
+    
+    @lru_cache(maxsize=1000)
+    def _random_set_effects(self, size_of_random_set: int, n_samples: int) -> np.ndarray:
+        """Compute effects for random sets of genes efficiently."""
+        # Pre-allocate results array
+        effects = np.zeros(n_samples)
+        
+        # Generate all random indices at once (n_samples x size_of_random_set)
+        random_indices = np.random.choice(
+            self.zero_diag_a_qq.shape[0], 
+            size=(n_samples, size_of_random_set), 
+            replace=True
+        )
+        
+        # Compute effects in a vectorized way
+        for i in range(n_samples):
+            inds = random_indices[i]
+            idx = np.ix_(inds, inds)
+            element_sum = self.zero_diag_a_qq[idx].sum()
+            effects[i] = element_sum / (size_of_random_set * size_of_random_set - size_of_random_set)
+        
+        return effects
 
     def compute_network_adjacency_concordance_metric(
         self,
@@ -1809,7 +1831,7 @@ class ValidationMixin(BaseClassProtocol):
         reference_set_exclusion_fraction: float = 0.25,
         min_set_size: int = 3,
         max_set_size: int = 200,
-        n_samples: int = 1000,
+        n_samples: int = 10000,
         p_value_threshold: float = 0.5,
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         verbose: bool = False,
@@ -1842,7 +1864,10 @@ class ValidationMixin(BaseClassProtocol):
         assert isinstance(a_qq, np.ndarray)
         q = a_qq.shape[0]
         zero_diag_a_qq = a_qq * (1.0 - np.eye(q))
-        mean_element_value = zero_diag_a_qq.sum() / (q * q - q)
+        self.zero_diag_a_qq = zero_diag_a_qq  # store for later use
+        # mean_element_value = zero_diag_a_qq.sum() / (q * q - q)
+        mean_nonzero_element_value = zero_diag_a_qq[zero_diag_a_qq > 0].sum() / (zero_diag_a_qq > 0).sum()
+        std_nonzero_element_value = np.std(zero_diag_a_qq[zero_diag_a_qq > 0])
 
         # decide which gene sets to include and convert to indices
         final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
@@ -1866,28 +1891,6 @@ class ValidationMixin(BaseClassProtocol):
             effect = element_sum / (len(gene_inds) * len(gene_inds) - len(gene_inds))
             return effect
 
-        @lru_cache(maxsize=1000)
-        def _random_set_effects(size_of_random_set: int, n_samples: int = 1000) -> np.ndarray:
-            """Compute effects for random sets of genes efficiently."""
-            # Pre-allocate results array
-            effects = np.zeros(n_samples)
-            
-            # Generate all random indices at once (n_samples x size_of_random_set)
-            random_indices = np.random.choice(
-                zero_diag_a_qq.shape[0], 
-                size=(n_samples, size_of_random_set), 
-                replace=True
-            )
-            
-            # Compute effects in a vectorized way
-            for i in range(n_samples):
-                inds = random_indices[i]
-                idx = np.ix_(inds, inds)
-                element_sum = zero_diag_a_qq[idx].sum()
-                effects[i] = element_sum / (size_of_random_set * size_of_random_set - size_of_random_set)
-            
-            return effects
-
         def _process_gene_set(set_name, gene_set_inds) -> pd.DataFrame | None:
             if len(gene_set_inds) < min_set_size:
                 if verbose:
@@ -1904,10 +1907,13 @@ class ValidationMixin(BaseClassProtocol):
                     )
                 return
             effect = _effect_of_set(gene_set_inds)
-            normalized_effect = effect - mean_element_value
+            normalized_effect = (effect - mean_nonzero_element_value) / std_nonzero_element_value
 
             # p-value via permutation test
-            random_control_effects = _random_set_effects(size_of_random_set=len(gene_set_inds))
+            random_control_effects = self._random_set_effects(
+                size_of_random_set=len(gene_set_inds), 
+                n_samples=n_samples,
+            )
             pval = (random_control_effects > effect).mean()
             pval = np.clip(pval, a_min=1.0 / n_samples, a_max=None)  # cannot be less than 1/n_samples
 
