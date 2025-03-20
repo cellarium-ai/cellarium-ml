@@ -1809,6 +1809,7 @@ class ValidationMixin(BaseClassProtocol):
         reference_set_exclusion_fraction: float = 0.25,
         min_set_size: int = 3,
         max_set_size: int = 200,
+        n_samples: int = 1000,
         p_value_threshold: float = 0.5,
         gene_naming: t.Literal["id", "symbol"] = "symbol",
         verbose: bool = False,
@@ -1827,7 +1828,7 @@ class ValidationMixin(BaseClassProtocol):
                 are excluded from the concordance metric
             min_set_size: minimum size of a gene set present in the graph to be included in the concordance metric
             max_set_size: maximum size of a gene set present in the graph to be included in the concordance metric
-            adjacency_strategy: adjacency strategy
+            n_samples: number of random sets to sample for computing p-values
             p_value_threshold: p-values above this threshold are considered totally insignificant
                 and are not included in the final concordance metric, which is the sum of -log10(p-value)
             gene_naming: whether to use gene IDs or gene symbols
@@ -1857,35 +1858,23 @@ class ValidationMixin(BaseClassProtocol):
         if verbose:
             logger.info(f"{len(final_ref_gene_sets_as_inds)} gene sets meet criteria")
 
-        def _effect_of_set(shared_data_qq, gene_inds: set[int]) -> float:
+        def _effect_of_set(gene_inds: set[int]) -> float:
             assert len(gene_inds) > 1, "Gene set must have at least 2 members"
             # compute the mean adjacency element for a set of genes
             inds = np.array(list(gene_inds))
-            element_sum = shared_data_qq[np.ix_(inds, inds)].sum()
+            element_sum = zero_diag_a_qq[np.ix_(inds, inds)].sum()
             effect = element_sum / (len(gene_inds) * len(gene_inds) - len(gene_inds))
             return effect
 
-        n_samples = 1000
-
-        # # @lru_cache(maxsize=1000)
-        # def _random_set_effects(shared_data_qq, size_of_random_set: int, n_samples: int = n_samples) -> np.ndarray:
-        #     # compute the standard deviation of the effect of a random set of genes
-        #     effects = [
-        #         _effect_of_set(
-        #             shared_data_qq, 
-        #             set(np.random.choice(a_qq.shape[0], size_of_random_set, replace=False))
-        #         ) for _ in range(n_samples)
-        #     ]
-        #     return np.array(effects)
-        
-        def _random_set_effects(shared_data_qq, size_of_random_set: int, n_samples: int = 1000) -> np.ndarray:
+        @lru_cache(maxsize=1000)
+        def _random_set_effects(size_of_random_set: int, n_samples: int = 1000) -> np.ndarray:
             """Compute effects for random sets of genes efficiently."""
             # Pre-allocate results array
             effects = np.zeros(n_samples)
             
             # Generate all random indices at once (n_samples x size_of_random_set)
             random_indices = np.random.choice(
-                shared_data_qq.shape[0], 
+                zero_diag_a_qq.shape[0], 
                 size=(n_samples, size_of_random_set), 
                 replace=True
             )
@@ -1894,12 +1883,12 @@ class ValidationMixin(BaseClassProtocol):
             for i in range(n_samples):
                 inds = random_indices[i]
                 idx = np.ix_(inds, inds)
-                element_sum = shared_data_qq[idx].sum()
+                element_sum = zero_diag_a_qq[idx].sum()
                 effects[i] = element_sum / (size_of_random_set * size_of_random_set - size_of_random_set)
             
             return effects
 
-        def _process_gene_set(shared_data_qq, set_name, gene_set_inds) -> pd.DataFrame | None:
+        def _process_gene_set(set_name, gene_set_inds) -> pd.DataFrame | None:
             if len(gene_set_inds) < min_set_size:
                 if verbose:
                     logger.warning(
@@ -1914,11 +1903,11 @@ class ValidationMixin(BaseClassProtocol):
                         "fraction of members in graph and will be skipped"
                     )
                 return
-            effect = _effect_of_set(shared_data_qq, gene_set_inds)
+            effect = _effect_of_set(gene_set_inds)
             normalized_effect = effect - mean_element_value
 
             # p-value via permutation test
-            random_control_effects = _random_set_effects(shared_data_qq, size_of_random_set=len(gene_set_inds))
+            random_control_effects = _random_set_effects(size_of_random_set=len(gene_set_inds))
             pval = (random_control_effects > effect).mean()
             pval = np.clip(pval, a_min=1.0 / n_samples, a_max=None)  # cannot be less than 1/n_samples
 
@@ -1945,7 +1934,7 @@ class ValidationMixin(BaseClassProtocol):
         dfs = []
         try:
             for set_name, gene_set_inds in tqdm(final_ref_gene_sets_as_inds.items()):
-                dfs.append(_process_gene_set(zero_diag_a_qq, set_name, gene_set_inds))
+                dfs.append(_process_gene_set(set_name, gene_set_inds))
         except KeyboardInterrupt:
             pass
         # dfs = Parallel()(
