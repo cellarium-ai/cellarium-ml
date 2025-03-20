@@ -285,6 +285,51 @@ def append_random_control_collection(
     )
 
 
+def _compute_function_on_gene_set(
+    args: tuple[set[str], set[str], Literal["iou", "intersection", "precision", "precision_recall", "f1"]],
+) -> float:
+    """
+    Given a set of genes and a dictionary of gene sets, compute a function measuring
+    something about the overlap between the input set and each predefined gene set.
+
+    Args:
+        input_gene_set: set of gene names
+        reference_gene_set: set of gene names
+        metric_name: one of
+            - 'iou': intersection over union
+            - 'intersection': number of genes in input and reference gene set
+            - 'precision': intersection divided by number of genes in input set
+            - 'precision_recall': precision and recall (intersection divided by
+                number of genes in reference set)
+            - 'f1': f1 score (harmonic mean of precision and recall)
+
+    Returns:
+        metric value
+    """
+    input_gene_set, gset, metric_name = args
+    intersection = len(input_gene_set & gset)
+    match metric_name:
+        case "iou":
+            union = len(input_gene_set | gset)  # few extra ms
+            metric: float | tuple[float, float] = intersection / union
+        case "intersection":
+            metric = intersection
+        case "precision":
+            metric = intersection / len(input_gene_set)
+        case "precision_recall":
+            precision = intersection / len(input_gene_set)
+            recall = intersection / len(gset)
+            metric = (precision, recall)
+        case "f1":
+            # precision = intersection / len(in_gset)
+            # recall = intersection / len(gset)
+            # metric = 2 * (precision * recall) / (precision + recall + 1e-10)
+            metric = 2 * intersection / (len(input_gene_set) + len(gset))  # same as above
+        case _:
+            raise ValueError(f"Unknown function {metric_name}")
+    return metric
+
+
 def compute_function_on_gene_sets(
     input_gene_set: set[str],
     reference_gene_sets: dict[str, set[str]],
@@ -309,29 +354,12 @@ def compute_function_on_gene_sets(
     Returns:
         pd.Series with the function value for each gene set
     """
-    results = {}
-    for name, gset in reference_gene_sets.items():
-        intersection = len(input_gene_set.intersection(gset))
-        match metric_name:
-            case "iou":
-                union = len(input_gene_set.union(gset))  # few extra ms
-                metric: float | tuple[float, float] = intersection / union
-            case "intersection":
-                metric = intersection
-            case "precision":
-                metric = intersection / len(input_gene_set)
-            case "precision_recall":
-                precision = intersection / len(input_gene_set)
-                recall = intersection / len(gset)
-                metric = (precision, recall)
-            case "f1":
-                # precision = intersection / len(in_gset)
-                # recall = intersection / len(gset)
-                # metric = 2 * (precision * recall) / (precision + recall + 1e-10)
-                metric = 2 * intersection / (len(input_gene_set) + len(gset))  # same as above
-            case _:
-                raise ValueError(f"Unknown function {metric_name}")
-        results[name] = metric
+    results = {
+        name: _compute_function_on_gene_set(
+            (input_gene_set, gset, metric_name)
+        )
+        for name, gset in reference_gene_sets.items()
+    }
     return pd.Series(results, name=metric_name)
 
 
