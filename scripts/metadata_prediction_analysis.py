@@ -159,6 +159,15 @@ def main():
 
     os.makedirs(args.output_path, exist_ok=True)
 
+    output_prefix = os.path.splitext(os.path.basename(args.val_adata_path))[0]
+    meta_adata_output_file_path = os.path.join(
+        args.output_path, f"{output_prefix}_metadata_prediction_scores.h5ad"
+    )
+
+    if os.path.exists(meta_adata_output_file_path):
+        logger.warning(f"Output file {meta_adata_output_file_path} already exists. Exiting ...")
+        exit(1)
+    
     logger.info("Loading ontology resources ...")
     ontology_benchmarking_resource_path_dict = {
         'cell_type': os.path.join(args.ontology_resource_path, 'cl_benchmarking_resource.pkl'),
