@@ -345,11 +345,13 @@ CONFIGS = [
                 "batch_size": "50",
                 "shuffle": "true",
                 "num_workers": "2",
+                "val_size": "0.1",
             },
             "trainer": {
                 "accelerator": "cpu",
                 "devices": devices,
                 "max_steps": "4",
+                "val_check_interval": "2",
             },
         },
     },
@@ -394,22 +396,25 @@ CONFIGS = [
                     "init_args": {
                         "n_batch": None,
                         "encoder": {
-                            "layers": [
-                                {
-                                    "class_path": "cellarium.ml.models.common.nn.LinearWithBatch",
-                                    "init_args": {"out_features": 128},
-                                }
-                            ],
+                            "hidden_layers": [],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
                             "output_bias": True,
                         },
                         "decoder": {
-                            "layers": [
+                            "hidden_layers": [
                                 {
-                                    "class_path": "cellarium.ml.models.common.nn.LinearWithBatch",
-                                    "init_args": {"out_features": 128},
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "batch_to_bias_hidden_layers": []},
                                 }
                             ],
-                            "output_bias": True,
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "final_additive_bias": True,
                         },
                     },
                 },
@@ -436,7 +441,7 @@ CONFIGS = [
                         "attr": "obs",
                         "key": "dataset_id",
                         "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
-                    }
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "2",

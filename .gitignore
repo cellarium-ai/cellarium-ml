@@ -5,6 +5,7 @@ runs/
 .idea/
 .ruff_cache/
 .pytest_cache/
+.vscode/
 docs/build/
 docs/source/examples/
 docs/source/tutorials/
@@ -15,6 +16,10 @@ lightning_logs/
 build/
 notebooks/.ipynb_checkpoints/
 output/
+data/
+*.h5ad
+*.csv
+*.csv.gz
 
 *.png
 

@@ -25,7 +25,7 @@ class BoringDataset(torch.utils.data.Dataset):
         if self.var_names is not None:
             data["var_names_g"] = self.var_names
         return data
-    
+
 
 class BoringDatasetSCVI(BoringDataset):
     """A simple dataset for testing purposes that includes batch_index_n."""

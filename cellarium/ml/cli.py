@@ -15,6 +15,7 @@ from operator import attrgetter,itemgetter
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
@@ -22,9 +23,10 @@ from jsonargparse._loaders_dumpers import DefaultLoader
 from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
+from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
-from cellarium.ml.utilities.data import collate_fn
+from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 cached_loaders = {}
 
@@ -220,27 +222,69 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     """
     adata = data.dadc[0]
     field = data.batch_keys["y_categories"]
+    assert isinstance(field, AnnDataField)
     return field(adata)
 
 
-def nunique_scvi(data: CellariumAnnDataDataModule) -> int:
+def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
     """
-    Compute the number of categories in the target variable.
+    Compute the number of categories in batch_index_n.
 
-    E.g. if the target variable is ``obs["cell_type"]`` then this function
-    returns the number of categories in ``obs["cell_type"]``::
+    .. note::
 
-        >>> len(data.dadc[0].obs["cell_type"].cat.categories)
+            If batch_index_n is comprised of multiple keys, the number of categories is computed
+            as the product of the number of categories in each key.
 
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
-        key: Data is pulled from adata.obs[key]
 
     Returns:
-        The number of categories in the target variable.
+        The number of categories in batch_index_n.
     """
     field = data.batch_keys["batch_index_n"]
-    value = getattr(data.dadc[0], field.attr)
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    x = obs[field.key]
+    if isinstance(x, pd.DataFrame):
+        return int(x.apply(lambda col: len(col.cat.categories)).product())
+    else:
+        return len(x.cat.categories)
+
+
+def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
+    """Extract the number of unique categories in each covariate in the "categorical_covariate_index_nd" batch_key.
+
+    Example:
+
+        .. code-block:: yaml
+            categorical_covariate_index_nd:
+                attr: obs
+                key:
+                    - chemistry
+                    - condition
+                convert_fn: cellarium.ml.utilities.data.categories_to_codes
+
+        The field "categorical_covariate_index_nd" indicates that we are specifying categorical covariates from
+        the columnns ["chemistry", "condition"] from adata.obs.
+        We extract those columns from adata.obs and count the number of categories in each.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        List of length (number of keys) containing the number of categories in each field.
+    """
+    if "categorical_covariate_index_nd" not in data.batch_keys:
+        return []
+    field = data.batch_keys["categorical_covariate_index_nd"]
+    assert isinstance(field, AnnDataField)
+    dataframe = getattr(data.dadc[0], field.attr)
+    n_cats_per_cov = []
+    if field.key is not None:
+        for key in field.key:
+            covariate_series = dataframe[key]
+            n_cats_per_cov.append(len(covariate_series.cat.categories))
+    return n_cats_per_cov
 
     if hasattr(value,"columns"):
         if field.key in value.columns:
@@ -314,7 +358,7 @@ def compute_var_names_g(
         The variable names.
     """
     adata = data.dadc[0]
-    batch = {key: field(adata) for key, field in data.batch_keys.items()}
+    batch = tree_map(lambda field: field(adata), data.batch_keys)
     pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
 
 
@@ -408,6 +452,13 @@ def lightning_cli_factory(
                     "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
                 }
             )
+
+        def predict(self, *args, **kwargs):
+            """Not well documented, but defining this here overrides the default predict subcommand.
+            This method injects return_predictions=False into the kwargs to prevent the predictions from
+            being returned, which prevents memory overflow when writing predictions to a file."""
+            kwargs["return_predictions"] = False
+            self.trainer.predict(*args, **kwargs)
 
     return NewLightningCLI
 
@@ -689,8 +740,8 @@ def scvi(args: ArgsType = None) -> None:
                 "model.model.init_args.var_names_g",
                 compute_var_names_g,
             ),
-            LinkArguments("data", "model.model.init_args.n_batch", nunique_scvi),
-            LinkArguments("data","model.model.init_args.n_cats_per_cov",extract_n_cats_per_cov), #uses multiple_categories_to_codes
+            LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+            LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
         ],
     )
 

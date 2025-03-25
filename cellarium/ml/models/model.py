@@ -6,11 +6,11 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
+import lightning.pytorch as pl
 import numpy as np
 import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
-import lightning.pytorch as pl
 
 
 class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
@@ -22,7 +22,7 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
         super(torch.nn.Module, self).__setattr__("_pyro_params", OrderedDict())
         super().__init__()
 
-    __call__: Callable[..., torch.Tensor | None]
+    __call__: Callable[..., dict[str, torch.Tensor | None]]
 
     @abstractmethod
     def reset_parameters(self) -> None:
@@ -81,13 +81,27 @@ class PredictMixin(metaclass=ABCMeta):
         """
 
 
-class ValidateMixin(metaclass=ABCMeta):
+class ValidateMixin:
     """
-    Abstract mixin class for models that can perform validation.
+    Mixin class for models that can perform validation.
     """
 
-    @abstractmethod
-    def validate(self, *args: Any, **kwargs: Any) -> None:
+    __call__: Callable[..., dict[str, torch.Tensor | None]]
+
+    def validate(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        batch_idx: int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         """
-        Perform validation.
+        Default validation method for models. This method logs the validation loss to TensorBoard.
+        Override this method to customize the validation behavior.
         """
+        output = self(*args, **kwargs)
+        loss = output.get("loss")
+        if loss is not None:
+            # Logging to TensorBoard by default
+            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)

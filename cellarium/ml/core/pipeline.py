@@ -41,13 +41,17 @@ class CellariumPipeline(torch.nn.ModuleList):
     def __add__(self, other: Iterable[torch.nn.Module]) -> Self:
         return self.__class__(chain(self, other))
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
+    def forward(
+        self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
+    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | torch.Tensor | np.ndarray]:
         for module in self:
             batch |= call_func_with_batch(module.forward, batch)
 
         return batch
 
-    def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(
+        self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
+    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
         for module in self[:-1]:
             batch |= call_func_with_batch(module.forward, batch)
 
@@ -58,7 +62,7 @@ class CellariumPipeline(torch.nn.ModuleList):
 
         return batch
 
-    def validate(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+    def validate(self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]) -> None:
         for module in self[:-1]:
             batch |= call_func_with_batch(module.forward, batch)
 
