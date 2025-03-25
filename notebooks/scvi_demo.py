@@ -60,11 +60,12 @@ foldername_dict = {
                     10: ["human_pancreas_rna","","../example_configs/scvi_config_human_pancreas_rna.yaml","../data/human_pancreas_rna.h5ad",["cell_type","study"],"var.index"], #no raw data available?
                     11: ["Kidney_muto_rna","lightning_logs/version_71/checkpoints/epoch=49-step=2000.ckpt","../example_configs/scvi_config_Kidney_muto_rna.yaml","../data/Kidney_muto_rna.h5ad",["cell_type_category","author_cell_type"],"feature_name"],
                     12: ["mouse_Liver_rna","","../example_configs/scvi_config_mouse_Liver_rna.yaml","../data/mouse_Liver_rna.h5ad",["cell_type","study"],"var.index"], #no raw data available?
-                    13: ["extract0"]
+                    13: ["jejunum-small-intestine-raw", "../lightning_logs/bigrun/checkpoints/epoch=3-step=300000.ckpt", "../example_configs/scvi_jejunum_small_intestine.yaml", "../data/coarsed_normal/concatenated/train/extract_{0..37}.h5ad"],
+                    #14: ["jejunum-small-intestine-raw-normalized", "../lightning_logs/bigrun/checkpoints/epoch=3-step=300000.ckpt", "../example_configs/scvi_jejunum_small_intestine_normalized.yaml", "../data/coarsed_normal/normed/train/extract_{0..37}.h5ad"],
                     }
 
 #TODO: Warning: perhaps n_cats_per_cov is a problem or the categorical_covariate_index
-foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[0]
+foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[13]
 use_test = False
 if use_test:
     foldername_test,checkpoint_file_test,config_file_test, adata_file_test,color_keys_test,gene_names_test = foldername_dict[2]
@@ -76,10 +77,7 @@ if use_test:
 #NF.subset_adata(adata,350000,"../data/single_cell_lung_atlas_subset.h5ad")
 
 #NF.scanpy_scvi(adata_file) #too slow to handle
-subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
-
-exit()
-
+#subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
 
 
 NF.folders(foldername,"figures",overwrite=False)

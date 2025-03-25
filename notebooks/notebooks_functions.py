@@ -45,12 +45,14 @@ import matplotlib.gridspec as gridspec
 from matplotlib.pyplot import rc_context
 from sklearn.decomposition import NMF
 import dataframe_image as dfi
-import anndata as ad
 import rapids_singlecell as rsc
-from _collections import defaultdict
+from collections import defaultdict, Counter
 from google.cloud import storage
 from anndata import AnnData, read_h5ad
-
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from dash import Dash, dcc, html
+from dash.dependencies import Input, Output
 
 #mpl.use('agg')
 
@@ -438,21 +440,18 @@ class ComputeUMAP():
 
     def plot_umap_cuda(self):
         adata = self.adata
-        filepath = self.filepath
 
         print(f"UMAP of {self.basis} GPU-accelerated ...")
         rsc.get.anndata_to_GPU(adata=adata, convert_all=True)
         rsc.pp.filter_genes(adata, min_count=1)
-
         sc.set_figure_params(fontsize=14, vector_friendly=True)
-        rsc.pp.neighbors(adata, use_rep=self.rep, n_neighbors=15, metric='euclidean')  # X_scvi #X_raw
         rsc.pp.pca(adata, svd_solver="auto")
+        rsc.pp.neighbors(adata, use_rep="X_pca", n_neighbors=15, metric='euclidean')  # X_scvi #X_raw
         rsc.tl.umap(adata)
         adata_transformed = rsc.get.anndata_to_CPU(adata, convert_all=True, copy=True)
 
         adata_transformed.obsm[f'X_{self.basis}'] = adata_transformed.obsm['X_umap'].copy()
-        palette = list(matplotlib.colors.CSS4_COLORS.values()) if len(
-            adata.obs[self.color_keys[0]].value_counts().keys()) > 20 else "tab20b"
+        palette = list(matplotlib.colors.CSS4_COLORS.values()) if len(adata.obs[self.color_keys[0]].value_counts().keys()) > 20 else "tab20b"
 
         sc.pl.embedding(adata_transformed, basis=f'{self.basis}', color=self.color_keys,
                         palette=palette,
@@ -468,46 +467,155 @@ class ComputeUMAP():
 
 
         plt.show()
-        exit()
 
-        adata_transformed.write(filepath)
+        #adata_transformed.write(self.filepath)
 
         return adata_transformed
 
     def plot_umap(self):
         adata = self.adata
-        filepath = self.filepath
         print(f"UMAP of {self.basis} ...")
 
-        sc.set_figure_params(fontsize=14, vector_friendly=True)
-
-
-
-        sc.pp.neighbors(adata, use_rep=self.rep, n_neighbors=15, metric='euclidean', knn=True,method="umap")  # X_scvi #X_raw
-
+        sc.set_figure_params(fontsize=14, vector_friendly=True,figsize=(5,8))
+        sc.pp.filter_genes(adata, min_counts=1)
         sc.pp.pca(adata, svd_solver="auto")
-
+        sc.pp.neighbors(adata, use_rep="X_pca", n_neighbors=15, metric='euclidean', knn=True,method="umap")  # X_scvi #X_raw
         sc.tl.umap(adata)
+
         adata.obsm[f'X_{self.basis}'] = adata.obsm['X_umap'].copy()
+
 
         palette = list(matplotlib.colors.CSS4_COLORS.values()) if len(
             adata.obs[self.color_keys[0]].value_counts().keys()) > 20 else "tab20b"
 
-        sc.pl.embedding(adata, basis=f'{self.basis}', color=self.color_keys,
-                        palette=palette,
-                        ncols=1, show=False)
+        plot = sc.pl.embedding(adata, basis=f'{self.basis}', color=self.color_keys,
+                        palette=palette, ncols=1, show=False, wspace=1, hspace=1)
         plt.savefig(f"{self.figpath}/{self.figname}.jpg", bbox_inches="tight")
         plt.clf()
         plt.close()
         if self.basis == "raw_umap":
             adata.obsm['X_raw_umap'] = adata.obsm['X_umap'].copy()
         else:
-
             adata.layers['raw'] = adata.X.copy()
 
-        #adata.write(filepath) #TODO: fix?
+        #adata.write(self.filepath) #TODO: fix?
 
         return adata
+
+    def plot_umap_plotly(self):
+        """
+
+        :return:
+        """
+
+        adata = self.adata
+        print(f"UMAP of {self.basis} ...")
+
+        sc.set_figure_params(fontsize=14, vector_friendly=True)
+        sc.pp.filter_genes(adata, min_counts=1)
+        sc.pp.pca(adata, svd_solver="auto")
+        sc.pp.neighbors(adata, use_rep="X_pca", n_neighbors=15, metric='euclidean', knn=True,method="umap")  # X_scvi #X_raw
+        sc.tl.umap(adata)
+
+        adata.obsm[f'X_{self.basis}'] = adata.obsm['X_umap'].copy()
+
+
+        # df = pd.DataFrame({
+        #                    "UMAP_x": adata.obsm['X_umap'][:,0],
+        #                    "UMAP_y": adata.obsm['X_umap'][:,1],
+        #                    "tissue_labels": adata.obs['tissue_label'],
+        #                    "cell_type_label": adata.obs['cell_type_label'],
+        #                    })
+        #
+        # df.to_csv(f"{self.figpath}/umap_labels_only_glyco.tsv",sep="\t",index=False)
+
+
+
+        tissue_labels = list(adata.obs[self.color_keys[0]].value_counts().keys())
+        cell_labels = list(adata.obs[self.color_keys[1]].value_counts().keys())
+
+        palette = list(matplotlib.colors.CSS4_COLORS.values()) if len(tissue_labels) > 20 else "tab20b"
+
+        print("Making interactive plotly")
+        # Create figure
+        fig = make_subplots(rows=1, cols=2, subplot_titles=["Tissue", "Cell types"])
+
+        # Add separate traces for each label
+        for label in tissue_labels:
+
+            adata_subset = adata[adata.obs[self.color_keys[0]] == label]
+
+            umap_x = adata_subset.obsm["X_umap"][:,0]
+            umap_y = adata_subset.obsm["X_umap"][:,1]
+
+            fig.add_trace(go.Scatter(
+                x=umap_x, y=umap_y,
+                #mode='markers+text',
+                mode='markers',
+                text=[label] * len(umap_x),  # Show label on points
+                textposition="top center",
+                #name=f'Label {label}',  # Toggle each label using legend
+                marker=dict(size=10)
+            ), row=1, col=1)
+
+            del adata_subset
+
+        # Add separate traces for each label
+        for label in cell_labels:
+
+            adata_subset = adata[adata.obs[self.color_keys[1]] == label]
+
+            umap_x = adata_subset.obsm["X_umap"][:,0]
+            umap_y = adata_subset.obsm["X_umap"][:,1]
+
+            fig.add_trace(go.Scatter(
+                x=umap_x, y=umap_y,
+                mode='markers',
+                #mode='markers+text',
+                text=[label] * len(umap_x),  # Show label on points
+                textposition="top center",
+                #name=f'Label {label}',  # Toggle each label using legend
+                marker=dict(size=10)
+            ), row=1, col=2)
+
+        # Create dropdown menus for each plot
+        dropdowns = [
+            {
+                "buttons": [
+                    {"label": "Show All", "method": "update",
+                     "args": [{"visible": [True] * (len(tissue_labels) + len(cell_labels))}]},
+                    *[
+                        {"label": f"Show {label}", "method": "update",
+                         "args": [{"visible": [(label == lbl) if i < len(tissue_labels) else True for i, lbl in
+                                               enumerate(tissue_labels + cell_labels)]}]}
+                        for label in tissue_labels
+                    ]
+                ],
+                "direction": "down",
+                "showactive": True,
+                "x": 0.2, "y": 1.15  # Position dropdown
+            },
+            {
+                "buttons": [
+                    {"label": "Show All", "method": "update",
+                     "args": [{"visible": [True] * (len(tissue_labels) + len(cell_labels))}]},
+                    *[
+                        {"label": f"Show {label}", "method": "update",
+                         "args": [{"visible": [(True if i < len(tissue_labels) else label == lbl) for i, lbl in
+                                               enumerate(tissue_labels + cell_labels)]}]}
+                        for label in cell_labels
+                    ]
+                ],
+                "direction": "down",
+                "showactive": True,
+                "x": 0.8, "y": 1.15  # Position dropdown
+            }
+        ]
+
+        # Apply dropdown menus
+        fig.update_layout(updatemenus=dropdowns, title_text="Interactive scatter Plots")
+
+        fig.write_html(f"{self.figpath}/UMAP_plotly_only_glyco.html")
 
     def run(self):
         if f"X_{self.basis}" not in list(self.adata.obsm.keys()) or self.overwrite:
@@ -515,6 +623,7 @@ class ComputeUMAP():
                 return self.plot_umap_cuda()
             else:
                 return self.plot_umap()
+                #return self.plot_umap_plotly()
         else:
             print(f"Key 'X_{self.basis}' found, continue")
 
@@ -1297,15 +1406,6 @@ def plot_nmf(adata_subset,color_keys,figpath,gene_group_name=""):
 
     #TODO: also color by cell type
 
-def plot_scree_plot(adata):
-
-    # Perform a scree plot: Analysis of eigen values magnitudes
-
-    plt.plot(PC_values, pca.explained_variance_ratio_, 'o-', linewidth=2, color='blue')
-    plt.title('Scree Plot')
-    plt.xlabel('Principal Component')
-    plt.ylabel('Variance Explained')
-
 class Compute_Leiden_clusters():
 
     def __init__(self,adata,gene_set_dict,figpath,color_keys,filepath,overwrite,plot_all,use_cuda):
@@ -1576,7 +1676,6 @@ def scanpy_scvi(adata_file):
     latent = model.get_latent_representation()
     adata.obsm["og_scvi_latent"] = latent
 
-
 def get_cell_ontology_label(term_id, ontology_file_path):
     """
     Retrieve the label for a given Cell Ontology (CL) term using RDFLib.
@@ -1616,7 +1715,6 @@ def get_cell_ontology_label(term_id, ontology_file_path):
     except Exception as e:
         print(f"Error retrieving label: {e}")
         return None
-
 
 def search_cell_ontology_rdflib(owl_graph, term_id, return_children=False):
     """
@@ -1686,7 +1784,6 @@ def search_cell_ontology_rdflib(owl_graph, term_id, return_children=False):
         return {"main": label, "children": organ_labels}
     else:
         return label
-
 
 def search_uberon_rdflib(owl_graph,term_id,return_children=False):
     """
@@ -1787,11 +1884,9 @@ def build_coarsened_metadata(cellxgene_census:types.ModuleType,script_dir:str, m
             cell_metadata = pd.read_pickle(filepath)
 
 
-
         #cell_metadata[['cell_type', 'cell_type_ontology_term_id']].drop_duplicates(inplace=True) #TODO: Apparently we might not use this, was just for analyzing
         cell_metadata['cell_type_unknown'] = cell_metadata['cell_type'] == 'unknown'
         cell_metadata['cell_type_unknown'].sum() / len(cell_metadata)
-
 
         if method == "broad":
             # filepath = "{}/data/pseudobulk/info.pkl".format(script_dir)
@@ -1900,7 +1995,6 @@ def build_coarsened_metadata(cellxgene_census:types.ModuleType,script_dir:str, m
             df.reset_index()
             df.to_pickle(filepath_coarsened)
 
-
         elif method == "ku":
             tissue_coarsener = pd.read_csv(f"{script_dir}/data/common_files/uberon_ontology_map.tsv",sep="\t",skiprows=1)
             tissue_coarsener_dict = dict(zip(tissue_coarsener.iloc[:,0],tissue_coarsener.iloc[:,1]))
@@ -1936,9 +2030,7 @@ def build_coarsened_metadata(cellxgene_census:types.ModuleType,script_dir:str, m
 
             df = cell_metadata #TODO: Delete if the groupby are not used
             df.to_pickle(filepath_coarsened)
-
-
-
+        census.close()
 
     else:
         print(f"Reading {filepath_coarsened}")
@@ -2038,10 +2130,7 @@ def plot_histogram(coarsened_metadata,category,type="Barplot",bucket_size=1000):
         df.to_csv("Diversity_df_{}.tsv".format(category),index=False,sep="\t")
 
 
-
     value_counts = value_counts.to_dict()
-
-
 
     fig, [[ax0,ax1],[ax2,ax3]] = plt.subplots(nrows=2,ncols=2,figsize=size)
     cell_counts = list(value_counts.values())
@@ -2140,6 +2229,60 @@ def plot_histogram(coarsened_metadata,category,type="Barplot",bucket_size=1000):
 
     fig.suptitle("Cellxgene coarsed dataset by -{}-. Bucket size: {}. Number combinations: {}".format(category,bucket_size,len(value_counts)),fontsize=20)
     plt.savefig("{}_{}_bucketsize{}.jpg".format(type,category,bucket_size))
+
+def coarsed_cell_types_diversity(metadata,build_uberon_map, script_dir,type="Barplot",bucket_size=1000):
+
+    print("Starting bar plot ....")
+
+    #Highlight: Mapping to coarsed ontology term
+    tissue_coarsener = pd.read_csv(f"{script_dir}/data/common_files/uberon_ontology_map.tsv", sep="\t", skiprows=0, index_col=None)
+    tissue_coarsener_dict = dict(zip(tissue_coarsener.iloc[:, 0], tissue_coarsener.iloc[:, 1]))
+    metadata['tissue_coarse_ontology_id'] = metadata['tissue_ontology_term_id'].map(tissue_coarsener_dict)
+    cell_coarsener = pd.read_csv(f"{script_dir}/data/common_files/cell_ontology_map.tsv", sep="\t", skiprows=0,index_col=None)
+
+
+    cell_coarsener_dict = dict(zip(cell_coarsener.iloc[:, 0], cell_coarsener.iloc[:, 1]))
+    metadata['cell_type_coarse_ontology_term_id'] = metadata['cell_type_ontology_term_id'].map(cell_coarsener_dict).replace(['^UBERON', '^BFO', '^PR'], np.nan, regex=True)
+
+    # Highlight: Build or load previously found uberon-labels #TODO: Remember to re-make with the new data, right now it only contains intestine stuff
+    uberon_map_path = f"{script_dir}/data/coarsed/merged/uberon_map_dict.json"
+    uberon_map_dict = build_uberon_map(uberon_map_path,
+                                       uberon_list=metadata["tissue_coarse_ontology_id"].unique().astype(str),
+                                       overwrite=False)
+    # Highlight: Build or load previously found cell ontology labels
+    cell_ontology_map_path = f"{script_dir}/data/coarsed/merged/cell_ontology_map_dict.json"
+    cell_ontology_map_dict = build_uberon_map(cell_ontology_map_path,
+                                              uberon_list=metadata["cell_type_coarse_ontology_term_id"].unique().astype(str),
+                                              type="cellontology",
+                                              overwrite=False)
+
+    #Highlight: Map the og cell types to the coarsened ones
+
+    metadata["cell_type_coarsed"] = metadata["cell_type_coarse_ontology_term_id"].map(cell_ontology_map_dict)
+    metadata["tissue_type_coarsed"] = metadata["tissue_coarse_ontology_id"].map(uberon_map_dict)
+    category = "cell_type_coarsed"
+
+    value_counts = metadata[category].value_counts()
+    df = value_counts.rename_axis(category).reset_index(name='counts')
+
+    grouped_metadata = metadata.groupby(category, as_index=False)["cell_type"].apply(np.unique)
+    grouped_metadata["diversity"] = grouped_metadata["cell_type"].apply(len)
+    diversity_dict = grouped_metadata.set_index(category)['diversity'].to_dict()
+
+    df["cell_type_diversity"] = df[category].map(diversity_dict)
+
+    df.to_csv(f"{script_dir}/data/common_files/coarsedned_cell_types_diversity.tsv", sep = "\t",index=False)
+
+
+
+
+
+
+
+
+
+
+
 
 
 

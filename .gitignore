@@ -35,3 +35,7 @@ notebooks/paths.txt
 notebooks/lys_cellxgene_queries.ipynb
 
 coarse_cellxgene2.sh
+
+notebooks/unique_tissueontologies.txt
+
+notebooks/figures/
