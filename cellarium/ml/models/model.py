@@ -109,3 +109,22 @@ class ValidateMixin:
         if loss is not None:
             # Logging to TensorBoard by default
             pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
+
+
+class TestMixin(metaclass=ABCMeta):
+    """
+    Abstract mixin class for models that can perform testing.
+    """
+
+    @abstractmethod
+    def test(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        batch_idx: int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Perform testing.
+        """

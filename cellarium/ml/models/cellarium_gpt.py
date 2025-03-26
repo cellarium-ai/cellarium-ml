@@ -1,26 +1,22 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from functools import cached_property
-from typing import Any, Literal
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
-import pandas as pd
 import torch
 from torch import nn
-from torch.nn.attention.flex_attention import create_block_mask
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from cellarium.ml.layers import GeneExpressionEmbedding, MetadataEmbedding, Transformer
+from cellarium.ml.layers import MultiHeadReadout, TokenEmbedding, Transformer
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
-from cellarium.ml.utilities.layers import create_initializer
-from cellarium.ml.utilities.mup import scale_initializers_by_dimension
+from cellarium.ml.utilities.layers import scale_initializers_by_dimension
+from cellarium.ml.utilities.mup import LRAdjustmentGroup
 
 try:
-    from cerebras.modelzoo.common.utils.model.mup_utils import LRAdjustmentGroup
     from cerebras.pytorch.backend import use_cs
 except ImportError:
-    from cellarium.ml.utilities.mup import LRAdjustmentGroup
 
     def use_cs() -> bool:
         return False
@@ -41,7 +37,9 @@ def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
         torch.Tensor: The prompt diagonal mask.
 
     Example:
+
         For prompt_mask = [True, False, True, False, False], the attention mask is:
+
         [[True, False, True, False, False],
          [True, True,  True, False, False],
          [True, False, True, False, False],
@@ -62,318 +60,15 @@ def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
         return attention_mask_ncc
 
 
-class DummyTokenizer(torch.nn.Module):
-    def forward(self, **kwargs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return kwargs
-
-
-class PredictTokenizer(torch.nn.Module):
-    def __init__(
-        self,
-        max_total_mrna_umis: int,
-        gene_vocab_sizes: dict[str, int],
-        metadata_vocab_sizes: dict[str, int],
-        ontology_infos: dict[str, dict[str, Any]],
-    ) -> None:
-        super().__init__()
-        self.max_total_mrna_umis = max_total_mrna_umis
-        self.gene_vocab_sizes = gene_vocab_sizes
-        self.metadata_vocab_sizes = metadata_vocab_sizes
-        self.ontology_infos = ontology_infos
-
-    def forward(
-        self,
-        metadata_tokens_n: dict[str, torch.Tensor],
-        metadata_prompt_masks_n: dict[str, torch.Tensor],
-        gene_tokens_nc: dict[str, torch.Tensor],
-        gene_prompt_mask_nc: torch.Tensor,
-    ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
-        # step 1. gene tokens
-        gene_value_nc = gene_tokens_nc.pop("gene_value").float()
-        total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis").float()
-        device = gene_value_nc.device
-
-        # step 1.1 downsample gene values (by scaling, to preserve differentiability)
-        max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
-        downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
-        gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
-        gene_value_nc = gene_value_nc * gene_downsample_p_nc
-        total_mrna_umis_nc = downsampled_total_mrna_umis_nc
-
-        # step 1.2 create gene query and prompt masks
-        gene_query_mask_nc = ~gene_prompt_mask_nc
-        gene_value_nc3 = torch.stack(
-            [
-                torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(),  # masked values are set to 0
-                gene_query_mask_nc.float(),  # 1 if the gene is queried, 0 if the gene is prompted
-                torch.log1p(total_mrna_umis_nc),
-            ],
-            dim=2,
-        )
-        gene_tokens_nc["gene_value"] = gene_value_nc3
-
-        # step 2. metadata tokens
-        #   assign token codes based on the ontology info
-        #   token values not in the ontology are treated as unmeasured and assigned a code value of -1
-        for key, ontology_info in self.ontology_infos.items():
-            assert self.metadata_vocab_sizes[key] == len(ontology_info["names"])
-            metadata_tokens_n[key] = torch.tensor(
-                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["names"]).codes,
-                dtype=torch.int,
-            )
-        # step 2.1 create metadata query and prompt masks
-        metadata_prompt_mask_nm = torch.stack(
-            [metadata_prompt_masks_n[key] for key in self.ontology_infos.keys()], dim=1
-        )
-        metadata_query_mask_nm = ~metadata_prompt_mask_nm
-
-        # clamp unmeasured tokens to 0
-        # for key, metadata_token_n in metadata_tokens_n.items():
-        #     metadata_tokens_n[key] = metadata_token_n.clamp(0).int()
-
-        # impute mask token for unmeasured metadata
-        for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
-            # for each metadata type, mask token is the last token in the vocabulary
-            mask_token_index = self.metadata_vocab_sizes[key]
-            metadata_tokens_n[key] = torch.where(metadata_query_mask_nm[:, i], mask_token_index, metadata_token_n).int()
-
-        # step 3. generate the full prompt mask
-        prompt_mask_nc = torch.cat([gene_prompt_mask_nc, metadata_prompt_mask_nm], dim=1)
-
-        return {
-            "gene_tokens_nc": gene_tokens_nc,
-            "metadata_tokens_n": metadata_tokens_n,
-            "prompt_mask_nc": prompt_mask_nc,
-        }
-
-
-class TrainTokenizer(torch.nn.Module):
-    """
-    Tokenizer for the Cellarium GPT model.
-
-    Args:
-        context_len:
-            Context length.
-        gene_downsample_fraction:
-            Downsample fraction.
-        min_total_mrna_umis:
-            Minimum total mRNA UMIs.
-        max_total_mrna_umis:
-            Maximum total mRNA UMIs.
-        gene_vocab_sizes:
-            Gene token vocabulary sizes.
-        metadata_vocab_sizes:
-            Metadata token vocabulary sizes.
-        ontology_infos:
-            Ontology information.
-    """
-
-    def __init__(
-        self,
-        context_len: int,
-        gene_downsample_fraction: float,
-        min_total_mrna_umis: int,
-        max_total_mrna_umis: int,
-        gene_vocab_sizes: dict[str, int],
-        metadata_vocab_sizes: dict[str, int],
-        ontology_downsample_p: float,
-        ontology_infos_path: str,
-        prefix_len: int | None = None,
-        metadata_prompt_tokens: list[str] | None = None,
-        obs_names_rng: bool = False,
-    ) -> None:
-        super().__init__()
-        self.context_len = context_len
-        self.gene_downsample_fraction = gene_downsample_fraction
-        self.min_total_mrna_umis = min_total_mrna_umis
-        self.max_total_mrna_umis = max_total_mrna_umis
-        self.gene_vocab_sizes = gene_vocab_sizes
-        self.metadata_vocab_sizes = metadata_vocab_sizes
-        ontology_infos = torch.load(ontology_infos_path, weights_only=True)
-        self.ontology_infos = ontology_infos
-        self.ontology_downsample_p = ontology_downsample_p
-        self.prefix_len = prefix_len
-        self.metadata_prompt_tokens = metadata_prompt_tokens
-        self.obs_names_rng = obs_names_rng
-
-    def forward(
-        self,
-        metadata_tokens_n: dict[str, torch.Tensor],
-        gene_tokens_n: dict[str, torch.Tensor],
-        gene_tokens_ng: dict[str, torch.Tensor],
-        gene_id_g: torch.Tensor | None = None,
-        obs_names_n: np.ndarray | None = None,
-    ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
-        ### GENE TOKENS ###
-        n, g = gene_tokens_ng["gene_value"].shape
-        m = len(metadata_tokens_n)
-        gene_context_len = self.context_len - m
-        device = gene_tokens_ng["gene_value"].device
-
-        ## gene measurement tokens (assay, suspension type, etc.) ##
-        gene_tokens_nc = {key: gene_tokens_n[key][:, None].expand(-1, gene_context_len).int() for key in gene_tokens_n}
-
-        ## gene id ##
-        if gene_id_g is None:
-            gene_id_g = torch.arange(g, device=device)
-        gene_tokens_ng["gene_id"] = gene_id_g.expand(n, g)
-
-        if self.obs_names_rng:
-            rng_n = [torch.Generator(device=device) for _ in range(n)]
-            [rng.manual_seed(int(obs_name)) for rng, obs_name in zip(rng_n, obs_names_n)]
-            shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
-        else:
-            shuffle_idx_ng = torch.argsort(torch.rand((n, g), dtype=torch.float32, device=device), dim=-1)
-        shuffle_idx_nc = shuffle_idx_ng[:, :gene_context_len]
-
-        for key, gene_token_ng in gene_tokens_ng.items():
-            gene_tokens_nc[key] = torch.gather(gene_token_ng, dim=-1, index=shuffle_idx_nc)
-
-        ## gene value ##
-        gene_value_nc = gene_tokens_nc.pop("gene_value")
-        total_mrna_umis_nc = gene_tokens_nc.pop("total_mrna_umis")
-        # downsample gene values
-        max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
-        downsampled_total_mrna_umis_nc = torch.minimum(total_mrna_umis_nc, max_total_mrna_umis).float()
-        if self.gene_downsample_fraction > 0:
-            gene_downsample_p_nc = torch.minimum(
-                torch.rand((n, gene_context_len), device=device) / self.gene_downsample_fraction,
-                torch.tensor(1.0, device=device),
-            )
-            downsampled_total_mrna_umis_nc = torch.lerp(
-                torch.full_like(gene_downsample_p_nc, self.min_total_mrna_umis),
-                downsampled_total_mrna_umis_nc,
-                gene_downsample_p_nc,
-            )
-        gene_downsample_p_nc = downsampled_total_mrna_umis_nc / total_mrna_umis_nc
-        gene_value_nc = torch.binomial(gene_value_nc, gene_downsample_p_nc)
-        total_mrna_umis_nc = torch.round(downsampled_total_mrna_umis_nc)
-        if self.prefix_len is not None:
-            prefix_len_n = torch.full((n,), self.prefix_len, dtype=torch.float32)
-        else:
-            # sample prefix length
-            # prefix_len_weights = [1, max_prefix_len / 2, max_prefix_len / 3, ..., max_prefix_len / max_prefix_len]
-            max_prefix_len = gene_context_len - 1
-            prefix_len_weights = 1 / torch.arange(max_prefix_len + 1, dtype=torch.float32)
-            prefix_len_weights[0] = 1 / 10
-            prefix_len_n = torch.multinomial(prefix_len_weights, n, replacement=True)
-        # create prompt and query masks
-        gene_query_mask_nc = torch.arange(gene_context_len, device=device) >= prefix_len_n[:, None].expand(n, -1)
-        gene_prompt_mask_nc = ~gene_query_mask_nc
-        if "measured_genes_mask" in gene_tokens_nc:
-            measured_genes_mask_nc = gene_tokens_nc.pop("measured_genes_mask")
-            gene_query_mask_nc = gene_query_mask_nc & measured_genes_mask_nc
-            gene_prompt_mask_nc = gene_prompt_mask_nc & measured_genes_mask_nc
-
-        gene_value_nc3 = torch.stack(
-            [
-                torch.log1p(gene_value_nc) * gene_prompt_mask_nc.float(),
-                gene_query_mask_nc.float(),
-                torch.log1p(total_mrna_umis_nc),
-            ],
-            dim=2,
-        )
-        gene_tokens_nc["gene_value"] = gene_value_nc3
-        # gene label
-        gene_value_vocab_size = self.gene_vocab_sizes["gene_value"]
-        gene_label_nc = gene_value_nc.clamp(0, gene_value_vocab_size - 1).int()
-
-        ### METADATA TOKENS ###
-
-        ## metadata tokens ##
-        # assign token codes based on the ontology info
-        # token values not in the ontology are treated as unmeasured and assigned a code value of -1
-        for key, ontology_info in self.ontology_infos.items():
-            assert self.metadata_vocab_sizes[key] == len(ontology_info["names"])
-            metadata_tokens_n[key] = torch.tensor(
-                pd.Categorical(metadata_tokens_n[key], categories=ontology_info["names"]).codes,
-                dtype=torch.int,
-            )
-        # create metadata query and prompt masks
-        if self.metadata_prompt_tokens is not None:
-            metadata_prompt_mask_nm = torch.zeros((n, m), dtype=torch.bool, device=device)
-            for metadata_token_idx, metadata_token in enumerate(metadata_tokens_n):
-                if metadata_token in self.metadata_prompt_tokens:
-                    metadata_prompt_mask_nm[:, metadata_token_idx] = True
-        else:
-            metadata_prefix_len_n = torch.randint(0, m + 1, (n,), device=device)
-            metadata_prefix_mask_nm = torch.arange(m, device=device) < metadata_prefix_len_n[:, None]
-            shuffle_idx_nm = torch.argsort(torch.rand_like(metadata_prefix_mask_nm, dtype=torch.float32), dim=-1)
-            metadata_prompt_mask_nm = torch.gather(metadata_prefix_mask_nm, dim=-1, index=shuffle_idx_nm)
-        metadata_query_mask_nm = ~metadata_prompt_mask_nm
-        metadata_measured_mask_nm = torch.stack(
-            [metadata_token_n >= 0 for metadata_token_n in metadata_tokens_n.values()], dim=1
-        ).bool()
-        metadata_query_mask_nm = metadata_query_mask_nm & metadata_measured_mask_nm
-        metadata_prompt_mask_nm = metadata_prompt_mask_nm & metadata_measured_mask_nm
-        # clamp unmeasured tokens to 0
-        for key, metadata_token_n in metadata_tokens_n.items():
-            metadata_tokens_n[key] = metadata_token_n.clamp(0).int()
-        # metadata labels
-        metadata_labels_n = {key: metadata_tokens_n[key].clone() for key in metadata_tokens_n}
-        if self.ontology_downsample_p != 0:
-            # downsample metadata based on ontology
-            for key, ontology_info in self.ontology_infos.items():
-                if "shortest_distances_matrix" not in ontology_info:
-                    continue
-                metadata_token_n = metadata_tokens_n[key]
-                shortest_distances_matrix = ontology_info["shortest_distances_matrix"]
-                ontology_weights = (
-                    self.ontology_downsample_p * (1 - self.ontology_downsample_p) ** shortest_distances_matrix
-                )
-                metadata_tokens_n[key] = (
-                    torch.multinomial(ontology_weights[metadata_token_n], num_samples=1).squeeze(-1).int()
-                )
-        # impute mask token for unmeasured metadata
-        # mask token is the last token in the vocabulary
-        for i, (key, metadata_token_n) in enumerate(metadata_tokens_n.items()):
-            metadata_tokens_n[key] = torch.where(
-                metadata_query_mask_nm[:, i], self.metadata_vocab_sizes[key], metadata_token_n
-            ).int()
-
-        ### PROMPT MASK ###
-        prompt_mask_nc = torch.cat([gene_prompt_mask_nc, metadata_prompt_mask_nm], dim=1)
-
-        ### LABELS ###
-        block_label_nc = torch.block_diag(
-            gene_label_nc,
-            *[metadata_label_n.unsqueeze(-1) for metadata_label_n in metadata_labels_n.values()],
-        )
-        labels_nc = {
-            key: block_label_nc[n * i : n * (i + 1)] for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
-        }
-
-        ### LABEL WEIGHTS ###
-        block_label_weight_nc = (
-            torch.block_diag(
-                gene_query_mask_nc / torch.maximum(gene_query_mask_nc.sum(dim=-1, keepdim=True), torch.tensor(1.0)),
-                *[metadata_query_mask_nm[:, i].unsqueeze(-1).float() for i in range(m)],
-            )
-            / n
-        )
-        label_weights_nc = {
-            key: block_label_weight_nc[n * i : n * (i + 1)]
-            for i, key in enumerate(["gene_value"] + list(metadata_tokens_n))
-        }
-
-        return {
-            "gene_tokens_nc": gene_tokens_nc,
-            "metadata_tokens_n": metadata_tokens_n,
-            "prompt_mask_nc": prompt_mask_nc,
-            "labels_nc": labels_nc,
-            "label_weights_nc": label_weights_nc,
-        }
-
-
 class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     """
-    Cellarium GPT model.
+    CellariumGPT model.
 
     Args:
-        gene_vocab_sizes:
-            Gene token vocabulary sizes.
-        metadata_vocab_sizes:
-            Metadata token vocabulary sizes.
+        categorical_token_size_dict:
+            Categorical token vocabulary sizes. Must include "gene_value" and "gene_id". Additionally, it can include
+            experimental conditions, such as "assay" and "suspension_type", and metadata tokens such as "cell_type",
+            "tissue", "sex", "development_stage", and "disease".
         d_model:
             Dimensionality of the embeddings and hidden states.
         d_ffn:
@@ -388,18 +83,19 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
             Whether to use bias in the linear transformations.
         attention_backend:
             Backend for the attention computation.
-        gene_categories:
-            Gene ID categories.
+        attention_softmax_fp32:
+            Whether to use float32 for softmax computation when ``torch`` backend is used.
+        loss_scale_dict:
+            A dictionary of loss scales for each label type. These are the query tokens that are used
+            to compute the loss.
         initializer_range:
             The standard deviation of the truncated normal initializer.
         embeddings_scale:
             Multiplier for the embeddings.
-        output_logits_scale:
-            Multiplier for the output logits.
         attention_logits_scale:
             Multiplier for the attention logits.
-        lr_adjustment_groups:
-            Learning rate adjustment groups.
+        output_logits_scale:
+            Multiplier for the output logits.
         mup_base_d_model:
             Base dimensionality of the model for muP.
         mup_base_d_ffn:
@@ -408,35 +104,33 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
     def __init__(
         self,
-        gene_vocab_sizes: dict[str, int],
-        metadata_vocab_sizes: dict[str, int],
+        # Vocab sizes
+        categorical_token_size_dict: dict[str, int],
+        # Model parameters
         d_model: int,
         d_ffn: int,
         n_heads: int,
         n_blocks: int,
         dropout_p: float,
         use_bias: bool,
-        attention_backend: Literal["flash", "flex", "math", "mem_efficient", "torch"],
+        attention_backend: Literal["flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
-        loss_scales: dict[str, float],
-        # tunable hyperparameters
+        loss_scale_dict: dict[str, float],
+        # Tunable parameters
         initializer_range: float = 0.02,
         embeddings_scale: float = 1.0,
         attention_logits_scale: float = 1.0,
         output_logits_scale: float = 1.0,
-        # muP (maximal update parameterization)  parameters
-        lr_adjustment_groups: dict | None = None,
+        # muP (maximal update parameterization) parameters
         mup_base_d_model: int | None = None,
         mup_base_d_ffn: int | None = None,
-        gene_categories: np.ndarray | None = None,
     ) -> None:
         super().__init__()
 
-        self.gene_vocab_sizes = gene_vocab_sizes.copy()
-        self.metadata_vocab_sizes = metadata_vocab_sizes.copy()
-        self.d_model = d_model
-        self.d_ffn = d_ffn
-        self.attention_backend = attention_backend
+        # Vocab sizes
+        self.categorical_token_size_dict = categorical_token_size_dict
+
+        # Initializers
         self.initializer_range = initializer_range
         default_initializer = {
             "name": "trunc_normal_",
@@ -450,19 +144,20 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
         Wo_initializer = default_initializer.copy()
         dense1_initializer = default_initializer.copy()
         dense2_initializer = default_initializer.copy()
-        self.head_initializer = default_initializer.copy()
-        if lr_adjustment_groups is None:
-            lr_adjustment_groups = {
-                "embedding": LRAdjustmentGroup("*embedding*weight"),
-                "decoder_attention": LRAdjustmentGroup("*transformer*attention*W*weight"),
-                "decoder_input_ffn": LRAdjustmentGroup("*transformer*ffn.dense1*weight"),
-                "decoder_output_ffn": LRAdjustmentGroup("*transformer*ffn.dense2*weight"),
-            }
+        heads_initializer = default_initializer.copy()
+        self.lr_adjustment_groups = {
+            "embedding": LRAdjustmentGroup("*embedding*weight"),
+            "decoder_attention": LRAdjustmentGroup("*transformer*attention*W*weight"),
+            "decoder_input_ffn": LRAdjustmentGroup("*transformer*ffn.dense1*weight"),
+            "decoder_output_ffn": LRAdjustmentGroup("*transformer*ffn.dense2*weight"),
+        }
 
+        # Multipliers
         self.embeddings_scale = embeddings_scale
-        self.output_logits_scale = output_logits_scale
         self.attention_logits_scale = attention_logits_scale
-        # Handle muP scaling
+        self.output_logits_scale = output_logits_scale
+
+        # Handle muP scaling for Adam and AdamW optimizers
         if mup_base_d_model:
             d_model_width_mult = d_model / mup_base_d_model
             scale_initializers_by_dimension(
@@ -479,7 +174,8 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
                 "decoder_attention",
                 "decoder_input_ffn",
             ]:
-                lr_adjustment_groups[lr_adjustment_group].set_scale(1 / d_model_width_mult)
+                self.lr_adjustment_groups[lr_adjustment_group].set_scale(1 / d_model_width_mult)
+            self.width_mult = d_model_width_mult
         else:
             scale_initializers_by_dimension(
                 Wo_initializer,
@@ -493,53 +189,50 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
                 width_scale=d_ffn_width_mult**-0.5,
                 depth_scale=(2 * n_blocks) ** -0.5,
             )
-            lr_adjustment_groups["decoder_output_ffn"].set_scale(1 / d_ffn_width_mult)
+            self.lr_adjustment_groups["decoder_output_ffn"].set_scale(1 / d_ffn_width_mult)
+            assert self.width_mult == d_ffn_width_mult
         else:
             scale_initializers_by_dimension(
                 dense2_initializer,
                 depth_scale=(2 * n_blocks) ** -0.5,
             )
 
-        self.lr_adjustment_groups = lr_adjustment_groups
-
-        if gene_categories is not None:
-            assert len(gene_categories) == gene_vocab_sizes["gene_id"]
-        self.gene_categories = gene_categories
-
-        gene_value_vocab_size = gene_vocab_sizes.pop("gene_value")
-        self.gene_embedding = GeneExpressionEmbedding(
-            categorical_vocab_sizes=gene_vocab_sizes,
-            continuous_vocab_sizes={"gene_value": 3},
-            d_model=d_model,
-            embeddings_initializer=embeddings_initializer,
-        )
-        self.metadata_embedding = MetadataEmbedding(
-            categorical_vocab_sizes={key: vocab_size + 1 for key, vocab_size in metadata_vocab_sizes.items()},
+        embedding_token_size_dict = {}
+        for key, vocab_size in categorical_token_size_dict.items():
+            if key in loss_scale_dict:
+                # Add 1 to the vocab size for the query tokens to account for the mask token
+                embedding_token_size_dict[key] = vocab_size + 1
+            elif key != "gene_value":
+                embedding_token_size_dict[key] = vocab_size
+        self.token_embedding = TokenEmbedding(
+            categorical_token_size_dict=embedding_token_size_dict,
+            continuous_token_list=["gene_value", "gene_query_mask", "total_mrna_umis"],
             d_model=d_model,
             embeddings_initializer=embeddings_initializer,
         )
         self.transformer = Transformer(
-            d_model,
-            d_ffn,
-            use_bias,
-            n_heads,
-            n_blocks,
-            dropout_p,
-            attention_logits_scale,
-            attention_backend,
-            attention_softmax_fp32,
-            Wqkv_initializer,
-            Wo_initializer,
-            dense1_initializer,
-            dense2_initializer,
+            d_model=d_model,
+            d_ffn=d_ffn,
+            use_bias=use_bias,
+            n_heads=n_heads,
+            n_blocks=n_blocks,
+            dropout_p=dropout_p,
+            attention_logits_scale=attention_logits_scale,
+            attention_backend=attention_backend,
+            attention_softmax_fp32=attention_softmax_fp32,
+            Wqkv_initializer=Wqkv_initializer,
+            Wo_initializer=Wo_initializer,
+            dense1_initializer=dense1_initializer,
+            dense2_initializer=dense2_initializer,
         )
-        self.head = nn.ModuleDict(
-            {
-                "gene_value": nn.Linear(d_model, gene_value_vocab_size, use_bias),
-                **{key: nn.Linear(d_model, vocab_size, use_bias) for key, vocab_size in metadata_vocab_sizes.items()},
-            }
+        self.head = MultiHeadReadout(
+            categorical_token_size_dict={key: categorical_token_size_dict[key] for key in loss_scale_dict},
+            d_model=d_model,
+            use_bias=use_bias,
+            output_logits_scale=output_logits_scale,
+            heads_initializer=heads_initializer,
         )
-        self.loss_scales = loss_scales
+        self.loss_scale_dict = loss_scale_dict
 
         self.reset_parameters()
 
@@ -549,31 +242,46 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
         self.apply(_reset_parameters)
 
-        for module in self.head.children():
-            create_initializer(self.head_initializer)(module.weight)
+    @property
+    def d_model(self) -> int:
+        block = self.transformer.blocks[0]
+        # assert isinstance(block, TransformerBlock)
+        return block.d_model
 
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
+    @property
+    def d_ffn(self) -> int:
+        block = self.transformer.blocks[0]
+        # assert isinstance(block, TransformerBlock)
+        return block.d_ffn
 
-    @cached_property
-    def token_to_id(self) -> dict[str, int]:
-        return {var_name: i for i, var_name in enumerate(self.gene_categories)}
+    @property
+    def n_heads(self) -> int:
+        block = self.transformer.blocks[0]
+        # assert isinstance(block, TransformerBlock)
+        return block.attention.n_heads
 
-    @cached_property
-    def vectorized_token_to_id(self):
-        return np.vectorize(lambda x: self.token_to_id[x])
+    @property
+    def n_blocks(self) -> int:
+        return len(self.transformer.blocks)
 
-    def set_attention_backend(self, attention_backend: str) -> None:
-        self.attention_backend = attention_backend
+    @property
+    def attention_backend(self) -> Literal["flex", "math", "mem_efficient", "torch"]:
+        block = self.transformer.blocks[0]
+        # assert isinstance(block, TransformerBlock)
+        return block.attention.attention_backend
+
+    @attention_backend.setter
+    def attention_backend(self, value: Literal["flex", "math", "mem_efficient", "torch"]) -> None:
         for block in self.transformer.blocks:
-            block.attention.attention_backend = attention_backend
+            # assert isinstance(block, TransformerBlock)
+            block.attention.attention_backend = value
 
-    def predict(
+    def get_embeddings(
         self,
         gene_tokens_nc: dict[str, torch.Tensor],
         metadata_tokens_n: dict[str, torch.Tensor],
         prompt_mask_nc: torch.Tensor | None,
-        predict_keys: list[str] | None = None,
+        to_cpu = True
     ) -> dict[str, torch.Tensor]:
         # embed the gene IDs, values, and total mRNA UMIs
         embedding_ncd = torch.cat(
@@ -592,66 +300,113 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
 
             n, c = prompt_mask_nc.shape
             attention_mask_ncc = create_block_mask(
-                prompt_diagonal_mask_mod,
-                B=n,
-                H=None,
-                Q_LEN=c,
-                KV_LEN=c,
-                BLOCK_SIZE=c,
-                device=prompt_mask_nc.device,
-                _compile=False,
-            )
+                prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c, BLOCK_SIZE=c, device=prompt_mask_nc.device, _compile=False)
         else:
             attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
 
         # transformer blocks
         hidden_state_ncd = embedding_ncd * self.embeddings_scale
+
+        hidden_states = self.transformer.forward_all_hidden_states(hidden_state_ncd, attention_mask_ncc, 
+                                                                   to_cpu=to_cpu)
+        # hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
+
+        return hidden_states
+
+    def predict(
+        self,
+        token_value_nc_dict: dict[str, torch.Tensor],
+        token_mask_nc_dict: dict[str, torch.Tensor],
+        prompt_mask_nc: torch.Tensor,
+    ) -> dict[str, np.ndarray | torch.Tensor]:
+        """
+        Args:
+            token_value_nc_dict:
+                Dictionary of token value tensors of shape ``(n, c)``.
+            token_mask_nc_dict:
+                Dictionary of token mask tensors of shape ``(n, c)``.
+
+        Returns:
+            Dictionary of logits tensors of shape ``(n, c, k)``.
+        """
+        # Create embeddings
+        embedding_ncd = self.token_embedding(token_value_nc_dict, token_mask_nc_dict)
+
+        # Create attention mask
+        attention_mask_ncc: torch.Tensor | BlockMask
+        if self.attention_backend == "flex":
+
+            def prompt_diagonal_mask_mod(b, h, q_idx, kv_idx):
+                return prompt_mask_nc[b, kv_idx] | (q_idx == kv_idx)
+
+            n, c = prompt_mask_nc.shape
+            attention_mask_ncc = create_block_mask(prompt_diagonal_mask_mod, B=n, H=None, Q_LEN=c, KV_LEN=c)
+        else:
+            attention_mask_ncc = prompt_diagonal_mask(prompt_mask_nc)
+
+        # Transformer blocks
+        hidden_state_ncd = embedding_ncd * self.embeddings_scale
         hidden_state_ncd = self.transformer(hidden_state_ncd, attention_mask_ncc)
 
-        # compute logits
-        logits_nck = {}
-        if predict_keys is None:
-            predict_keys = ["gene_value"] + list(metadata_tokens_n)
-        for key in predict_keys:
-            logits_nck[key] = self.head[key](hidden_state_ncd) * self.output_logits_scale
+        # Compute logits
+        logits_nck_dict = self.head(hidden_state_ncd)
 
-        return logits_nck
+        return logits_nck_dict
 
     def forward(
         self,
-        gene_tokens_nc: dict[str, torch.Tensor],
-        metadata_tokens_n: dict[str, torch.Tensor],
+        token_value_nc_dict: dict[str, torch.Tensor],
+        token_mask_nc_dict: dict[str, torch.Tensor],
         prompt_mask_nc: torch.Tensor,
-        labels_nc: dict[str, torch.Tensor],
-        label_weights_nc: dict[str, torch.Tensor],
+        label_nc_dict: dict[str, torch.Tensor],
+        label_weight_nc_dict: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        logits_nck = self.predict(gene_tokens_nc, metadata_tokens_n, prompt_mask_nc)
+        logits_nck_dict = self.predict(
+            token_value_nc_dict=token_value_nc_dict,
+            token_mask_nc_dict=token_mask_nc_dict,
+            prompt_mask_nc=prompt_mask_nc,
+        )
 
-        # compute loss
-        losses = {}
+        # Compute loss
+        if not (set(self.loss_scale_dict) == set(label_nc_dict) == set(label_weight_nc_dict)):
+            raise ValueError("The keys of loss_scale_dict, label_nc_dict, and label_weight_nc_dict must be the same.")
+        loss_dict = {}
         loss_fn = nn.CrossEntropyLoss(reduction="none")
-        for key, label_nc in labels_nc.items():
-            losses[key] = torch.sum(
-                loss_fn(logits_nck[key].view(label_nc.numel(), -1), label_nc.view(-1).long())
-                * label_weights_nc[key].view(-1)
+        # Make sure that label_nc_dict is created by concatenating the gene_value and metadata labels
+        # in the same order as the embeddings.
+        for key, label_nc in label_nc_dict.items():
+            logits_nck = logits_nck_dict[key]
+            assert isinstance(logits_nck, torch.Tensor)
+            label_weight_nc = label_weight_nc_dict[key]
+            assert isinstance(label_weight_nc, torch.Tensor)
+            loss_dict[key] = torch.sum(
+                loss_fn(logits_nck.view(label_nc.numel(), -1), label_nc.view(-1).long()) * label_weight_nc.view(-1)
             )
 
-        losses["loss"] = sum(losses[key] * self.loss_scales[key] for key in losses)
+        loss = sum(loss_dict[key] * self.loss_scale_dict[key] for key in loss_dict)
+        assert isinstance(loss, torch.Tensor)
+        loss_dict["loss"] = loss
 
-        return losses
+        return loss_dict
 
     def validate(
         self,
         trainer: pl.Trainer,
         pl_module: pl.LightningModule,
-        metadata_tokens_n: dict[str, torch.Tensor],
-        gene_tokens_nc: dict[str, torch.Tensor],
-        prompt_mask_nc: torch.Tensor,
-        labels_nc: dict[str, torch.Tensor],
-        label_weights_nc: dict[str, torch.Tensor],
         batch_idx: int,
+        token_value_nc_dict: dict[str, torch.Tensor],
+        token_mask_nc_dict: dict[str, torch.Tensor],
+        prompt_mask_nc: torch.Tensor,
+        label_nc_dict: dict[str, torch.Tensor],
+        label_weight_nc_dict: dict[str, torch.Tensor],
     ) -> None:
-        n = gene_tokens_nc["gene_value"].shape[0]
-        loss_dict = self(gene_tokens_nc, metadata_tokens_n, prompt_mask_nc, labels_nc, label_weights_nc)
+        n = prompt_mask_nc.shape[0]
+        loss_dict = self.forward(
+            token_value_nc_dict=token_value_nc_dict,
+            token_mask_nc_dict=token_mask_nc_dict,
+            prompt_mask_nc=prompt_mask_nc,
+            label_nc_dict=label_nc_dict,
+            label_weight_nc_dict=label_weight_nc_dict,
+        )
 
         pl_module.log_dict(loss_dict, sync_dist=True, on_epoch=True, batch_size=n)

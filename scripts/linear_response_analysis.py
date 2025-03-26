@@ -119,13 +119,14 @@ def main():
         attention_backend="mem_efficient",
         verbose=False,
     )
-
-    all_query_gene_ids = val_adata.var["feature_id"].values
+    
+    all_query_gene_ids = val_adata.var['feature_id'].to_numpy()
     print(f"Total number of query genes from validation AnnData: {len(all_query_gene_ids)}")
 
     if args.max_query_genes is not None:
-        query_gene_ids = all_query_gene_ids[: args.max_query_genes]
-        print(f"Limiting to {args.max_query_genes} first query genes for linear response analysis.")
+        highly_expressed_gene_indices = np.argsort(val_adata.X[args.cell_index, :])[::-1]
+        query_gene_ids = all_query_gene_ids[highly_expressed_gene_indices[:args.max_query_genes]]
+        print(f"Limiting to {args.max_query_genes} highly-expressed query genes for linear response analysis.")
     else:
         query_gene_ids = all_query_gene_ids
         print(f"Using all {len(all_query_gene_ids)} query genes for linear response analysis.")
@@ -205,22 +206,24 @@ def main():
         "total_mrna_umis": total_mrna_umis,
         "prompt_metadata_dict": prompt_metadata_dict,
         # Expression range outputs
-        "x_lo_q": gex_range_dict["x_lo_q"].cpu().numpy(),
-        "x_hi_q": gex_range_dict["x_hi_q"].cpu().numpy(),
-        "range_q": gex_range_dict["range_q"].cpu().numpy(),
-        "gene_logits_qk": gex_range_dict["gene_logits_qk"].cpu().numpy(),
-        "gene_logits_mode_q": gex_range_dict["gene_logits_mode_q"].cpu().numpy(),
-        "gene_marginal_mean_q": gex_range_dict["gene_marginal_mean_q"].cpu().numpy(),
-        "gene_marginal_std_q": gex_range_dict["gene_marginal_std_q"].cpu().numpy(),
+        "x_lo_q": gex_range_dict['x_lo_q'].cpu().numpy().astype(np.float32),
+        "x_hi_q": gex_range_dict['x_hi_q'].cpu().numpy().astype(np.float32),
+        "range_q": gex_range_dict['range_q'].cpu().numpy().astype(np.float32),
+        "gene_logits_qk": gex_range_dict['gene_logits_qk'].cpu().numpy().astype(np.float32),
+        "gene_logits_mode_q": gex_range_dict['gene_logits_mode_q'].cpu().numpy().astype(np.float32),
+        "gene_marginal_mean_q": gex_range_dict['gene_marginal_mean_q'].cpu().numpy().astype(np.float32),
+        "gene_marginal_std_q": gex_range_dict['gene_marginal_std_q'].cpu().numpy().astype(np.float32),
+        
         # Dose response outputs
         "query_gene_ids": query_gene_ids,
         "perturb_gene_ids": query_gene_ids,
-        "doses_pi": dose_response_dict["doses_pi"],
-        "responses_mean_pqi": dose_response_dict["responses_mean_pqi"],
+        # "doses_pi": dose_response_dict['doses_pi'],
+        # "responses_mean_pqi": dose_response_dict['responses_mean_pqi'],
+        
         # Linear regression outputs
-        "slope_qp": slope_qp,
-        "intercept_qp": intercept_qp,
-        "r_squared_qp": r_squared_qp,
+        "slope_qp": slope_qp.astype(np.float32),
+        # "intercept_qp": intercept_qp,
+        "r_squared_qp": r_squared_qp.astype(np.float32),
     }
 
     print("Saving output ...")
