@@ -808,6 +808,8 @@ class NetworkAnalysisBase:
         # clear previously computed properties
         self.igraph.cache_clear()
         self.compute_leiden_communites.cache_clear()
+        if hasattr(self, "_random_set_effects"):
+            self._random_set_effects.cache_clear()
 
         return a_pp
 
@@ -1865,9 +1867,9 @@ class ValidationMixin(BaseClassProtocol):
         q = a_qq.shape[0]
         zero_diag_a_qq = a_qq * (1.0 - np.eye(q))
         self.zero_diag_a_qq = zero_diag_a_qq  # store for later use
-        # mean_element_value = zero_diag_a_qq.sum() / (q * q - q)
-        mean_nonzero_element_value = zero_diag_a_qq[zero_diag_a_qq > 0].sum() / (zero_diag_a_qq > 0).sum()
-        std_nonzero_element_value = np.std(zero_diag_a_qq[zero_diag_a_qq > 0])
+        mean_element_value = zero_diag_a_qq.sum() / (q * q - q)
+        # take the std of values only from the upper triangle of the matrix not including diagonal
+        std_element_value = np.std(zero_diag_a_qq[np.triu_indices(q, k=1)])
 
         # decide which gene sets to include and convert to indices
         final_ref_gene_sets_as_inds = self._get_reference_gene_sets_as_inds_and_filter(
@@ -1907,7 +1909,9 @@ class ValidationMixin(BaseClassProtocol):
                     )
                 return
             effect = _effect_of_set(gene_set_inds)
-            normalized_effect = (effect - mean_nonzero_element_value) / std_nonzero_element_value
+            normalized_effect = (effect - mean_element_value) / std_element_value
+
+            expression_mean = self.processed.prompt_marginal_mean_p[np.asarray(list(gene_set_inds))].mean()
 
             # p-value via permutation test
             random_control_effects = self._random_set_effects(
@@ -1928,6 +1932,7 @@ class ValidationMixin(BaseClassProtocol):
                     "gene_set": [set_name],
                     "effect": [effect],
                     "normalized_effect": [normalized_effect],
+                    "expr_mean": [expression_mean],
                     "pval": [pval],
                     # "pval_analytic": [pval_analytic],
                     "fraction_of_set_in_graph": [fraction_of_set_in_graph],
