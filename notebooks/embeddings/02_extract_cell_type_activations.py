@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from braceexpand import braceexpand
 from tqdm import tqdm
 import multiprocessing as mp
+from copy import copy
 
 # for flex attention
 import torch._dynamo
@@ -30,6 +31,7 @@ TRAIN_ROOT_PATH = "/work/hdd/bbjr/mallina1/data/human_cellariumgpt_v2/extract_fi
 # CHECKPOINT_PATH = "/work/hdd/bbjr/mallina1/cellarium/models/latest/epoch=5-step=504000.ckpt"
 CHECKPOINT_PATH = "/work/hdd/bbjr/mallina1/cellarium/models/compute_optimal_checkpoints/epoch=6-step=63560.ckpt"
 OUTPUT_PATH = "/work/hdd/bbjr/mallina1/data/human_cellariumgpt_v2/activations"
+# OUTPUT_PATH = "/work/nvme/bbjr/mallina1/activations"
 
 REF_ADATA_PATH = os.path.join(ROOT_PATH, "data", "extract_0.h5ad")
 GENE_INFO_PATH = os.path.join(ROOT_PATH, "gene_info", "gene_info.tsv")
@@ -42,22 +44,30 @@ def process_arg_on_gpu(arg):
         "sex": False,
         "development_stage": False
     }
-    (train_fname, ctx, tr_adata, indices, batch_size, output_fp) = arg
+    (train_fname, ctx, tr_adata, indices, batch_size, output_fp, rng) = arg
 
     for batch_idx in tqdm(range(0, len(indices), batch_size)):
-        if batch_idx > 0:
-            obs_index = [indices[batch_idx]]
-        else:
-            obs_index = [indices[batch_idx]]
-            if len(indices) > batch_idx + 1:
-                obs_index.append(indices[batch_idx+1])
-            if len(indices) > batch_idx + 2:
-                obs_index.append(indices[batch_idx+2])
+        obs_index = [indices[batch_idx]]
+        for batch_sub_idx in range(1, batch_size):
+            if len(indices) > batch_idx + batch_sub_idx:
+                obs_index.append(indices[batch_idx + batch_sub_idx])
+        # if len(indices) > batch_idx + 1:
+        #     obs_index.append(indices[batch_idx+1])
+        # if len(indices) > batch_idx + 2:
+        #     obs_index.append(indices[batch_idx+2])
 
-        tokens_dict, context_indices = ctx.generate_tokens_from_adata(adata = tr_adata, 
+        tr_adata_subsampled = copy(tr_adata)
+        # sample_idx = np.random.choice(np.arange(len(tr_adata.var_names)), size=4096, replace=False)
+        # tr_adata_subsampled = tr_adata_subsampled[:, sample_idx]
+
+        tokens_dict, context_indices = ctx.generate_tokens_from_adata(adata = tr_adata_subsampled, 
                                                                       obs_index=obs_index, 
                                                                       query_var_names=[],
-                                                                      metadata_prompt_masks_dict=metadata_prompt_dict)
+                                                                      metadata_prompt_masks_dict=metadata_prompt_dict,
+                                                                      n_rand_prompt_vars=4096,
+                                                                      rand_prompt_var_names_sublist=tr_adata.var_names,
+                                                                      fixed_prompt_var_names_sublist=[],
+                                                                      rng=rng)
         query_cell_type_idx = context_indices['query_cell_type']
         query_disease_idx = context_indices['query_disease']
         query_tissue_idx = context_indices['query_tissue']
@@ -122,13 +132,15 @@ def process_arg_on_gpu(arg):
                             tissue_activations=curr_tissue_activations,
                             development_stage_activations=curr_development_stage_activations,
                             metadata=curr_metadata)
+        del curr_cell_type_activations, curr_disease_activations, curr_sex_activations, curr_tissue_activations, curr_development_stage_activations
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train_fname', default='extract_0.h5ad', type=str)
+    parser.add_argument('--train_fname', default='extract_0.h5ad', type=str, nargs='+')
+    parser.add_argument('--train_fname_brace', default=None)
     cfg = parser.parse_args()
 
-    mp.set_start_method('spawn')
+    #mp.set_start_method('spawn')
     contexts = []
     for DEVICE in DEVICES:
         ctx = CellariumGPTInferenceContext(
@@ -142,9 +154,13 @@ def main():
 
     # train_fnames = list(braceexpand('extract_{0..1}.h5ad'))
     # train_fnames = ['extract_0.h5ad']
-    train_fnames = [cfg.train_fname]
+    if cfg.train_fname_brace is not None:
+        train_fnames = list(braceexpand(cfg.train_fname_brace))
+    else:
+        train_fnames = cfg.train_fname
+    print(train_fnames)
 
-    batch_size = 3
+    batch_size = 160
     for train_fname in train_fnames:
         print(f'Processing {train_fname}...')
         tr_adata = sc.read_h5ad(os.path.join(TRAIN_ROOT_PATH, train_fname))
@@ -161,16 +177,17 @@ def main():
                 indices += [x for x in range(start_idx, total_n)]
 
             output_fp = os.path.join(OUTPUT_PATH, f'activations_{train_fname[:-5]}_part_{idx}.npz')
-            arg = (train_fname, contexts[idx], tr_adata, indices, batch_size, output_fp)
+            rng = torch.Generator(device='cpu')
+            arg = (train_fname, contexts[idx], tr_adata, indices, batch_size, output_fp, rng)
 
             args.append(arg)
 
         # run without multiprocessing
-        # for arg in args:
-        #   process_arg_on_gpu(arg)
+        for arg in args:
+          process_arg_on_gpu(arg)
 
-        with mp.Pool(len(DEVICES)) as p:
-            p.map(process_arg_on_gpu, args)
+        #with mp.Pool(len(DEVICES)) as p:
+        #    p.map(process_arg_on_gpu, args)
 
 if __name__=='__main__':
     main();

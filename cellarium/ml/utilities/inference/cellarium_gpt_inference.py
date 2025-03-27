@@ -223,6 +223,7 @@ class CellariumGPTInferenceContext:
             rng: torch.Generator | None = None,
             query_total_mrna_umis: float | None = None,
             metadata_prompt_masks_dict: dict[str, bool] | None = None,
+            query_assay_ontology_term_id: float | None = None
         ) -> tuple[dict, dict]:
         """
 
@@ -329,7 +330,8 @@ class CellariumGPTInferenceContext:
                 torch.arange(n_cells, device=cpu_device)[:, None],
                 prompt_vars_np]
             query_gene_value_nq = torch.zeros(
-                n_cells, n_query_vars, dtype=torch.float32, device=cpu_device)            
+                n_cells, n_query_vars, dtype=torch.float32, device=cpu_device)     
+    
             gene_value_nc = torch.cat([prompt_gene_value_np, query_gene_value_nq], dim=1)
 
             # gene prompt mask
@@ -341,23 +343,65 @@ class CellariumGPTInferenceContext:
         prompt_total_mrna_umis_nc = torch.tensor(
             adata.obs["total_mrna_umis"].values,
             dtype=torch.float32, device=cpu_device)[:, None].expand(n_cells, n_prompt_vars)
+        
         if query_total_mrna_umis is None:
             # the same as prompt
             query_total_mrna_umis_nc = torch.tensor(
                 adata.obs["total_mrna_umis"].values,
                 dtype=torch.float32, device=cpu_device)[:, None].expand(n_cells, n_query_vars)
         else:
-            query_total_mrna_umis_nc = torch.tensor(
-                [query_total_mrna_umis] * n_cells,
-                dtype=torch.float32, device=cpu_device)[:, None].expand(n_cells, n_query_vars)
+            if type(query_total_mrna_umis) == int:
+                query_total_mrna_umis_nc = torch.tensor(
+                    [query_total_mrna_umis] * n_cells,
+                    dtype=torch.float32, device=cpu_device)[:, None].expand(n_cells, n_query_vars)
+            else:
+                assert query_total_mrna_umis.shape[0] == n_cells
+                assert query_total_mrna_umis.shape[1] == n_query_vars
+                query_total_mrna_umis_nc = torch.tensor(
+                    query_total_mrna_umis, dtype=torch.float32, device=cpu_device)
+            # elif type(query_total_mrna_umis) == list or type(query_total_mrna_umis) == np.ndarray:
+            #     if n_cells > 1:
+            #         # if passing (n_cells, n_query_vars) custom query UMIS make sure shapes align
+            #         # for batch inference
+            #         assert query_total_mrna_umis.shape[0] == n_cells
+            #         assert query_total_mrna_umis.shape[1] == n_query_vars
+            #         query_total_mrna_umis_nc = torch.tensor(
+            #             query_total_mrna_umis, dtype=torch.float32, device=cpu_device)
+            #     else:
+            #         # if passing a single list then we assume querying just one cell
+            #         # could update this to expand along n_cells and use the same list
+            #         # across all cells in batch mode but for now we will keep it this way
+            #         # to ensure there are no silent errors in inference in case we use
+            #         # this function in a different way
+            #         assert query_total_mrna_umis.shape[0] == n_query_vars
+            #         query_total_mrna_umis_nc = torch.tensor(
+            #             query_total_mrna_umis, dtype=torch.float32, device=cpu_device)[None, :]
+            # else:
+            #     raise
+
         total_mrna_umis_nc = torch.cat([prompt_total_mrna_umis_nc, query_total_mrna_umis_nc], dim=1)
 
         # convert assay and suspension_type to codes
-        assay_nc = torch.tensor(
+        prompt_assay_nc = torch.tensor(
             pd.Categorical(
                 adata.obs["assay_ontology_term_id"].values,
                 categories=self.gene_ontology_infos["assay_ontology_term_id"]["names"]).codes,
-            dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_total_vars)
+            dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_prompt_vars)
+        
+        if query_assay_ontology_term_id is not None:
+            query_assay_nc = torch.tensor(
+                pd.Categorical(
+                    [query_assay_ontology_term_id],
+                    categories=self.gene_ontology_infos["assay_ontology_term_id"]["names"]).codes,
+                dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_query_vars)
+        else:
+            query_assay_nc = torch.tensor(
+                pd.Categorical(
+                    adata.obs["assay_ontology_term_id"].values,
+                    categories=self.gene_ontology_infos["assay_ontology_term_id"]["names"]).codes,
+                dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_query_vars)
+        assay_nc = torch.cat([prompt_assay_nc, query_assay_nc], dim=1)
+
         suspension_type_nc = torch.tensor(
             pd.Categorical(
                 adata.obs["suspension_type"].values,
@@ -385,20 +429,24 @@ class CellariumGPTInferenceContext:
         # import ipdb; ipdb.set_trace()
         # generate metadata tokens dicts; `PredictTokenizer` will convert these to codes
         metadata_token_n_dict = {
-            "cell_type": adata.obs["cell_type_ontology_term_id"].values,  # categorical
-            "tissue": adata.obs["tissue_ontology_term_id"].values,  # categorical
-            "development_stage": adata.obs["development_stage_ontology_term_id"].values,  # categorical
-            "disease": adata.obs["disease_ontology_term_id"].values,  # categorical
-            "sex": adata.obs["sex_ontology_term_id"].values,  # categorical
+            "cell_type": adata.obs["cell_type_ontology_term_id"].to_numpy(),  # categorical
+            "tissue": adata.obs["tissue_ontology_term_id"].to_numpy(),  # categorical
+            "development_stage": adata.obs["development_stage_ontology_term_id"].to_numpy(),  # categorical
+            "disease": adata.obs["disease_ontology_term_id"].to_numpy(),  # categorical
+            "sex": adata.obs["sex_ontology_term_id"].to_numpy(),  # categorical
         }
 
-        # apply the mask on metadata tokens
         for metadata_key, value in metadata_token_n_dict.items():
             mask = expanded_metadata_prompt_masks_dict[metadata_key].numpy()
-            tmp_value = value.to_numpy()
-            tmp_value[~mask] = "<MASK>"
-            # value[~mask] = "<MASK>"
-            metadata_token_n_dict[metadata_key] = tmp_value
+            value[~mask] = "<MASK>"
+
+        # # apply the mask on metadata tokens
+        # for metadata_key, value in metadata_token_n_dict.items():
+        #     mask = expanded_metadata_prompt_masks_dict[metadata_key].numpy()
+        #     tmp_value = value.to_numpy()
+        #     tmp_value[~mask] = "<MASK>"
+        #     # value[~mask] = "<MASK>"
+        #     metadata_token_n_dict[metadata_key] = tmp_value
 
         # where to find each thing in the context?
         context_indices = dict()
