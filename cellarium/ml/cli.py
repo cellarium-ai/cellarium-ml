@@ -293,6 +293,8 @@ def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
             return len(value.cat.categories)
 
 
+
+
 # def extract_nd_covariates(data:CellariumAnnDataDataModule) -> np.ndarray: #TODO: delete
 #     """Convert the categorical covariates to integer encoded array
 #     Example:
@@ -361,11 +363,9 @@ def compute_var_names_g(
     batch = tree_map(lambda field: field(adata), data.batch_keys)
     pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
 
-
     # if batch["batch_index_n"] is None:
     #     warnings.warn("Batch information has not been specified, setting it to np.array([3],dtype=np.int8)")
     #     batch["batch_index_n"] = np.array([3],dtype=np.int8)
-
 
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
@@ -373,7 +373,6 @@ def compute_var_names_g(
             fake_pipeline = copy.deepcopy(pipeline)
         fake_pipeline.to("cpu")
         output = fake_pipeline(fake_batch)
-
 
     return output["var_names_g"]
 

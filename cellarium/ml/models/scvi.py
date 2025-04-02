@@ -404,7 +404,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         decoder: Dict specifying the decoder configuration.
         n_latent: Dimension of the latent space.
         n_batch: Number of total batches in the dataset.
-        batch_bais_sampled: True to sample the batch-specific biases from their distributions.
+        batch_bias_sampled: True to sample the batch-specific biases from their distributions.
         n_continuous_cov: Number of continuous covariates.
         n_cats_per_cov: A list of integers containing the number of categories for each categorical covariate.
         dropout_rate: Dropout rate for hidden units in the encoder only.
@@ -475,6 +475,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         use_size_factor_key: bool = False,
         use_observed_lib_size: bool = True,
+        reconstruct_genes: list | None = None,
+        build_reconstructions: bool = False,
     ):
 
         super().__init__()
@@ -494,6 +496,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.n_latent_batch = n_latent_batch
         assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
         self.batch_kl_weight = batch_kl_weight
+        self.reconstruct_genes = reconstruct_genes
+        self.build_reconstructions = build_reconstructions
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")
@@ -600,6 +604,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             n_cats_per_cov=self.n_cats_per_cov,  # for the (optional) sizing of the final additive bias layer
         )
 
+
         self.reset_parameters()
 
 
@@ -640,8 +645,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 batch_nb = self.batch_representation_mean_bd[batch_index_n.long(), :]
         return batch_nb
     
-    def categorical_onehot_from_categorical_index(self, categorical_covariate_index_nd: torch.Tensor | None) -> torch.Tensor | None:
-        """Compute one-hot encoding of categorical covariates from integer category indices.
 
     def categorical_onehot_from_categorical_index(
         self,
@@ -843,16 +846,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             - ``x_ng``: (x_ng is a notational misnomer) Embedding of the input data into the scVI latent space.
         """
 
-        # uncomment the below to reconstruct
-        # return self.reconstruct(
-        #     x_ng=x_ng,
-        #     var_names_g=var_names_g,
-        #     batch_index_n=batch_index_n,
-        #     continuous_covariates_nc=continuous_covariates_nc,
-        #     categorical_covariate_index_nd=categorical_covariate_index_nd,
-        #     transform_batch="mean",
-        #     sample=False,
-        # )
+        if self.build_reconstructions:
+            return self.reconstruct(
+                x_ng=x_ng,
+                var_names_g=var_names_g,
+                batch_index_n=batch_index_n,
+                continuous_covariates_nc=continuous_covariates_nc,
+                categorical_covariate_index_nd=categorical_covariate_index_nd,
+                transform_batch="mean",
+                sample=False,
+            )
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
@@ -868,19 +871,26 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )["z"]
         return {"x_ng": z_nk}
 
-    def get_glyco_gene_list(self) -> list[str]:
+    def get_reconstruct_gene_list(self,reconstruct_genes: list | None) -> list[str]:
         """Return ordered list of genes from glyco gene file, checking which are present in model."""
-        if getattr(self, "glyco_gene_set", None) is None:
-            df = pd.read_csv("/home/sfleming/cellarium-ml/data/glyco_df_20241216.tsv", sep="\t")
-            self.glyco_gene_list = df["ensembl_gene_id"].values.tolist()
-            i = 0
-            for gid in self.glyco_gene_list:
-                if gid not in self.var_names_g:
-                    print(f"WARNING: {gid} not in var_names_g")
-                    i += 1
-            if i > 0:
-                print(f"WARNING: {i} genes in glyco_gene_list not in var_names_g")
-        return self.glyco_gene_list
+        #TODO: if predict gene list is None, keep all genes (self.var_names_g)
+        if reconstruct_genes is not None:
+            if getattr(self, "glyco_gene_set", None) is None:
+                # df = pd.read_csv("/home/sfleming/cellarium-ml/data/glyco_df_20241216.tsv", sep="\t")
+                # self.glyco_gene_list = df["ensembl_gene_id"].values.tolist()
+
+                self.reconstruct_gene_list = reconstruct_genes
+
+                i = 0
+                for gid in self.reconstruct_gene_list:
+                    if gid not in self.var_names_g:
+                        print(f"WARNING: {gid} not in var_names_g")
+                        i += 1
+                if i > 0:
+                    print(f"WARNING: {i} genes in reconstruct_gene_list not in var_names_g")
+        else:
+            self.reconstruct_gene_list = self.var_names_g
+        return self.reconstruct_gene_list
 
     @torch.no_grad()
     def reconstruct(
@@ -948,7 +958,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
 
         output_counts_sum_np: int | torch.Tensor = 0
-        gid_list = self.get_glyco_gene_list()
+        gid_list = self.get_reconstruct_gene_list(self.reconstruct_genes)
         # get the genes in the order of the glyco gene list
         gene_inds = [np.where(var_names_g == gid)[0][0] for gid in gid_list]
 

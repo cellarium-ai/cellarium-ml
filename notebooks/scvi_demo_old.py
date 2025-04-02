@@ -65,7 +65,7 @@ foldername_dict = {
                     }
 
 #TODO: Warning: perhaps n_cats_per_cov is a problem or the categorical_covariate_index
-foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[14]
+foldername,checkpoint_file,config_file, adata_file,color_keys,gene_names = foldername_dict[13]
 use_test = False
 if use_test:
     foldername_test,checkpoint_file_test,config_file_test, adata_file_test,color_keys_test,gene_names_test = foldername_dict[2]
@@ -76,12 +76,9 @@ if use_test:
 
 #NF.subset_adata(adata,350000,"../data/single_cell_lung_atlas_subset.h5ad")
 
+
 #NF.scanpy_scvi(adata_file) #too slow to handle
 #subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","fit","-c",config_file],env=env) #/opt/conda/bin/python
-subprocess.call([f"{sys.executable}","../cellarium/ml/cli.py","scvi","predict","-c",config_file],env=env) #/opt/conda/bin/python
-
-
-exit()
 
 NF.folders(foldername,"figures",overwrite=False)
 NF.folders(foldername,"tmp_data",overwrite=False)
@@ -94,6 +91,8 @@ figpath = f"figures/{foldername}"
 datapath = f"tmp_data/{foldername}"
 overwrite = False
 use_cuda = False
+
+
 
 
 filename = f"adata_processed{filename_suffix}"

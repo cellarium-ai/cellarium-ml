@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 import torch
 from torch import nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention import SDPBackend, sdpa_kernel #TODO: Reactivate
 
 from cellarium.ml.utilities.layers import create_initializer
 
