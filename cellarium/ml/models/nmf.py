@@ -223,6 +223,8 @@ def compute_loadings(
 
     for i in range(n_iterations):
         optimizer.zero_grad()
+
+        # TODO: use the nmf_frobenius_loss function
         loss = (
             F.mse_loss(
                 torch.bmm(alpha_unconstrained_rnk.exp(), factors_rkg),
@@ -339,6 +341,50 @@ class NMFInitUniformRandom(NMFInit):
         x.uniform_(0.0, 2.0)
 
 
+class LoadingsEncoder(torch.nn.Module):
+    """
+    Encode count data x_ng to loadings alpha_rnk, where r is the number of replicates of NMF and
+    k is the number of gene expression programs. Makes r into a batch dimension, reshaping the input
+    to shape (r, n, g).
+    The output alpha_rnk is of shape (r, n, k).
+    The encoder is a simple feedforward neural network with two linear layers and a ReLU activation function.
+    The one-hot-encoded r is concatenated to the input x_ng in the g dimension, making the input
+    shape (r, n, r + g), with the (r, n) dimensions as batch dimensions. This is critical to allow
+    the replicates to be trained independently.
+    The output entries are all >= 0 but the output is not normalized in the k dimension.
+    """
+
+    def __init__(self, g: int, r: int, k: int, hidden_size: int = 32):
+        super().__init__()
+        self.g = g
+        self.r = r
+        self.k = k
+        self.linear1 = torch.nn.Linear(r + g, hidden_size)
+        self.linear2 = torch.nn.Linear(hidden_size, k)
+        self.relu = torch.nn.ReLU()
+        self.one_hot_r1r = torch.eye(r).unsqueeze(1)
+
+    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x_ng: The count data.
+
+        Returns:
+            The loadings alpha_rnk, where r is the replicate batch dimension,
+            n is cells, and k is the factors.
+        """
+        n, g = x_ng.shape
+        r = self.r
+        x_rng = x_ng.view(1, n, g).expand(r, n, g)
+        one_hot_rnr = self.one_hot_r1r.expand(r, n, r)
+        x_rnm = torch.cat((one_hot_rnr, x_rng), dim=-1)
+        h_rnh = self.linear1(x_rnm)
+        h_rnh = self.relu(h_rnh)
+        alpha_rnk = self.linear2(h_rnh)
+        alpha_rnk = self.relu(alpha_rnk)
+        return alpha_rnk
+
+
 class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
     """
     Use the online NMF algorithm of Mairal et al. [1] to factorize the count matrix
@@ -362,7 +408,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         r: int,
         full_g: int,
         log_variational: bool,
-        algorithm: Literal["mairal"] = "mairal",
+        algorithm: Literal["mairal", "amortized_mairal"] = "mairal",
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
     ) -> None:
@@ -400,6 +446,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
         self.n_nmf = r
 
+        if self.algorithm == "amortized_mairal":
+            self.loadings_encoders = torch.nn.ModuleDict({str(k): LoadingsEncoder(g=g, r=r, k=k) for k in k_values})
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -422,6 +471,10 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             getattr(self, f"full_B_{i}_kg").zero_()
             init_fn(getattr(self, f"full_D_{i}_kg"), k=i, transformed_data_mean=self.transformed_data_mean)
 
+        if self.loadings_encoder is not None:
+            # TODO
+            pass
+
     def _compute_loadings(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor, n_iterations: int) -> torch.Tensor:
         """
         Run compute_loadings.
@@ -434,14 +487,24 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         Returns:
             The computed loadings.
         """
-        alpha_rnk = compute_loadings(
-            x_ng=x_ng,
-            factors_rkg=factors_rkg,
-            n_iterations=n_iterations,
-            learning_rate=0.05,
-            normalize=False,
-            alpha_tol=self._alpha_tol,
-        )
+        normalize = False
+
+        if self.algorithm == "mairal":
+            alpha_rnk = compute_loadings(
+                x_ng=x_ng,
+                factors_rkg=factors_rkg,
+                n_iterations=n_iterations,
+                learning_rate=0.05,
+                normalize=normalize,
+                alpha_tol=self._alpha_tol,
+            )
+        elif self.algorithm == "amortized_mairal":
+            _, k, _ = factors_rkg.shape
+            alpha_rnk = self.loadings_encoders[str(k)](x_ng)
+            if normalize:
+                alpha_rnk = F.normalize(alpha_rnk, dim=-1, p=1)
+        else:
+            raise ValueError(f"Unknown algorithm: {self.algorithm}")
         return alpha_rnk
 
     def _compute_factors(
@@ -472,7 +535,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         )
         return factors_rkg
 
-    def online_dictionary_learning(self, x_ng: torch.Tensor, factors_rkg: torch.Tensor) -> torch.Tensor:
+    def online_dictionary_learning(
+        self, x_ng: torch.Tensor, factors_rkg: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
@@ -511,7 +576,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 n_iterations=200,
             )
 
-        return updated_factors_rkg
+        return updated_factors_rkg, alpha_rnk
 
     def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
         """
@@ -534,16 +599,30 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             x_ = x_ng / std_g
             x_ = torch.clamp(x_, min=0.0, max=100.0)
 
-        if self.algorithm == "mairal":
+        if self.algorithm in "mairal":
             for i in self.k_values:
                 D_rkg = getattr(self, f"D_{i}_rkg")
-                D_rkg = self.online_dictionary_learning(x_ng=x_, factors_rkg=D_rkg)
+                D_rkg, _ = self.online_dictionary_learning(x_ng=x_, factors_rkg=D_rkg)
                 setattr(self, f"D_{i}_rkg", D_rkg)
+            output = {}
+
+        elif self.algorithm == "amortized_mairal":
+            # TODO
+            for i in self.k_values:
+                D_rkg = getattr(self, f"D_{i}_rkg")
+                D_rkg, alpha_rnk = self.online_dictionary_learning(x_ng=x_, factors_rkg=D_rkg)
+                setattr(self, f"D_{i}_rkg", D_rkg)
+            nmf_loss = nmf_frobenius_loss(
+                x=x_,
+                loadings_nk=alpha_rnk,
+                factors_kg=D_rkg,
+            )
+            output = {"loss": nmf_loss}
 
         else:
             raise ValueError(f"Unknown algorithm: {self.algorithm}")
 
-        return {}
+        return output
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
