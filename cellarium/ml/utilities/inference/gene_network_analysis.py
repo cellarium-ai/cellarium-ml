@@ -1676,13 +1676,14 @@ class ValidationMixin(BaseClassProtocol):
         if set_diagonal_to_one:
             np.fill_diagonal(a_qq, 1.0)
 
+        smallest_nonzero_val = np.nanmin(self.adjacency_matrix[self.adjacency_matrix > 0])
         if z_score:
-            smallest_nonzero_val = np.nanmin(self.adjacency_matrix[self.adjacency_matrix > 0])
             mean = np.nanmean(np.log(self.adjacency_matrix + smallest_nonzero_val))
             std = np.nanstd(np.log(self.adjacency_matrix + smallest_nonzero_val))
             a_qq = (np.log(a_qq + smallest_nonzero_val) - mean) / std
             cmap = "coolwarm"
         else:
+            a_qq = np.log(a_qq + smallest_nonzero_val)
             cmap = "Oranges"
 
         # seaborn clustermap that labels the genes
