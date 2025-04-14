@@ -77,11 +77,11 @@ def calculate_tps_and_fps_csv(query_cell_obj: np.array, ground_truth_cl_name: st
 
             if match_cl_name in hop_match_intersect:
                 true_positives[i] = max(match_score, true_positives[i])
-            elif match_cl_name not in hop_all_descendants.union(hop_all_ancestors):
+            elif (match_cl_name not in hop_all_descendants.union(hop_all_ancestors)) and (not match_co_data["all_descendants"].intersection(hop_all_descendants)):
                 false_positives[i] = max(match_score, false_positives[i])
             elif match_cl_name in hop_all_descendants:
                 max_descendants[i] = max(match_score,max_descendants[i]) #TRIAL
-                min_descendants[i] = max(match_score,min_descendants[i]) #TRIAL
+                min_descendants[i] = min(match_score,min_descendants[i]) #TRIAL
 
     return true_positives, false_positives, max_descendants, min_descendants
 
