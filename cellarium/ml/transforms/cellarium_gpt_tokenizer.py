@@ -83,6 +83,7 @@ class CellariumGPTTrainTokenizer(torch.nn.Module):
         gene_token_ng_dict["gene_id"] = torch.arange(g, device=device).expand(n, g)
 
         if self.obs_names_rng:
+            assert obs_names_n is not None
             rng_n = [torch.Generator(device=device) for _ in range(n)]
             [rng.manual_seed(int(obs_name)) for rng, obs_name in zip(rng_n, obs_names_n)]
             shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
@@ -444,6 +445,7 @@ class CellariumGPTTestTokenizer(torch.nn.Module):
         gene_token_ng_dict["gene_id"] = torch.arange(g, device=device).expand(n, g)
 
         if self.obs_names_rng:
+            assert obs_names_n is not None
             rng_n = [torch.Generator(device=device) for _ in range(n)]
             [rng.manual_seed(int(obs_name)) for rng, obs_name in zip(rng_n, obs_names_n)]
             shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])

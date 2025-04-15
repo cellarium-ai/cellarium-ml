@@ -113,7 +113,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         drop_incomplete_batch: bool = False,
         train_size: float | int | None = None,
         val_size: float | int | None = None,
-        pred_size: float | int | None = None,
         worker_seed: int | None = None,
         test_mode: bool = False,
         # DataLoader args
@@ -135,10 +134,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.shuffle_seed = shuffle_seed
         self.drop_last_indices = drop_last_indices
         self.n_train, self.n_val = train_val_split(len(dadc), train_size, val_size)
-        if pred_size is not None:
-            _, self.n_pred = train_val_split(len(dadc), None, pred_size)
-        else:
-            self.n_pred = len(dadc)
         self.worker_seed = worker_seed
         self.test_mode = test_mode
         # DataLoader args
@@ -201,8 +196,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
-                start_idx=len(self.dadc) - self.n_pred,
-                end_idx=len(self.dadc),
             )
 
         if stage == "test":
@@ -307,8 +300,11 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                     "Cannot resume training with a different batch size. "
                     f"Expected {self.batch_size}, got {state_dict['batch_size']}."
                 )
-            # if state_dict["accumulate_grad_batches"] != 1:
-            #     raise ValueError("Training with gradient accumulation is not supported when resuming training.")
+            if state_dict["accumulate_grad_batches"] != self.trainer.accumulate_grad_batches:
+                raise ValueError(
+                    "Cannot resume training with a different accumulate grad batches. "
+                    f"Expected {self.trainer.accumulate_grad_batches}, got {state_dict['accumulate_grad_batches']}."
+                )
             if state_dict["shuffle"] != self.shuffle:
                 raise ValueError(
                     "Cannot resume training with a different shuffle value. "
