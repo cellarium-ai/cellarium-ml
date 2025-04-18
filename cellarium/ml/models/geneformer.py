@@ -3,7 +3,7 @@
 
 import numpy as np
 import torch
-from transformers import BertConfig, BertForMaskedLM
+from transformers.models.bert import BertConfig, BertForMaskedLM
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.utilities.testing import (
