@@ -283,14 +283,14 @@ class CellariumCLI(LightningCLI):
         trainer_defaults: dict[str, Any] | None = None,
         args: ArgsType = None,
     ) -> None:
+        self.model_class_path = model_class_path
+        self.link_arguments = link_arguments
         super().__init__(
             CellariumModule,
             CellariumAnnDataDataModule,
             trainer_defaults=trainer_defaults,
             args=args,
         )
-        self.model_class_path = model_class_path
-        self.link_arguments = link_arguments
 
     def _add_instantiators(self) -> None:
         # disable breaking dependency injection support change introduced in PyTorch Lightning 2.3
