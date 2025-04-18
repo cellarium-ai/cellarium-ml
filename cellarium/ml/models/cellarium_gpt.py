@@ -22,9 +22,6 @@ except ImportError:
         return False
 
 
-torch.set_float32_matmul_precision("highest")
-
-
 def prompt_diagonal_mask(prompt_mask_nc: torch.Tensor) -> torch.Tensor:
     """
     Generate a prompt diagonal mask for self-attention.
