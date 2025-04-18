@@ -307,16 +307,11 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                     "Cannot resume training with a different batch size. "
                     f"Expected {self.batch_size}, got {state_dict['batch_size']}."
                 )
-<<<<<<< HEAD
-            # if state_dict["accumulate_grad_batches"] != 1:
-            #     raise ValueError("Training with gradient accumulation is not supported when resuming training.")
-=======
             if state_dict["accumulate_grad_batches"] != self.trainer.accumulate_grad_batches:
                 raise ValueError(
                     "Cannot resume training with a different accumulate grad batches. "
                     f"Expected {self.trainer.accumulate_grad_batches}, got {state_dict['accumulate_grad_batches']}."
                 )
->>>>>>> main
             if state_dict["shuffle"] != self.shuffle:
                 raise ValueError(
                     "Cannot resume training with a different shuffle value. "
