@@ -329,6 +329,7 @@ def lightning_cli_factory(
 def cellarium_gpt(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.CellariumGPT` model.
+
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
