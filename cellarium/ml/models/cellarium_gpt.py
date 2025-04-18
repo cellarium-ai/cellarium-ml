@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from cellarium.ml.layers import MultiHeadReadout, TokenEmbedding, Transformer
+from cellarium.ml.layers import MultiHeadReadout, TokenEmbedding, Transformer, TransformerBlock
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.layers import scale_initializers_by_dimension
 from cellarium.ml.utilities.mup import LRAdjustmentGroup
@@ -245,19 +245,22 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     @property
     def d_model(self) -> int:
         block = self.transformer.blocks[0]
-        # assert isinstance(block, TransformerBlock)
+        if TYPE_CHECKING:
+            assert isinstance(block, TransformerBlock)
         return block.d_model
 
     @property
     def d_ffn(self) -> int:
         block = self.transformer.blocks[0]
-        # assert isinstance(block, TransformerBlock)
+        if TYPE_CHECKING:
+            assert isinstance(block, TransformerBlock)
         return block.d_ffn
 
     @property
     def n_heads(self) -> int:
         block = self.transformer.blocks[0]
-        # assert isinstance(block, TransformerBlock)
+        if TYPE_CHECKING:
+            assert isinstance(block, TransformerBlock)
         return block.attention.n_heads
 
     @property
@@ -267,13 +270,15 @@ class CellariumGPT(CellariumModel, PredictMixin, ValidateMixin):
     @property
     def attention_backend(self) -> Literal["flex", "math", "mem_efficient", "torch"]:
         block = self.transformer.blocks[0]
-        # assert isinstance(block, TransformerBlock)
+        if TYPE_CHECKING:
+            assert isinstance(block, TransformerBlock)
         return block.attention.attention_backend
 
     @attention_backend.setter
     def attention_backend(self, value: Literal["flex", "math", "mem_efficient", "torch"]) -> None:
         for block in self.transformer.blocks:
-            # assert isinstance(block, TransformerBlock)
+            if TYPE_CHECKING:
+                assert isinstance(block, TransformerBlock)
             block.attention.attention_backend = value
 
     def predict(
