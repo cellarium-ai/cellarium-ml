@@ -22,7 +22,7 @@ from google_cloud_pipeline_components.v1.custom_job import (
 #     ],
 #     base_image="us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:gpgnasp",
 # )
-def run_analysis(cell_int: int):
+def run_analysis(cell_int: int, models: list[str]):
 
     import os
     import psutil
@@ -53,7 +53,8 @@ def run_analysis(cell_int: int):
 
     # choose cell types and models
     # models = ["10M_001_bs1536", "19M_001_bs2048", "30M_001_bs2560", "59M_001_bs3072"]  #, 
-    models = ["98M_001_bs4608"]
+    # models = ["98M_001_bs4608"]
+    # models = ["146M_001_bs5632"]
 
     # gene sets
     # msigdb_path = "gs://cellarium-scratch/sfleming/references/msigdb.v2024.1.Hs.json"
@@ -283,15 +284,31 @@ def run_analysis(cell_int: int):
 #         job.submit()
 
 
-def run_as_script(cell_int: int):
+def run_as_script(cell_int: int, models: list[str]):
     print(cell_int)
-    run_analysis(cell_int=cell_int)
+    print(models)
+    run_analysis(cell_int=cell_int, models=models)
     print('Done.')
 
 
 if __name__ == "__main__":
     # main()
-    if len(sys.argv) != 2:
-        raise UserWarning("Usage: python linear_response_network_adjacency_computation.py <cell_int>")
+    if len(sys.argv) != 3:
+        raise UserWarning("Usage: python linear_response_network_adjacency_concordance.py <cell_int> <model>")
     cell_int = int(sys.argv[1])
-    run_as_script(cell_int=cell_int)
+    match int(sys.argv[2]):
+        case 0:
+            model = "10M_001_bs1536"
+        case 1:
+            model = "19M_001_bs2048"
+        case 2:
+            model = "30M_001_bs2560"
+        case 3:
+            model = "59M_001_bs3072"
+        case 4:
+            model = "98M_001_bs4608"
+        case 5:
+            model = "146M_001_bs5632"
+        case _:
+            raise ValueError("Invalid model index. Must be 0-5.")
+    run_as_script(cell_int=cell_int, models=[model])
