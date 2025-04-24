@@ -4,6 +4,7 @@
 import numpy as np
 import pandas as pd
 import torch
+from cellarium.ml.data import read_h5ad_file
 
 
 class CellariumGPTTrainTokenizer(torch.nn.Module):
@@ -293,7 +294,8 @@ class CellariumGPTPredictTokenizer(torch.nn.Module):
         max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
         downsampled_total_mrna_umis_nj = torch.minimum(total_mrna_umis_nj, max_total_mrna_umis).float()
         gene_downsample_p_nj = downsampled_total_mrna_umis_nj / total_mrna_umis_nj
-        gene_value_nj = torch.binomial(gene_value_nj, gene_downsample_p_nj)
+        # gene_value_nj = torch.binomial(gene_value_nj, gene_downsample_p_nj)
+        gene_value_nj = torch.round(gene_value_nj * gene_downsample_p_nj)
 
         gene_query_mask_nj = ~gene_prompt_mask_nj
         gene_token_nj_dict["gene_value"] = torch.log1p(gene_value_nj) * gene_prompt_mask_nj.float()
@@ -409,6 +411,7 @@ class CellariumGPTTestTokenizer(torch.nn.Module):
         prefix_len: int | None = None,
         metadata_prompt_token_list: list[str] | None = None,
         obs_names_rng: bool = False,
+        shuffle_genes: bool = True,
     ) -> None:
         super().__init__()
         self.context_len = context_len
@@ -422,6 +425,9 @@ class CellariumGPTTestTokenizer(torch.nn.Module):
         self.prefix_len = prefix_len
         self.metadata_prompt_token_list = metadata_prompt_token_list
         self.obs_names_rng = obs_names_rng
+        self.shuffle_genes = shuffle_genes
+        ref_adata = read_h5ad_file("/mnt/cellariumgpt-training-data/human_cellariumgpt_v2/extract_files/extract_0.h5ad")
+        self.gene_ids = ref_adata.var.index.values
 
     def forward(
         self,
@@ -429,6 +435,7 @@ class CellariumGPTTestTokenizer(torch.nn.Module):
         gene_token_n_dict: dict[str, torch.Tensor],
         gene_token_ng_dict: dict[str, torch.Tensor],
         obs_names_n: np.ndarray | None = None,
+        gene_id_g: np.ndarray | None = None,
     ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
         ### GENE TOKENS ###
         n, g = gene_token_ng_dict["gene_value"].shape
@@ -442,18 +449,24 @@ class CellariumGPTTestTokenizer(torch.nn.Module):
         gene_token_nj_dict = {key: gene_token_n_dict[key][:, None].expand(-1, j).int() for key in gene_token_n_dict}
 
         ## gene id ##
-        gene_token_ng_dict["gene_id"] = torch.arange(g, device=device).expand(n, g)
-
-        if self.obs_names_rng:
-            rng_n = [torch.Generator(device=device) for _ in range(n)]
-            [rng.manual_seed(int(obs_name)) for rng, obs_name in zip(rng_n, obs_names_n)]
-            shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
+        if gene_id_g is not None:
+            gene_token_ng_dict["gene_id"] = torch.tensor(pd.Categorical(gene_id_g, categories=self.gene_ids).codes, dtype=torch.long).expand(n, g)
         else:
-            shuffle_idx_ng = torch.argsort(torch.rand((n, g), dtype=torch.float32, device=device), dim=-1)
-        shuffle_idx_nj = shuffle_idx_ng[:, :j]
+            gene_token_ng_dict["gene_id"] = torch.arange(g, device=device).expand(n, g)
+
+        if self.shuffle_genes:
+            if self.obs_names_rng:
+                rng_n = [torch.Generator(device=device) for _ in range(n)]
+                [rng.manual_seed(int(obs_name)) for rng, obs_name in zip(rng_n, obs_names_n)]
+                shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
+            else:
+                shuffle_idx_ng = torch.argsort(torch.rand((n, g), dtype=torch.float32, device=device), dim=-1)
+            gather_idx_nj = shuffle_idx_ng[:, :j]
+        else:
+            gather_idx_nj = torch.arange(j, device=device).expand(n, j)
 
         for key, gene_token_ng in gene_token_ng_dict.items():
-            gene_token_nj_dict[key] = torch.gather(gene_token_ng, dim=-1, index=shuffle_idx_nj)
+            gene_token_nj_dict[key] = torch.gather(gene_token_ng, dim=-1, index=gather_idx_nj)
 
         if self.prefix_len is not None:
             prefix_len_n = torch.full((n,), self.prefix_len, dtype=torch.float32)
@@ -620,6 +633,170 @@ class CellariumGPTTestTokenizer(torch.nn.Module):
             "prompt_mask_nc": prompt_mask_nc,
             "label_nc_dict": label_nc_dict,
             "label_weight_nc_dict": label_weight_nc_dict,
+            "total_mrna_umis_downsampled_n": total_mrna_umis_nj[:, 0],
+            "gene_prompt_size_n": gene_prompt_mask_nj.sum(-1),
+            "gene_query_size_n": gene_query_mask_nj.sum(-1),
+        }
+
+
+class CellariumGPTGenerateTokenizer(torch.nn.Module):
+    """
+    Tokenizer for the Cellarium GPT model.
+
+    Args:
+        context_len:
+            Context length.
+        gene_downsample_p:
+            Gene downsample probability.
+        min_total_mrna_umis:
+            Minimum total mRNA UMIs.
+        max_total_mrna_umis:
+            Maximum total mRNA UMIs.
+        gene_vocab_sizes:
+            Gene token vocabulary sizes.
+        metadata_vocab_sizes:
+            Metadata token vocabulary sizes.
+        ontology_infos_path:
+            Path to ontology information.
+        prefix_len:
+            Prefix length. If ``None``, the prefix length is sampled.
+        metadata_prompt_token_list:
+            List of metadata tokens to prompt. If ``None``, the metadata prompt tokens are sampled.
+        obs_names_rng:
+            Cell IDs are used as random seeds for shuffling gene tokens.
+            If ``None``, gene tokens are shuffled without a random seed.
+    """
+
+    def __init__(
+        self,
+        # context_len: int,
+        gene_downsample_p: float,
+        min_total_mrna_umis: int,
+        max_total_mrna_umis: int,
+        gene_vocab_sizes: dict[str, int],
+        # metadata_vocab_sizes: dict[str, int],
+        # ontology_downsample_p: float,
+        # ontology_infos_path: str,
+        # prefix_len: int | None = None,
+        # metadata_prompt_token_list: list[str] | None = None,
+        # obs_names_rng: bool = False,
+        # shuffle_genes: bool = True,
+    ) -> None:
+        super().__init__()
+        # self.context_len = context_len
+        self.gene_downsample_p = gene_downsample_p
+        self.min_total_mrna_umis = min_total_mrna_umis
+        self.max_total_mrna_umis = max_total_mrna_umis
+        self.gene_vocab_sizes = gene_vocab_sizes
+        # self.metadata_vocab_sizes = metadata_vocab_sizes
+        # self.ontology_infos = torch.load(ontology_infos_path, weights_only=True)
+        # self.ontology_downsample_p = ontology_downsample_p
+        # self.prefix_len = prefix_len
+        # self.metadata_prompt_token_list = metadata_prompt_token_list
+        # self.obs_names_rng = obs_names_rng
+        # self.shuffle_genes = shuffle_genes
+        ref_adata = read_h5ad_file("/mnt/cellariumgpt-training-data/human_cellariumgpt_v2/extract_files/extract_0.h5ad")
+        self.gene_ids = ref_adata.var.index.values
+
+    def forward(
+        self,
+        # metadata_token_n_dict: dict[str, torch.Tensor],
+        gene_token_n_dict: dict[str, torch.Tensor],
+        gene_token_ng_dict: dict[str, torch.Tensor],
+        obs_names_n: np.ndarray | None = None,
+        gene_id_g: np.ndarray | None = None,
+    ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
+        ### GENE TOKENS ###
+        n, g = gene_token_ng_dict["gene_value"].shape
+        # m = len(metadata_token_n_dict)
+        # c = self.context_len
+        # gene context length
+        j = g * 2
+        device = gene_token_ng_dict["gene_value"].device
+
+        ## gene measurement tokens (assay, suspension type, etc.) ##
+        gene_token_nj_dict = {key: gene_token_n_dict[key][:, None].expand(-1, j).int() for key in gene_token_n_dict}
+        gene_token_nj_dict["assay"] = torch.cat(
+            [gene_token_nj_dict["assay"][:, :g], torch.ones((n, g), device=device, dtype=torch.int)], dim=1
+        )
+
+        ## gene id ##
+        gene_token_ng_dict["gene_id"] = torch.tensor(pd.Categorical(gene_id_g, categories=self.gene_ids).codes, dtype=torch.long).expand(n, g)
+
+        for key, gene_token_ng in gene_token_ng_dict.items():
+            gene_token_nj_dict[key] = torch.cat([gene_token_ng, gene_token_ng], dim=-1)
+
+        prefix_len_n = torch.full((n,), g, dtype=torch.float32)
+        # create prompt and query masks
+        query_len_n = j - prefix_len_n
+        gene_query_mask_nj = torch.arange(j, device=device) < query_len_n[:, None].expand(n, -1)
+        # gene_query_mask_nj = torch.arange(j, device=device) >= prefix_len_n[:, None].expand(n, -1)
+        gene_prompt_mask_nj = ~gene_query_mask_nj
+
+        ## gene value ##
+        gene_value_nj = gene_token_nj_dict.pop("gene_value")
+        total_mrna_umis_nj = gene_token_nj_dict.pop("total_mrna_umis")
+        # downsample gene values
+        max_total_mrna_umis = torch.tensor(self.max_total_mrna_umis, device=device)
+        downsampled_total_mrna_umis_nj = torch.minimum(total_mrna_umis_nj, max_total_mrna_umis).float()
+        # only downsample prompt genes
+        downsampled_total_mrna_umis_nj = torch.where(
+            gene_prompt_mask_nj,
+            downsampled_total_mrna_umis_nj * self.gene_downsample_p,
+            downsampled_total_mrna_umis_nj,
+        )
+        gene_downsample_p_nj = downsampled_total_mrna_umis_nj / total_mrna_umis_nj
+        gene_value_nj = torch.binomial(gene_value_nj, gene_downsample_p_nj)
+        total_mrna_umis_nj = torch.round(downsampled_total_mrna_umis_nj)
+
+        gene_token_nj_dict["gene_value"] = torch.log1p(gene_value_nj) * gene_prompt_mask_nj.float()
+        gene_token_nj_dict["gene_query_mask"] = gene_query_mask_nj.float()
+        gene_token_nj_dict["total_mrna_umis"] = torch.log1p(total_mrna_umis_nj)
+
+        gene_token_value_nc_dict = gene_token_nj_dict
+        gene_token_mask_nc = torch.ones((n, j), dtype=torch.bool, device=device)
+        gene_token_mask_nc_dict = {key: gene_token_mask_nc for key in gene_token_nj_dict}
+
+        # gene label
+        gene_value_vocab_size = self.gene_vocab_sizes["gene_value"]
+        # gene_label_nj = gene_value_nj.clamp(0, gene_value_vocab_size - 1).int()
+
+        ### METADATA TOKENS ###
+
+        ## metadata tokens ##
+        # assign token codes based on the ontology info
+        # token values not in the ontology are treated as unmeasured and assigned a code value of -1
+        # create metadata query and prompt masks
+
+        ### PROMPT MASK ###
+        prompt_mask_nc = gene_prompt_mask_nj
+
+        # ### LABELS ###
+        # block_label_nc = torch.block_diag(
+        #     gene_label_nj,
+        #     *[metadata_label_n.unsqueeze(-1) for metadata_label_n in metadata_label_n_dict.values()],
+        # )
+        # label_nc_dict = {
+        #     key: block_label_nc[n * i : n * (i + 1)]
+        #     for i, key in enumerate(["gene_value"] + list(metadata_token_n_dict))
+        # }
+
+        # ### LABEL WEIGHTS ###
+        # block_label_weight_nc = torch.block_diag(
+        #     gene_query_mask_nj,
+        #     *[metadata_query_mask_nm[:, i].unsqueeze(-1).float() for i in range(m)],
+        # )
+        # label_weight_nc_dict = {
+        #     key: block_label_weight_nc[n * i : n * (i + 1)]
+        #     for i, key in enumerate(["gene_value"] + list(metadata_token_n_dict))
+        # }
+
+        return {
+            "token_value_nc_dict": gene_token_value_nc_dict,
+            "token_mask_nc_dict": gene_token_mask_nc_dict,
+            "prompt_mask_nc": prompt_mask_nc,
+            "label_nc_dict": None,
+            "label_weight_nc_dict": None,
             "total_mrna_umis_downsampled_n": total_mrna_umis_nj[:, 0],
             "gene_prompt_size_n": gene_prompt_mask_nj.sum(-1),
             "gene_query_size_n": gene_query_mask_nj.sum(-1),
