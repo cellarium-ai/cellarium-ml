@@ -57,15 +57,11 @@ def calculate_tps_and_fps_csv(query_cell_obj: np.array, ground_truth_cl_name: st
     hops = [co_resource[ground_truth_cl_name][f"hop_{i}"] for i in range(num_hops + 1)]
     true_positives = [0.0] * len(hops)
     false_positives = [0.0] * len(hops)
-    max_descendants = [0.0] * len(hops) #TRIAL
-    min_descendants = [0.0] * len(hops) #TRIAL
+    max_descendants = [0.0] * len(hops) 
+    min_descendants = [0.0] * len(hops) 
 
-    #for match in query_cell_obj.matches: # query_cell_obj["matches"]
     for i in range(len(query_cell_obj)):
-        #match_cl_name = match.cell_type_ontology_term_id.replace("CL:","CL_")
-        #match_cl_name = cell_type_ontology_term_id_array[i].replace("CL:","CL_")
         match_cl_name = cell_type_ontology_term_id_array[i]
-        #match_score = match.score
         match_score = query_cell_obj[i]
         match_co_data = co_resource[match_cl_name]
         match_ancestors = match_co_data["all_ancestors"]
@@ -80,8 +76,8 @@ def calculate_tps_and_fps_csv(query_cell_obj: np.array, ground_truth_cl_name: st
             elif (match_cl_name not in hop_all_descendants.union(hop_all_ancestors)) and (not match_co_data["all_descendants"].intersection(hop_all_descendants)):
                 false_positives[i] = max(match_score, false_positives[i])
             elif match_cl_name in hop_all_descendants:
-                max_descendants[i] = max(match_score,max_descendants[i]) #TRIAL
-                min_descendants[i] = min(match_score,min_descendants[i]) #TRIAL
+                max_descendants[i] = max(match_score,max_descendants[i]) 
+                min_descendants[i] = min(match_score,min_descendants[i])
 
     return true_positives, false_positives, max_descendants, min_descendants
 
@@ -129,20 +125,12 @@ def calculate_metrics_for_query_cell_csv(
         calculate_f1(precision=precision, recall=sensitivity)
         for precision, sensitivity in zip(precisions, sensitivities)
     ]
-
-    #query_cell_metrics = {"query_cell_id": query_cell_obj.query_cell_id, "detail": ""}
     query_cell_metrics = {"query_cell_id": db_id}
-
-    # for i, (sensitivity, specificity, f1_score) in enumerate(zip(sensitivities, specificities, f1_scores)):
-    #     query_cell_metrics[f"hop_{i}_sensitivity"] = sensitivity
-    #     query_cell_metrics[f"hop_{i}_specificity"] = specificity
-    #     query_cell_metrics[f"hop_{i}_f1_score"] = f1_score
 
     for i, (sensitivity, specificity, f1_score, fp, max_descendant, min_descendant) in enumerate(zip(sensitivities, specificities, f1_scores, false_positives, max_descendants, min_descendants)):
         query_cell_metrics[f"hop_{i}_sensitivity"] = sensitivity
         query_cell_metrics[f"hop_{i}_specificity"] = specificity
         query_cell_metrics[f"hop_{i}_f1_score"] = f1_score
-        #query_cell_metrics[f"hop_{i}_tp"] = tp_i #Sensitivity is true positive so no need to save it twice
         query_cell_metrics[f"hop_{i}_fp"] = fp
         query_cell_metrics[f"hop_{i}_max_descendant_score"] = max_descendant
         query_cell_metrics[f"hop_{i}_min_descendant_score"] = min_descendant
@@ -152,7 +140,6 @@ def calculate_metrics_for_csv_cas_output(
     db_id_array: np.array,
     ground_truth_cl_names: t.Iterable[str],
     cell_type_ontology_term_id_array: np.array,
-    #cas_result: t.List[t.Dict[str, t.Any]],
     single_batch_df_copy: pd.DataFrame,
     co_resource: t.Dict[str, t.Any],
     num_hops: int,
@@ -173,17 +160,6 @@ def calculate_metrics_for_csv_cas_output(
          for each hop level as columns.
     """
     df_result = pd.DataFrame()
-
-    # for query_res_obj, ground_truth in zip(cas_result, ground_truth_cl_names):
-    #     query_cell_metrics = calculate_metrics_for_query_cell(
-    #         query_cell_obj=query_res_obj,
-    #         ground_truth_cl_name=ground_truth,
-    #         co_resource=co_resource,
-    #         num_hops=num_hops,
-    #     )
-
-    #cell_type_ontology_term_id_array = np.array(single_batch_df_copy.columns)
-    #print(f"NIMISH DBID ARRAY IS {db_id_array}")
     for i in range(len(single_batch_df_copy)):
         query_cell_metrics = calculate_metrics_for_query_cell_csv(
             db_id=db_id_array[i],
@@ -195,11 +171,8 @@ def calculate_metrics_for_csv_cas_output(
         )
 
         df_result = pd.concat([df_result, pd.DataFrame([query_cell_metrics])])
-
-    #df_result = df_result.set_index("query_cell_id")
     return df_result
 
-# Trial with cas metrics in batches
 def split_into_batches_csv(data, batch_size):
     """
     Split a list into batches of a given size.
@@ -216,8 +189,6 @@ def split_into_batches_csv(data, batch_size):
 
 def calculate_metrics_for_cas_output_in_batches_csv(
     ground_truth_cl_names: t.List[str],
-    #cas_result: t.Dict[str, t.Any],
-    #co_resource: t.Dict[str, t.Any],
     db_id_array: np.array,
     cell_type_ontology_term_id_array: np.array,
     single_batch_df_copy: pd.DataFrame,
@@ -242,10 +213,7 @@ def calculate_metrics_for_cas_output_in_batches_csv(
     num_workers = multiprocessing.cpu_count()
     with concurrency.ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = []
-
-        #cas_result_batches = split_into_batches(data_list=cas_result, batch_size=batch_size)
         single_batch_df_copy_batches = split_into_batches_csv(data = single_batch_df_copy, batch_size=batch_size)
-        #ground_truth_cl_names_batches = split_into_batches(data_list=ground_truth_cl_names, batch_size=batch_size)
         ground_truth_cl_names_batches = split_into_batches_csv(data=ground_truth_cl_names, batch_size=batch_size)
         db_id_array_batches = split_into_batches_csv(data = db_id_array, batch_size=batch_size)
 

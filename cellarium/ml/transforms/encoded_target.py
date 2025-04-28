@@ -5,7 +5,6 @@
 import numpy as np
 import torch
 from torch import nn
-
 from cellarium.ml.data.fileio import read_pkl_from_gcs
 
 
@@ -17,13 +16,10 @@ class EncodedTargets(nn.Module):
     def __init__(
         self,
         multilabel_flag: bool = False,
-        #target_row_ancestors_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_ancestors_col_torch_tensor.pkl',
-        target_row_ancestors_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_ancestors_col_torch_tensor_lrexp_human.pkl',
-        #unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
-        unique_cell_types_nparray_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
-        #target_row_descendents_only_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_only_col_torch_tensor.pkl',
-        target_row_descendents_only_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_only_col_torch_tensor_lrexp_human.pkl',
-        target_row_mod_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_mod_column_tensor_lexrp_human.pkl'
+        target_row_ancestors_col_torch_tensor_path: str = '',
+        unique_cell_types_nparray_path: str = '',
+        target_row_descendents_only_col_torch_tensor_path: str = '',
+        target_row_mod_col_torch_tensor_path: str = ''
     ) -> None:
         super().__init__()
         self.multilabel_flag = multilabel_flag
@@ -39,9 +35,8 @@ class EncodedTargets(nn.Module):
         """
 
         """
+        indices = np.searchsorted(self.unique_cell_types_nparray, y_n)
         if self.multilabel_flag==0:
-            return({'y_n':torch.tensor(np.searchsorted(self.unique_cell_types_nparray, y_n))})
+            return {'y_n':torch.tensor(indices), 'descendents_nc': self.target_row_descendents_only_col_torch_tensor[indices], 'mod_nc': self.target_row_mod_col_torch_tensor[indices], 'y_n_predict': indices}
         else:
-            indices = np.searchsorted(self.unique_cell_types_nparray, y_n)
-            #return {'y_n':self.target_row_ancestors_col_torch_tensor[indices], 'descendents_nc': self.target_row_descendents_only_col_torch_tensor[indices], 'mod_nc': self.target_row_mod_col_torch_tensor[indices]}
-            return {'y_n':self.target_row_ancestors_col_torch_tensor[indices], 'descendents_nc': self.target_row_descendents_only_col_torch_tensor[indices], 'mod_nc': self.target_row_mod_col_torch_tensor[indices], 'y_n_predict': indices} # using for prediction
+            return {'y_n':self.target_row_ancestors_col_torch_tensor[indices], 'descendents_nc': self.target_row_descendents_only_col_torch_tensor[indices], 'mod_nc': self.target_row_mod_col_torch_tensor[indices], 'y_n_predict': indices}

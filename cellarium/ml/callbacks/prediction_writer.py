@@ -4,7 +4,6 @@
 import os
 from collections.abc import Sequence
 from pathlib import Path
-
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
@@ -21,7 +20,9 @@ def write_prediction(
     query_ids: np.ndarray,
     output_dir: Path | str,
     columns: np.ndarray,
-    postfix: int | str
+    postfix: int | str,
+    co_resource_path: str,
+    output_csv_path: str
 ) -> None:
     """
     Write prediction to a CSV file.
@@ -30,7 +31,7 @@ def write_prediction(
     ground_truth_cl_names = query_ids
     cell_type_ontology_term_id_array = columns
     db_id_array = ids
-    co_resource = read_pkl_from_gcs('gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/shared_meta/dev_benchmarking_june_2024_metadata_benchmarking_resource_schema_5-0.pickle')
+    co_resource = read_pkl_from_gcs(co_resource_path)
     cas_out_csv = calculate_metrics_for_cas_output_in_batches_csv(
     db_id_array = db_id_array,
     ground_truth_cl_names=ground_truth_cl_names,
@@ -41,12 +42,9 @@ def write_prediction(
     batch_size= int(len(ground_truth_cl_names)/multiprocessing.cpu_count()))
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-
-    replica_id = os.environ.get("REPLICA_INDEX", 0)
-    output_path = "gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/model_predictions/Model_5_alpha_zero_normalized/hop_score_outputs_new/hop_scores_extract_"+str(postfix)+".csv"
+    output_path = str(output_csv_path)+str(postfix)+".csv"
     cas_out_csv.sort_values(by='query_cell_id', inplace=True)
     cas_out_csv.to_csv(output_path, header=True, index=False)
-
 
 class PredictionWriter(pl.callbacks.BasePredictionWriter):
     """
@@ -66,10 +64,20 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
             written. If not ``None``, only the first ``prediction_size`` columns will be written.
     """
 
-    def __init__(self, output_dir: Path | str, prediction_size: int | None = None) -> None:
+    def __init__(
+            self,
+            multilabel_flag: bool, 
+            output_dir: Path | str,
+            co_resource_path: str, 
+            output_csv_path: str,
+            csv_columns_path: str,
+            ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
-        self.prediction_size = prediction_size
+        self.co_resource_path = co_resource_path
+        self.output_csv_path = output_csv_path
+        self.columns = np.char.replace(read_pkl_from_gcs(csv_columns_path),':',"_")
+        self.multilabel_flag = multilabel_flag
 
     def write_on_batch_end(
         self,
@@ -81,20 +89,20 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        columns = read_pkl_from_gcs("gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl")
-        columns = np.char.replace(columns,':',"_")
         pred = prediction["cell_type_probs_nc"]
-        if self.prediction_size is not None:
-            pred = pred[:, : self.prediction_size]
-        #y_n = batch['y_n'].cpu().numpy()
-        y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
-        y_n_cell_type_ids = np.take(columns,y_n)
+        if self.multilabel_flag:
+            y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
+        else:
+            y_n = batch['y_n'].cpu().numpy()
+        y_n_cell_type_ids = np.take(self.columns,y_n)
 
         write_prediction(
             prediction=pred,
             ids=batch["obs_names_n"],
             query_ids = y_n_cell_type_ids,
             output_dir=self.output_dir,
-            columns=columns[0:self.prediction_size],
-            postfix=batch_idx * trainer.world_size + trainer.global_rank
+            columns=self.columns,
+            postfix=batch_idx * trainer.world_size + trainer.global_rank,
+            co_resource_path=self.co_resource_path,
+            output_csv_path = self.output_csv_path
         )

@@ -1,7 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-
 import lightning.pytorch as pl
 import numpy as np
 import pyro
@@ -43,28 +42,27 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self,
         n_obs: int,
         var_names_g: np.ndarray,
-        y_categories: np.ndarray | None,
         alpha: float = 0.5,
+        actual_categories=670,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
         activation_fn: str = 'softmax',
         out_distribution: str = 'Categorical',
         seed: int = 0,
         probability_propagation_flag: bool = False,
-        #target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/target_row_descendent_col_torch_tensor.pkl',
-        target_row_descendent_col_torch_tensor_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human.pkl',
-        #y_categories_path: str = 'gs://cellarium-file-system/curriculum/human_10x_ebd_lrexp_extract/models/shared_metadata/final_filtered_sorted_unique_cells.pkl',
-        y_categories_path: str = 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human.pkl',
+        target_row_descendent_col_torch_tensor_path: str = '',
+        y_categories_path: str = '',
+        valid_mask_path: str = '',
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
 
         # data
         self.alpha = alpha
+        self.actual_categories = actual_categories
         self.n_obs = n_obs
         self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
-        #self.y_categories = y_categories
         self.y_categories = read_pkl_from_gcs(y_categories_path)
         self.target_row_descendent_col_torch_tensor = read_pkl_from_gcs(target_row_descendent_col_torch_tensor_path)
         self.n_categories = len(self.y_categories)
@@ -89,7 +87,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.elbo = pyro.infer.Trace_ELBO()
 
         self.log_metrics = log_metrics
-        self.valid_mask = read_pkl_from_gcs('gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/shared_meta/sublist_indices.pkl')
+        self.valid_mask = read_pkl_from_gcs(valid_mask_path)
 
     def reset_parameters(self) -> None:
         rng_device = self.W_gc.device.type if self.W_gc.device.type != "meta" else "cpu"
@@ -128,22 +126,23 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0],dim=-2):
             logits_nc = x_ng @ W_gc + self.b_c
-            compiled_propagated_logits = torch.compile(self.log_probs)
-            propagated_logits = compiled_propagated_logits(logits=logits_nc)
-            if self.out_distribution == categorical_distribution.PyroCategorical:
-                pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
-            elif self.out_distribution == bernoulli_distribution.CustomPyroBernoulli:
-                #scale = self.get_scale(descendents_nc=descendents_nc) #n,c
-                #scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))/(mod_nc)
-                scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))
-                propagated_logits = torch.clamp(propagated_logits,max=-1e-7)
-                logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)*descendents_nc
-                with pyro.poutine.scale(scale=scale):
-                    with pyro.plate("categories", size=self.n_categories, dim=-1):
-                        pyro.sample("y", self.out_distribution(
-                    log_prob_tensor = propagated_logits,
-                    log1m_prob_tensor=logits_complement,
-                    ), obs=y_n)
+            if self.probability_propagation_flag==False: # only used for base model
+                    pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)    
+            else:
+                compiled_propagated_logits = torch.compile(self.log_probs)
+                propagated_logits = compiled_propagated_logits(logits=logits_nc)
+                if self.out_distribution == categorical_distribution.PyroCategorical:
+                    pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
+                elif self.out_distribution == bernoulli_distribution.CustomPyroBernoulli:
+                    scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))
+                    propagated_logits = torch.clamp(propagated_logits,max=-1e-7)
+                    logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)*descendents_nc
+                    with pyro.poutine.scale(scale=scale):
+                        with pyro.plate("categories", size=self.n_categories, dim=-1):
+                            pyro.sample("y", self.out_distribution(
+                        log_prob_tensor = propagated_logits,
+                        log1m_prob_tensor=logits_complement,
+                        ), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor, mod_nc: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
@@ -162,16 +161,16 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             A dictionary with the target logits.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g) 
         logits_nc = x_ng @ self.W_gc + self.b_c
-        activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-
-        # logits_nc = x_ng @ self.W_gc[:, self.valid_mask] + self.b_c[self.valid_mask]
-        # activation_out_filtered = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-        # activation_out = torch.zeros(x_ng.shape[0], self.W_gc.shape[1], device=x_ng.device)
-        # activation_out[:, self.valid_mask] = activation_out_filtered
-        activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+        if self.actual_categories==self.W_gc.shape[1]:
+            activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
+        else: # when trained model has fewer classes than expected during validation
+            activation_out_filtered = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
+            activation_out = torch.zeros(x_ng.shape[0], self.actual_categories, device=x_ng.device)
+            activation_out[:, self.valid_mask] = activation_out_filtered
+        if self.probability_propagation_flag:
+                activation_out = self.probability_propagation(activation_out_gpu=activation_out)
         return {"y_logits_nc": logits_nc,"cell_type_probs_nc": activation_out}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
@@ -220,9 +219,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         log_probs = self.logsumexp_propagated(logits) - torch.logsumexp(logits,dim=1,keepdim=True)
         return log_probs
 
-    # OPTION 4
     def logsumexp_propagated(self,logits_nc):
-        # matrix multiplication for torch where replacement/optimization
+        # matrix multiplication for torch with replacement/optimization
         desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype = torch.float)
         temp = torch.where(
             desc_matrix_cc.T == 0,
