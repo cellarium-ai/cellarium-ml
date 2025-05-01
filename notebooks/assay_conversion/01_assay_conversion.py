@@ -113,7 +113,7 @@ def main():
     # if args.target_cell != '':
     #     val_adata = val_adata[val_adata.obs.CellType == args.target_cell].copy()
     # val_adata = val_adata[val_adata.obs.Method == '10x Chromium (v2) A']
-    val_adata = val_adata[val_adata.obs.CellType.isin(['B cell', 'Cytotoxic T cell'])].copy()
+    # val_adata = val_adata[val_adata.obs.CellType.isin(['B cell', 'Cytotoxic T cell'])].copy()
     # val_adata = val_adata[val_adata.obs.CellType.isin(['CD4+ T cell'])].copy()
 
     ctx = CellariumGPTInferenceContext(

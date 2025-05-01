@@ -10,7 +10,7 @@
 #SBATCH --cpus-per-task 16
 #SBATCH --mem 32G
 #SBATCH --gpus-per-node 1
-#SBATCH --time 02:00:00
+#SBATCH --time 03:00:00
 
 source /u/mallina1/envs/torch_jax2/bin/activate
 cd /u/mallina1/research/cellarium-ml/notebooks/assay_conversion

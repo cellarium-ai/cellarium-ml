@@ -223,7 +223,8 @@ class CellariumGPTInferenceContext:
             rng: torch.Generator | None = None,
             query_total_mrna_umis: float | None = None,
             metadata_prompt_masks_dict: dict[str, bool] | None = None,
-            query_assay_ontology_term_id: float | None = None
+            query_assay_ontology_term_id: float | None = None,
+            query_suspension_type: str = None
         ) -> tuple[dict, dict]:
         """
 
@@ -402,11 +403,26 @@ class CellariumGPTInferenceContext:
                 dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_query_vars)
         assay_nc = torch.cat([prompt_assay_nc, query_assay_nc], dim=1)
 
-        suspension_type_nc = torch.tensor(
+
+        prompt_suspension_type_nc = torch.tensor(
             pd.Categorical(
                 adata.obs["suspension_type"].values,
                 categories=self.gene_ontology_infos["suspension_type"]["names"]).codes,
-            dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_total_vars)
+            dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_prompt_vars)
+
+        if query_suspension_type is not None:
+            query_suspension_type_nc = torch.tensor(
+                pd.Categorical(
+                    [query_suspension_type],
+                    categories=self.gene_ontology_infos["suspension_type"]["names"]).codes,
+                dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_query_vars)
+        else:
+            query_suspension_type_nc = torch.tensor(
+                pd.Categorical(
+                    adata.obs["suspension_type"].values,
+                    categories=self.gene_ontology_infos["suspension_type"]["names"]).codes,
+                dtype=torch.int64, device=cpu_device)[:, None].expand(n_cells, n_query_vars)
+        suspension_type_nc = torch.cat([prompt_suspension_type_nc, query_suspension_type_nc], dim=1)
 
         # apply the mask
         gene_value_nc[~gene_prompt_mask_nc] = -1
