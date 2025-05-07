@@ -16,6 +16,9 @@ from lightning.pytorch.strategies import DDPStrategy
 from sklearn.metrics import silhouette_score
 from torch.utils.data import DataLoader, IterableDataset
 
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+    
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.transforms import Filter
 from cellarium.ml.utilities.testing import (
@@ -25,6 +28,10 @@ from cellarium.ml.utilities.testing import (
 
 warnings.filterwarnings("ignore")
 
+def get_mean_var(X):
+    scaler = StandardScaler(with_mean=False)
+    scaler.fit(X)
+    return(scaler.mean_, scaler.var_)
 
 def calculate_rec_error(
     dataset: DataLoader | IterableDataset,
@@ -88,56 +95,7 @@ def get_embedding(
         index.extend(batch["obs_names_n"])
 
     return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
-
-
-class KMeans:
-    def __init__(self, n_clusters, max_iter=200, tol=1e-4):
-        self.n_clusters = n_clusters
-        self.max_iter = max_iter
-        self.tol = tol
-        self.centroids: torch.Tensor | None = None
-
-    def initialize_centroids(self, x_np: torch.Tensor):
-        # KMeans++ initialization
-        first_random_index = int(torch.randint(0, x_np.shape[0], (1,)).item())
-        indices: list[int] = [first_random_index]
-        for _ in range(1, self.n_clusters):
-            square_distance_n = torch.min(torch.cdist(x_np, x_np[indices], p=2) ** 2, dim=1)[0]
-            probs_n = square_distance_n / torch.sum(square_distance_n)
-            # cumulative_probs_n = torch.cumsum(probs_n, dim=0)
-            # r = torch.rand(1).item()
-            # next_index = torch.searchsorted(cumulative_probs_n, r).item()
-            next_index = int(torch.multinomial(probs_n, 1).item())
-            indices.append(next_index)
-
-        self.centroids = x_np[indices]
-
-    def fit(self, x_ng: torch.Tensor):
-        if self.centroids is None:
-            self.initialize_centroids(x_ng)
-            assert isinstance(self.centroids, torch.Tensor)
-
-        for i in range(self.max_iter):
-            # Assignment Step: Assign each data point to the nearest centroid
-            distances = torch.cdist(x_ng, self.centroids)
-            labels = torch.argmin(distances, dim=1)
-
-            # Update Step: Calculate new centroids
-            new_centroids = torch.stack([x_ng[labels == k].mean(dim=0) for k in range(self.n_clusters)])
-
-            # Check for convergence
-            if torch.all(torch.abs(new_centroids - self.centroids) < self.tol):
-                break
-
-            self.centroids = new_centroids
-
-        self.labels_ = labels
-
-    def predict(self, x_ng: torch.Tensor):
-        assert isinstance(self.centroids, torch.Tensor)
-        distances = torch.cdist(x_ng, self.centroids)
-        return torch.argmin(distances, dim=1)
-
+    
 
 def nmf_frobenius_loss(x: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: torch.Tensor):
     # compute prediction error as the frobenius norm
@@ -158,20 +116,15 @@ def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neigh
         topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
         topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
         d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
-
-        # mean centering prevents underflow in distance computations in the kmeans algorithm
-        d_norm_mg_mean = d_norm_mg.mean(0)
-        d_norm_mg = d_norm_mg - d_norm_mg_mean
-
-        kmeans = KMeans(n_clusters=k)
-        kmeans.fit(d_norm_mg)
-        kmeans_cluster_labels = kmeans.predict(d_norm_mg)
+        
         df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
-        kmeans_cluster_labels = kmeans_cluster_labels.cpu().numpy()
+        kmeans = KMeans(n_clusters=k, random_state=1) # n_init=10, 
+        kmeans.fit(df_d_norm_mg)
+        kmeans_cluster_labels = pd.Series(kmeans.labels_+1, index=df_d_norm_mg.index)
 
         silhouette = silhouette_score(df_d_norm_mg.values, kmeans_cluster_labels, metric="cosine")
 
-        median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median()
+        median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median() # mean() # quantile(0.9) # 
         median_D = torch.Tensor(median_D.values)
         median_D = F.normalize(median_D, dim=1, p=1)
 
@@ -188,14 +141,129 @@ def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neigh
         "stability": silhouette,
     }
 
+def update_consensusD(
+    pipeline,
+    density_threshold = 0.2,
+    local_neighborhood_size = 0.1
+):
+    torch.manual_seed(0)
+    k_range = pipeline[-1].k_values
+    consensus_stat = {}
+    for k in k_range:
+
+        D_rkg = getattr(pipeline[-1], f"D_{k}_rkg")
+        consensus_output = consensus(D_rkg=D_rkg, k=k,
+                                     density_threshold=density_threshold,
+                                     local_neighborhood_size=local_neighborhood_size)
+        setattr(pipeline[-1], f"D_{k}_kg", consensus_output['consensus_D'])
+
+        consensus_stat[k] = consensus_output
+        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output['stability'], 4))))
+
+    return consensus_stat
+
+def get_full_D(A_kk, B_kg, factors_kg, n_iterations):
+    """
+    Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
+
+    Args:
+        factors_kg: The matrix of gene expression programs (Mairal's dictionary D).
+        n_iterations: The number of iterations to perform.
+    """
+    _D_tol = 1e-8
+
+    _, k_dimension = A_kk.shape
+
+    D_buffer = factors_kg.clone()
+
+    for _ in range(n_iterations):
+        for k in range(k_dimension):
+
+            scalar = A_kk[k, k]
+            a_1k = A_kk[k, :]
+            b_1g = B_kg[k, :]
+
+            # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
+            u_1g = torch.clamp(
+                factors_kg[k, :] + (b_1g - torch.matmul(a_1k, factors_kg)) / scalar,
+                min=0.0,
+            )
+            # u_1g = factors_kg[k, :] + (b_1g - torch.matmul(a_1k, factors_kg)) / scalar
+
+            factors_1g = u_1g / torch.clamp(torch.linalg.norm(u_1g), min=1.0)
+            factors_kg[k, :] = factors_1g
+
+        D_diff = torch.linalg.norm(factors_kg - D_buffer) / torch.linalg.norm(factors_kg)
+        if D_diff <= _D_tol:
+            break
+        D_buffer = factors_kg.clone()
+
+    return factors_kg
+
+def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
+    """
+    Solve OLS: Beta = (X^T X)^{-1} X^T Y,
+    accumulating X^T X and X^T Y in row-batches.
+    
+    Optionally mean/variance-normalize each column of Y *globally* 
+    (using the entire dataset's mean/var), while still only converting
+    each row-batch to dense on-the-fly.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n_samples, n_predictors)
+        Predictor matrix.
+    Y : np.ndarray or scipy.sparse.spmatrix, shape (n_samples, n_targets)
+        Outcomes. Each column is one target variable.
+    batch_size : int
+        Number of rows to process per chunk.
+    normalize_y : bool
+        If True, compute global mean & var of Y columns, then subtract mean 
+        and divide by std for each batch.
+
+    Returns
+    -------
+    Beta : np.ndarray, shape (n_predictors, n_targets)
+        The OLS coefficients for each target.
+    """
+
+    # -- Basic shape checks
+    n_samples, n_predictors = X.shape
+    n_samples_Y, n_targets = Y.shape
+    if n_samples != n_samples_Y:
+        raise ValueError("X and Y must have the same number of rows.")
+
+    # -- Optionally compute global mean & variance of Y columns
+    if normalize_y:
+        meanY, varY = get_mean_var(Y)
+
+        # Avoid zero or near-zero std
+        eps = 1e-12
+        varY[varY < eps] = eps
+        stdY = np.sqrt(varY)
+    
+    # -- Optionally apply normalization
+    if normalize_y:
+        Y_batch = (Y - meanY) / stdY
+        
+    # -- Accumulate partial sums
+    XtX += X.T @ X
+    XtY += X.T @ Y
+
+    # -- Solve the normal equations
+    #    Beta = (X^T X)^(-1) X^T Y
+    #    Using lstsq for stability.
+    Beta, residuals, rank, s = np.linalg.lstsq(XtX, XtY, rcond=None)
+    return Beta, XtX, XtY
+    
 
 def compute_loadings(
     x_ng: torch.Tensor,
     factors_rkg: torch.Tensor,
     n_iterations: int,
-    learning_rate: float = 0.2,
     normalize: bool = False,
-    alpha_tol: float = 5e-5,
+    alpha_tol: float = 1e-5,
+    transformed_data_mean: float = 0.28,
 ) -> torch.Tensor:
     """
     Algorithm 1 step 4 from Mairal et al. [1] for computing the loadings.
@@ -212,43 +280,39 @@ def compute_loadings(
         The computed loadings.
     """
     n, _ = x_ng.shape
-    r, k, _ = factors_rkg.shape
-    alpha_unconstrained_rnk = torch.nn.Parameter(
-        torch.zeros((r, n, k), requires_grad=True, device=factors_rkg.device)  # TODO: try others
-    )
-    alpha_init_rnk = alpha_unconstrained_rnk.exp().clone()
-    alpha_buffer_rnk = alpha_init_rnk.clone()
-
-    optimizer = torch.optim.Adam([alpha_unconstrained_rnk], lr=learning_rate)
-
+    r, n_factors, g = factors_rkg.shape
+    
+    alpha_rnk = torch.rand((r, n, n_factors), device=factors_rkg.device).abs()
+    # factor = np.sqrt(transformed_data_mean / n_factors)
+    # alpha_rnk = factor * torch.randn((r, n, n_factors), device=factors_rkg.device).abs()
+    # alpha_rnk = factor * torch.zeros((r, n, n_factors), device=factors_rkg.device).abs()
+    alpha_buffer_rnk = alpha_rnk.clone()
+    
+    DDT = torch.bmm(factors_rkg, factors_rkg.transpose(1, 2))
+    xDT = torch.bmm(x_ng.expand(r, n, g), factors_rkg.transpose(1, 2))
+    
     for i in range(n_iterations):
-        optimizer.zero_grad()
-        loss = (
-            F.mse_loss(
-                torch.bmm(alpha_unconstrained_rnk.exp(), factors_rkg),
-                x_ng.unsqueeze(0),
-                reduction="sum",
-            )
-            * 0.5
-        )
+        for k in range(n_factors):
+            scalar = DDT[:, k, k].view(r, 1, 1)
+            a_rk1 = DDT[:, :, k].unsqueeze(2)
+            b_rn1 = xDT[:, :, k].unsqueeze(2)
 
-        loss.backward()
-        optimizer.step()
-        alpha_rnk = alpha_unconstrained_rnk.exp()
+            # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
+            u_r1g = torch.clamp(
+                alpha_rnk[:, :, k].unsqueeze(2) + (b_rn1 - torch.bmm(alpha_rnk, a_rk1)) / scalar,
+                min=0.0,
+            )
+            alpha_rnk[:, :, k] = u_r1g.squeeze(2)
 
         alpha_max_diff = (
             F.mse_loss(alpha_rnk, alpha_buffer_rnk, reduction="none").sum(dim=[-2, -1])
-            / alpha_init_rnk.square().sum(dim=[-2, -1])
+            / alpha_rnk.square().sum(dim=[-2, -1])
         ).max()
         if alpha_max_diff <= alpha_tol:
             break
         alpha_buffer_rnk = alpha_rnk.clone()
-
-    if normalize:
-        alpha_rnk = F.normalize(alpha_rnk, dim=-1, p=1)
-
-    return alpha_rnk.detach()
-
+    
+    return alpha_rnk
 
 def compute_factors(
     A_rkk: torch.Tensor,
@@ -438,7 +502,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             x_ng=x_ng,
             factors_rkg=factors_rkg,
             n_iterations=n_iterations,
-            learning_rate=0.05,
             normalize=False,
             alpha_tol=self._alpha_tol,
         )
@@ -491,7 +554,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         alpha_rnk = self._compute_loadings(
             x_ng=x_ng,
             factors_rkg=factors_rkg,
-            n_iterations=200,
+            n_iterations=100,
         )
 
         with torch.no_grad():
@@ -508,7 +571,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 factors_rkg=factors_rkg,
                 A_rkk=A_rkk,
                 B_rkg=B_rkg,
-                n_iterations=200,
+                n_iterations=100,
             )
 
         return updated_factors_rkg
@@ -532,7 +595,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         else:
             std_g = torch.std(x_ng, dim=0) + 1e-4
             x_ = x_ng / std_g
-            x_ = torch.clamp(x_, min=0.0, max=100.0)
+            # x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.algorithm == "mairal":
             for i in self.k_values:
@@ -554,6 +617,11 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 "NonNegativeMatrixFactorization requires that the `broadcast_buffers` parameter of "
             )
             "lightning.pytorch.strategies.DDPStrategy is set to True."
+
+    def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
+        for i in self.k_values:
+            getattr(self, f"A_{i}_rkk").zero_()
+            getattr(self, f"B_{i}_rkg").zero_()
 
     def on_end(self, trainer: pl.Trainer) -> None:
         trainer.save_checkpoint(trainer.default_root_dir + "/NMF.ckpt")
@@ -579,7 +647,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         else:
             std_g = torch.std(x_filtered_ng, dim=0) + 1e-4
             x_ = x_filtered_ng / std_g
-            x_ = torch.clamp(x_, min=0.0, max=100.0)
+            # x_ = torch.clamp(x_, min=0.0, max=100.0)
 
         if self.get_rec_error:
             rec_error = []
@@ -590,7 +658,6 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                     x_ng=x_,
                     factors_rkg=D_kg.to(x_.device).unsqueeze(0),
                     n_iterations=1000,
-                    learning_rate=0.01,
                     alpha_tol=self._alpha_tol,
                 ).squeeze(0)
                 rec_error.append(
@@ -611,36 +678,34 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 factors_rkg=D_kg.to(x_.device).unsqueeze(0),
                 n_iterations=1000,
                 alpha_tol=self._alpha_tol,
-                learning_rate=0.01,
                 normalize=False,
             ).squeeze(0)
 
-            # update A and B, Mairal Algorithm 1 step 5 and 6
-            A_kk: torch.Tensor = getattr(self, f"full_A_{k}_kk")
-            B_kg: torch.Tensor = getattr(self, f"full_B_{k}_kg")
-            A = A_kk + torch.matmul(alpha_nk.T, alpha_nk) / x_ng.shape[0]
-            B = B_kg + torch.matmul(alpha_nk.T, x_) / x_ng.shape[0]
-            setattr(self, f"full_A_{k}_kk", A)
-            setattr(self, f"full_B_{k}_kg", B)
-
             ## get the final D for full transcrptome
             if self.if_get_full_D:
-                x_ng = (x_ng.T / x_ng.sum(1)).T * 1e4
-                x_ = torch.log1p(x_ng)
+                x_ng = (x_ng.T / x_ng.sum(1)).T * 1e6
+                
+                ## update A and B, Mairal Algorithm 1 step 5 and 6
                 A_kk = getattr(self, f"full_A_{k}_kk")
                 B_kg = getattr(self, f"full_B_{k}_kg")
-                full_D_kg = getattr(self, f"full_D_{k}_kg")
+                # full_D_kg = getattr(self, f"full_D_{k}_kg")
+                
+                # A = A_kk + torch.matmul(alpha_nk.T, alpha_nk) / x_.shape[0]
+                # B = B_kg + torch.matmul(alpha_nk.T, x_) / x_.shape[0]
+                # setattr(self, f"full_A_{k}_kk", A)
+                # setattr(self, f"full_B_{k}_kg", B)
 
-                # compute factors, Mairal Algorithm 1 step 7
-                D = compute_factors(
-                    A_rkk=A_kk.unsqueeze(0),
-                    B_rkg=B_kg.unsqueeze(0),
-                    factors_rkg=full_D_kg.unsqueeze(0),
-                    n_iterations=100,
-                    D_tol=self._D_tol,
-                ).squeeze(0)
+                ## compute factors, Mairal Algorithm 1 step 7
+                # D = get_full_D(
+                #     A_kk=A,
+                #     B_kg=B,
+                #     factors_kg=full_D_kg,
+                #     n_iterations=200,
+                # )
+                D, A, B = efficient_ols_all_cols(alpha_nk, x_ng, A_kk, B_kg)
                 setattr(self, f"full_D_{k}_kg", D)
-
+                setattr(self, f"full_A_{k}_kk", A)
+                setattr(self, f"full_B_{k}_kg", B)
             return {"alpha_nk": alpha_nk}
 
     @property
