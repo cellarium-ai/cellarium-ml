@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-    
+
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.transforms import Filter
 from cellarium.ml.utilities.testing import (
@@ -95,7 +95,7 @@ def get_embedding(
         index.extend(batch["obs_names_n"])
 
     return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
-    
+
 
 def nmf_frobenius_loss(x: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: torch.Tensor):
     # compute prediction error as the frobenius norm
@@ -226,13 +226,7 @@ def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
     Beta : np.ndarray, shape (n_predictors, n_targets)
         The OLS coefficients for each target.
     """
-
-    # -- Basic shape checks
-    n_samples, n_predictors = X.shape
-    n_samples_Y, n_targets = Y.shape
-    if n_samples != n_samples_Y:
-        raise ValueError("X and Y must have the same number of rows.")
-
+    
     # -- Optionally compute global mean & variance of Y columns
     if normalize_y:
         meanY, varY = get_mean_var(Y)
@@ -244,7 +238,7 @@ def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
     
     # -- Optionally apply normalization
     if normalize_y:
-        Y_batch = (Y - meanY) / stdY
+        Y = (Y - meanY) / stdY
         
     # -- Accumulate partial sums
     XtX += X.T @ X
@@ -255,7 +249,7 @@ def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
     #    Using lstsq for stability.
     Beta, residuals, rank, s = np.linalg.lstsq(XtX, XtY, rcond=None)
     return Beta, XtX, XtY
-    
+
 
 def compute_loadings(
     x_ng: torch.Tensor,
@@ -456,8 +450,8 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             self._dummy_param = torch.nn.Parameter(torch.empty(()))
 
             self.register_buffer(f"full_A_{i}_kk", torch.empty(i, i))
-            self.register_buffer(f"full_B_{i}_kg", torch.empty(i, g))
-            self.register_buffer(f"full_D_{i}_kg", torch.empty(i, g))
+            self.register_buffer(f"full_B_{i}_kg", torch.empty(i, full_g))
+            self.register_buffer(f"full_D_{i}_kg", torch.empty(i, full_g))
 
         self._D_tol = 1e-5
         self._alpha_tol = 1e-5
@@ -702,10 +696,13 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 #     factors_kg=full_D_kg,
                 #     n_iterations=200,
                 # )
-                D, A, B = efficient_ols_all_cols(alpha_nk, x_ng, A_kk, B_kg)
-                setattr(self, f"full_D_{k}_kg", D)
-                setattr(self, f"full_A_{k}_kk", A)
-                setattr(self, f"full_B_{k}_kg", B)
+                D, A, B = efficient_ols_all_cols(alpha_nk.cpu().numpy(), 
+                                                 x_ng.cpu().numpy(), 
+                                                 A_kk.cpu().numpy(), 
+                                                 B_kg.cpu().numpy())
+                setattr(self, f"full_D_{k}_kg", torch.tensor(D))
+                setattr(self, f"full_A_{k}_kk", torch.tensor(A))
+                setattr(self, f"full_B_{k}_kg", torch.tensor(B))
             return {"alpha_nk": alpha_nk}
 
     @property
