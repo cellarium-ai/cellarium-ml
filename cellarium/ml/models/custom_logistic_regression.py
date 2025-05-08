@@ -8,7 +8,7 @@ import pyro.distributions as dist
 import torch
 import torch.nn.functional
 
-from cellarium.ml.categorical_distribution import bernoulli_distribution, categorical_distribution
+from cellarium.ml.categorical_distribution import categorical_distribution
 from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
@@ -42,11 +42,9 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self,
         n_obs: int,
         var_names_g: np.ndarray,
-        alpha: float = 0.5,
         actual_categories=670,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
-        activation_fn: str = 'softmax',
         out_distribution: str = 'Categorical',
         seed: int = 0,
         probability_propagation_flag: bool = False,
@@ -58,7 +56,6 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         super().__init__()
 
         # data
-        self.alpha = alpha
         self.actual_categories = actual_categories
         self.n_obs = n_obs
         self.var_names_g = var_names_g
@@ -66,12 +63,8 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.y_categories = read_pkl_from_gcs(y_categories_path)
         self.target_row_descendent_col_torch_tensor = read_pkl_from_gcs(target_row_descendent_col_torch_tensor_path)
         self.n_categories = len(self.y_categories)
-        self.activation_fn = getattr(torch.nn.functional, activation_fn)
         self.probability_propagation_flag = probability_propagation_flag
-        if out_distribution == "Categorical":
-            self.out_distribution = getattr(categorical_distribution,'Pyro'+out_distribution)
-        else:
-            self.out_distribution = getattr(bernoulli_distribution,'CustomPyro'+out_distribution)
+        self.out_distribution = getattr(categorical_distribution,'Pyro'+out_distribution)
 
         self.seed = seed
         # parameters
@@ -98,7 +91,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c.data.zero_()
 
     def forward(
-        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, descendents_nc: torch.Tensor, mod_nc: torch.Tensor, **kwargs
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, **kwargs
     ) -> dict[str, torch.Tensor | None]:
         """
         Args:
@@ -116,10 +109,10 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, descendents_nc, mod_nc)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
         return {"loss": loss}
 
-    def model(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor, mod_nc: torch.Tensor) -> None:
+    def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
             dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
@@ -131,20 +124,9 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             else:
                 compiled_propagated_logits = torch.compile(self.log_probs)
                 propagated_logits = compiled_propagated_logits(logits=logits_nc)
-                if self.out_distribution == categorical_distribution.PyroCategorical:
-                    pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
-                elif self.out_distribution == bernoulli_distribution.CustomPyroBernoulli:
-                    scale = ((descendents_nc+self.alpha)-(descendents_nc*self.alpha))
-                    propagated_logits = torch.clamp(propagated_logits,max=-1e-7)
-                    logits_complement = self.bernoulli_log_probs(propagated_logits=propagated_logits)*descendents_nc
-                    with pyro.poutine.scale(scale=scale):
-                        with pyro.plate("categories", size=self.n_categories, dim=-1):
-                            pyro.sample("y", self.out_distribution(
-                        log_prob_tensor = propagated_logits,
-                        log1m_prob_tensor=logits_complement,
-                        ), obs=y_n)
+                pyro.sample("y", self.out_distribution(logits = propagated_logits), obs=y_n)
 
-    def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor, descendents_nc: torch.Tensor, mod_nc: torch.Tensor) -> None:
+    def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
     def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
@@ -212,7 +194,7 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
         step 1: propagated_logits: LSE (L_i) where i belongs to the
         set of descendents of each column in c and column c
         step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the
-        2604 classes c in each row (sum of all logits in each row of n before propagation)
+        2613 classes c in each row (sum of all logits in each row of n before propagation)
         log(1-p_k') = log{(sum(p_i) i belongs to set(descendents(k)) + p_k)/sum(p_m), m = total cell types}
         step 3: LSE(L_i) - LSE(L_m)
         """
@@ -227,16 +209,3 @@ class CustomLogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
             float('-inf'),
             logits_nc.unsqueeze(dim=-1)*desc_matrix_cc.T)
         return temp.logsumexp(dim=1)
-
-    def bernoulli_log_probs(self, propagated_logits: torch.Tensor):
-        LN_HALF = -0.6931471805599453
-        logp_zero_capped = torch.minimum(
-            torch.zeros_like(propagated_logits),
-            propagated_logits,
-            ) #clamping propagated logits to avoid exact zero values
-        result = torch.where(
-            logp_zero_capped >= LN_HALF,
-            torch.log(-torch.expm1(logp_zero_capped)),  # For logp >= LN_HALF
-            torch.log1p(-torch.exp(logp_zero_capped))  # For logp < LN_HALF
-        )
-        return result
