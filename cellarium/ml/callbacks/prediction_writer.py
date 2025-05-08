@@ -65,8 +65,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
     """
 
     def __init__(
-            self,
-            multilabel_flag: bool, 
+            self, 
             output_dir: Path | str,
             co_resource_path: str, 
             output_csv_path: str,
@@ -77,7 +76,6 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         self.co_resource_path = co_resource_path
         self.output_csv_path = output_csv_path
         self.columns = np.char.replace(read_pkl_from_gcs(csv_columns_path),':',"_")
-        self.multilabel_flag = multilabel_flag
 
     def write_on_batch_end(
         self,
@@ -90,10 +88,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         dataloader_idx: int,
     ) -> None:
         pred = prediction["cell_type_probs_nc"]
-        if self.multilabel_flag:
-            y_n = batch['y_n_predict'] # use for model variation 4 predictions when multiple classes are targets
-        else:
-            y_n = batch['y_n'].cpu().numpy()
+        y_n = batch['y_n'].cpu().numpy()
         y_n_cell_type_ids = np.take(self.columns,y_n)
 
         write_prediction(
