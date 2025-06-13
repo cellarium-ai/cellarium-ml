@@ -1,0 +1,25 @@
+augment_training_data: true
+batch_size: 2048
+epsilon: 1.0e-15
+gamma: 1.3
+gene_dim: 19331
+lambda_sparse: 1.0e-05
+learning_rate: 0.005
+lr_scheduler: !!python/name:torch.optim.lr_scheduler.StepLR ''
+lr_scheduler_kwargs:
+  gamma: 0.9
+  step_size: 1
+  verbose: true
+mask_type: entmax
+momentum: 0.02
+n_a: 64
+n_d: 128
+n_independent: 5
+n_shared: 3
+n_steps: 1
+optimizer: !!python/name:torch.optim.adamw.AdamW ''
+train_set_size: 15240192
+type_dim: 164
+val_set_size: 3500032
+virtual_batch_size: 256
+weight_decay: 0.05

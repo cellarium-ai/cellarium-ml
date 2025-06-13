@@ -1,0 +1,169 @@
+# lightning.pytorch==2.2.1
+seed_everything: true
+trainer:
+  accelerator: gpu
+  strategy: auto
+  devices: 1
+  num_nodes: 1
+  precision: 32-true
+  logger: null
+  callbacks: null
+  fast_dev_run: false
+  max_epochs: 6
+  min_epochs: null
+  max_steps: -1
+  min_steps: null
+  max_time: null
+  limit_train_batches: null
+  limit_val_batches: null
+  limit_test_batches: null
+  limit_predict_batches: null
+  overfit_batches: 0.0
+  val_check_interval: null
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: null
+  log_every_n_steps: 20
+  enable_checkpointing: null
+  enable_progress_bar: null
+  enable_model_summary: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: null
+  gradient_clip_algorithm: null
+  deterministic: null
+  benchmark: null
+  inference_mode: true
+  use_distributed_sampler: true
+  profiler: null
+  detect_anomaly: false
+  barebones: false
+  plugins: null
+  sync_batchnorm: false
+  reload_dataloaders_every_n_epochs: 0
+  # default_root_dir: gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/model_predictions/Model_variation_5_alpha_one_normalized/missing_hop_scores_new
+  default_root_dir: /home/nmagre/P1_logistic_regression/single_branch_trials/test/m3_670
+  callbacks:
+  - class_path: cellarium.ml.callbacks.PredictionWriter
+    init_args:
+      # output_dir: "gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/model_predictions/Model_variation_5_alpha_one_normalized/missing_hop_scores_new"
+      output_dir: "/home/nmagre/P1_logistic_regression/single_branch_trials/test/m3_670"
+      co_resource_path: "gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/shared_meta/dev_benchmarking_june_2024_metadata_benchmarking_resource_schema_5-0.pickle"
+      # output_csv_path: "gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/model_predictions/Model_variation_5_alpha_one_normalized/missing_hop_scores_new/hop_scores_extract_66_73_" 
+      output_csv_path: "/home/nmagre/P1_logistic_regression/single_branch_trials/test/m3_670/hop_scores_extract_66_73_" 
+      csv_columns_path: "gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human_sublist.pkl"
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
+      log_momentum: false
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      every_n_train_steps: 1000
+      save_top_k: -1
+model:
+  optim_fn: torch.optim.Adam
+  optim_kwargs:
+    lr: 5e-3 
+  cpu_transforms:
+  - class_path: cellarium.ml.transforms.EncodedTargets
+    init_args:
+      unique_cell_types_nparray_path: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human_sublist.pkl
+  transforms:
+  - class_path: cellarium.ml.transforms.NormalizeTotal
+    init_args:
+      target_count: 10000
+      eps: 1.0e-06
+  - class_path: cellarium.ml.transforms.Log1p
+  - class_path: cellarium.ml.transforms.DivideByScale
+    init_args:
+      scale_g:
+        !CheckpointLoader
+        file_path: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/tdigest_NT_log1p_lrexp_human/lightning_logs/version_0/checkpoints/epoch=0-step=420.ckpt
+        attr: model.median_g
+        convert_fn: torch.Tensor.float
+      var_names_g:
+        !CheckpointLoader
+        file_path: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/tdigest_NT_log1p_lrexp_human/lightning_logs/version_0/checkpoints/epoch=0-step=420.ckpt
+        attr: model.var_names_g
+        convert_fn: null
+  - class_path: cellarium.ml.transforms.Filter
+    init_args:
+      filter_list:
+        !FileLoader
+        file_path: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/features_TPM_above_1_intersection_with_CAS_lrexp_human_train.csv
+        loader_fn: pandas.read_csv
+        attr: original_feature_id
+        convert_fn: pandas.Series.to_list
+  model:
+    class_path: cellarium.ml.models.CustomLogisticRegression
+    init_args:
+      W_prior_scale: 1e-2 
+      W_init_scale: 1.0
+      seed: 0
+      actual_categories:  670 #total targets for validation
+      out_distribution: 'Categorical' #training
+      target_row_descendent_col_torch_tensor_path: 'gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/target_row_descendent_col_torch_tensor_lrexp_human_sublist.pkl'
+      probability_propagation_flag: False #used for both training and validation
+      log_metrics: true
+      y_categories_path: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/final_filtered_sorted_unique_cells_lrexp_human_sublist.pkl
+      valid_mask_path: 'gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/shared_meta/sublist_indices.pkl'
+      
+  scheduler_fn: torch.optim.lr_scheduler.SequentialLR
+  scheduler_kwargs:
+    schedulers: 
+      - scheduler_fn: torch.optim.lr_scheduler.LinearLR
+        scheduler_kwargs:
+          start_factor: 0.0001 
+          end_factor: 1.0
+          total_iters: 12299
+      - scheduler_fn: torch.optim.lr_scheduler.CosineAnnealingLR
+        scheduler_kwargs: 
+          T_max: 49196
+    milestones: 
+      - 12299
+  is_initialized: false
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      # filenames: gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/extract_files/extract_{1..110}.h5ad
+      # limits: [8693, 12956, 16896, 49407, 57195, 61163, 61684, 62936, 64553, 65368, 66284, 72537, 73711, 74759, 75635, 76570, 77914, 79987, 89967, 100799, 101968, 103184, 106056, 107108, 108176, 109395, 110646, 111899, 125927, 135059, 140795, 146969, 155139, 165746, 173109, 178867, 186253, 190778, 198709, 204513, 239983, 249512, 271896, 290527, 303337, 309606, 327033, 328923, 332195, 334506, 338210, 343458, 345600, 354916, 363470, 364217, 369365, 373212, 377919, 380093, 382522, 383854, 385326, 388167, 390112, 391733, 393283, 397449, 398677, 400859, 406385, 410028, 419696, 422089, 429481, 433011, 441636, 446916, 457561, 481609, 483546, 492671, 493914, 499775, 506518, 507650, 518135, 523923, 531442, 537705, 545592, 549987, 555829, 568174, 589828, 596122, 597764, 602180, 605076, 606390, 609169, 611075, 612677, 617466, 621225, 630556, 638399, 642790, 644499, 647710]
+      filenames: gs://cellarium-file-system/curriculum/lrexp_human_validation_split_20241126/extract_files/extract_{1..2}.h5ad
+      limits: [8693, 12956]
+      # [12345, 33999, 40293] # 94_96
+      # [1937,11062,12305,18166,24909] #81_85
+      # [1621,3171,7337,8565,10747,16273,19916,29584] #66_73
+      max_cache_size: 20
+      cache_size_strictly_enforced: true
+      label: null
+      keys: null
+      index_unique: null
+      convert: null
+      indices_strict: true
+      obs_columns_to_validate:
+        - total_mrna_umis
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
+    var_names_g:
+      attr: var_names
+    total_mrna_umis_n:
+      attr: obs
+      key: total_mrna_umis
+    y_n:
+      attr: obs
+      key: cell_type_ontology_term_id
+      convert_fn: cellarium.ml.utilities.data.filter_categories
+    obs_names_n:
+      attr: obs_names
+      convert_fn: cellarium.ml.utilities.data.filter_categories
+  batch_size: 13000
+  iteration_strategy: cache_efficient
+  shuffle: false
+  seed: 0
+  drop_last_indices: False
+  test_mode: false
+  num_workers: 4
+  drop_incomplete_batch: false
+  prefetch_factor: null
+  persistent_workers: false
+ckpt_path: "gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/Base_model_regular_lr/lightning_logs/version_3/checkpoints/last.ckpt"
