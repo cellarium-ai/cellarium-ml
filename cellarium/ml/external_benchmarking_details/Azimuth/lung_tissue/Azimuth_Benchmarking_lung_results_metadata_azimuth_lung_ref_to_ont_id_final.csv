@@ -1,0 +1,68 @@
+,azimuth_label,ontology_cell_name,cell_id
+0,Alveolar Epithelial Type 1,type I pneumocyte,CL:0002062
+1,B,B cell,CL:0000236
+2,Basal,basal cell,CL:0000646
+3,CD14+ Monocyte,"CD14-positive, CD16-negative classical monocyte",CL:0002057
+4,CD4 T,"CD4-positive, alpha-beta T cell",CL:0000624
+5,Ciliated,ciliated cell,CL:0000064
+6,Dendritic,dendritic cell,CL:0000451
+7,Fibroblast,fibroblast,CL:0000057
+8,Lymphatic,endothelial cell of lymphatic vessel,CL:0002138
+9,Macrophage,macrophage,CL:0000235
+10,Natural Killer,natural killer cell,CL:0000623
+11,Plasma,plasma cell,CL:0000786
+12,Alveolar Epithelial Type 2,type II pneumocyte,CL:0002063
+13,Basophil/Mast,myeloid leukocyte,CL:0000766
+14,CD16+ Monocyte,"CD14-low, CD16-positive monocyte",CL:0002396
+15,Capillary,capillary endothelial cell,CL:0002144
+16,CD8 T,"CD8-positive, alpha-beta T cell",CL:0000625
+17,Club,club cell,CL:0000158
+18,Myofibroblast,myofibroblast cell,CL:0000186
+19,Plasmacytoid Dendritic,plasmacytoid dendritic cell,CL:0000784
+20,Proliferating Macrophage,macrophage,CL:0000235
+21,Proliferating NK/T,lymphocyte,CL:0000542
+22,Bronchial Vessel,bronchial epithelial cell,CL:0002328
+23,Mucous,mucus secreting cell,CL:0000319
+24,Vein,vein endothelial cell,CL:0002543
+25,Pericyte,pericyte,CL:0000669
+26,Smooth Muscle,smooth muscle cell,CL:0000192
+27,Artery,endothelial cell of artery,CL:1000413
+28,Capillary Aerocyte,capillary endothelial cell,CL:0002144
+29,Capillary Intermediate,capillary endothelial cell,CL:0002144
+30,Lipofibroblast,fibroblast,CL:0000057
+31,Mesothelial,mesothelial cell,CL:0000077
+32,Platelet/Megakaryocyte,myeloid cell,CL:0000763
+33,Natural Killer T,mature NK T cell,CL:0000814
+34,Fibromyocyte,smooth muscle cell,CL:0000192
+35,Goblet,goblet cell,CL:0000160
+36,Ionocyte,ionocyte,CL:0005006
+37,Neuroendocrine,neuroendocrine cell,CL:0000165
+38,Serous,serous secreting cell,CL:0000313
+39,Adventitial Fibroblast,fibroblast,CL:0000057
+41,Alveolar Fibroblast,fibroblast,CL:0000057
+43,CD4+ Memory/Effector T,"CD4-positive, alpha-beta T cell",CL:0000624
+45,Classical Monocyte,classical monocyte,CL:0000860
+51,OLR1+ Classical Monocyte,classical monocyte,CL:0000860
+54,Intermediate Monocyte,intermediate monocyte,CL:0002393
+55,Myeloid Dendritic Type 1,myeloid dendritic cell,CL:0000782
+56,Myeloid Dendritic Type 2,myeloid dendritic cell,CL:0000782
+62,Bronchial Vessel 1,bronchial epithelial cell,CL:0002328
+63,CD8+ Naive T,"naive thymus-derived CD8-positive, alpha-beta T cell",CL:0000900
+66,Airway Smooth Muscle,smooth muscle cell,CL:0000192
+67,EREG+ Dendritic,dendritic cell,CL:0000451
+70,Basophil/Mast 1,myeloid leukocyte,CL:0000766
+72,Capillary Intermediate 2,capillary endothelial cell,CL:0002144
+73,Bronchial Vessel 2,bronchial epithelial cell,CL:0002328
+74,IGSF21+ Dendritic,dendritic cell,CL:0000451
+75,Proliferating Basal,basal cell,CL:0000646
+76,Nonclassical Monocyte,non-classical monocyte,CL:0000875
+77,CD8+ Memory/Effector T,"CD8-positive, alpha-beta T cell",CL:0000625
+78,CD4+ Naive T,"naive thymus-derived CD4-positive, alpha-beta T cell",CL:0000895
+79,Differentiating Basal,basal cell,CL:0000646
+83,TREM2+ Dendritic,dendritic cell,CL:0000451
+84,Signaling Alveolar Epithelial Type 2,type II pneumocyte,CL:0002063
+86,Capillary Intermediate 1,capillary endothelial cell,CL:0002144
+87,Vascular Smooth Muscle,vascular associated smooth muscle cell,CL:0000359
+88,Basophil/Mast 2,myeloid leukocyte,CL:0000766
+93,Proximal Basal,basal cell,CL:0000646
+94,Proximal Ciliated,ciliated cell,CL:0000064
