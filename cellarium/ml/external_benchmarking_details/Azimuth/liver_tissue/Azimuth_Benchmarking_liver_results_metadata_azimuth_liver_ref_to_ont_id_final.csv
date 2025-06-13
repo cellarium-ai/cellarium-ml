@@ -1,0 +1,28 @@
+,azimuth_label,ontology_cell_name,cell_id
+0,B,B cell,CL:0000236
+1,Cholangiocyte,cholangiocyte,CL:1000488
+2,Endothelial,endothelial cell,CL:0000115
+3,Hepatocyte,hepatocyte,CL:0000182
+4,HSC/mFB,hematopoietic stem cell,CL:0000037
+5,Myeloid,myeloid cell,CL:0000763
+6,Plasma,plasma cell,CL:0000786
+7,T/NK,T cell,CL:0000084
+8,CD4 T,"CD4-positive, alpha-beta T cell",CL:0000624
+9,CD8 T,"CD8-positive, alpha-beta T cell",CL:0000625
+10,DC1,conventional dendritic cell,CL:0000990
+11,DC2,plasmacytoid dendritic cell,CL:0000784
+12,Erythrocyte,erythrocyte,CL:0000232
+13,HSC,hematopoietic stem cell,CL:0000037
+14,Inflammatory Macrophage,inflammatory macrophage,CL:0000863
+15,Mast,mast cell,CL:0000097
+16,Monocyte,monocyte,CL:0000576
+17,Myofibroblast,myofibroblast cell,CL:0000186
+18,NK,natural killer cell,CL:0000623
+19,NK_CD56bright,"CD16-negative, CD56-bright natural killer cell, human",CL:0000938
+20,Noninflammatory Macrophage,macrophage,CL:0000235
+21,pDC,plasmacytoid dendritic cell,CL:0000784
+22,Portal Fibroblast,hepatic portal fibroblast,CL:0009100
+23,Proliferating T/NK,T cell,CL:0000084
+24,Sinusoidal Endothelial,endothelial cell of sinusoid,CL:0002262
+25,Vascual Central Venous Endothelial,endothelial cell of pericentral hepatic sinusoid,CL:0019022
+26,Vascual Portal Endothelial,endothelial cell of hepatic portal vein,CL:0009094

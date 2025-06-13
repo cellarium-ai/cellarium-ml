@@ -1,0 +1,95 @@
+azimuth_label,cell_name,cell_id
+Mono,monocyte,CL:0000576
+CD4 T,"CD4-positive, alpha-beta T cell",CL:0000624
+CD8 T,"CD8-positive, alpha-beta T cell",CL:0000625
+NK,natural killer cell,CL:0000623
+B,mature B cell,CL:0000785
+other T,mature T cell,CL:0002419
+DC,dendritic cell,CL:0000451
+B intermediate,mature B cell,CL:0000785
+B memory,memory B cell,CL:0000787
+B naive,naive B cell,CL:0000788
+Plasmablast,plasmablast,CL:0000980
+CD4 CTL,"CD4-positive, alpha-beta cytotoxic T cell",CL:0000934
+CD4 Naive,"naive thymus-derived CD4-positive, alpha-beta T cell",CL:0000895
+CD4 Proliferating,"activated CD4-positive, alpha-beta T cell",CL:0000896
+CD4 TCM,"CD4-positive, alpha-beta memory T cell",CL:0000897
+CD4 TEM,"effector CD4-positive, alpha-beta T cell",CL:0001044
+Treg,regulatory T cell,CL:0000815
+CD8 Naive,"naive thymus-derived CD8-positive, alpha-beta T cell",CL:0000900
+CD8 Proliferating,"activated CD8-positive, alpha-beta T cell",CL:0000906
+CD8 TCM,"CD8-positive, alpha-beta memory T cell",CL:0000909
+CD8 TEM,"effector CD8-positive, alpha-beta T cell",CL:0001050
+ASDC,dendritic cell,CL:0000451
+cDC1,CD141-positive myeloid dendritic cell,CL:0002394
+cDC2,CD1c-positive myeloid dendritic cell,CL:0002399
+pDC,plasmacytoid dendritic cell,CL:0000784
+CD14 Mono,"CD14-positive, CD16-negative classical monocyte",CL:0002057
+CD16 Mono,"CD14-low, CD16-positive monocyte",CL:0002396
+NK,"CD16-positive, CD56-dim natural killer cell, human",CL:0000939
+NK Proliferating,natural killer cell,CL:0000623
+NK_CD56bright,"CD16-negative, CD56-bright natural killer cell, human",CL:0000938
+Eryth,erythroid lineage cell,CL:0000764
+HSPC,hematopoietic precursor cell,CL:0008001
+ILC,innate lymphoid cell,CL:0001065
+Platelet,platelet,CL:0000233
+dnT,"CD4-negative, CD8-negative, alpha-beta intraepithelial T cell",CL:0000935
+gdT,gamma-delta T cell,CL:0000798
+MAIT,mucosal invariant T cell,CL:0000940
+ASDC_mDC,myeloid dendritic cell,CL:0000782
+ASDC_pDC,plasmacytoid dendritic cell,CL:0000784
+B intermediate kappa,mature B cell,CL:0000785
+B intermediate lambda,mature B cell,CL:0000785
+B memory kappa,memory B cell,CL:0000787
+B memory lambda,memory B cell,CL:0000787
+B naive kappa,naive B cell,CL:0000788
+B naive lambda,naive B cell,CL:0000788
+CD14 Mono,"CD14-positive, CD16-negative classical monocyte",CL:0002057
+CD16 Mono,"CD14-low, CD16-positive monocyte",CL:0002396
+CD4 CTL,"CD4-positive, alpha-beta cytotoxic T cell",CL:0000934
+CD4 Naive,"naive thymus-derived CD4-positive, alpha-beta T cell",CL:0000895
+CD4 Proliferating,"activated CD4-positive, alpha-beta T cell",CL:0000896
+CD4 TCM_1,"CD4-positive, alpha-beta memory T cell",CL:0000897
+CD4 TCM_2,"CD4-positive, alpha-beta memory T cell",CL:0000897
+CD4 TCM_3,"CD4-positive, alpha-beta memory T cell",CL:0000897
+CD4 TEM_1,"effector CD4-positive, alpha-beta T cell",CL:0001044
+CD4 TEM_2,"effector CD4-positive, alpha-beta T cell",CL:0001044
+CD4 TEM_3,"effector CD4-positive, alpha-beta T cell",CL:0001044
+CD4 TEM_4,"effector CD4-positive, alpha-beta T cell",CL:0001044
+CD8 Naive,"naive thymus-derived CD8-positive, alpha-beta T cell",CL:0000900
+CD8 Naive_2,"naive thymus-derived CD8-positive, alpha-beta T cell",CL:0000900
+CD8 Proliferating,"activated CD8-positive, alpha-beta T cell",CL:0000906
+CD8 TCM_1,"CD8-positive, alpha-beta memory T cell",CL:0000909
+CD8 TCM_2,"CD8-positive, alpha-beta memory T cell",CL:0000909
+CD8 TCM_3,"CD8-positive, alpha-beta memory T cell",CL:0000909
+CD8 TEM_1,"effector CD8-positive, alpha-beta T cell",CL:0001050
+CD8 TEM_2,"effector CD8-positive, alpha-beta T cell",CL:0001050
+CD8 TEM_3,"effector CD8-positive, alpha-beta T cell",CL:0001050
+CD8 TEM_4,"effector CD8-positive, alpha-beta T cell",CL:0001050
+CD8 TEM_5,"effector CD8-positive, alpha-beta T cell",CL:0001050
+CD8 TEM_6,"effector CD8-positive, alpha-beta T cell",CL:0001050
+cDC1,CD141-positive myeloid dendritic cell,CL:0002394
+cDC2_1,CD1c-positive myeloid dendritic cell,CL:0002399
+cDC2_2,CD1c-positive myeloid dendritic cell,CL:0002399
+dnT_1,"CD4-negative, CD8-negative, alpha-beta intraepithelial T cell",CL:0000935
+dnT_2,"CD4-negative, CD8-negative, alpha-beta intraepithelial T cell",CL:0000935
+Eryth,erythroid lineage cell,CL:0000764
+gdT_1,gamma-delta T cell,CL:0000798
+gdT_2,gamma-delta T cell,CL:0000798
+gdT_3,gamma-delta T cell,CL:0000798
+gdT_4,gamma-delta T cell,CL:0000798
+HSPC,hematopoietic precursor cell,CL:0008001
+ILC,innate lymphoid cell,CL:0001065
+MAIT,mucosal invariant T cell,CL:0000940
+NK Proliferating,natural killer cell,CL:0000623
+NK_1,"CD16-positive, CD56-dim natural killer cell, human",CL:0000939
+NK_2,"CD16-positive, CD56-dim natural killer cell, human",CL:0000939
+NK_3,"CD16-positive, CD56-dim natural killer cell, human",CL:0000939
+NK_4,"CD16-positive, CD56-dim natural killer cell, human",CL:0000939
+NK_CD56bright,"CD16-negative, CD56-bright natural killer cell, human",CL:0000938
+pDC,plasmacytoid dendritic cell,CL:0000784
+Plasma,plasma cell,CL:0000786
+Plasmablast,plasmablast,CL:0000980
+Platelet,platelet,CL:0000233
+Treg Memory,regulatory T cell,CL:0000815
+Treg Naive,regulatory T cell,CL:0000815

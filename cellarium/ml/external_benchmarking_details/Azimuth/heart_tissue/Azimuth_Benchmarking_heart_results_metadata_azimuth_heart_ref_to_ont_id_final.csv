@@ -1,0 +1,25 @@
+,azimuth_label,ontology_cell_name,cell_id
+0,Adipocyte,adipocyte,CL:0000136
+1,B,B cell,CL:0000236
+2,Cardiomyocyte,cardiac muscle cell,CL:0000746
+3,Endothelial,endothelial cell,CL:0000115
+4,Fibroblast,fibroblast,CL:0000057
+5,Lymphatic Endothelial,endothelial cell of lymphatic vessel,CL:0002138
+6,Mast,mast cell,CL:0000097
+7,Mesothelial,mesothelial cell,CL:0000077
+8,Myeloid,myeloid cell,CL:0000763
+9,Neuronal,neuron,CL:0000540
+10,NK/T,natural killer cell,CL:0000623
+11,Pericyte,pericyte,CL:0000669
+12,Smooth Muscle,smooth muscle cell,CL:0000192
+14,Arterial Endothelial,endothelial cell of artery,CL:1000413
+15,Atrial Cardiomyocyte,neuron,CL:0000540
+17,Capillary Endothelial,capillary endothelial cell,CL:0002144
+18,Endocardial,endocardial cell,CL:0002350
+21,ILC,innate lymphoid cell,CL:0001065
+23,Macrophage,macrophage,CL:0000235
+26,Monocyte/cDC,monocyte,CL:0000576
+28,NK,natural killer cell,CL:0000623
+31,T,T cell,CL:0000084
+32,Venous Endothelial,vein endothelial cell,CL:0002543
+33,Ventricular Cardiomyocyte,cardiac muscle cell,CL:0000746

@@ -1,0 +1,59 @@
+,azimuth_label,ontology_cell_name,cell_id
+0,Afferent / Efferent Arteriole Endothelial,kidney afferent arteriole endothelial cell,CL:1001096
+1,Ascending Thin Limb,kidney loop of Henle thin ascending limb epithelial cell,CL:1001107
+2,Ascending Vasa Recta Endothelial,vasa recta ascending limb cell,CL:1001131
+3,B,mature B cell,CL:0000785
+4,Classical Dendritic,dendritic cell,CL:0000451
+5,Connecting Tubule,kidney connecting tubule epithelial cell,CL:1000768
+6,Connecting Tubule Intercalated Type A,renal alpha-intercalated cell,CL:0005011
+7,Connecting Tubule Principal,kidney collecting duct principal cell,CL:1001431
+8,Cortical Collecting Duct Intercalated Type A,renal alpha-intercalated cell,CL:0005011
+9,Cortical Collecting Duct Principal,kidney collecting duct principal cell,CL:1001431
+10,Cortical Thick Ascending Limb,kidney loop of Henle cortical thick ascending limb epithelial cell,CL:1001109
+11,Cortical Vascular Smooth Muscle / Pericyte,vascular associated smooth muscle cell,CL:0000359
+12,Cycling Mononuclear Phagocyte,mononuclear phagocyte,CL:0000113
+13,Descending Thin Limb Type 1,kidney loop of Henle thin descending limb epithelial cell,CL:1001111
+14,Descending Thin Limb Type 2,kidney loop of Henle thin descending limb epithelial cell,CL:1001111
+15,Descending Thin Limb Type 3,kidney loop of Henle thin descending limb epithelial cell,CL:1001111
+16,Descending Vasa Recta Endothelial,vasa recta descending limb cell,CL:1001285
+17,Distal Convoluted Tubule Type 1,kidney distal convoluted tubule epithelial cell,CL:1000849
+18,Distal Convoluted Tubule Type 2,kidney distal convoluted tubule epithelial cell,CL:1000849
+19,Fibroblast,fibroblast,CL:0000057
+20,Glomerular Capillary Endothelial,glomerular capillary endothelial cell,CL:1001005
+21,Inner Medullary Collecting Duct,kidney inner medulla collecting duct epithelial cell,CL:1000547
+22,Intercalated Type B,renal beta-intercalated cell,CL:0002201
+23,Lymphatic Endothelial,endothelial cell of lymphatic vessel,CL:0002138
+24,M2 Macrophage,macrophage,CL:0000235
+25,Macula Densa,macula densa epithelial cell,CL:1000850
+26,Mast,mast cell,CL:0000097
+27,Medullary Fibroblast,fibroblast,CL:0000057
+28,Medullary Thick Ascending Limb,kidney loop of Henle medullary thick ascending limb epithelial cell,CL:1001108
+29,Mesangial,mesangial cell,CL:0000650
+30,Monocyte-derived,monocyte,CL:0000576
+31,Natural Killer T,lymphocyte,CL:0000542
+32,Neutrophil,neutrophil,CL:0000775
+33,Non-classical monocyte,monocyte,CL:0000576
+34,Outer Medullary Collecting Duct Intercalated Type A,kidney outer medulla collecting duct intercalated cell,CL:1000717
+35,Outer Medullary Collecting Duct Principal,kidney outer medulla collecting duct principal cell,CL:1000716
+36,Papillary Tip Epithelial,papillary tips cell,CL:1000597
+37,Parietal Epithelial,parietal epithelial cell,CL:1000452
+38,Peritubular Capilary Endothelial,peritubular capillary endothelial cell,CL:1001033
+39,Plasma,plasma cell,CL:0000786
+40,Plasmacytoid Dendritic,plasmacytoid dendritic cell,CL:0000784
+41,Podocyte,glomerular visceral epithelial cell,CL:0000170
+42,Proximal Tubule Epithelial Segment 1,epithelial cell of proximal tubule,CL:0002306
+43,Proximal Tubule Epithelial Segment 2,epithelial cell of proximal tubule,CL:0002306
+44,Proximal Tubule Epithelial Segment 3,epithelial cell of proximal tubule,CL:0002306
+45,Renin-positive Juxtaglomerular Granular,kidney granular cell,CL:0000648
+46,Schwann / Neural,Schwann cell,CL:0002573
+47,T,T cell,CL:0000084
+48,Vascular Smooth Muscle / Pericyte,vascular associated smooth muscle cell,CL:0000359
+64,Distal Convoluted Tubule,kidney distal convoluted tubule epithelial cell,CL:1000849
+92,Descending Thin Limb,kidney loop of Henle thin descending limb epithelial cell,CL:1001111
+94,Endothelial,endothelial cell,CL:0000115
+96,Immune,leukocyte,CL:0000738
+97,Intercalated,renal intercalated cell,CL:0005010
+99,Principal,renal principal cell,CL:0005009
+100,Proximal Tubule,epithelial cell of proximal tubule,CL:0002306
+101,Schwann,Schwann cell,CL:0002573
+102,Thick Ascending Limb,kidney loop of Henle thick ascending limb epithelial cell,CL:1001106
