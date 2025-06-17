@@ -1,10 +1,10 @@
-# Cellarium ML: Ontology-Aware Cell Type Annotation using scRNA-seq Data
+*Cellarium ML: Ontology-Aware Cell Type Annotation using scRNA-seq Data*
 
 **This branch implements ontology-aware probabilistic models for annotating cell types using single-cell RNA sequencing data. It builds upon the core infrastructure of the Cellarium ML library and introduces a lightweight logistic regression-based model with hierarchical consistency and an ontology-aware evaluation metric.**
 
 ---
 
-## 🔬 Project Overview
+🔬 Project Overview
 
 Current cell type annotation methods often overlook the hierarchical structure of cell types defined in the Cell Ontology. This can lead to inconsistent probabilistic outputs and suboptimal benchmarking. In this work, we address these limitations by introducing:
 
@@ -16,7 +16,7 @@ These additions emphasize *annotation over rigid classification* and improve bio
 
 ---
 
-## 📁 Code Organization
+📁 Code Organization
 
 This branch extends the main Cellarium ML repository with the following new components:
 
@@ -30,7 +30,7 @@ This branch extends the main Cellarium ML repository with the following new comp
 
 ---
 
-## 🚀 Getting Started
+🚀 Getting Started
 
 To install the package and run this specific model:
 
@@ -56,7 +56,7 @@ custom_logistic_regression --predict --config SOCAM_test_base_model_config.yaml
 
 ---
 
-## 📊 Results
+📊 Results
 
 We show that:
 
