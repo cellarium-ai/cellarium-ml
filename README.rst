@@ -1,3 +1,70 @@
+# Cellarium ML: Ontology-Aware Cell Type Annotation using scRNA-seq Data
+
+**This branch implements ontology-aware probabilistic models for annotating cell types using single-cell RNA sequencing data. It builds upon the core infrastructure of the Cellarium ML library and introduces a lightweight logistic regression-based model with hierarchical consistency and an ontology-aware evaluation metric.**
+
+---
+
+## 🔬 Project Overview
+
+Current cell type annotation methods often overlook the hierarchical structure of cell types defined in the Cell Ontology. This can lead to inconsistent probabilistic outputs and suboptimal benchmarking. In this work, we address these limitations by introducing:
+
+- **Hierarchical Probability Propagation**: A strategy that ensures predictions are consistent with ontological parent-child relationships.
+- **Ontology-Aware Evaluation**: A novel *hop-based F1 scoring* scheme that rewards predictions based on their semantic proximity in the ontology graph.
+- **Lightweight Logistic Regression Model**: A scalable model that integrates ontological constraints into a fast, interpretable classification pipeline.
+
+These additions emphasize *annotation over rigid classification* and improve biological interpretability.
+
+---
+
+## 📁 Code Organization
+
+This branch extends the main Cellarium ML repository with the following new components:
+
+- `cellarium/ml/models/custom_logistic_regression`: Contains the modified logistic regression model adapted to handle hierarchical annotation using probability propagation.
+- `cellarium/ml/hop_scoring/hop_score_calculation.py`: Implements the hop-based F1 score for ontology-aware benchmarking.
+- `cellarium/ml/categorical_distribution/categorical_distribution.py`: Builds over the skeleton base categorical distribution class defined by Pytorch to not perform the normalization step for input propagated probabilities.
+- `cellarium/ml/callbacks/prediction_writer.py`: Converts model predictions to hop score outputs and saves df in csv format to the specified GCS/local directory.
+- `cellarium/ml/sample_config_files`: Contains YAML configuration files for training and validation runs.
+- `cellarium/ml/metadata_files`: Contains important metadata files required to train and validate the custom logistic regression models. The paths to these files are specified in the config files.
+- `cellarium/ml/external_benchmarking_details:` Contains mappings for gene names and cell types as well as lists of cell types that are common between the external benchmarking methods and SOCAM. The external benchmarking models include Azimuth, CAS, OnClass and ScTab.
+
+---
+
+## 🚀 Getting Started
+
+To install the package and run this specific model:
+
+```bash
+bash
+CopyEdit
+git clone --single-branch --branch SOCAM https://github.com/cellarium-ai/cellarium-ml.git
+cd cellarium-ml
+make install
+
+```
+
+To train the logistic regression model with hierarchical constraints:
+
+```bash
+bash
+CopyEdit
+To run model training:
+custom_logistic_regression --fit --config SOCAM_train_base_model_config.yaml
+To run model inference:
+custom_logistic_regression --predict --config SOCAM_test_base_model_config.yaml
+```
+
+---
+
+## 📊 Results
+
+We show that:
+
+- The proposed method improves hierarchical consistency of predicted probabilities.
+- Ontology-aware F1 score correlates better with expert annotation consensus than traditional F1 metrics.
+- The model is scalable to millions of cells and thousands of labels.
+
+---
 *Cellarium ML: distributed single-cell data analysis.*
 
 ---------
