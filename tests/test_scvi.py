@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Literal, Sequence, TypedDict
 
+import anndata
 import lightning.pytorch as pl
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.models import SingleCellVariationalInference
+from cellarium.ml.models.scvi import EncoderSCVI
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDatasetSCVI
 
@@ -332,8 +334,7 @@ def test_vae_architectures():
         },
     ]
     print(
-        "batch injection in both encoder and decoder with "
-        "decoder final additive bias with batch embedded and sampled"
+        "batch injection in both encoder and decoder with decoder final additive bias with batch embedded and sampled"
     )
     print(kwargs6)
     model = SingleCellVariationalInference(**kwargs6)
@@ -366,4 +367,160 @@ def test_vae_architectures():
             categorical_covariate_np=None,
             inverse_overdispersion=model.px_r.exp(),
             library_size_n1=batch["x_ng"].float().sum(dim=-1, keepdim=True),
+        )
+
+
+@pytest.mark.parametrize(
+    "use_batch_norm,use_layer_norm",
+    [
+        (False, False),
+        (True, False),
+        (False, True),
+    ],
+    ids=["no_norm", "batch_norm", "layer_norm"],
+)
+@pytest.mark.parametrize("n_layers", [1, 2], ids=["one_layer", "two_layers"])
+@pytest.mark.parametrize("hidden_size", [16, 32], ids=["hidden_16", "hidden_32"])
+def test_encoder_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layers, hidden_size):
+    try:
+        import scvi
+        from scvi.nn import Encoder as SCVIEncoder
+    except ImportError:
+        pytest.skip("scvi-tools is not installed, skipping test")
+
+    # Setup test data
+    n, g = 100, 50
+    var_names_g = [f"gene_{i}" for i in range(g)]
+    X = np.random.poisson(lam=2.0, size=(n, g))
+    batch_indices = np.random.randint(0, 2, size=n)
+
+    # Create anndata for scvi-tools
+    adata = anndata.AnnData(X)
+    adata.var_names = var_names_g
+    adata.obs["batch"] = batch_indices
+    scvi.model.SCVI.setup_anndata(adata, batch_key="batch")
+
+    # set params
+    dropout_rate = 0.0
+    n_layers = 1  # number of hidden layers in the encoder
+
+    # Initialize scvi-tools encoder
+    scvi_encoder = SCVIEncoder(
+        n_input=g,
+        n_output=10,  # n_latent
+        n_cat_list=[2],  # assuming 2 batches for this example
+        n_hidden=hidden_size,
+        n_layers=n_layers,
+        dropout_rate=dropout_rate,
+        distribution="normal",
+        use_batch_norm=use_batch_norm,
+        use_layer_norm=use_layer_norm,
+    )
+
+    # Initialize Cellarium encoder with matching architecture
+    cellarium_encoder = EncoderSCVI(
+        in_features=g,
+        out_features=10,  # n_latent
+        hidden_layers=[
+            {
+                "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                "init_args": {
+                    "out_features": hidden_size,
+                    "n_batch": 2,  # assuming 2 batches for this example
+                    "batch_to_bias_hidden_layers": [],
+                },
+                "dressing_init_args": {
+                    "use_batch_norm": use_batch_norm,
+                    "use_layer_norm": use_layer_norm,
+                    "dropout_rate": dropout_rate,
+                },
+            }
+        ]
+        + (n_layers - 1)
+        * [
+            {
+                "class_path": "torch.nn.Linear",
+                "init_args": {"out_features": hidden_size},
+                "dressing_init_args": {
+                    "use_batch_norm": use_batch_norm,
+                    "use_layer_norm": use_layer_norm,
+                    "dropout_rate": dropout_rate,
+                },
+            }
+        ],
+        final_layer={"class_path": "torch.nn.Linear", "init_args": {}},
+    )
+
+    # Set the same weights manually for both encoders
+    with torch.no_grad():
+        print("cellarium encoder")
+        print(cellarium_encoder)
+        print("scvi encoder")
+        print(scvi_encoder)
+
+        # Set FC layer weights for layer 1
+        cellarium_encoder.fully_connected.module_list[0].layer.weight.copy_(
+            scvi_encoder.encoder.fc_layers[0][0].weight[:, :g]
+        )
+        cellarium_encoder.fully_connected.module_list[0].layer.bias.copy_(scvi_encoder.encoder.fc_layers[0][0].bias[:g])
+
+        # set batch weights for layer 1
+        cellarium_encoder.fully_connected.module_list[0].layer.bias_decoder.module_list[0].weight.copy_(
+            scvi_encoder.encoder.fc_layers[0][0].weight[:, g:]
+        )
+
+        # set FC layer weights for subsequent layers
+        for i in range(1, n_layers):
+            cellarium_encoder.fully_connected.module_list[i].layer.weight.copy_(
+                scvi_encoder.encoder.fc_layers[i][0].weight
+            )
+            cellarium_encoder.fully_connected.module_list[i].layer.bias.copy_(scvi_encoder.encoder.fc_layers[i][0].bias)
+
+        # Set mean encoder weights
+        cellarium_encoder.mean_encoder.weight.copy_(scvi_encoder.mean_encoder.weight)
+        cellarium_encoder.mean_encoder.bias.copy_(scvi_encoder.mean_encoder.bias)
+
+        # Set var encoder weights
+        cellarium_encoder.var_encoder.weight.copy_(scvi_encoder.var_encoder.weight)
+        cellarium_encoder.var_encoder.bias.copy_(scvi_encoder.var_encoder.bias)
+
+        # set batch normalization parameters if they exist
+        if hasattr(scvi_encoder, "batch_norm"):
+            cellarium_encoder.batch_norm.weight.copy_(scvi_encoder.batch_norm.weight)
+            cellarium_encoder.batch_norm.bias.copy_(scvi_encoder.batch_norm.bias)
+            cellarium_encoder.batch_norm.running_mean.copy_(scvi_encoder.batch_norm.running_mean)
+            cellarium_encoder.batch_norm.running_var.copy_(scvi_encoder.batch_norm.running_var)
+
+    # Test on same input
+    x = torch.FloatTensor(X)
+    cellarium_batch_nb = torch.nn.functional.one_hot(
+        torch.from_numpy(batch_indices).squeeze().long(),
+        num_classes=2,
+    ).float()
+
+    # Get outputs
+    with torch.no_grad():
+        cellarium_dist = cellarium_encoder(x, cellarium_batch_nb, None)
+        scvi_out = scvi_encoder(x, cellarium_batch_nb)  # returns (mean, var, sample)
+
+        # Compare means and vars
+        print("Comparing Cellarium and scvi-tools encoder outputs")
+        print("Cellarium means:", cellarium_dist.loc[:1, :2])
+        print("scvi-tools means:", scvi_out[0][:1, :2])
+        print("Cellarium scales:", cellarium_dist.scale[:1, :2])
+        print("scvi-tools scales:", scvi_out[1][:1, :2])
+        torch.testing.assert_close(
+            cellarium_dist.loc,
+            scvi_out[0],
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"Encoder means do not match: cellarium {cellarium_dist.loc[:1, :2]} vs scvi {scvi_out[0][:1, :2]}",
+        )
+        torch.testing.assert_close(
+            cellarium_dist.scale.square(),
+            scvi_out[1],
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"Encoder scales do not match: cellarium {cellarium_dist.scale[:1, :2].square()} "
+            "vs scvi {scvi_out[1][:1, :2]}",
         )

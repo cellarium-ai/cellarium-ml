@@ -220,14 +220,14 @@ class EncoderSCVI(torch.nn.Module):
             final_layer["class_path"],
             in_features=self.fully_connected.out_features,
             out_features=out_features,
-            bias=final_layer["init_args"].pop("bias", True),
+            bias=final_layer["init_args"].get("bias", True),
             **final_layer["init_args"],
         )
         self.var_encoder = instantiate_from_class_path(
             final_layer["class_path"],
             in_features=self.fully_connected.out_features,
             out_features=out_features,
-            bias=final_layer["init_args"].pop("bias", True),
+            bias=final_layer["init_args"].get("bias", True),
             **final_layer["init_args"],
         )
         self.mean_encoder_takes_batch = isinstance(self.mean_encoder, LinearWithBatch)
@@ -368,9 +368,9 @@ class DecoderSCVI(torch.nn.Module):
 
         # optional inverse overdispersion per cell
         if inverse_overdispersion is None:
-            assert (
-                self.inverse_overdispersion_decoder is not None
-            ), "inverse_overdispersion must be provided when not using Poisson or gene-cell dispersion"
+            assert self.inverse_overdispersion_decoder is not None, (
+                "inverse_overdispersion must be provided when not using Poisson or gene-cell dispersion"
+            )
             inverse_overdispersion = self.inverse_overdispersion_decoder(q_nh).exp()
 
         # construct the count distribution
@@ -524,7 +524,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             self.px_r = torch.nn.Parameter(torch.zeros(1))  # dummy
         else:
             raise ValueError(
-                "dispersion must be one of ['gene', " " 'gene-label', 'gene-cell'], but input was " "{}".format(
+                "dispersion must be one of ['gene',  'gene-label', 'gene-cell'], but input was {}".format(
                     self.dispersion
                 )
             )
