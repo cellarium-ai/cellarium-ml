@@ -6,6 +6,7 @@ from typing import Any, Literal
 import torch
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
 
 from cellarium.ml.utilities.layers import create_initializer
 
@@ -16,6 +17,9 @@ except ImportError:
 
     def use_cs() -> bool:
         return False
+
+
+compiled_flex_attention = torch.compile(flex_attention, dynamic=False)
 
 
 class MultiHeadAttention(nn.Module):
@@ -36,7 +40,7 @@ class MultiHeadAttention(nn.Module):
         attention_backend:
             Backend for the attention computation.
         attention_softmax_fp32:
-            Whether to use float32 for softmax computation.
+            Whether to use float32 for softmax computation when ``torch`` backend is used.
         Wqkv_initializer:
             Initializer for the query, key, and value linear transformations.
         Wo_initializer:
@@ -56,7 +60,7 @@ class MultiHeadAttention(nn.Module):
         n_heads: int,
         dropout_p: float,
         attention_logits_scale: float,
-        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_backend: Literal["flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
@@ -105,7 +109,7 @@ class MultiHeadAttention(nn.Module):
         x_query_ncd: torch.Tensor,
         x_key_ncd: torch.Tensor,
         x_value_ncd: torch.Tensor,
-        attention_mask_ncc: torch.Tensor,
+        attention_mask_ncc: torch.Tensor | BlockMask,
     ) -> torch.Tensor:
         """
         Args:
@@ -134,6 +138,7 @@ class MultiHeadAttention(nn.Module):
         scale_factor = self.attention_logits_scale / query_nhck.shape[-1]
 
         if (self.attention_backend == "torch") or use_cs():
+            assert isinstance(attention_mask_ncc, torch.Tensor)
             key_nhck = key_nhck * torch.tensor(scale_factor, dtype=key_nhck.dtype)
             attention_logits_nhcc = torch.matmul(query_nhck, key_nhck.transpose(-1, -2))
             neg_inf = torch.tensor(float("-inf"), dtype=torch.float32)
@@ -149,7 +154,19 @@ class MultiHeadAttention(nn.Module):
                 attention_weights_nhcc, self.dropout_p, training=self.training
             )
             output_nhck = torch.matmul(attention_weights_nhcc, value_nhck)
+        elif self.attention_backend == "flex":
+            assert isinstance(attention_mask_ncc, BlockMask)
+            if self.dropout_p > 0.0:
+                raise NotImplementedError("Dropout is not yet supported for flex_attention")
+            output_nhck = compiled_flex_attention(  # type: ignore[assignment]
+                query_nhck,
+                key_nhck,
+                value_nhck,
+                block_mask=attention_mask_ncc,
+                scale=scale_factor,
+            )
         else:
+            assert isinstance(attention_mask_ncc, torch.Tensor)
             with sdpa_kernel(self.backend_map[self.attention_backend]):
                 output_nhck = nn.functional.scaled_dot_product_attention(
                     query_nhck,

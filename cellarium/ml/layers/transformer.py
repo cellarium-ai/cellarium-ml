@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from cellarium.ml.layers.attention import MultiHeadAttention
 from cellarium.ml.layers.ffn import PositionWiseFFN
@@ -31,7 +32,7 @@ class TransformerBlock(nn.Module):
         attention_backend:
             Backend for the attention computation.
         attention_softmax_fp32:
-            Whether to use FP32 for the softmax computation.
+            Whether to use FP32 for the softmax computation when ``torch`` backend is used.
         Wqkv_initializer:
             Initializer for the query, key, and value linear transformations.
         Wo_initializer:
@@ -50,7 +51,7 @@ class TransformerBlock(nn.Module):
         n_heads: int,
         dropout_p: float,
         attention_logits_scale: float,
-        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_backend: Literal["flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
@@ -81,10 +82,18 @@ class TransformerBlock(nn.Module):
         )
         self.normadd2 = NormAdd(d_model, dropout_p, use_bias)
 
+    @property
+    def d_ffn(self) -> int:
+        return self.ffn.dense1.out_features
+
+    @property
+    def d_model(self) -> int:
+        return self.ffn.dense1.in_features
+
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        attention_mask_ncc: torch.Tensor,
+        attention_mask_ncc: torch.Tensor | BlockMask,
     ) -> torch.Tensor:
         """
         Args:
@@ -121,6 +130,8 @@ class Transformer(nn.Module):
             Multiplier for the attention scores.
         attention_backend:
             Backend for the attention computation.
+        attention_softmax_fp32:
+            Whether to use FP32 for the softmax computation when ``torch`` backend is used.
         Wqkv_initializer:
             Initializer for the query, key, and value linear transformations.
         Wo_initializer:
@@ -140,7 +151,7 @@ class Transformer(nn.Module):
         n_blocks: int,
         dropout_p: float,
         attention_logits_scale: float,
-        attention_backend: Literal["math", "flash", "mem_efficient", "torch"],
+        attention_backend: Literal["flex", "math", "mem_efficient", "torch"],
         attention_softmax_fp32: bool,
         Wqkv_initializer: dict[str, Any],
         Wo_initializer: dict[str, Any],
@@ -168,7 +179,7 @@ class Transformer(nn.Module):
                 for _ in range(n_blocks)
             ]
         )
-        self.ln = nn.LayerNorm(d_model, use_bias)
+        self.ln = nn.LayerNorm(d_model, bias=use_bias)
 
         self._reset_parameters()
 
@@ -178,7 +189,7 @@ class Transformer(nn.Module):
     def forward(
         self,
         hidden_state_ncd: torch.Tensor,
-        attention_mask_ncc: torch.Tensor,
+        attention_mask_ncc: torch.Tensor | BlockMask,
     ) -> torch.Tensor:
         """
         Args:

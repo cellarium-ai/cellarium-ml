@@ -13,9 +13,17 @@ USE_CUDA = torch.cuda.is_available()
 class BoringDataset(torch.utils.data.Dataset):
     """A simple dataset for testing purposes."""
 
-    def __init__(self, data: np.ndarray, var_names: np.ndarray | None = None) -> None:
+    def __init__(
+        self,
+        data: np.ndarray,
+        var_names: np.ndarray | None = None,
+        y: np.ndarray | None = None,
+        y_categories: np.ndarray | None = None,
+    ) -> None:
         self.data = data
         self.var_names = var_names
+        self.y = y
+        self.y_categories = y_categories
 
     def __len__(self) -> int:
         return len(self.data)
@@ -24,6 +32,10 @@ class BoringDataset(torch.utils.data.Dataset):
         data = {"x_ng": self.data[idx, None]}
         if self.var_names is not None:
             data["var_names_g"] = self.var_names
+        if self.y is not None:
+            data["y_n"] = self.y[idx, None]
+        if self.y_categories is not None:
+            data["y_categories"] = self.y_categories
         return data
 
 
@@ -62,3 +74,9 @@ class BoringModel(CellariumModel):
                 kwargs[key] = torch.cat(GatherLayer.apply(value), dim=0)
         self.iter_data.append(kwargs)
         return {}
+
+    def get_extra_state(self) -> dict:
+        return {"iter_data": self.iter_data}
+
+    def set_extra_state(self, state) -> None:
+        self.iter_data = state["iter_data"]

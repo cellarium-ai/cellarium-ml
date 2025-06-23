@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import warnings
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRSchedulerConfig
+from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.core.pipeline import CellariumPipeline
@@ -150,6 +151,7 @@ class CellariumModule(pl.LightningModule):
         self.pipeline = CellariumPipeline(cpu_transforms + transforms + (model,))  # the full pipeline
 
         if not self.hparams["is_initialized"]:
+            # Note: when using FSDPStrategy, the model is initialized here and then wrapped and sharded by the strategy.
             model.reset_parameters()
             self.hparams["is_initialized"] = True
 
@@ -289,7 +291,28 @@ class CellariumModule(pl.LightningModule):
         batch["batch_idx"] = batch_idx
         self.module_pipeline.validate(batch)
 
-    def configure_optimizers(self) -> OptimizerLRSchedulerConfig | None:
+    def test_step(self, batch: dict[str, Any], batch_idx: int) -> None:
+        """
+        Forward pass for test step.
+
+        Args:
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
+
+        Returns:
+            None
+        """
+        if self.module_pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        batch["pl_module"] = self
+        batch["trainer"] = self.trainer
+        batch["batch_idx"] = batch_idx
+        self.module_pipeline.test(batch)
+
+    def configure_optimizers(self) -> OptimizerLRScheduler:
         """Configure optimizers for the model."""
         optim_fn = self.hparams["optim_fn"]
         optim_kwargs = self.hparams["optim_kwargs"] or {}
@@ -303,11 +326,80 @@ class CellariumModule(pl.LightningModule):
                 warnings.warn("Scheduler is defined but no optimizer is defined.", UserWarning)
             return None
 
-        optim_config: OptimizerLRSchedulerConfig = {"optimizer": optim_fn(self.model.parameters(), **optim_kwargs)}
+        if self.model.lr_adjustment_groups:
+            if optim_fn not in (torch.optim.Adam, torch.optim.AdamW):
+                raise ValueError("Learning rate adjustment groups are only supported for Adam and AdamW optimizers.")
+
+            # Group parameters by learning rate adjustment group
+            assert "default" not in self.model.lr_adjustment_groups
+            lr_group_to_params_mapping: dict[str, list[torch.Tensor]] = defaultdict(list)
+            for name, param in self.named_parameters():
+                for lr_group_name, lr_group in self.model.lr_adjustment_groups.items():
+                    if lr_group.param_filter(name):
+                        lr_group_to_params_mapping[lr_group_name].append(param)
+                        break
+                else:
+                    lr_group_to_params_mapping["default"].append(param)
+
+            # Create parameter groups for the optimizer
+            param_groups = []
+            for lr_group_name, params in lr_group_to_params_mapping.items():
+                # For scaling rules consult Table 8 in https://arxiv.org/abs/2203.03466
+                # There are four scaling factors that need to be considered for mu-Transfer:
+                # a. Scaling of the multiplier. This needs to be handled by the self.model.__init__
+                # b. Scaling of the initializer. This also needs to be handled by the self.model.__init__
+                # c. Scaling of the learning rate. This is handled here based on
+                #    the lr adjustment groups configured by the self.model.__init__
+                # d. Scaling of the gradients or, alternatively, the epsilon. This is handled here.
+                group_optim_kwargs = optim_kwargs.copy()
+                # For Adam and AdamW optimizers, the gradients need to be scaled by the width multiplier
+                # Alternatively, the epsilon can be scaled down by the width multiplier
+                group_optim_kwargs["eps"] /= self.model.width_mult
+                if lr_group_name != "default":
+                    # Scale the learning rate based on the lr adjustment group
+                    group_optim_kwargs["lr"] *= self.model.lr_adjustment_groups[lr_group_name].scale
+                    if optim_fn == torch.optim.AdamW:
+                        # weight_decay is coupled with the learning rate in AdamW
+                        # so we need to decouple it by scaling it inversely with the learning rate
+                        # see https://github.com/microsoft/mup/issues/1
+                        group_optim_kwargs["weight_decay"] /= self.model.lr_adjustment_groups[lr_group_name].scale
+                param_groups.append({"params": params, **group_optim_kwargs})
+            optimizer = optim_fn(param_groups)
+        else:
+            optimizer = optim_fn(self.parameters(), **optim_kwargs)
+
         if scheduler_fn is not None:
-            scheduler = scheduler_fn(optim_config["optimizer"], **scheduler_kwargs)
-            optim_config["lr_scheduler"] = {"scheduler": scheduler, "interval": "step"}
-        return optim_config
+            scheduler = scheduler_fn(optimizer, **scheduler_kwargs)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+            }
+        else:
+            return {"optimizer": optimizer}
+
+    def configure_gradient_clipping(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: int | float | None = None,
+        gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        """
+        Handle gradient clipping by norm when using the FSDP strategy.
+        """
+        from lightning.pytorch.strategies import FSDPStrategy
+        from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
+
+        if isinstance(self.trainer.strategy, FSDPStrategy) and gradient_clip_algorithm in ("norm", None):
+            if gradient_clip_val is None:
+                gradient_clip_val = self.trainer.gradient_clip_val or 0.0
+            if gradient_clip_val <= 0:
+                return
+            assert isinstance(self.trainer.strategy.model, FullyShardedDataParallel)
+            self.trainer.strategy.model.clip_grad_norm_(gradient_clip_val)
+        else:
+            self.clip_gradients(
+                optimizer, gradient_clip_val=gradient_clip_val, gradient_clip_algorithm=gradient_clip_algorithm
+            )
 
     def on_train_epoch_start(self) -> None:
         """
@@ -341,10 +433,25 @@ class CellariumModule(pl.LightningModule):
 
     def on_train_epoch_end(self) -> None:
         """
+        Calls the ``set_resume_step`` method on the iterable dataset of the given dataloader.
+
+        If the dataset is ``IterableDataset`` and has ``set_resume_step`` method defined, then
+        ``set_resume_step`` must be called at the end of every epoch to ensure that the dataset
+        is in the correct state for resuming training.
+
         Calls the ``on_train_epoch_end`` method on the :attr:`model` attribute.
         If the :attr:`model` attribute has ``on_train_epoch_end`` method defined, then
         ``on_train_epoch_end`` must be called at the end of every epoch.
         """
+        combined_loader = self.trainer.fit_loop._combined_loader
+        assert combined_loader is not None
+        dataloaders = combined_loader.flattened
+        for dataloader in dataloaders:
+            dataset = dataloader.dataset
+            set_resume_step = getattr(dataset, "set_resume_step", None)
+            if callable(set_resume_step):
+                set_resume_step(None)
+
         on_train_epoch_end = getattr(self.model, "on_train_epoch_end", None)
         if callable(on_train_epoch_end):
             on_train_epoch_end(self.trainer)
@@ -383,3 +490,21 @@ class CellariumModule(pl.LightningModule):
         if not self._cpu_transforms_in_module_pipeline:
             self.trainer.datamodule.collate_fn = self.trainer.datamodule.collate_fn.first_applied  # type: ignore[attr-defined]
             self._cpu_transforms_in_module_pipeline = True
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        fit_loop = self.trainer.fit_loop
+        epoch_loop = fit_loop.epoch_loop
+        batch_progress = epoch_loop.batch_progress
+        if batch_progress.current.completed < batch_progress.current.processed:  # type: ignore[attr-defined]
+            # Checkpointing is done before these attributes are updated. So, we need to update them manually.
+            checkpoint["loops"]["fit_loop"]["epoch_loop.batch_progress"]["total"]["completed"] += 1
+            checkpoint["loops"]["fit_loop"]["epoch_loop.batch_progress"]["current"]["completed"] += 1
+            if not epoch_loop._should_accumulate():
+                checkpoint["loops"]["fit_loop"]["epoch_loop.state_dict"]["_batches_that_stepped"] += 1
+
+            if batch_progress.is_last_batch:
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["processed"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["processed"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["completed"] += 1
+                checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["completed"] += 1
+                checkpoint["CellariumAnnDataDataModule"]["epoch"] += 1
