@@ -109,4 +109,4 @@ data:
   num_workers: 2
   prefetch_factor: null
   persistent_workers: false
-ckpt_path: null
+ckpt_path: /tmp/test_examples/lr/lightning_logs/version_0/checkpoints/epoch=1-step=13.ckpt

@@ -14,6 +14,7 @@ To execute the workflow, download the config files from `here <https://github.co
     cellarium-ml onepass_mean_var_std fit --config onepass_train_config.yaml
     cellarium-ml incremental_pca fit --config ipca_train_config.yaml
     cellarium-ml logistic_regression fit --config lr_train_config.yaml
+    cellarium-ml logistic_regression fit --config lr_resume_train_config.yaml
 
 Below we explain how the config files were created and what changes were made to the default configuration.
 
@@ -222,16 +223,24 @@ Below we highlight the changes made to the default configuration file.
 train
 ~~~~~
 
-Change the number of devices, set the number of epochs, and set the path for logs and weights:
+Change the number of devices, checkpoint the model every iteration step, set the number of epochs, log after every iteration step, and set the path for logs and weights:
 
 .. code-block:: diff
 
     <   devices: auto
+    <   callbacks: null
     <   max_epochs: null
+    <   log_every_n_steps: null
     <   default_root_dir: null
     ---
     >   devices: 2
+    >   callbacks:
+    >   - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    >       init_args:
+    >       every_n_train_steps: 1
+    >       save_top_k: -1
     >   max_epochs: 5
+    >   log_every_n_steps: 1
     >   default_root_dir: /tmp/test_examples/lr
 
 model
@@ -300,5 +309,16 @@ Configure the ``DataLoader``. ``batch_keys`` contains the same keys as above and
     >       attr: obs
     >       key: assay
     >       convert_fn: cellarium.ml.utilities.data.categories_to_codes
-    >   batch_size: 100
+    >   batch_size: 25
     >   num_workers: 2
+
+4. Resume training
+------------------
+
+In order to resume training of the logistic regression model from a saved checkpoint add the checkpoint filepath to the config file:
+
+.. code-block:: diff
+
+    < ckpt_path: null
+    ---
+    > ckpt_path: /tmp/test_examples/lr/lightning_logs/version_0/checkpoints/epoch=1-step=13.ckpt 

@@ -16,7 +16,9 @@ lightning_logs/
 build/
 notebooks/.ipynb_checkpoints/
 output/
-data/
 *.h5ad
 *.csv
 *.csv.gz
+*.tsv
+*.tsv.gz
+*.ckpt

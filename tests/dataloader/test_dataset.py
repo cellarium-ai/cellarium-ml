@@ -13,7 +13,7 @@ import pytest
 import torch
 from anndata import AnnData
 
-from cellarium.ml import CellariumModule
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     IterableDistributedAnnDataCollectionDataset,
@@ -304,3 +304,78 @@ def test_iterable_dataset_set_epoch_multi_device(
     expected_epochs = set(range(epochs))
 
     assert set(expected_epochs) == set(actual_epochs)
+
+
+@pytest.mark.parametrize("iteration_strategy", ["same_order", "cache_efficient"])
+@pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
+@pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
+@pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
+@pytest.mark.parametrize(
+    "drop_incomplete_batch", [False, True], ids=["no drop incomplete batch", "drop incomplete batch"]
+)
+@pytest.mark.parametrize("persistent_workers", [False, True], ids=["non-persistent workers", "persistent workers"])
+@pytest.mark.parametrize("resume_step", [1, 4, 5])
+def test_load_from_checkpoint(
+    dadc: DistributedAnnDataCollection,
+    iteration_strategy: Literal["same_order", "cache_efficient"],
+    shuffle: bool,
+    num_workers: int,
+    persistent_workers: bool,
+    batch_size: int,
+    drop_incomplete_batch: bool,
+    tmp_path: Path,
+    resume_step: int,
+):
+    if persistent_workers and num_workers == 0:
+        pytest.skip("persistent_workers requires num_workers > 0")
+
+    datamodule1 = CellariumAnnDataDataModule(
+        dadc=dadc,
+        batch_keys={"x_ng": AnnDataField("X")},
+        batch_size=batch_size,
+        iteration_strategy=iteration_strategy,
+        shuffle=shuffle,
+        drop_incomplete_batch=drop_incomplete_batch,
+        test_mode=True,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+    )
+    module1 = CellariumModule(model=BoringModel())
+    trainer1 = pl.Trainer(
+        accelerator="cpu",
+        max_epochs=3,
+        logger=False,
+        callbacks=[pl.callbacks.ModelCheckpoint(every_n_train_steps=1, save_top_k=-1)],
+        default_root_dir=tmp_path,
+    )
+    trainer1.fit(module1, datamodule1)
+
+    # resume from checkpoint
+    datamodule2 = CellariumAnnDataDataModule(
+        dadc=dadc,
+        batch_keys={"x_ng": AnnDataField("X")},
+        batch_size=batch_size,
+        iteration_strategy=iteration_strategy,
+        shuffle=shuffle,
+        drop_incomplete_batch=drop_incomplete_batch,
+        test_mode=True,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+    )
+    module2 = CellariumModule(model=BoringModel())
+    trainer2 = pl.Trainer(
+        accelerator="cpu",
+        max_epochs=3,
+        logger=False,
+    )
+    try:
+        ckpt_path = tmp_path / f"checkpoints/epoch=0-step={resume_step}.ckpt"
+        trainer2.fit(module2, datamodule2, ckpt_path=ckpt_path)
+    except FileNotFoundError:
+        ckpt_path = tmp_path / f"checkpoints/epoch=1-step={resume_step}.ckpt"
+        trainer2.fit(module2, datamodule2, ckpt_path=ckpt_path)
+
+    iter_data1 = collate_fn(module1.model.iter_data)
+    iter_data2 = collate_fn(module2.model.iter_data)
+
+    torch.testing.assert_close(iter_data1["x_ng"], iter_data2["x_ng"])
