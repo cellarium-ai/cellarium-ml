@@ -332,8 +332,7 @@ def test_vae_architectures():
         },
     ]
     print(
-        "batch injection in both encoder and decoder with "
-        "decoder final additive bias with batch embedded and sampled"
+        "batch injection in both encoder and decoder with decoder final additive bias with batch embedded and sampled"
     )
     print(kwargs6)
     model = SingleCellVariationalInference(**kwargs6)
