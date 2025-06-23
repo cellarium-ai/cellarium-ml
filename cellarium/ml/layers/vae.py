@@ -44,6 +44,7 @@ class DressedLayer(torch.nn.Module):
         assert not (use_batch_norm and use_layer_norm), "Cannot use both batch and layer normalization."
         super().__init__()
         out_features = layer.out_features
+        assert isinstance(out_features, int), "The layer must have an `out_features` attribute of type `int`."
         batch_norm = torch.nn.BatchNorm1d(out_features, **batch_norm_kwargs) if use_batch_norm else None
         layer_norm = torch.nn.LayerNorm(out_features, **layer_norm_kwargs) if use_layer_norm else None
         activation = activation_fn() if (activation_fn is not None) else None

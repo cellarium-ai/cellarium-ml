@@ -169,6 +169,10 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
                         **layer["dressing_init_args"],
                     )
                 )
+            assert (
+                hasattr(module_list[-1].layer, "out_features") 
+                and isinstance(module_list[-1].layer.out_features, int)
+            )
             out_features = module_list[-1].layer.out_features
         self.module_list = module_list
         self.out_features = out_features

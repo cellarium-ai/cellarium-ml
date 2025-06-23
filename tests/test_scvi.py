@@ -156,6 +156,9 @@ def test_load_from_checkpoint_multi_device(
         loaded_model = CellariumModule.load_from_checkpoint(ckpt_path).model
         assert isinstance(loaded_model, SingleCellVariationalInference)
         assert np.array_equal(model.var_names_g, loaded_model.var_names_g)
+        assert hasattr(model.z_encoder.fully_connected.module_list[0].layer, "weight")
+        assert hasattr(loaded_model.z_encoder.fully_connected.module_list[0].layer, "weight")
+        # check that the weights are the same
         torch.testing.assert_close(
             model.z_encoder.fully_connected.module_list[0].layer.weight,
             loaded_model.z_encoder.fully_connected.module_list[0].layer.weight,
