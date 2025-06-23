@@ -462,22 +462,37 @@ def test_encoder_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layers, hi
         print(scvi_encoder)
 
         # Set FC layer weights for layer 1
-        cellarium_encoder.fully_connected.module_list[0].layer.weight.copy_(
+        assert hasattr(cellarium_encoder.fully_connected.module_list[0].layer, "weight")
+        assert hasattr(scvi_encoder.encoder.fc_layers[0][0], "weight")
+        assert hasattr(cellarium_encoder.fully_connected.module_list[0].layer, "bias")
+        assert hasattr(scvi_encoder.encoder.fc_layers[0][0], "bias")
+        cellarium_encoder.fully_connected.module_list[0].layer.weight.copy_(  # type: ignore[operator]
             scvi_encoder.encoder.fc_layers[0][0].weight[:, :g]
         )
-        cellarium_encoder.fully_connected.module_list[0].layer.bias.copy_(scvi_encoder.encoder.fc_layers[0][0].bias[:g])
+        cellarium_encoder.fully_connected.module_list[0].layer.bias.copy_(  # type: ignore[operator]
+            scvi_encoder.encoder.fc_layers[0][0].bias[:g]
+        )
 
         # set batch weights for layer 1
-        cellarium_encoder.fully_connected.module_list[0].layer.bias_decoder.module_list[0].weight.copy_(
+        assert hasattr(cellarium_encoder.fully_connected.module_list[0].layer, "bias_decoder")
+        assert hasattr(cellarium_encoder.fully_connected.module_list[0].layer.bias_decoder, "module_list")
+        assert isinstance(
+            cellarium_encoder.fully_connected.module_list[0].layer.bias_decoder.module_list,
+            torch.nn.ModuleList,
+        )
+        assert hasattr(scvi_encoder.encoder.fc_layers[0][0], "weight")
+        cellarium_encoder.fully_connected.module_list[0].layer.bias_decoder.module_list[0].weight.copy_(  # type: ignore[operator]
             scvi_encoder.encoder.fc_layers[0][0].weight[:, g:]
         )
 
         # set FC layer weights for subsequent layers
         for i in range(1, n_layers):
-            cellarium_encoder.fully_connected.module_list[i].layer.weight.copy_(
+            cellarium_encoder.fully_connected.module_list[i].layer.weight.copy_(  # type: ignore[union-attr, operator]
                 scvi_encoder.encoder.fc_layers[i][0].weight
             )
-            cellarium_encoder.fully_connected.module_list[i].layer.bias.copy_(scvi_encoder.encoder.fc_layers[i][0].bias)
+            cellarium_encoder.fully_connected.module_list[i].layer.bias.copy_(  # type: ignore[union-attr, operator]
+                scvi_encoder.encoder.fc_layers[i][0].bias
+            )
 
         # Set mean encoder weights
         cellarium_encoder.mean_encoder.weight.copy_(scvi_encoder.mean_encoder.weight)
@@ -489,10 +504,10 @@ def test_encoder_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layers, hi
 
         # set batch normalization parameters if they exist
         if hasattr(scvi_encoder, "batch_norm"):
-            cellarium_encoder.batch_norm.weight.copy_(scvi_encoder.batch_norm.weight)
-            cellarium_encoder.batch_norm.bias.copy_(scvi_encoder.batch_norm.bias)
-            cellarium_encoder.batch_norm.running_mean.copy_(scvi_encoder.batch_norm.running_mean)
-            cellarium_encoder.batch_norm.running_var.copy_(scvi_encoder.batch_norm.running_var)
+            cellarium_encoder.batch_norm.weight.copy_(scvi_encoder.batch_norm.weight)  # type: ignore[union-attr, operator]
+            cellarium_encoder.batch_norm.bias.copy_(scvi_encoder.batch_norm.bias)  # type: ignore[union-attr, operator]
+            cellarium_encoder.batch_norm.running_mean.copy_(scvi_encoder.batch_norm.running_mean)  # type: ignore[union-attr, operator]
+            cellarium_encoder.batch_norm.running_var.copy_(scvi_encoder.batch_norm.running_var)  # type: ignore[union-attr, operator]
 
     # Test on same input
     x = torch.FloatTensor(X)
