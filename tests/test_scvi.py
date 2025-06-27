@@ -16,7 +16,7 @@ from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.models import SingleCellVariationalInference
-from cellarium.ml.models.scvi import EncoderSCVI
+from cellarium.ml.models.scvi import EncoderSCVI, DecoderSCVI
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDatasetSCVI
 
@@ -418,6 +418,7 @@ def test_encoder_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layers, hi
         distribution="normal",
         use_batch_norm=use_batch_norm,
         use_layer_norm=use_layer_norm,
+        inject_covariates=False,
     )
 
     # Initialize Cellarium encoder with matching architecture
@@ -541,4 +542,181 @@ def test_encoder_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layers, hi
             atol=1e-5,
             msg=f"Encoder scales do not match: cellarium {cellarium_dist.scale[:1, :2].square()} "
             "vs scvi {scvi_out[1][:1, :2]}",
+        )
+
+
+@pytest.mark.parametrize(
+    "use_batch_norm,use_layer_norm",
+    [
+        (False, False),
+        (True, False),
+        (False, True),
+    ],
+    ids=["no_norm", "batch_norm", "layer_norm"],
+)
+@pytest.mark.parametrize("n_layers", [1, 2], ids=["one_layer", "two_layers"])
+@pytest.mark.parametrize("hidden_size", [16, 32], ids=["hidden_16", "hidden_32"])
+def test_decoder_mean_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layers, hidden_size):
+    try:
+        import scvi
+        from scvi.nn import DecoderSCVI as SCVIDecoder
+    except ImportError:
+        pytest.skip("scvi-tools is not installed, skipping test")
+
+    # Setup test data
+    n, g = 100, 50
+    var_names_g = [f"gene_{i}" for i in range(g)]
+    n_latent = 10
+    n_batch = 2
+    z_nk = torch.randn(n, n_latent)
+    batch_indices = np.random.randint(0, n_batch, size=n)
+    library_size_n1 = torch.rand(n, 1) + 4
+
+    # Create anndata for scvi-tools
+    adata = anndata.AnnData(np.random.poisson(lam=2.0, size=(n, g)))
+    adata.var_names = var_names_g
+    adata.obs["batch"] = batch_indices
+    scvi.model.SCVI.setup_anndata(adata, batch_key="batch")
+
+    # Initialize scvi-tools decoder
+    scvi_decoder = SCVIDecoder(
+        n_input=n_latent,
+        n_output=g,
+        n_cat_list=[n_batch],
+        n_hidden=hidden_size,
+        n_layers=n_layers,
+        # dropout_rate=0.0,
+        use_batch_norm=use_batch_norm,
+        use_layer_norm=use_layer_norm,
+        inject_covariates=False,
+    )
+
+    # Initialize Cellarium decoder with matching architecture
+    cellarium_decoder = DecoderSCVI(
+        in_features=n_latent,
+        out_features=g,
+        hidden_layers=[
+            {
+                "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                "init_args": {
+                    "out_features": hidden_size,
+                    "n_batch": n_batch,
+                    "batch_to_bias_hidden_layers": [],
+                },
+                "dressing_init_args": {
+                    "use_batch_norm": use_batch_norm,
+                    "use_layer_norm": use_layer_norm,
+                    "dropout_rate": 0.0,
+                },
+            }
+        ]
+        + (n_layers - 1)
+        * [
+            {
+                "class_path": "torch.nn.Linear",
+                "init_args": {"out_features": hidden_size},
+                "dressing_init_args": {
+                    "use_batch_norm": use_batch_norm,
+                    "use_layer_norm": use_layer_norm,
+                    "dropout_rate": 0.0,
+                },
+            }
+        ],
+        final_layer={
+            "class_path": "torch.nn.Linear",
+            "init_args": {},
+        },
+        n_batch=n_batch,
+        dispersion="gene",
+        gene_likelihood="nb",
+        scale_activation="softmax",
+        final_additive_bias=False,
+    )
+
+    # Set the same weights manually for both decoders
+    with torch.no_grad():
+        print("cellarium decoder")
+        print(cellarium_decoder)
+        print("scvi decoder")
+        print(scvi_decoder)
+
+        # Set FC layer weights for layer 1
+        assert hasattr(cellarium_decoder.fully_connected.module_list[0].layer, "weight")
+        assert hasattr(scvi_decoder.px_decoder.fc_layers[0][0], "weight")
+        assert hasattr(cellarium_decoder.fully_connected.module_list[0].layer, "bias")
+        assert hasattr(scvi_decoder.px_decoder.fc_layers[0][0], "bias")
+        cellarium_decoder.fully_connected.module_list[0].layer.weight.copy_(
+            scvi_decoder.px_decoder.fc_layers[0][0].weight[:, :n_latent]
+        )
+        cellarium_decoder.fully_connected.module_list[0].layer.bias.copy_(
+            scvi_decoder.px_decoder.fc_layers[0][0].bias[:hidden_size]
+        )
+
+        # set batch weights for layer 1
+        assert hasattr(cellarium_decoder.fully_connected.module_list[0].layer, "bias_decoder")
+        assert hasattr(cellarium_decoder.fully_connected.module_list[0].layer.bias_decoder, "module_list")
+        assert isinstance(
+            cellarium_decoder.fully_connected.module_list[0].layer.bias_decoder.module_list,
+            torch.nn.ModuleList,
+        )
+        assert hasattr(scvi_decoder.px_decoder.fc_layers[0][0], "weight")
+        cellarium_decoder.fully_connected.module_list[0].layer.bias_decoder.module_list[0].weight.copy_(
+            scvi_decoder.px_decoder.fc_layers[0][0].weight[:, n_latent:]
+        )
+
+        # set FC layer weights for subsequent layers
+        for i in range(1, n_layers):
+            cellarium_decoder.fully_connected.module_list[i].layer.weight.copy_(
+                scvi_decoder.px_decoder.fc_layers[i][0].weight
+            )
+            cellarium_decoder.fully_connected.module_list[i].layer.bias.copy_(
+                scvi_decoder.px_decoder.fc_layers[i][0].bias
+            )
+
+        # Set final layer weights
+        cellarium_decoder.normalized_count_decoder.weight.copy_(scvi_decoder.px_scale_decoder[0].weight)
+        cellarium_decoder.normalized_count_decoder.bias.copy_(scvi_decoder.px_scale_decoder[0].bias)
+
+        # set batch normalization parameters if they exist
+        if hasattr(scvi_decoder, "batch_norm"):
+            cellarium_decoder.batch_norm.weight.copy_(scvi_decoder.batch_norm.weight)
+            cellarium_decoder.batch_norm.bias.copy_(scvi_decoder.batch_norm.bias)
+            cellarium_decoder.batch_norm.running_mean.copy_(scvi_decoder.batch_norm.running_mean)
+            cellarium_decoder.batch_norm.running_var.copy_(scvi_decoder.batch_norm.running_var)
+
+    # Test on same input
+    batch_nb = torch.nn.functional.one_hot(
+        torch.from_numpy(batch_indices).squeeze().long(),
+        num_classes=n_batch,
+    ).float()
+
+    # Get outputs
+    with torch.no_grad():
+        # Set a fixed inverse_overdispersion for testing
+        inverse_overdispersion = torch.ones(g)
+        
+        cellarium_dist = cellarium_decoder(
+            z_nk=z_nk,
+            batch_nb=batch_nb,
+            categorical_covariate_np=None,
+            inverse_overdispersion=inverse_overdispersion,
+            library_size_n1=library_size_n1,
+        )
+        scvi_output = scvi_decoder(
+            'gene',
+            z_nk,
+            library_size_n1,
+            batch_nb,
+        )
+
+        # Compare means
+        print("Comparing Cellarium and scvi-tools decoder outputs")
+        print("Cellarium means:", cellarium_dist.mean[:1, :2])
+        print("scvi-tools means:", scvi_output[2][:1, :2])
+        torch.testing.assert_close(
+            cellarium_dist.mean,
+            scvi_output[2],
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"Decoder means do not match: cellarium {cellarium_dist.mean[:1, :2]} vs scvi {scvi_output[2][:1, :2]}",
         )
