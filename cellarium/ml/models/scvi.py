@@ -840,7 +840,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             max_kl_weight=self.z_kl_weight_max,
             min_kl_weight=self.z_kl_weight_min,
         )
-        print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
+        # print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
 
         # optional KL divergence for batch representation
         kl_divergence_batch: torch.Tensor | int
