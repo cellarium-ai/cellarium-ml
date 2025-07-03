@@ -223,14 +223,14 @@ class EncoderSCVI(torch.nn.Module):
             final_layer["class_path"],
             in_features=self.fully_connected.out_features,
             out_features=out_features,
-            bias=final_layer["init_args"].pop("bias", True),
+            bias=final_layer["init_args"].get("bias", True),
             **final_layer["init_args"],
         )
         self.var_encoder = instantiate_from_class_path(
             final_layer["class_path"],
             in_features=self.fully_connected.out_features,
             out_features=out_features,
-            bias=final_layer["init_args"].pop("bias", True),
+            bias=final_layer["init_args"].get("bias", True),
             **final_layer["init_args"],
         )
         self.mean_encoder_takes_batch = isinstance(self.mean_encoder, LinearWithBatch)
@@ -507,7 +507,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_kl_weight: float = 0.0,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
-        kl_warmup_epochs: int = 400,
+        kl_warmup_epochs: int | None = 400,
         kl_weight_max: float = 1.0,
         kl_weight_min: float = 0.0,
         use_size_factor_key: bool = False,
