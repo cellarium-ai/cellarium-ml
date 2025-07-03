@@ -433,6 +433,19 @@ def lightning_cli_factory(
             # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
             pass
 
+        def before_instantiate_classes(self):
+            # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
+            if self.subcommand == "predict":
+                return_predictions: bool = self.config["predict"]["return_predictions"]
+                if return_predictions:
+                    warnings.warn(
+                        "The `return_predictions` argument should be set to 'false' when running predict to avoid OOM. "
+                        "This can be set at indent level 0 in the config file. Example:\n"
+                        "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
+                        UserWarning,
+                    )
+            return super().before_instantiate_classes()
+
         def instantiate_classes(self) -> None:
             with torch.device("meta"):
                 # skip the initialization of model parameters

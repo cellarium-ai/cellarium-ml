@@ -68,6 +68,7 @@ model:
       n_batch: null
 
       # these can be changed
+      kl_warmup_epochs: 50
       batch_embedded: true
       batch_representation_sampled: true
       n_latent_batch: null
@@ -113,9 +114,18 @@ model:
       use_layer_norm: none
       use_size_factor_key: false
       use_observed_lib_size: true
-  optim_fn: torch.optim.AdamW
+  # ==========================================
+  # *** cellarium defaults
+  # optim_fn: torch.optim.AdamW
+  # optim_kwargs: 
+  #   lr: 1e-3
+  # *** scvi-tools defaults
+  optim_fn: torch.optim.Adam
   optim_kwargs: 
-    lr: 1e-4
+    lr: 1e-3
+    weight_decay: 1e-6
+    eps: 0.01
+  # ==========================================
   scheduler_fn: null
   scheduler_kwargs: null
   is_initialized: False

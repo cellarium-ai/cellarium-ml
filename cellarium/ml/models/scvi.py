@@ -171,6 +171,9 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
                         **layer["dressing_init_args"],
                     )
                 )
+            assert hasattr(module_list[-1].layer, "out_features") and isinstance(
+                module_list[-1].layer.out_features, int
+            )
             out_features = module_list[-1].layer.out_features
         self.module_list = module_list
         self.out_features = out_features
@@ -222,14 +225,14 @@ class EncoderSCVI(torch.nn.Module):
             final_layer["class_path"],
             in_features=self.fully_connected.out_features,
             out_features=out_features,
-            bias=final_layer["init_args"].pop("bias", True),
+            bias=final_layer["init_args"].get("bias", True),
             **final_layer["init_args"],
         )
         self.var_encoder = instantiate_from_class_path(
             final_layer["class_path"],
             in_features=self.fully_connected.out_features,
             out_features=out_features,
-            bias=final_layer["init_args"].pop("bias", True),
+            bias=final_layer["init_args"].get("bias", True),
             **final_layer["init_args"],
         )
         self.mean_encoder_takes_batch = isinstance(self.mean_encoder, LinearWithBatch)
@@ -370,9 +373,9 @@ class DecoderSCVI(torch.nn.Module):
 
         # optional inverse overdispersion per cell
         if inverse_overdispersion is None:
-            assert (
-                self.inverse_overdispersion_decoder is not None
-            ), "inverse_overdispersion must be provided when not using Poisson or gene-cell dispersion"
+            assert self.inverse_overdispersion_decoder is not None, (
+                "inverse_overdispersion must be provided when not using Poisson or gene-cell dispersion"
+            )
             inverse_overdispersion = self.inverse_overdispersion_decoder(q_nh).exp()
 
         # construct the count distribution
@@ -387,6 +390,44 @@ class DecoderSCVI(torch.nn.Module):
                 # dist = ZeroInflatedNegativeBinomial(count_mean_ng + self.eps, inverse_overdispersion + self.eps, self.dropout_decoder(q_nh))
 
         return dist
+    
+
+def compute_annealed_kl_weight(
+    epoch: int,
+    step: int,
+    n_epochs_kl_warmup: int | None,
+    n_steps_kl_warmup: int | None,
+    max_kl_weight: float = 1.0,
+    min_kl_weight: float = 0.0,
+) -> float | torch.Tensor:
+    """Computes the kl weight for the current step or epoch.
+
+    If both `n_epochs_kl_warmup` and `n_steps_kl_warmup` are None `max_kl_weight` is returned.
+
+    Args:
+        epoch: Current epoch.
+        step: Current step.
+        n_epochs_kl_warmup: Number of epochs to warm up the KL weight.
+        n_steps_kl_warmup: Number of steps to warm up the KL weight.
+        max_kl_weight: Maximum KL weight.
+        min_kl_weight: Minimum KL weight.
+
+    Returns:
+        The KL weight for the current step or epoch.
+    """
+    if min_kl_weight > max_kl_weight:
+        raise ValueError(
+            f"min_kl_weight={min_kl_weight} is larger than max_kl_weight={max_kl_weight}."
+        )
+
+    slope = max_kl_weight - min_kl_weight
+    if n_epochs_kl_warmup:
+        if epoch < n_epochs_kl_warmup:
+            return slope * (epoch / n_epochs_kl_warmup) + min_kl_weight
+    elif n_steps_kl_warmup:
+        if step < n_steps_kl_warmup:
+            return slope * (step / n_steps_kl_warmup) + min_kl_weight
+    return max_kl_weight
 
 
 class SingleCellVariationalInference(CellariumModel, PredictMixin):
@@ -437,6 +478,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 * ``"both"``: use layer norm in both encoder(s) and decoder.
             Note: if ``use_batch_norm`` is also specified, both will be applied (first
             :class:`~torch.nn.BatchNorm1d`, then :class:`~torch.nn.LayerNorm`).
+        kl_warmup_epochs: Number of epochs to warm up the KL weight.
+        kl_weight_max: Maximum KL weight.
+        kl_weight_min: Minimum KL weight.
         use_size_factor_key: If ``True``, use the :attr:`~anndata.AnnData.obs` column as defined by the
             ``size_factor_key`` parameter in the model's ``setup_anndata`` method as the scaling
             factor in the mean of the conditional distribution. Takes priority over
@@ -473,6 +517,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_kl_weight: float = 0.0,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
+        kl_warmup_epochs: int | None = 400,
+        kl_weight_max: float = 1.0,
+        kl_weight_min: float = 0.0,
         use_size_factor_key: bool = False,
         use_observed_lib_size: bool = True,
         reconstruct_genes: list | None = None,
@@ -494,6 +541,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
+        self.z_kl_weight_max = kl_weight_max
+        self.z_kl_weight_min = kl_weight_min
+        self.z_kl_warmup_epochs = kl_warmup_epochs
         assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
         self.batch_kl_weight = batch_kl_weight
         self.reconstruct_genes = reconstruct_genes
@@ -541,7 +591,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             #self.register_buffer('px_r', self.px_r)
         else:
             raise ValueError(
-                "dispersion must be one of ['gene', " " 'gene-label', 'gene-cell'], but input was " "{}".format(
+                "dispersion must be one of ['gene',  'gene-label', 'gene-cell'], but input was {}".format(
                     self.dispersion
                 )
             )
@@ -752,6 +802,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         batch_index_n: torch.Tensor,
+        epoch: int,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
         size_factor_n1: torch.Tensor | None = None,
@@ -800,6 +851,17 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # KL divergence for z
         kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
+        # compute the annealed KL weight
+        z_kl_weight = compute_annealed_kl_weight(
+            epoch=epoch,
+            step=None,
+            n_epochs_kl_warmup=self.z_kl_warmup_epochs,
+            n_steps_kl_warmup=None,
+            max_kl_weight=self.z_kl_weight_max,
+            min_kl_weight=self.z_kl_weight_min,
+        )
+        # print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
+
         # optional KL divergence for batch representation
         kl_divergence_batch: torch.Tensor | int
         if self.batch_representation_sampled and (self.batch_kl_weight > 0):
@@ -814,7 +876,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         # full loss
-        loss = torch.mean(rec_loss + kl_divergence_z + kl_divergence_batch)
+        loss = torch.mean(rec_loss + z_kl_weight * kl_divergence_z + kl_divergence_batch)
 
         return {"loss": loss}
 

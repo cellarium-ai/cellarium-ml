@@ -101,12 +101,12 @@ class OnePassMeanVarStd(CellariumModel):
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
-            assert isinstance(
-                trainer.strategy, DDPStrategy
-            ), "OnePassMeanVarStd requires that the trainer uses the DDP strategy."
-            assert (
-                trainer.strategy._ddp_kwargs["broadcast_buffers"] is False
-            ), "OnePassMeanVarStd requires that broadcast_buffers is set to False."
+            assert isinstance(trainer.strategy, DDPStrategy), (
+                "OnePassMeanVarStd requires that the trainer uses the DDP strategy."
+            )
+            assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is False, (
+                "OnePassMeanVarStd requires that broadcast_buffers is set to False."
+            )
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         # no need to merge if only one process
@@ -125,6 +125,7 @@ class OnePassMeanVarStd(CellariumModel):
         """
         mean_g = self.x_sums / self.x_size
         if self.algorithm == "shifted_data":
+            assert isinstance(self.x_shift, torch.Tensor)
             mean_g = mean_g + self.x_shift
         return mean_g
 

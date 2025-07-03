@@ -89,7 +89,18 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
 
     .. note::
         To prevent an out-of-memory error, set the ``return_predictions`` argument of the
-        :class:`~lightning.pytorch.Trainer` to ``False``.
+        :class:`~lightning.pytorch.Trainer` to ``False``. This is accomplished in the config
+        file by including ``return_predictions: false`` at indent level 0. For example,
+
+        .. code-block:: yaml
+
+            trainer:
+              ...
+            model:
+              ...
+            data:
+              ...
+            return_predictions: false
 
     Args:
         output_dir:
