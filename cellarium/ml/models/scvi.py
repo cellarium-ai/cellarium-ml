@@ -799,7 +799,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # full loss
         loss = torch.mean(rec_loss + kl_divergence_z + kl_divergence_batch)
 
-        return {"loss": loss}
+        return {"loss": loss, "reconstruction_loss": rec_loss, "kl_divergence_z": kl_divergence_z, "z_nk": inference_outputs["z"]}
 
     def predict(
         self,
