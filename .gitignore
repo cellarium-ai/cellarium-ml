@@ -22,3 +22,6 @@ output/
 *.tsv
 *.tsv.gz
 *.ckpt
+examples/cli_workflow/scvi_big_run/cellarium_scvi_glycosylation_20250116_train_config.yaml
+
+examples/cli_workflow/scvi_big_run/cellarium_scvi_glycosylation_20250204_scvi_train_config_20250204.yaml

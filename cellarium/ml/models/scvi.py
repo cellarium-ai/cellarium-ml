@@ -237,6 +237,7 @@ class EncoderSCVI(torch.nn.Module):
         )
         self.mean_encoder_takes_batch = isinstance(self.mean_encoder, LinearWithBatch)
         self.var_eps = var_eps
+        self.softmax = torch.nn.Softmax(dim=-1)
 
     def forward(
         self,
@@ -245,19 +246,34 @@ class EncoderSCVI(torch.nn.Module):
         categorical_covariate_np: torch.Tensor | None,
     ) -> Distribution:
         q_nh = self.fully_connected(x_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
+
         q_mean_nk = (
             self.mean_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
             if self.mean_encoder_takes_batch
             else self.mean_encoder(q_nh)
         )
+
+        #prev_exp_var =  self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np) if self.mean_encoder_takes_batch else self.var_encoder(q_nh) #prior to ex everything becomes very large
+
+        # q_var_nk = (
+        #     torch.exp(
+        #         self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
+        #         if self.mean_encoder_takes_batch
+        #         else self.var_encoder(q_nh)
+        #     )
+        #     + self.var_eps
+        # )
+
+
         q_var_nk = (
-            torch.exp(
+            self.softmax(
                 self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
                 if self.mean_encoder_takes_batch
                 else self.var_encoder(q_nh)
             )
             + self.var_eps
         )
+
         return Normal(q_mean_nk, q_var_nk.sqrt())
 
 
@@ -349,11 +365,15 @@ class DecoderSCVI(torch.nn.Module):
         categorical_covariate_np: torch.Tensor | None = None,
     ) -> Distribution:
         # bulk of the network
+
         q_nh = self.fully_connected(
             z_nk,
             batch_nb=batch_nb,
             categorical_covariate_np=categorical_covariate_np,
         )
+
+        # w = self.normalized_count_decoder._modules["bias_decoder"]._modules["module_list"][0].weight
+        # b = self.normalized_count_decoder._modules["bias_decoder"]._modules["module_list"][0].bias
 
         # mean counts
         unnormalized_chi_ng = (
@@ -361,7 +381,9 @@ class DecoderSCVI(torch.nn.Module):
             if self.count_decoder_takes_batch
             else self.normalized_count_decoder(q_nh)
         )
+
         chi_ng = self.normalized_count_activation(unnormalized_chi_ng)
+
         if self.final_additive_bias_layer is not None:
             count_mean_ng = torch.exp(library_size_n1) * chi_ng + self.final_additive_bias_layer(
                 torch.cat([batch_nb, categorical_covariate_np], dim=-1)
@@ -388,7 +410,6 @@ class DecoderSCVI(torch.nn.Module):
             case "zinb":
                 raise NotImplementedError("ZINB is not currently implemented")
                 # dist = ZeroInflatedNegativeBinomial(count_mean_ng + self.eps, inverse_overdispersion + self.eps, self.dropout_decoder(q_nh))
-
         return dist
     
 
@@ -548,6 +569,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_kl_weight = batch_kl_weight
         self.reconstruct_genes = reconstruct_genes
         self.build_reconstructions = build_reconstructions
+
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")
@@ -737,6 +759,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         if self.log_variational:
             encoder_input_ng = torch.log1p(encoder_input_ng)
 
+
+
         # if continuous_covariates_nc is not None and self.encode_covariates:
         #     encoder_input_ng = torch.cat((encoder_input_ng, continuous_covariates_nc), dim=-1)
 
@@ -783,6 +807,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 #     torch.nn.functional.one_hot(y.squeeze().long(), self.n_labels).float(), self.px_r
                 # )  # px_r gets transposed - last dimension is nb genes
         assert isinstance(inverse_overdispersion, torch.Tensor)
+
 
         count_distribution = self.decoder(
             z_nk=z_nk,
@@ -860,7 +885,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             max_kl_weight=self.z_kl_weight_max,
             min_kl_weight=self.z_kl_weight_min,
         )
-        # print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
+
+        #print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
 
         # optional KL divergence for batch representation
         kl_divergence_batch: torch.Tensor | int
@@ -909,6 +935,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         """
 
         if self.build_reconstructions:
+
             return self.reconstruct(
                 x_ng=x_ng,
                 var_names_g=var_names_g,
@@ -1011,6 +1038,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
+
 
         inference_outputs = self.inference(
             x_ng=x_ng,
