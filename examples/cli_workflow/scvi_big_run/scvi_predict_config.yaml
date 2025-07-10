@@ -58,15 +58,12 @@ model:
           loader_fn: pandas.read_csv
           attr: "ensembl_id"
           convert_fn: pandas.Series.to_list
-
   model:
     class_path: cellarium.ml.models.SingleCellVariationalInference
     init_args:
-
       # these are pulled from data, leave null
       var_names_g: null
       n_batch: null
-
       # these can be changed
       batch_embedded: true
       batch_representation_sampled: true
@@ -100,7 +97,6 @@ model:
             batch_to_bias_hidden_layers: []
         final_additive_bias: true
       n_latent: 50
-
       # probably leave these alone
       n_continuous_cov: 0
       n_cats_per_cov: null

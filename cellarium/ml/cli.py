@@ -418,7 +418,6 @@ def lightning_cli_factory(
         A :class:`LightningCLI` class with the given model and argument linking.
     """
 
-    #TODO: Override with decorators?
     class NewLightningCLI(LightningCLI):
         def __init__(self, args: ArgsType = None) -> None:
             super().__init__(

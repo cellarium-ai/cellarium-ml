@@ -192,15 +192,4 @@ def get_categories(x: pd.Series) -> np.ndarray:
     return np.asarray(x.cat.categories)
 
 
-def parse_gene_list(data):
 
-    print(data)
-
-    exit()
-
-    genes = pd.read_csv(predict_genes,sep="\t")
-    predict_gene_list = genes["ensembl_id"].tolist()
-
-    print(predict_gene_list)
-    exit()
-    return predict_gene_list
