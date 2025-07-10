@@ -24,6 +24,7 @@ from cellarium.ml.utilities.testing import (
 )
 
 
+
 def class_from_class_path(class_path: str):
     module_name, class_name = class_path.rsplit(".", 1)
     module = importlib.import_module(module_name)
@@ -62,14 +63,14 @@ class LinearWithBatch(torch.nn.Linear):
     """
 
     def __init__(
-            self,
-            in_features: int,
-            out_features: int,
-            n_batch: int,
-            batch_to_bias_hidden_layers: list[int],
-            categorical_covariate_dimensions: list[int] = [],
-            bias: bool = True,
-            batch_to_bias_dressing_init_kwargs: dict[str, Any] = {},
+        self,
+        in_features: int,
+        out_features: int,
+        n_batch: int,
+        batch_to_bias_hidden_layers: list[int],
+        categorical_covariate_dimensions: list[int] = [],
+        bias: bool = True,
+        batch_to_bias_dressing_init_kwargs: dict[str, Any] = {},
     ):
         super().__init__(in_features, out_features, bias=bias)
         self.bias_decoder = FullyConnectedLinear(
@@ -80,9 +81,9 @@ class LinearWithBatch(torch.nn.Linear):
         )
 
     def compute_bias(
-            self,
-            batch_nb: torch.Tensor,
-            categorical_covariate_np: torch.Tensor | None = None,
+        self,
+        batch_nb: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Returns the bias given batch representations.
@@ -100,10 +101,10 @@ class LinearWithBatch(torch.nn.Linear):
             return self.bias_decoder(torch.cat([batch_nb, categorical_covariate_np], dim=-1))
 
     def forward(  # type: ignore[override]
-            self,
-            x_ng: torch.Tensor,
-            batch_nb: torch.Tensor,
-            categorical_covariate_np: torch.Tensor | None = None,
+        self,
+        x_ng: torch.Tensor,
+        batch_nb: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Computes the forward pass of the layer as
@@ -136,9 +137,9 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            in_features: int,
-            layers: list[dict],
+        self,
+        in_features: int,
+        layers: list[dict],
     ):
         super().__init__()
         for layer in layers:
@@ -177,10 +178,10 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
         self.out_features = out_features
 
     def forward(
-            self,
-            x_ng: torch.Tensor,
-            batch_nb: torch.Tensor,
-            categorical_covariate_np: torch.Tensor | None,
+        self,
+        x_ng: torch.Tensor,
+        batch_nb: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None,
     ) -> torch.Tensor:
         x_ = x_ng
         for dressed_layer in self.module_list:
@@ -210,12 +211,12 @@ class EncoderSCVI(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            in_features: int,
-            out_features: int,
-            hidden_layers: list[dict],
-            final_layer: dict,
-            var_eps: float = 1e-4,
+        self,
+        in_features: int,
+        out_features: int,
+        hidden_layers: list[dict],
+        final_layer: dict,
+        var_eps: float = 1e-4,
     ):
         super().__init__()
         self.fully_connected = FullyConnectedWithBatchArchitecture(in_features, hidden_layers)
@@ -235,19 +236,33 @@ class EncoderSCVI(torch.nn.Module):
         )
         self.mean_encoder_takes_batch = isinstance(self.mean_encoder, LinearWithBatch)
         self.var_eps = var_eps
+        self.softmax = torch.nn.Softmax(dim=-1)
 
     def forward(
-            self,
-            x_ng: torch.Tensor,
-            batch_nb: torch.Tensor,
-            categorical_covariate_np: torch.Tensor | None,
+        self,
+        x_ng: torch.Tensor,
+        batch_nb: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None,
     ) -> Distribution:
+
+
         q_nh = self.fully_connected(x_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
+
         q_mean_nk = (
             self.mean_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
             if self.mean_encoder_takes_batch
             else self.mean_encoder(q_nh)
         )
+
+        # q_var_nk = (
+        #     self.softmax(
+        #         self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
+        #         if self.mean_encoder_takes_batch
+        #         else self.var_encoder(q_nh)
+        #     )
+        #     + self.var_eps
+        # )
+
         q_var_nk = (
                 torch.exp(
                     self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
@@ -256,6 +271,7 @@ class EncoderSCVI(torch.nn.Module):
                 )
                 + self.var_eps
         )
+
         return Normal(q_mean_nk, q_var_nk.sqrt())
 
 
@@ -281,18 +297,18 @@ class DecoderSCVI(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            in_features: int,
-            out_features: int,
-            hidden_layers: list[dict],
-            final_layer: dict,
-            n_batch: int,
-            dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
-            gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
-            scale_activation: Literal["softmax", "softplus"] = "softmax",
-            final_additive_bias: bool = False,
-            n_cats_per_cov: list[int] | None = None,
-            eps: float = 1e-10,
+        self,
+        in_features: int,
+        out_features: int,
+        hidden_layers: list[dict],
+        final_layer: dict,
+        n_batch: int,
+        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
+        gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
+        scale_activation: Literal["softmax", "softplus"] = "softmax",
+        final_additive_bias: bool = False,
+        n_cats_per_cov: list[int] | None = None,
+        eps: float = 1e-10,
     ):
         super().__init__()
         self.eps = eps
@@ -339,14 +355,15 @@ class DecoderSCVI(torch.nn.Module):
             )
 
     def forward(
-            self,
-            z_nk: torch.Tensor,
-            batch_nb: torch.Tensor,
-            inverse_overdispersion: torch.Tensor | None,
-            library_size_n1: torch.Tensor,
-            categorical_covariate_np: torch.Tensor | None = None,
+        self,
+        z_nk: torch.Tensor,
+        batch_nb: torch.Tensor,
+        inverse_overdispersion: torch.Tensor | None,
+        library_size_n1: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None = None,
     ) -> Distribution:
         # bulk of the network
+
         q_nh = self.fully_connected(
             z_nk,
             batch_nb=batch_nb,
@@ -385,18 +402,17 @@ class DecoderSCVI(torch.nn.Module):
                 dist = Poisson(count_mean_ng + self.eps)
             case "zinb":
                 raise NotImplementedError("ZINB is not currently implemented")
-                # dist = ZeroInflatedNegativeBinomial(count_mean_ng, inverse_overdispersion, self.dropout_decoder(q_nh))
-
+                # dist = ZeroInflatedNegativeBinomial(count_mean_ng + self.eps, inverse_overdispersion + self.eps, self.dropout_decoder(q_nh))
         return dist
-
+    
 
 def compute_annealed_kl_weight(
-        epoch: int,
-        step: int,
-        n_epochs_kl_warmup: int | None,
-        n_steps_kl_warmup: int | None,
-        max_kl_weight: float = 1.0,
-        min_kl_weight: float = 0.0,
+    epoch: int,
+    step: int,
+    n_epochs_kl_warmup: int | None,
+    n_steps_kl_warmup: int | None,
+    max_kl_weight: float = 1.0,
+    min_kl_weight: float = 0.0,
 ) -> float | torch.Tensor:
     """Computes the kl weight for the current step or epoch.
 
@@ -443,7 +459,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         decoder: Dict specifying the decoder configuration.
         n_latent: Dimension of the latent space.
         n_batch: Number of total batches in the dataset.
-        batch_bais_sampled: True to sample the batch-specific biases from their distributions.
+        batch_bias_sampled: True to sample the batch-specific biases from their distributions.
         n_continuous_cov: Number of continuous covariates.
         n_cats_per_cov: A list of integers containing the number of categories for each categorical covariate.
         dropout_rate: Dropout rate for hidden units in the encoder only.
@@ -483,36 +499,50 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             ``size_factor_key`` parameter in the model's ``setup_anndata`` method as the scaling
             factor in the mean of the conditional distribution. Takes priority over
             ``use_observed_lib_size``.
-        use_observed_lib_size: If ``True``, use the observed library size for RNA as the scaling factor in the
-            mean of the conditional distribution. (currently must be ``True``)
+        use_observed_lib_size: If ``True``, use the observed library size for RNA as the scaling factor in the mean of the
+            conditional distribution.
+        library_log_means: :class:`~numpy.ndarray` of shape ``(1, n_batch)`` of means of the log library sizes that
+            parameterize the prior on library size if ``use_size_factor_key`` is ``False`` and
+            ``use_observed_lib_size`` is ``False``.
+        library_log_vars: :class:`~numpy.ndarray` of shape ``(1, n_batch)`` of variances of the log library sizes
+            that parameterize the prior on library size if ``use_size_factor_key`` is ``False`` and
+            ``use_observed_lib_size`` is ``False``.
+        batch_embedding_kwargs: Keyword arguments passed into :class:`~scvi.nn.Embedding` if ``batch_representation`` is
+            set to ``"embedding"
+        reconstruction_genes: List of genes to be reconstructed
+        build_reconstructions: True to sample the reconstructed expressions, False to sample the latent representations
+            ``.
     """
 
     def __init__(
-            self,
-            var_names_g: Sequence[str],
-            encoder: dict[str, list[dict] | dict | bool],
-            decoder: dict[str, list[dict] | dict | bool],
-            n_batch: int = 0,
-            n_latent: int = 10,
-            n_continuous_cov: int = 0,
-            n_cats_per_cov: list[int] = [],
-            dropout_rate: float = 0.1,
-            dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
-            log_variational: bool = True,
-            gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
-            latent_distribution: Literal["normal", "ln"] = "normal",
-            batch_embedded: bool = False,
-            batch_representation_sampled: bool = False,
-            n_latent_batch: int | None = None,
-            batch_kl_weight: float = 0.0,
-            use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
-            use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
-            kl_warmup_epochs: int | None = 400,
-            kl_weight_max: float = 1.0,
-            kl_weight_min: float = 0.0,
-            use_size_factor_key: bool = False,
-            use_observed_lib_size: bool = True,
+        self,
+        var_names_g: Sequence[str],
+        encoder: dict[str, list[dict] | dict | bool],
+        decoder: dict[str, list[dict] | dict | bool],
+        n_batch: int = 0,
+        n_latent: int = 10,
+        n_continuous_cov: int = 0,
+        n_cats_per_cov: list[int] = [],
+        dropout_rate: float = 0.1,
+        dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
+        log_variational: bool = True,
+        gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
+        latent_distribution: Literal["normal", "ln"] = "normal",
+        batch_embedded: bool = False,
+        batch_representation_sampled: bool = False,
+        n_latent_batch: int | None = None,
+        batch_kl_weight: float = 0.0,
+        use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
+        use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
+        kl_warmup_epochs: int | None = 400,
+        kl_weight_max: float = 1.0,
+        kl_weight_min: float = 0.0,
+        use_size_factor_key: bool = False,
+        use_observed_lib_size: bool = True,
+        reconstruction_genes: list | None = None,
+        build_reconstructions: bool = False,
     ):
+
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.n_input = len(self.var_names_g)
@@ -533,6 +563,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.z_kl_warmup_epochs = kl_warmup_epochs
         assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
         self.batch_kl_weight = batch_kl_weight
+        self.reconstruction_genes = reconstruction_genes
+        self.build_reconstructions = build_reconstructions
+
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")
@@ -567,11 +600,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(self.n_input))
+            #self.register_buffer('px_r', self.px_r)
         elif self.dispersion == "gene-label":
             raise NotImplementedError
             # self.px_r = torch.nn.Parameter(torch.randn(self.n_input, n_labels))
         elif self.dispersion == "gene-cell":
             self.px_r = torch.nn.Parameter(torch.zeros(1))  # dummy
+            #self.register_buffer('px_r', self.px_r)
         else:
             raise ValueError(
                 "dispersion must be one of ['gene',  'gene-label', 'gene-cell'], but input was {}".format(
@@ -637,8 +672,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             n_cats_per_cov=self.n_cats_per_cov,  # for the (optional) sizing of the final additive bias layer
         )
 
-        #print(self)
+
         self.reset_parameters()
+
 
     def reset_parameters(self) -> None:
         for m in self.modules():
@@ -678,8 +714,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         return batch_nb
 
     def categorical_onehot_from_categorical_index(
-            self,
-            categorical_covariate_index_nd: torch.Tensor | None,
+        self,
+        categorical_covariate_index_nd: torch.Tensor | None,
     ) -> torch.Tensor | None:
         """Compute one-hot encoding of categorical covariates from integer category indices.
 
@@ -701,11 +737,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         return None
 
     def inference(
-            self,
-            x_ng: torch.Tensor,
-            batch_nb: torch.Tensor,
-            continuous_covariates_nc: torch.Tensor | None = None,
-            categorical_covariate_np: torch.Tensor | None = None,
+        self,
+        x_ng: torch.Tensor,
+        batch_nb: torch.Tensor,
+        continuous_covariates_nc: torch.Tensor | None = None,
+        categorical_covariate_np: torch.Tensor | None = None,
     ):
         """
         High level inference method.
@@ -733,13 +769,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         return outputs
 
     def generative(
-            self,
-            z_nk: torch.Tensor,
-            library_size_n1: torch.Tensor,
-            batch_nb: torch.Tensor,
-            continuous_covariates_nc: torch.Tensor | None = None,
-            categorical_covariate_np: torch.Tensor | None = None,
-            size_factor_n1: torch.Tensor | None = None,
+        self,
+        z_nk: torch.Tensor,
+        library_size_n1: torch.Tensor,
+        batch_nb: torch.Tensor,
+        continuous_covariates_nc: torch.Tensor | None = None,
+        categorical_covariate_np: torch.Tensor | None = None,
+        size_factor_n1: torch.Tensor | None = None,
     ) -> dict[str, Distribution]:
         """Runs the generative model."""
 
@@ -779,14 +815,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         return dict(px=count_distribution, pz=pz)
 
     def forward(
-            self,
-            x_ng: torch.Tensor,
-            var_names_g: np.ndarray,
-            batch_index_n: torch.Tensor,
-            epoch: int,
-            continuous_covariates_nc: torch.Tensor | None = None,
-            categorical_covariate_index_nd: torch.Tensor | None = None,
-            size_factor_n1: torch.Tensor | None = None,
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        batch_index_n: torch.Tensor,
+        epoch: int,
+        continuous_covariates_nc: torch.Tensor | None = None,
+        categorical_covariate_index_nd: torch.Tensor | None = None,
+        size_factor_n1: torch.Tensor | None = None,
     ):
         """
         Args:
@@ -840,7 +876,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             max_kl_weight=self.z_kl_weight_max,
             min_kl_weight=self.z_kl_weight_min,
         )
-        # print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
+        #print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
 
         # optional KL divergence for batch representation
         kl_divergence_batch: torch.Tensor | int
@@ -861,12 +897,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         return {"loss": loss}
 
     def predict(
-            self,
-            x_ng: torch.Tensor,
-            var_names_g: np.ndarray,
-            batch_index_n: torch.Tensor,
-            continuous_covariates_nc: torch.Tensor | None = None,
-            categorical_covariate_index_nd: torch.Tensor | None = None,
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        batch_index_n: torch.Tensor,
+        continuous_covariates_nc: torch.Tensor | None = None,
+        categorical_covariate_index_nd: torch.Tensor | None = None,
     ):
         """
         Args:
@@ -888,16 +924,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             - ``x_ng``: (x_ng is a notational misnomer) Embedding of the input data into the scVI latent space.
         """
 
-        # uncomment the below to reconstruct
-        # return self.reconstruct(
-        #     x_ng=x_ng,
-        #     var_names_g=var_names_g,
-        #     batch_index_n=batch_index_n,
-        #     continuous_covariates_nc=continuous_covariates_nc,
-        #     categorical_covariate_index_nd=categorical_covariate_index_nd,
-        #     transform_batch="mean",
-        #     sample=False,
-        # )
+        if self.build_reconstructions:
+            return self.reconstruct(
+                x_ng=x_ng,
+                var_names_g=var_names_g,
+                batch_index_n=batch_index_n,
+                continuous_covariates_nc=continuous_covariates_nc,
+                categorical_covariate_index_nd=categorical_covariate_index_nd,
+                transform_batch="mean",
+                sample=False,
+            )
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
@@ -913,31 +949,38 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )["z"]
         return {"x_ng": z_nk}
 
-    def get_glyco_gene_list(self) -> list[str]:
+    def get_reconstruct_gene_list(self,reconstruction_genes: list | None) -> list[str]:
         """Return ordered list of genes from glyco gene file, checking which are present in model."""
-        if getattr(self, "glyco_gene_set", None) is None:
-            df = pd.read_csv("/home/sfleming/cellarium-ml/data/glyco_df_20241216.tsv", sep="\t")
-            self.glyco_gene_list = df["ensembl_gene_id"].values.tolist()
-            i = 0
-            for gid in self.glyco_gene_list:
-                if gid not in self.var_names_g:
-                    print(f"WARNING: {gid} not in var_names_g")
-                    i += 1
-            if i > 0:
-                print(f"WARNING: {i} genes in glyco_gene_list not in var_names_g")
-        return self.glyco_gene_list
+        #TODO: if predict gene list is None, keep all genes (self.var_names_g)
+        if reconstruction_genes is not None:
+            if getattr(self, "glyco_gene_set", None) is None:
+                # df = pd.read_csv("/home/sfleming/cellarium-ml/data/glyco_df_20241216.tsv", sep="\t")
+                # self.glyco_gene_list = df["ensembl_gene_id"].values.tolist()
+
+                self.reconstruct_gene_list = reconstruction_genes
+
+                i = 0
+                for gid in self.reconstruct_gene_list:
+                    if gid not in self.var_names_g:
+                        print(f"WARNING: {gid} not in var_names_g")
+                        i += 1
+                if i > 0:
+                    print(f"WARNING: {i} genes in reconstruct_gene_list not in var_names_g")
+        else:
+            self.reconstruct_gene_list = self.var_names_g
+        return self.reconstruct_gene_list
 
     @torch.no_grad()
     def reconstruct(
-            self,
-            x_ng: torch.Tensor,
-            var_names_g: np.ndarray,
-            batch_index_n: torch.Tensor,
-            continuous_covariates_nc: torch.Tensor | None = None,
-            categorical_covariate_index_nd: torch.Tensor | None = None,
-            size_factor_n: torch.Tensor | None = None,
-            transform_batch: str | int | None = None,
-            sample: bool = True,
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        batch_index_n: torch.Tensor,
+        continuous_covariates_nc: torch.Tensor | None = None,
+        categorical_covariate_index_nd: torch.Tensor | None = None,
+        size_factor_n: torch.Tensor | None = None,
+        transform_batch: str | int | None = None,
+        sample: bool = True,
     ):
         """
         Reconstruct the data using the VAE, optionally transforming the batch.
@@ -993,7 +1036,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
 
         output_counts_sum_np: int | torch.Tensor = 0
-        gid_list = self.get_glyco_gene_list()
+        gid_list = self.get_reconstruct_gene_list(self.reconstruction_genes)
         # get the genes in the order of the glyco gene list
         gene_inds = [np.where(var_names_g == gid)[0][0] for gid in gid_list]
 
