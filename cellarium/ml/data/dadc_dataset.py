@@ -177,8 +177,6 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         adata = self.dadc[idx]
         data = tree_map(lambda field: field(adata), self.batch_keys)
 
-        data["epoch"] = np.array([self.epoch])  # for scvi
-
         # for testing purposes
         if self.test_mode:
             rank, num_replicas = get_rank_and_num_replicas()
