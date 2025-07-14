@@ -57,7 +57,7 @@ def test_load_from_checkpoint_multi_device(
                 batch_embedded=batch_embedded,
                 batch_representation_sampled=batch_representation_sampled,
                 n_latent_batch=n_latent_batch,
-                batch_kl_weight=batch_kl_weight,
+                batch_kl_weight_max=batch_kl_weight,
                 encoder={
                     "hidden_layers": [
                         {
@@ -92,7 +92,7 @@ def test_load_from_checkpoint_multi_device(
             batch_embedded=batch_embedded,
             batch_representation_sampled=batch_representation_sampled,
             n_latent_batch=n_latent_batch,
-            batch_kl_weight=0,
+            batch_kl_weight_max=0,
             encoder={
                 "hidden_layers": [
                     {
@@ -217,7 +217,7 @@ standard_kwargs: SCVIKwargs = dict(
     batch_embedded=False,
     batch_representation_sampled=False,
     n_latent_batch=None,
-    batch_kl_weight=0.0,
+    batch_kl_weight_max=0.0,
     use_batch_norm="both",
     use_layer_norm="none",
 )
