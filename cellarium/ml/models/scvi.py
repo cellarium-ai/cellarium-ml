@@ -530,6 +530,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
+        if not (kl_annealing_start >= 0.0 and kl_annealing_start <= 1.0):
+            raise ValueError(
+                f"kl_annealing_start={kl_annealing_start} must be in the range [0.0, 1.0]."
+            )
         self.kl_annealing_start = kl_annealing_start
         assert not ((kl_warmup_steps is not None) and (kl_warmup_epochs is not None)), (
             "Only one of kl_warmup_epochs or kl_warmup_steps can be specified, not both."
