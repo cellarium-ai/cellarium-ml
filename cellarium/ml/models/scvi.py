@@ -530,13 +530,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
-        self.z_kl_weight_max = kl_weight_max
-        self.z_kl_weight_min = kl_weight_min
+        self.kl_weight_max = kl_weight_max
+        self.kl_weight_min = kl_weight_min
         assert not ((kl_warmup_steps is not None) and (kl_warmup_epochs is not None)), (
             "Only one of kl_warmup_epochs or kl_warmup_steps can be specified, not both."
         )
-        self.z_kl_warmup_epochs = kl_warmup_epochs
-        self.z_kl_warmup_steps = kl_warmup_steps
+        self.kl_warmup_epochs = kl_warmup_epochs
+        self.kl_warmup_steps = kl_warmup_steps
         assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
         self.batch_kl_weight = batch_kl_weight
         self.epoch = 0
@@ -838,13 +838,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
         # compute the annealed KL weight
-        z_kl_weight = compute_annealed_kl_weight(
+        kl_weight = compute_annealed_kl_weight(
             epoch=self.epoch,
             step=self.step,
-            n_epochs_kl_warmup=self.z_kl_warmup_epochs,
-            n_steps_kl_warmup=self.z_kl_warmup_steps,
-            max_kl_weight=self.z_kl_weight_max,
-            min_kl_weight=self.z_kl_weight_min,
+            n_epochs_kl_warmup=self.kl_warmup_epochs,
+            n_steps_kl_warmup=self.kl_warmup_steps,
+            max_kl_weight=self.kl_weight_max,
+            min_kl_weight=self.kl_weight_min,
         )
         # print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
 
@@ -862,7 +862,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         # full loss
-        loss = torch.mean(rec_loss + z_kl_weight * kl_divergence_z + kl_divergence_batch)
+        loss = torch.mean(rec_loss + kl_weight * (kl_divergence_z + kl_divergence_batch))
 
         return {"loss": loss}
 
@@ -1033,13 +1033,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         if trainer.logger is not None:
             trainer.logger.log_metrics(
                 {
-                    "z_kl_weight": compute_annealed_kl_weight(
+                    "kl_weight": compute_annealed_kl_weight(
                         epoch=self.epoch,
                         step=self.step,
-                        n_epochs_kl_warmup=self.z_kl_warmup_epochs,
-                        n_steps_kl_warmup=self.z_kl_warmup_steps,
-                        max_kl_weight=self.z_kl_weight_max,
-                        min_kl_weight=self.z_kl_weight_min,
+                        n_epochs_kl_warmup=self.kl_warmup_epochs,
+                        n_steps_kl_warmup=self.kl_warmup_steps,
+                        max_kl_weight=self.kl_weight_max,
+                        min_kl_weight=self.kl_weight_min,
                     )
                 },
                 step=trainer.global_step,
