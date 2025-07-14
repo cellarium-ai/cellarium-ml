@@ -532,13 +532,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_embedded: bool = False,
         batch_representation_sampled: bool = False,
         n_latent_batch: int | None = None,
-        batch_kl_weight: float = 0.0,
+        z_kl_weight_max: float = 1.0,
+        batch_kl_weight_max: float = 0.0,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         kl_warmup_epochs: int | None = None,
         kl_warmup_steps: int | None = None,
-        kl_weight_max: float = 1.0,
-        kl_weight_min: float = 0.0,
+        kl_annealing_start: float = 0.0,
         use_size_factor_key: bool = False,
         use_observed_lib_size: bool = True,
         reconstruction_genes: list | None = None,
@@ -560,17 +560,22 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
-        self.kl_weight_max = kl_weight_max
-        self.kl_weight_min = kl_weight_min
+        if not (kl_annealing_start >= 0.0 and kl_annealing_start <= 1.0):
+            raise ValueError(
+                f"kl_annealing_start={kl_annealing_start} must be in the range [0.0, 1.0]."
+            )
+        self.kl_annealing_start = kl_annealing_start
         assert not ((kl_warmup_steps is not None) and (kl_warmup_epochs is not None)), (
             "Only one of kl_warmup_epochs or kl_warmup_steps can be specified, not both."
         )
         self.kl_warmup_epochs = kl_warmup_epochs
         self.kl_warmup_steps = kl_warmup_steps
-        assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
-        self.batch_kl_weight = batch_kl_weight
         self.reconstruction_genes = reconstruction_genes
         self.build_reconstructions = build_reconstructions
+        assert batch_kl_weight_max >= 0.0, "batch_kl_weight must be non-negative"
+        self.batch_kl_weight_max = batch_kl_weight_max
+        assert z_kl_weight_max >= 0.0, "z_kl_weight must be non-negative"
+        self.z_kl_weight_max = z_kl_weight_max
         self.epoch = 0
         self.step = 0
 
@@ -874,20 +879,20 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
         # compute the annealed KL weight
-        kl_weight = compute_annealed_kl_weight(
+        kl_annealing_weight = compute_annealed_kl_weight(
             epoch=self.epoch,
             step=self.step,
             n_epochs_kl_warmup=self.kl_warmup_epochs,
             n_steps_kl_warmup=self.kl_warmup_steps,
-            max_kl_weight=self.kl_weight_max,
-            min_kl_weight=self.kl_weight_min,
+            max_kl_weight=1.0,
+            min_kl_weight=self.kl_annealing_start,
         )
         #print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
 
         # optional KL divergence for batch representation
         kl_divergence_batch: torch.Tensor | int
-        if self.batch_representation_sampled and (self.batch_kl_weight > 0):
-            kl_divergence_batch = self.batch_kl_weight * kl(
+        if self.batch_representation_sampled and (self.batch_kl_weight_max > 0):
+            kl_divergence_batch = kl(
                 self.batch_embedding_distribution(batch_index_n=batch_index_n),
                 Normal(torch.zeros_like(batch_nb), torch.ones_like(batch_nb)),
             ).sum(dim=1)
@@ -898,7 +903,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         # full loss
-        loss = torch.mean(rec_loss + kl_weight * (kl_divergence_z + kl_divergence_batch))
+        loss = torch.mean(
+            rec_loss 
+            + kl_annealing_weight * (
+                self.z_kl_weight_max * kl_divergence_z 
+                + self.batch_kl_weight_max * kl_divergence_batch
+            )
+        )
 
         return {"loss": loss}
 
@@ -1076,13 +1087,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         if trainer.logger is not None:
             trainer.logger.log_metrics(
                 {
-                    "kl_weight": compute_annealed_kl_weight(
+                    "kl_annealing_weight": compute_annealed_kl_weight(
                         epoch=self.epoch,
                         step=self.step,
                         n_epochs_kl_warmup=self.kl_warmup_epochs,
                         n_steps_kl_warmup=self.kl_warmup_steps,
-                        max_kl_weight=self.kl_weight_max,
-                        min_kl_weight=self.kl_weight_min,
+                        max_kl_weight=1.0,
+                        min_kl_weight=self.kl_annealing_start,
                     )
                 },
                 step=trainer.global_step,
