@@ -13,6 +13,7 @@ import torch
 from anndata import AnnData
 from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
+import lightning.pytorch as pl
 
 from cellarium.ml.distributions import NegativeBinomial
 from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
@@ -534,7 +535,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_kl_weight: float = 0.0,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
-        kl_warmup_epochs: int | None = 400,
+        kl_warmup_epochs: int | None = None,
+        kl_warmup_steps: int | None = None,
         kl_weight_max: float = 1.0,
         kl_weight_min: float = 0.0,
         use_size_factor_key: bool = False,
@@ -558,13 +560,19 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
-        self.z_kl_weight_max = kl_weight_max
-        self.z_kl_weight_min = kl_weight_min
-        self.z_kl_warmup_epochs = kl_warmup_epochs
+        self.kl_weight_max = kl_weight_max
+        self.kl_weight_min = kl_weight_min
+        assert not ((kl_warmup_steps is not None) and (kl_warmup_epochs is not None)), (
+            "Only one of kl_warmup_epochs or kl_warmup_steps can be specified, not both."
+        )
+        self.kl_warmup_epochs = kl_warmup_epochs
+        self.kl_warmup_steps = kl_warmup_steps
         assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
         self.batch_kl_weight = batch_kl_weight
         self.reconstruction_genes = reconstruction_genes
         self.build_reconstructions = build_reconstructions
+        self.epoch = 0
+        self.step = 0
 
 
         if n_continuous_cov > 0:
@@ -819,7 +827,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         batch_index_n: torch.Tensor,
-        epoch: int,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
         size_factor_n1: torch.Tensor | None = None,
@@ -842,7 +849,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the loss value.
         """
-
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
@@ -868,13 +874,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
         # compute the annealed KL weight
-        z_kl_weight = compute_annealed_kl_weight(
-            epoch=epoch,
-            step=None,
-            n_epochs_kl_warmup=self.z_kl_warmup_epochs,
-            n_steps_kl_warmup=None,
-            max_kl_weight=self.z_kl_weight_max,
-            min_kl_weight=self.z_kl_weight_min,
+        kl_weight = compute_annealed_kl_weight(
+            epoch=self.epoch,
+            step=self.step,
+            n_epochs_kl_warmup=self.kl_warmup_epochs,
+            n_steps_kl_warmup=self.kl_warmup_steps,
+            max_kl_weight=self.kl_weight_max,
+            min_kl_weight=self.kl_weight_min,
         )
         #print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
 
@@ -892,7 +898,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         # full loss
-        loss = torch.mean(rec_loss + z_kl_weight * kl_divergence_z + kl_divergence_batch)
+        loss = torch.mean(rec_loss + kl_weight * (kl_divergence_z + kl_divergence_batch))
 
         return {"loss": loss}
 
@@ -1062,6 +1068,25 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         x_tilde_np = output_counts_sum_np / len(transformed_batch_index_n_list)
         return {"x_ng": x_tilde_np}
+
+    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
+        self.step = trainer.global_step
+        self.epoch = trainer.current_epoch
+        # log these values to pytorch lightning logger
+        if trainer.logger is not None:
+            trainer.logger.log_metrics(
+                {
+                    "kl_weight": compute_annealed_kl_weight(
+                        epoch=self.epoch,
+                        step=self.step,
+                        n_epochs_kl_warmup=self.kl_warmup_epochs,
+                        n_steps_kl_warmup=self.kl_warmup_steps,
+                        max_kl_weight=self.kl_weight_max,
+                        min_kl_weight=self.kl_weight_min,
+                    )
+                },
+                step=trainer.global_step,
+            )
 
 
 def batch_index_to_batch_label(adata: AnnData, batch_keys: list[str]) -> pd.DataFrame:
