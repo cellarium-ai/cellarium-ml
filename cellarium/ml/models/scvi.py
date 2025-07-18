@@ -7,13 +7,13 @@ import importlib
 import itertools
 from typing import Any, Literal, Sequence
 
+import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import torch
 from anndata import AnnData
 from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
-import lightning.pytorch as pl
 
 from cellarium.ml.distributions import NegativeBinomial
 from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
@@ -389,7 +389,7 @@ class DecoderSCVI(torch.nn.Module):
                 # dist = ZeroInflatedNegativeBinomial(count_mean_ng, inverse_overdispersion, self.dropout_decoder(q_nh))
 
         return dist
-    
+
 
 def compute_annealed_kl_weight(
     epoch: int,
@@ -398,7 +398,7 @@ def compute_annealed_kl_weight(
     n_steps_kl_warmup: int | None,
     max_kl_weight: float = 1.0,
     min_kl_weight: float = 0.0,
-) -> float | torch.Tensor:
+) -> float:
     """Computes the kl weight for the current step or epoch.
 
     If both `n_epochs_kl_warmup` and `n_steps_kl_warmup` are None `max_kl_weight` is returned.
@@ -415,9 +415,7 @@ def compute_annealed_kl_weight(
         The KL weight for the current step or epoch.
     """
     if min_kl_weight > max_kl_weight:
-        raise ValueError(
-            f"min_kl_weight={min_kl_weight} is larger than max_kl_weight={max_kl_weight}."
-        )
+        raise ValueError(f"min_kl_weight={min_kl_weight} is larger than max_kl_weight={max_kl_weight}.")
 
     slope = max_kl_weight - min_kl_weight
     if n_epochs_kl_warmup:
@@ -531,9 +529,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
         if not (kl_annealing_start >= 0.0 and kl_annealing_start <= 1.0):
-            raise ValueError(
-                f"kl_annealing_start={kl_annealing_start} must be in the range [0.0, 1.0]."
-            )
+            raise ValueError(f"kl_annealing_start={kl_annealing_start} must be in the range [0.0, 1.0].")
         self.kl_annealing_start = kl_annealing_start
         assert not ((kl_warmup_steps is not None) and (kl_warmup_epochs is not None)), (
             "Only one of kl_warmup_epochs or kl_warmup_steps can be specified, not both."
@@ -868,14 +864,17 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # full loss
         loss = torch.mean(
             rec_loss
-            + kl_annealing_weight * (
-                self.z_kl_weight_max * kl_divergence_z
-                + self.batch_kl_weight_max * kl_divergence_batch
-            ),
+            + kl_annealing_weight
+            * (self.z_kl_weight_max * kl_divergence_z + self.batch_kl_weight_max * kl_divergence_batch),
             dim=0,
         )
 
-        return {"loss": loss, "reconstruction_loss": rec_loss, "kl_divergence_z": kl_divergence_z, "z_nk": inference_outputs["z"]}
+        return {
+            "loss": loss,
+            "reconstruction_loss": rec_loss,
+            "kl_divergence_z": kl_divergence_z,
+            "z_nk": inference_outputs["z"],
+        }
 
     def predict(
         self,
