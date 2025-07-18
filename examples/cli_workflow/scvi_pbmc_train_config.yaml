@@ -68,11 +68,12 @@ model:
       n_batch: null
 
       # these can be changed
-      kl_warmup_epochs: 50
+      kl_warmup_epochs: null
+      kl_warmup_steps: 100
       batch_embedded: true
       batch_representation_sampled: true
       n_latent_batch: null
-      batch_kl_weight: 0.01
+      batch_kl_weight_max: 0.01
       encoder: 
         hidden_layers:
         - class_path: cellarium.ml.models.scvi.LinearWithBatch
