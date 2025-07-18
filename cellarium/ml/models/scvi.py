@@ -840,7 +840,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
 
         # KL divergence for z
-        kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
+        kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=-1)
 
         # compute the annealed KL weight
         kl_annealing_weight = compute_annealed_kl_weight(
@@ -848,10 +848,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             step=self.step,
             n_epochs_kl_warmup=self.kl_warmup_epochs,
             n_steps_kl_warmup=self.kl_warmup_steps,
-            max_kl_weight=1.0,
+            max_kl_weight=self.z_kl_weight_max,
             min_kl_weight=self.kl_annealing_start,
         )
-        # print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
 
         # optional KL divergence for batch representation
         kl_divergence_batch: torch.Tensor | int
@@ -859,7 +858,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             kl_divergence_batch = kl(
                 self.batch_embedding_distribution(batch_index_n=batch_index_n),
                 Normal(torch.zeros_like(batch_nb), torch.ones_like(batch_nb)),
-            ).sum(dim=1)
+            ).sum(dim=-1)
         else:
             kl_divergence_batch = 0
 
@@ -868,11 +867,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         # full loss
         loss = torch.mean(
-            rec_loss 
+            rec_loss
             + kl_annealing_weight * (
-                self.z_kl_weight_max * kl_divergence_z 
+                self.z_kl_weight_max * kl_divergence_z
                 + self.batch_kl_weight_max * kl_divergence_batch
-            )
+            ),
+            dim=0,
         )
 
         return {"loss": loss}
@@ -1049,7 +1049,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                         step=self.step,
                         n_epochs_kl_warmup=self.kl_warmup_epochs,
                         n_steps_kl_warmup=self.kl_warmup_steps,
-                        max_kl_weight=1.0,
+                        max_kl_weight=self.z_kl_weight_max,
                         min_kl_weight=self.kl_annealing_start,
                     )
                 },
