@@ -156,14 +156,14 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
             out_features = in_features
         else:
             module_list = torch.nn.ModuleList()
-            n_hidden = [layer["init_args"].pop("out_features") for layer in layers]
+            n_hidden = [layer["init_args"].get("out_features") for layer in layers]
             for layer, n_in, n_out in zip(layers, [in_features] + n_hidden, n_hidden):
+                layer["init_args"]["out_features"] = n_out
                 module_list.append(
                     DressedLayer(
                         instantiate_from_class_path(
                             layer["class_path"],
                             in_features=n_in,
-                            out_features=n_out,
                             bias=True,
                             **layer["init_args"],
                         ),
