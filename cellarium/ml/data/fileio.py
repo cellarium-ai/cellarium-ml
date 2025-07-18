@@ -1,6 +1,6 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
-
+from typing import Literal
 import re
 import shutil
 import tempfile
@@ -12,7 +12,7 @@ from google.cloud.storage import Client
 url_schemes = ("http:", "https:", "ftp:")
 
 
-def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnData:
+def read_h5ad_gcs(filename: str, storage_client: Client | None = None, backed: Literal['r', 'r+'] | bool | None = None) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
 
@@ -22,6 +22,9 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
 
     Args:
         filename: Path to the data file in Cloud Storage.
+        backed: If 'r', load in backed mode instead of fully loading into memory.
+               If 'r+', load in backed mode with write access (only X can be modified).
+               If True, equivalent to 'r'. Default is None (load into memory).
     """
     if not filename.startswith("gs:"):
         raise ValueError("The filename must start with 'gs:' protocol name.")
@@ -36,7 +39,7 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None) -> AnnDat
     blob = bucket.blob(blob_name)
 
     with blob.open("rb") as f:
-        return read_h5ad(f)
+        return read_h5ad(f,backed=backed)
 
 
 def read_h5ad_url(filename: str) -> AnnData:
