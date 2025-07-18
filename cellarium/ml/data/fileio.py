@@ -42,7 +42,7 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None, backed: L
         return read_h5ad(f,backed=backed)
 
 
-def read_h5ad_url(filename: str) -> AnnData:
+def read_h5ad_url(filename: str,backed: Literal['r', 'r+'] | bool | None = None) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the URL.
 
@@ -51,16 +51,23 @@ def read_h5ad_url(filename: str) -> AnnData:
         >>> adata = read_h5ad_url(
         ...     "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad"
         ... )
+        >>> adata = read_h5ad_url(
+        ...     "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+        ...     backed='r'
+        ... )
 
     Args:
         filename: URL of the data file.
+         backed: If 'r', load in backed mode instead of fully loading into memory.
+               If 'r+', load in backed mode with write access (only X can be modified).
+               If True, equivalent to 'r'. Default is None (load into memory).
     """
     if not any(filename.startswith(scheme) for scheme in url_schemes):
         raise ValueError("The filename must start with 'http:', 'https:', or 'ftp:' protocol name.")
     with urllib.request.urlopen(filename) as response:
         with tempfile.TemporaryFile() as tmp_file:
             shutil.copyfileobj(response, tmp_file)
-            return read_h5ad(tmp_file)
+            return read_h5ad(tmp_file,backed=backed)
 
 
 def read_h5ad_local(filename: str) -> AnnData:
