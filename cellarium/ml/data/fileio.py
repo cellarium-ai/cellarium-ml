@@ -87,12 +87,16 @@ def read_h5ad_local(filename: str,str,backed: Literal['r', 'r+'] | bool | None =
     return read_h5ad(filename,backed=backed)
 
 
-def read_h5ad_file(filename: str, **kwargs) -> AnnData:
+def read_h5ad_file(filename: str, backed: Literal['r', 'r+'] | bool | None = None, **kwargs) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from a filename.
 
     Args:
         filename: Path to the data file.
+        backed: If 'r', load in backed mode instead of fully loading into memory.
+               If 'r+', load in backed mode with write access (only X can be modified).
+               If True, equivalent to 'r'. Default is None (load into memory).
+
     """
     if filename.startswith("gs:"):
         return read_h5ad_gcs(filename, **kwargs)
@@ -103,4 +107,4 @@ def read_h5ad_file(filename: str, **kwargs) -> AnnData:
     if any(filename.startswith(scheme) for scheme in url_schemes):
         return read_h5ad_url(filename)
 
-    return read_h5ad(filename)
+    return read_h5ad(filename,backed=backed)
