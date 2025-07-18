@@ -70,17 +70,21 @@ def read_h5ad_url(filename: str,backed: Literal['r', 'r+'] | bool | None = None)
             return read_h5ad(tmp_file,backed=backed)
 
 
-def read_h5ad_local(filename: str) -> AnnData:
+def read_h5ad_local(filename: str,str,backed: Literal['r', 'r+'] | bool | None = None) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the local disk.
 
     Args:
         filename: Path to the local data file.
+        backed: If 'r', load in backed mode instead of fully loading into memory.
+               If 'r+', load in backed mode with write access (only X can be modified).
+               If True, equivalent to 'r'. Default is None (load into memory).
+
     """
     if not filename.startswith("file:"):
         raise ValueError("The filename must start with 'file:' protocol name.")
     filename = re.sub(r"^file://?", "", filename)
-    return read_h5ad(filename)
+    return read_h5ad(filename,backed=backed)
 
 
 def read_h5ad_file(filename: str, **kwargs) -> AnnData:
