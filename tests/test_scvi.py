@@ -447,12 +447,21 @@ def testing_anndatas() -> tuple[anndata.AnnData, anndata.AnnData]:
         return train_data, test_data
 
 
-n_latent: int = 50
-n_hidden: int = 512
-n_layers: int = 2
+# # Lys test case
+# n_latent: int = 50
+# n_hidden: int = 512
+# n_layers: int = 2
+# batch_key: str = "batch_concat_cellxgene"
+# max_epochs: int = 5
+# batch_size: int = 1024
+
+# small dataset test case
+n_latent: int = 10
+n_hidden: int = 128
+n_layers: int = 1
 batch_key: str = "batch_concat_cellxgene"
-max_epochs: int = 5
-batch_size: int = 1024
+max_epochs: int = 10
+batch_size: int = 256
 
 
 @pytest.fixture(scope="module")
@@ -481,7 +490,8 @@ def train_scvi_tools_model(
         categorical_covariate_keys=None,
     )
     model = SCVI(train_data, gene_likelihood="nb", n_latent=n_latent, 
-                 n_layers=n_layers, n_hidden=n_hidden, dispersion="gene")
+                 n_layers=n_layers, n_hidden=n_hidden, dispersion="gene",
+                 deeply_inject_covariates=True)
     model.train(max_epochs=max_epochs, train_size=1, batch_size=batch_size)
     # embed the training data
     train_latent = model.get_latent_representation(train_data)
@@ -518,7 +528,7 @@ def train_cellarium_model(
         n_batch=train_data.obs[batch_key].nunique(),
         n_latent=n_latent,
         kl_annealing_start=0.0,
-        kl_warmup_epochs=max_epochs,
+        kl_warmup_epochs=400,#max_epochs,
         z_kl_weight_max=1.0,
         batch_kl_weight_max=0.0,
         batch_embedded=False,
@@ -536,7 +546,7 @@ def train_cellarium_model(
                         "dropout_rate": 0.1,
                     },
                 },
-            ],
+            ] * n_layers,
             "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
         },
         decoder={
@@ -550,7 +560,7 @@ def train_cellarium_model(
                         "dropout_rate": 0.0,
                     },
                 },
-            ],
+            ] * n_layers,
             "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
             "final_additive_bias": False,
         },
@@ -643,12 +653,8 @@ def test_latent_accuracy_metric(
 
     Compare the accuracy metric to that same metric computed via scvi-tools (with some margin of error).
     """
-
-    # get the training and test latent representations from the fixture
-    # train_latent, test_latent, train_data, test_data = train_scvi_tools_model
-    train_data, test_data = train_cellarium_model
-
     # compute the accuracy metric for scvi-tools
+    train_data, test_data = train_scvi_tools_model
     accuracy_scvi_tools = compute_neighbor_accuracy(
         train_data=train_data,
         test_data=test_data,
@@ -659,6 +665,7 @@ def test_latent_accuracy_metric(
     print(f"scvi-tools accuracy ({metric}): {accuracy_scvi_tools:.4f}")
 
     # compute the accuracy metric for Cellarium
+    train_data, test_data = train_cellarium_model
     accuracy_cellarium = compute_neighbor_accuracy(
         train_data=train_data,
         test_data=test_data,
@@ -668,6 +675,6 @@ def test_latent_accuracy_metric(
     )
     print(f"cellarium accuracy ({metric}): {accuracy_cellarium:.4f}")
 
-    assert accuracy_cellarium > accuracy_scvi_tools, (
+    assert 0, (
         f"Cellarium ({accuracy_cellarium:.4f}); scvi-tools ({accuracy_scvi_tools:.4f})"
     )
