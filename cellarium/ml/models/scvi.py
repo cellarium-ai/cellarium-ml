@@ -463,7 +463,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_embedded: bool = False,
         batch_representation_sampled: bool = False,
         n_latent_batch: int | None = None,
-        batch_kl_weight: float = 0.0,
+        batch_kl_weight_max: float = 0.0,
+        z_kl_weight_max: float = 1.0,
+        kl_annealing_start: float = 0.0,
+        kl_warmup_epochs: int | None = 400,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         use_size_factor_key: bool = False,
@@ -484,8 +487,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
-        assert batch_kl_weight >= 0.0, "batch_kl_weight must be non-negative"
-        self.batch_kl_weight = batch_kl_weight
+        assert batch_kl_weight_max >= 0.0, "batch_kl_weight must be non-negative"
+        self.batch_kl_weight = batch_kl_weight_max
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")

@@ -4,20 +4,23 @@
 import copy
 import math
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Literal, Sequence, TypedDict
 
 import anndata
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 from lightning.pytorch.strategies import DDPStrategy
 
-from cellarium.ml import CellariumModule
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.models import SingleCellVariationalInference
-from cellarium.ml.models.scvi import EncoderSCVI, DecoderSCVI
-from cellarium.ml.utilities.data import collate_fn
+from cellarium.ml.models.scvi import DecoderSCVI, EncoderSCVI
+from cellarium.ml.utilities.data import AnnDataField, categories_to_codes, collate_fn, densify
 from tests.common import BoringDatasetSCVI
 
 
@@ -59,7 +62,7 @@ def test_load_from_checkpoint_multi_device(
                 batch_embedded=batch_embedded,
                 batch_representation_sampled=batch_representation_sampled,
                 n_latent_batch=n_latent_batch,
-                batch_kl_weight=batch_kl_weight,
+                batch_kl_weight_max=batch_kl_weight,
                 encoder={
                     "hidden_layers": [
                         {
@@ -94,7 +97,7 @@ def test_load_from_checkpoint_multi_device(
             batch_embedded=batch_embedded,
             batch_representation_sampled=batch_representation_sampled,
             n_latent_batch=n_latent_batch,
-            batch_kl_weight=0,
+            batch_kl_weight_max=0,
             encoder={
                 "hidden_layers": [
                     {
@@ -219,7 +222,7 @@ standard_kwargs: SCVIKwargs = dict(
     batch_embedded=False,
     batch_representation_sampled=False,
     n_latent_batch=None,
-    batch_kl_weight=0.0,
+    batch_kl_weight_max=0.0,
     use_batch_norm="both",
     use_layer_norm="none",
 )
@@ -371,6 +374,331 @@ def test_vae_architectures():
             inverse_overdispersion=model.px_r.exp(),
             library_size_n1=batch["x_ng"].float().sum(dim=-1, keepdim=True),
         )
+
+
+def compute_neighbor_accuracy(
+    train_data: anndata.AnnData,
+    test_data: anndata.AnnData,
+    latent_obsm_key: str = "X_cellarium",
+    labels_obs_key: str = "cell_type",
+    metric: Literal["cosine", "euclidean"] = "euclidean",
+) -> float:
+    """
+    Compute the following accuracy metric:
+        - for each test sample, find the nearest training sample in latent space
+        - compute the accuracy as the fraction of neighbor training samples that have the right label
+    """
+    from sklearn.neighbors import NearestNeighbors
+
+    # pull data from anndata objects
+    train_latent = train_data.obsm[latent_obsm_key]
+    test_latent = test_data.obsm[latent_obsm_key]
+    train_labels = train_data.obs[labels_obs_key].astype(str).values
+    test_labels = test_data.obs[labels_obs_key].astype(str).values
+
+    # compute the nearest neighbors of each test point
+    nbrs = NearestNeighbors(n_neighbors=1, metric=metric).fit(train_latent)
+    _, indices = nbrs.kneighbors(test_latent)
+
+    # get the labels of the nearest neighbors and compute accuracy
+    train_labels = train_labels[indices.flatten()]
+    accuracy = np.mean(train_labels == test_labels)
+
+    return accuracy
+
+
+@pytest.fixture(scope="module")
+def testing_anndatas() -> tuple[anndata.AnnData, anndata.AnnData]:
+    """
+    Get the train and test data.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        # # data
+        # train_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_train.h5ad"
+        # test_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_test.h5ad"
+
+        # # download the data
+        # train_path = tmpdir / "train.h5ad"
+        # test_path = tmpdir / "test.h5ad"
+        # import requests
+
+        # response = requests.get(train_data)
+        # response.raise_for_status()
+        # with open(train_path, "wb") as f:
+        #     f.write(response.content)
+
+        # response = requests.get(test_data)
+        # response.raise_for_status()
+        # with open(test_path, "wb") as f:
+        #     f.write(response.content)
+
+        # temp hack because I'm on slow wifi =======================
+        train_path = Path("/Users/sfleming/Downloads/UBERON_0002115_train.h5ad")
+        test_path = Path("/Users/sfleming/Downloads/UBERON_0002115_test.h5ad")
+        shutil.copy(train_path, tmpdir / "train.h5ad")
+        shutil.copy(test_path, tmpdir / "test.h5ad")
+        # ===========================================================
+
+        # print out the contents of the temp directory
+        print(f"tmpdir contents: {os.listdir(tmpdir)}")
+
+        train_data = anndata.read_h5ad(tmpdir / "train.h5ad")
+        test_data = anndata.read_h5ad(tmpdir / "test.h5ad")
+        return train_data, test_data
+
+
+# # Lys test case
+# n_latent: int = 50
+# n_hidden: int = 512
+# n_layers: int = 2
+# batch_size: int = 1024
+# max_epochs: int = 5
+
+# small dataset test case
+n_latent: int = 10
+n_hidden: int = 128
+n_layers: int = 1
+batch_size: int = 512
+max_epochs: int = 10
+
+
+# other params
+n_epochs_kl_warmup: int = 10
+max_z_kl_weight: float = 10.0
+batch_key: str = "batch_concat_cellxgene"
+
+
+@pytest.fixture(scope="module")
+def train_scvi_tools_model(
+    testing_anndatas,
+    latent_obsm_key: str = "X_scvi",
+) -> tuple[np.ndarray, np.ndarray, anndata.AnnData, anndata.AnnData]:
+    """
+    Train a scvi-tools model on the training data and embed both the training and test data.
+
+    Returns:
+        - train_data: the training data with the model's latent representation added to obsm[latent_obsm_key]
+        - test_data: the test data with the model's latent representation added to obsm[latent_obsm_key]
+    """
+
+    # retrieve the training and test data from the fixture
+    train_data, test_data = testing_anndatas
+
+    # train the scvi-tools model on the training data
+    from scvi.model import SCVI
+
+    # set up and train scvi-tools model
+    SCVI.setup_anndata(
+        train_data,
+        batch_key=batch_key,
+        categorical_covariate_keys=None,
+    )
+    model = SCVI(
+        train_data,
+        gene_likelihood="nb",
+        n_latent=n_latent,
+        n_layers=n_layers,
+        n_hidden=n_hidden,
+        dispersion="gene",
+        deeply_inject_covariates=True,
+    )
+    model.train(
+        max_epochs=max_epochs,
+        train_size=1,
+        batch_size=batch_size,
+        plan_kwargs={"n_epochs_kl_warmup": n_epochs_kl_warmup, "max_kl_weight": max_z_kl_weight, "min_kl_weight": 0.0},
+    )
+    # embed the training data
+    train_latent = model.get_latent_representation(train_data)
+    # embed the test data
+    SCVI.setup_anndata(test_data)
+    test_latent = model.get_latent_representation(test_data)
+
+    # add the latent representation to the obsm of the training and test data
+    train_data.obsm[latent_obsm_key] = train_latent
+    test_data.obsm[latent_obsm_key] = test_latent
+
+    return train_data, test_data
+
+
+@pytest.fixture(scope="module")
+def train_cellarium_model(
+    testing_anndatas,
+    latent_obsm_key: str = "X_cellarium",
+) -> tuple[anndata.AnnData, anndata.AnnData]:
+    """
+    Train a Cellarium model on the training data and embed both the training and test data.
+
+    Returns:
+        - train_data: the training data with the model's latent representation added to obsm[latent_obsm_key]
+        - test_data: the test data with the model's latent representation added to obsm[latent_obsm_key]
+    """
+
+    # retrieve the training and test data from the fixture
+    train_data, test_data = testing_anndatas
+
+    # set up and train Cellarium model
+    cellarium_model = SingleCellVariationalInference(
+        var_names_g=train_data.var_names.values,
+        n_batch=train_data.obs[batch_key].nunique(),
+        n_latent=n_latent,
+        kl_annealing_start=0.0,
+        kl_warmup_epochs=n_epochs_kl_warmup,
+        z_kl_weight_max=max_z_kl_weight,
+        batch_kl_weight_max=0.0,
+        batch_embedded=False,
+        batch_representation_sampled=False,
+        gene_likelihood="nb",
+        dispersion="gene",
+        encoder={
+            "hidden_layers": [
+                {
+                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                    "init_args": {"out_features": n_hidden, "batch_to_bias_hidden_layers": []},
+                    "dressing_init_args": {
+                        "use_batch_norm": True,
+                        "use_layer_norm": False,
+                        "dropout_rate": 0.1,
+                    },
+                },
+            ]
+            * n_layers,
+            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+        },
+        decoder={
+            "hidden_layers": [
+                {
+                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                    "init_args": {"out_features": n_hidden, "batch_to_bias_hidden_layers": []},
+                    "dressing_init_args": {
+                        "use_batch_norm": True,
+                        "use_layer_norm": False,
+                        "dropout_rate": 0.0,
+                    },
+                },
+            ]
+            * n_layers,
+            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+            "final_additive_bias": False,
+        },
+    )
+
+    module = CellariumModule(
+        model=cellarium_model,
+        optim_fn=torch.optim.AdamW,
+        optim_kwargs={"lr": 1e-3, "weight_decay": 1e-6, "eps": 0.01},  # trying to match scvi-tools defaults
+    )
+
+    # data
+    train_datamodule = CellariumAnnDataDataModule(
+        dadc=train_data,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=densify),
+            "var_names_g": AnnDataField(attr="var_names"),
+            "batch_index_n": AnnDataField(attr="obs", key=batch_key, convert_fn=categories_to_codes),
+            "obs_names_n": AnnDataField(attr="obs_names"),
+        },
+        batch_size=batch_size,
+        num_workers=0,
+        shuffle=True,
+    )
+    test_datamodule = CellariumAnnDataDataModule(
+        dadc=test_data,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=densify),
+            "var_names_g": AnnDataField(attr="var_names"),
+            "batch_index_n": AnnDataField(attr="obs", key=batch_key, convert_fn=categories_to_codes),
+            "obs_names_n": AnnDataField(attr="obs_names"),
+        },
+        batch_size=batch_size,
+        num_workers=0,
+        shuffle=False,
+    )
+
+    # trainer
+    trainer = pl.Trainer(
+        accelerator="cpu",
+        devices=1,
+        max_epochs=max_epochs,
+        default_root_dir=tempfile.gettempdir(),
+    )
+
+    # fit
+    trainer.fit(module, train_datamodule)
+
+    # embed the training data
+    train_prediction_output = trainer.predict(module, train_datamodule)
+    train_latent = pd.concat(
+        [pd.DataFrame(out["x_ng"], index=out["obs_names_n"].astype(str)) for out in train_prediction_output],
+        axis=0,
+    )
+
+    # embed the test data
+    test_prediction_output = trainer.predict(module, test_datamodule)
+    test_latent = pd.concat(
+        [pd.DataFrame(out["x_ng"], index=out["obs_names_n"].astype(str)) for out in test_prediction_output],
+        axis=0,
+    )
+
+    # add the latent representation to the obsm of the training and test data
+    # print(train_data.obs_names)
+    # print(train_latent.index)
+    train_data.obsm[latent_obsm_key] = train_latent.loc[train_data.obs_names].values
+    test_data.obsm[latent_obsm_key] = test_latent.loc[test_data.obs_names].values
+
+    return train_data, test_data
+
+
+@pytest.mark.parametrize("metric", ["euclidean", "cosine"], ids=["euclidean", "cosine"])
+@pytest.mark.parametrize(
+    "annotation_key", ["cell_type", "cell_type_coarse_ontology_term_id"], ids=["celltype", "coarsecelltype"]
+)
+def test_latent_accuracy_metric(
+    train_scvi_tools_model,
+    train_cellarium_model,
+    metric: Literal["euclidean", "cosine"],
+    annotation_key: Literal["cell_type", "cell_type_coarse_ontology_term_id"],
+):
+    """
+    Run the following test:
+    - train on real training data (that has author labels)
+    - embed the training data (that has author labels)
+    - embed held-out test data
+    - compute the following accuracy metric:
+        - for each test sample, find the nearest training sample in latent space
+        - compute the accuracy as the fraction of neighbor training samples that have the right label
+
+    Compare the accuracy metric to that same metric computed via scvi-tools (with some margin of error).
+    """
+    tolerable_discrepancy = 0.01  # 1% discrepancy is acceptable
+
+    # compute the accuracy metric for scvi-tools
+    train_data, test_data = train_scvi_tools_model
+    accuracy_scvi_tools = compute_neighbor_accuracy(
+        train_data=train_data,
+        test_data=test_data,
+        latent_obsm_key="X_scvi",
+        labels_obs_key=annotation_key,
+        metric=metric,
+    )
+    print(f"scvi-tools accuracy ({metric}): {accuracy_scvi_tools:.4f}")
+
+    # compute the accuracy metric for Cellarium
+    train_data, test_data = train_cellarium_model
+    accuracy_cellarium = compute_neighbor_accuracy(
+        train_data=train_data,
+        test_data=test_data,
+        latent_obsm_key="X_cellarium",
+        labels_obs_key=annotation_key,
+        metric=metric,
+    )
+    print(f"cellarium accuracy ({metric}): {accuracy_cellarium:.4f}")
+
+    # assert accuracy_cellarium > accuracy_scvi_tools - tolerable_discrepancy, (
+    assert 0, (
+        f"Cellarium ({accuracy_cellarium:.4f}); scvi-tools ({accuracy_scvi_tools:.4f})"
+    )
 
 
 @pytest.mark.parametrize(
@@ -694,7 +1022,7 @@ def test_decoder_mean_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layer
     with torch.no_grad():
         # Set a fixed inverse_overdispersion for testing
         inverse_overdispersion = torch.ones(g)
-        
+
         cellarium_dist = cellarium_decoder(
             z_nk=z_nk,
             batch_nb=batch_nb,
@@ -703,7 +1031,7 @@ def test_decoder_mean_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layer
             library_size_n1=library_size_n1,
         )
         scvi_output = scvi_decoder(
-            'gene',
+            "gene",
             z_nk,
             library_size_n1,
             batch_nb,
@@ -754,11 +1082,11 @@ def test_loss_matches_scvi_tools(gene_likelihood, n_latent):
         encode_covariates=True,
         dispersion=dispersion,
     )
-    print('scvi params')
+    print("scvi params")
     print(scvi_model._module_kwargs)
     scvi_model.train(max_epochs=0)  # Setup only, no training
 
-    print('scvi-tools model:')
+    print("scvi-tools model:")
     print(scvi_model.module.z_encoder)
     print(scvi_model.module.decoder)
 
@@ -834,9 +1162,7 @@ def test_loss_matches_scvi_tools(gene_likelihood, n_latent):
         cellarium_model.decoder.normalized_count_decoder.weight.copy_(
             scvi_model.module.decoder.px_scale_decoder[0].weight
         )
-        cellarium_model.decoder.normalized_count_decoder.bias.copy_(
-            scvi_model.module.decoder.px_scale_decoder[0].bias
-        )
+        cellarium_model.decoder.normalized_count_decoder.bias.copy_(scvi_model.module.decoder.px_scale_decoder[0].bias)
 
         # Copy dispersion parameters if using negative binomial
         if gene_likelihood == "nb":
@@ -866,7 +1192,6 @@ def test_loss_matches_scvi_tools(gene_likelihood, n_latent):
 
     # Test that the encoders produce the same latent representations
     with torch.no_grad():
-
         # Cellarium encoder
         cellarium_z_dist = cellarium_model.z_encoder(x_ng=x, batch_nb=batch_nb, categorical_covariate_np=None)
         cellarium_mean_z_nk = cellarium_z_dist.loc
@@ -876,9 +1201,13 @@ def test_loss_matches_scvi_tools(gene_likelihood, n_latent):
         scvi_mean_z_nk = scvi_encoder_z_dist.loc
 
         print("Batch norm states:")
-        print("Cellarium running mean:", cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].running_mean)
+        print(
+            "Cellarium running mean:", cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].running_mean
+        )
         print("scvi-tools running mean:", scvi_model.module.z_encoder.encoder.fc_layers[0][1].running_mean)
-        print("Cellarium running var:", cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].running_var)
+        print(
+            "Cellarium running var:", cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].running_var
+        )
         print("scvi-tools running var:", scvi_model.module.z_encoder.encoder.fc_layers[0][1].running_var)
 
         # assert batch norm states are the same
@@ -982,13 +1311,13 @@ def test_loss_matches_scvi_tools(gene_likelihood, n_latent):
             )
 
         # Compare KL divergence for z
-        print('cellarium KL divergence')
-        print(cellarium_loss['kl_divergence_z'])
-        print('scvi-tools KL divergence')
-        print(scvi_loss.kl_local['kl_divergence_z'])
+        print("cellarium KL divergence")
+        print(cellarium_loss["kl_divergence_z"])
+        print("scvi-tools KL divergence")
+        print(scvi_loss.kl_local["kl_divergence_z"])
         torch.testing.assert_close(
-            cellarium_loss['kl_divergence_z'],
-            scvi_loss.kl_local['kl_divergence_z'],
+            cellarium_loss["kl_divergence_z"],
+            scvi_loss.kl_local["kl_divergence_z"],
             rtol=1e-5,
             atol=1e-5,
             msg=f"KL divergence for z does not match: cellarium {cellarium_loss['kl_divergence_z'][:3].detach()} "
@@ -996,13 +1325,13 @@ def test_loss_matches_scvi_tools(gene_likelihood, n_latent):
         )
 
         # Compare reconstruction losses
-        print('cellarium reconstruction loss')
-        print(cellarium_loss['reconstruction_loss'])
-        print('scvi-tools reconstruction loss')
-        print(scvi_loss.reconstruction_loss['reconstruction_loss'])
+        print("cellarium reconstruction loss")
+        print(cellarium_loss["reconstruction_loss"])
+        print("scvi-tools reconstruction loss")
+        print(scvi_loss.reconstruction_loss["reconstruction_loss"])
         torch.testing.assert_close(
-            cellarium_loss['reconstruction_loss'],
-            scvi_loss.reconstruction_loss['reconstruction_loss'],
+            cellarium_loss["reconstruction_loss"],
+            scvi_loss.reconstruction_loss["reconstruction_loss"],
             rtol=1e-5,
             atol=1e-5,
             msg=f"Reconstruction losses do not match: cellarium {cellarium_loss['reconstruction_loss'][:3].detach()} "
@@ -1014,7 +1343,7 @@ def test_loss_matches_scvi_tools(gene_likelihood, n_latent):
         print(f"scvi-tools loss: {scvi_loss.loss}")
         print(f"cellarium loss: {cellarium_loss['loss']}")
         torch.testing.assert_close(
-            cellarium_loss['loss'],
+            cellarium_loss["loss"],
             scvi_loss.loss,
             rtol=1e-5,
             atol=1e-5,
