@@ -1059,15 +1059,23 @@ def test_decoder_mean_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layer
         )
 
 
-@pytest.mark.parametrize("gene_likelihood", ["poisson", "nb"], ids=["poisson", "negative_binomial"])
-@pytest.mark.parametrize("use_batchnorm", [False, True], ids=["no_batchnorm", "batchnorm"])
-@pytest.mark.parametrize("n_latent", [5, 10], ids=["latent_5", "latent_10"])
-def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batchnorm):
+@pytest.fixture(scope="module")
+def matching_scvi_cellarium_models(request):
+    """
+    Create matched scvi-tools and cellarium models with identical weights.
+    
+    Returns a dictionary with models, data, and other necessary components for testing.
+    """
     try:
         import scvi
     except ImportError:
         pytest.skip("scvi-tools is not installed, skipping test")
-
+    
+    # Parse parameters from the parameterized test
+    gene_likelihood = request.param["gene_likelihood"]
+    n_latent = request.param["n_latent"]
+    use_batchnorm = request.param["use_batchnorm"]
+    
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -1190,14 +1198,15 @@ def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batc
         cellarium_model.decoder.normalized_count_decoder.weight.copy_(
             scvi_model.module.decoder.px_scale_decoder[0].weight
         )
-        cellarium_model.decoder.normalized_count_decoder.bias.copy_(scvi_model.module.decoder.px_scale_decoder[0].bias)
+        cellarium_model.decoder.normalized_count_decoder.bias.copy_(
+            scvi_model.module.decoder.px_scale_decoder[0].bias
+        )
 
         # Copy dispersion parameters if using negative binomial
         if gene_likelihood == "nb":
             cellarium_model.px_r.copy_(scvi_model.module.px_r)
 
-        # Copy batch norm parameters: they exist
-        # if hasattr(scvi_model.module.z_encoder.encoder.fc_layers[0][1], "batch_norm"):
+        # Copy batch norm parameters if they exist
         if use_batchnorm:
             bn_encoder = cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0]
             bn_encoder.weight.copy_(scvi_model.module.z_encoder.encoder.fc_layers[0][1].weight)
@@ -1205,16 +1214,11 @@ def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batc
             bn_encoder.running_mean.copy_(scvi_model.module.z_encoder.encoder.fc_layers[0][1].running_mean)
             bn_encoder.running_var.copy_(scvi_model.module.z_encoder.encoder.fc_layers[0][1].running_var)
 
-            # if hasattr(scvi_model.module.decoder, "batch_norm"):
             bn_decoder = cellarium_model.decoder.fully_connected.module_list[0].dressing[0]
             bn_decoder.weight.copy_(scvi_model.module.decoder.px_decoder.fc_layers[0][1].weight)
             bn_decoder.bias.copy_(scvi_model.module.decoder.px_decoder.fc_layers[0][1].bias)
             bn_decoder.running_mean.copy_(scvi_model.module.decoder.px_decoder.fc_layers[0][1].running_mean)
             bn_decoder.running_var.copy_(scvi_model.module.decoder.px_decoder.fc_layers[0][1].running_var)
-
-    # Zero gradients for both models
-    scvi_model.module.zero_grad()
-    cellarium_model.zero_grad()
 
     # Prepare input data
     x = torch.FloatTensor(X)
@@ -1222,55 +1226,6 @@ def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batc
         torch.from_numpy(batch_indices).squeeze().long(),
         num_classes=2,
     ).float()
-
-    # Test that the encoders produce the same latent representations
-    # Cellarium encoder
-    cellarium_z_dist = cellarium_model.z_encoder(x_ng=x, batch_nb=batch_nb, categorical_covariate_np=None)
-    cellarium_mean_z_nk = cellarium_z_dist.loc
-
-    # scvi-tools encoder
-    scvi_encoder_z_dist = scvi_model.module.z_encoder(x, batch_nb)[0]
-    scvi_mean_z_nk = scvi_encoder_z_dist.loc
-
-    if use_batchnorm:
-        print("Batch norm states:")
-        print(
-            "Cellarium running mean:", cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].running_mean
-        )
-        print("scvi-tools running mean:", scvi_model.module.z_encoder.encoder.fc_layers[0][1].running_mean)
-        print(
-            "Cellarium running var:", cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].running_var
-        )
-        print("scvi-tools running var:", scvi_model.module.z_encoder.encoder.fc_layers[0][1].running_var)
-
-        # assert batch norm states are the same
-        torch.testing.assert_close(
-            cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].running_mean,
-            scvi_model.module.z_encoder.encoder.fc_layers[0][1].running_mean,
-            rtol=1e-5,
-            atol=1e-5,
-            msg="Batch norm running mean does not match",
-        )
-        torch.testing.assert_close(
-            cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].running_var,
-            scvi_model.module.z_encoder.encoder.fc_layers[0][1].running_var,
-            rtol=1e-5,
-            atol=1e-5,
-            msg="Batch norm running var does not match",
-        )
-
-    # Compare latent representations
-    print("Comparing latent representations")
-    print("Cellarium z_nk:", cellarium_mean_z_nk[:3])
-    print("scvi-tools z_nk:", scvi_mean_z_nk[:3])
-    torch.testing.assert_close(
-        cellarium_mean_z_nk,
-        scvi_mean_z_nk,
-        rtol=1e-5,
-        atol=1e-5,
-        msg=f"Latent representations do not match: cellarium {cellarium_mean_z_nk[:3].detach()} "
-        f"vs scvi-tools {scvi_mean_z_nk[:3].detach()}",
-    )
 
     # Get scvi-tools data
     train_dl = scvi_model._make_data_loader(
@@ -1280,21 +1235,18 @@ def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batc
     )
     batch = next(iter(train_dl))
 
-    # Get Cellarium loss
+    # Get Cellarium outputs
     cellarium_loss = cellarium_model(
         x_ng=batch["X"],
         var_names_g=np.array(var_names_g),
         batch_index_n=batch["batch"],
     )
 
-    # get scvi-tools loss
+    # Get scvi-tools outputs
     scvi_inference_tensors = scvi_model.module._get_inference_input(batch)
     scvi_inference_output = scvi_model.module._regular_inference(**scvi_inference_tensors)
     with torch.no_grad():
         scvi_inference_output["z"] = cellarium_loss["z_nk"]  # cellarium's z_nk to avoid disagreement due to sampling
-
-    print("cellarium sampled z_nk:", cellarium_loss["z_nk"][:3])
-    print("scvi-tools sampled z_nk:", scvi_inference_output["z"][:3])
 
     scvi_generative_tensors = scvi_model.module._get_generative_input(batch, scvi_inference_output)
     scvi_generative_output = scvi_model.module.generative(**scvi_generative_tensors)
@@ -1305,24 +1257,129 @@ def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batc
         kl_weight=z_kl_weight,
     )
 
+    # Return a dictionary with all the data and models needed for testing
+    return {
+        "cellarium_model": cellarium_model,
+        "scvi_model": scvi_model,
+        "x": x,
+        "batch_nb": batch_nb,
+        "batch": batch,
+        "var_names_g": var_names_g,
+        "cellarium_loss": cellarium_loss,
+        "scvi_loss": scvi_loss,
+        "scvi_inference_output": scvi_inference_output,
+        "scvi_generative_output": scvi_generative_output,
+        "n_latent": n_latent,
+        "g": g,
+        "use_batchnorm": use_batchnorm,
+        "gene_likelihood": gene_likelihood,
+    }
+
+
+@pytest.mark.parametrize("matching_scvi_cellarium_models", [
+    {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
+    {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": True},
+    {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": False},
+    {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": True},
+    {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": False},
+], ids=[
+    "poisson-latent5-no_bn",
+    "poisson-latent5-bn",
+    "nb-latent5-no_bn",
+    "nb-latent5-bn",
+    "nb-latent10-no_bn",
+], indirect=True)
+def test_vs_scvi_encoders_produce_matching_latents(matching_scvi_cellarium_models):
+    """Test that encoders produce matching latent representations."""
+    data = matching_scvi_cellarium_models
+    
+    # Cellarium encoder
+    cellarium_z_dist = data["cellarium_model"].z_encoder(
+        x_ng=data["x"], 
+        batch_nb=data["batch_nb"], 
+        categorical_covariate_np=None
+    )
+    cellarium_mean_z_nk = cellarium_z_dist.loc
+
+    # scvi-tools encoder
+    scvi_encoder_z_dist = data["scvi_model"].module.z_encoder(data["x"], data["batch_nb"])[0]
+    scvi_mean_z_nk = scvi_encoder_z_dist.loc
+
+    # If using batch norm, check that the states match
+    if data["use_batchnorm"]:
+        torch.testing.assert_close(
+            data["cellarium_model"].z_encoder.fully_connected.module_list[0].dressing[0].running_mean,
+            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][1].running_mean,
+            rtol=1e-5,
+            atol=1e-5,
+            msg="Encoder batch norm running mean does not match",
+        )
+        torch.testing.assert_close(
+            data["cellarium_model"].z_encoder.fully_connected.module_list[0].dressing[0].running_var,
+            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][1].running_var,
+            rtol=1e-5,
+            atol=1e-5,
+            msg="Encoder batch norm running var does not match",
+        )
+
+    # Compare latent representations
+    torch.testing.assert_close(
+        cellarium_mean_z_nk,
+        scvi_mean_z_nk,
+        rtol=1e-5,
+        atol=1e-5,
+        msg=f"Latent representations do not match: cellarium {cellarium_mean_z_nk[:3].detach()} "
+        f"vs scvi-tools {scvi_mean_z_nk[:3].detach()}",
+    )
+
+
+@pytest.mark.parametrize("matching_scvi_cellarium_models", [
+    {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
+    {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
+], ids=[
+    "poisson-latent5-no_bn",
+    "nb-latent10-bn",
+], indirect=True)
+def test_vs_scvi_losses_match(matching_scvi_cellarium_models):
+    """Test that the total losses match between Cellarium and scvi-tools."""
+    data = matching_scvi_cellarium_models
+    
+    torch.testing.assert_close(
+        data["cellarium_loss"]["loss"],
+        data["scvi_loss"].loss,
+        rtol=1e-5,
+        atol=1e-5,
+        msg=f"Losses do not match: cellarium {data['cellarium_loss']['loss'].detach()} "
+        f"vs scvi-tools {data['scvi_loss'].loss.detach()}",
+    )
+
+
+@pytest.mark.parametrize("matching_scvi_cellarium_models", [
+    {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
+    {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
+], ids=[
+    "poisson-latent5-no_bn",
+    "nb-latent10-bn",
+], indirect=True)
+def test_vs_scvi_decoder_outputs_match(matching_scvi_cellarium_models):
+    """Test that decoder outputs and distributions match."""
+    data = matching_scvi_cellarium_models
+    
     # cellarium decoder output distribution
     with torch.no_grad():
-        cellarium_decoder_dist = cellarium_model.generative(
-            z_nk=cellarium_loss["z_nk"],
-            library_size_n1=x.sum(dim=-1, keepdim=True).log(),  # Use sum as library size
-            batch_nb=batch_nb,
+        cellarium_decoder_dist = data["cellarium_model"].generative(
+            z_nk=data["cellarium_loss"]["z_nk"],
+            library_size_n1=data["x"].sum(dim=-1, keepdim=True).log(),  # Use sum as library size
+            batch_nb=data["batch_nb"],
             categorical_covariate_np=None,
         )["px"]
         cellarium_mean_x_ng = cellarium_decoder_dist.mean
 
     # scvi-tools decoder output distribution
-    scvi_decoder_dist = scvi_generative_output["px"]
+    scvi_decoder_dist = data["scvi_generative_output"]["px"]
     scvi_mean_x_ng = scvi_decoder_dist.mean
 
-    # Compare decoder outputs
-    print("Comparing decoder outputs")
-    print("Cellarium mean x_ng:", cellarium_mean_x_ng[:3])
-    print("scvi-tools mean x_ng:", scvi_mean_x_ng[:3])
+    # Compare decoder means
     torch.testing.assert_close(
         cellarium_mean_x_ng,
         scvi_mean_x_ng,
@@ -1332,10 +1389,8 @@ def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batc
         f"vs scvi-tools {scvi_mean_x_ng[:3, :3].detach()}",
     )
 
-    if gene_likelihood == "nb":
-        print("Comparing overdispersion parameters")
-        print("Cellarium negbinom variance:", cellarium_decoder_dist.variance[:3])
-        print("scvi-tools negbinom variance:", scvi_decoder_dist.variance[:3])
+    # If negative binomial, compare variance parameters
+    if data["gene_likelihood"] == "nb":
         torch.testing.assert_close(
             cellarium_decoder_dist.variance,
             scvi_decoder_dist.variance,
@@ -1345,56 +1400,74 @@ def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batc
             f"vs scvi-tools {scvi_decoder_dist.variance[:3].detach()}",
         )
 
-    # Compare KL divergence for z
-    print("cellarium KL divergence")
-    print(cellarium_loss["kl_divergence_z"])
-    print("scvi-tools KL divergence")
-    print(scvi_loss.kl_local["kl_divergence_z"])
+
+@pytest.mark.parametrize("matching_scvi_cellarium_models", [
+    {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
+    {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
+], ids=[
+    "poisson-latent5-no_bn",
+    "nb-latent10-bn",
+], indirect=True)
+def test_vs_scvi_kl_divergence_match(matching_scvi_cellarium_models):
+    """Test that KL divergences match."""
+    data = matching_scvi_cellarium_models
+    
     torch.testing.assert_close(
-        cellarium_loss["kl_divergence_z"],
-        scvi_loss.kl_local["kl_divergence_z"],
+        data["cellarium_loss"]["kl_divergence_z"],
+        data["scvi_loss"].kl_local["kl_divergence_z"],
         rtol=1e-5,
         atol=1e-5,
-        msg=f"KL divergence for z does not match: cellarium {cellarium_loss['kl_divergence_z'][:3].detach()} "
-        f"vs scvi-tools {scvi_loss.kl_local['kl_divergence_z'][:3].detach()}",
+        msg=f"KL divergence for z does not match: cellarium {data['cellarium_loss']['kl_divergence_z'][:3].detach()} "
+        f"vs scvi-tools {data['scvi_loss'].kl_local['kl_divergence_z'][:3].detach()}",
     )
 
-    # Compare reconstruction losses
-    print("cellarium reconstruction loss")
-    print(cellarium_loss["reconstruction_loss"])
-    print("scvi-tools reconstruction loss")
-    print(scvi_loss.reconstruction_loss["reconstruction_loss"])
+
+@pytest.mark.parametrize("matching_scvi_cellarium_models", [
+    {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
+    {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
+], ids=[
+    "poisson-latent5-no_bn",
+    "nb-latent10-bn",
+], indirect=True)
+def test_vs_scvi_reconstruction_losses_match(matching_scvi_cellarium_models):
+    """Test that reconstruction losses match."""
+    data = matching_scvi_cellarium_models
+    
     torch.testing.assert_close(
-        cellarium_loss["reconstruction_loss"],
-        scvi_loss.reconstruction_loss["reconstruction_loss"],
+        data["cellarium_loss"]["reconstruction_loss"],
+        data["scvi_loss"].reconstruction_loss["reconstruction_loss"],
         rtol=1e-5,
         atol=1e-5,
-        msg=f"Reconstruction losses do not match: cellarium {cellarium_loss['reconstruction_loss'][:3].detach()} "
-        f"vs scvi-tools {scvi_loss.reconstruction_loss['reconstruction_loss'][:3].detach()}",
+        msg=f"Reconstruction losses do not match: cellarium {data['cellarium_loss']['reconstruction_loss'][:3].detach()} "
+        f"vs scvi-tools {data['scvi_loss'].reconstruction_loss['reconstruction_loss'][:3].detach()}",
     )
 
-    # Compare full losses
-    print("Comparing losses:")
-    print(f"scvi-tools loss: {scvi_loss.loss}")
-    print(f"cellarium loss: {cellarium_loss['loss']}")
-    torch.testing.assert_close(
-        cellarium_loss["loss"],
-        scvi_loss.loss,
-        rtol=1e-5,
-        atol=1e-5,
-        msg=f"Losses do not match: cellarium {cellarium_loss['loss'].detach()} "
-        f"vs scvi-tools {scvi_loss.loss.detach()}",
-    )
 
-    # Compare gradients layer by layer
-    print("\n=== Comparing gradients layer by layer ===")
+@pytest.mark.parametrize("matching_scvi_cellarium_models", [
+    {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
+    # {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": True},
+    # {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": False},
+    # {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
+], ids=[
+    "poisson-latent5-no_bn",
+    # "poisson-latent5-bn",
+    # "nb-latent10-no_bn",
+    # "nb-latent10-bn",
+], indirect=True)
+def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
+    """Test that gradients match layer by layer."""
+    data = matching_scvi_cellarium_models
+    
+    # Zero gradients for both models
+    data["scvi_model"].module.zero_grad()
+    data["cellarium_model"].zero_grad()
 
     # Perform backward pass for scvi-tools
-    scvi_loss.loss.backward(retain_graph=True)
+    data["scvi_loss"].loss.backward(retain_graph=True)
 
     # Perform backward pass for cellarium
-    cellarium_loss["loss"].backward()
-
+    data["cellarium_loss"]["loss"].backward()
+    
     # Helper function to compare gradients and print differences
     def compare_gradients(name, cell_grad, scvi_grad, rtol=1e-5, atol=1e-5) -> bool:
         """
@@ -1410,168 +1483,113 @@ def test_loss_and_gradients_match_scvi_tools(gene_likelihood, n_latent, use_batc
                 rtol=rtol,
                 atol=atol,
             )
-            print(f"{name}: MATCH ✓")
+            print(f"{name}: MATCH ✓\n")
             return True
-        except AssertionError as e:
-            print(f"{name}: DIFFER ✗")
-            # Calculate and print statistics about the difference
-            if cell_grad is not None and scvi_grad is not None:
-                abs_diff = (cell_grad - scvi_grad).abs()
-                max_diff = abs_diff.max().item()
-                mean_diff = abs_diff.mean().item()
-                rel_diff = (abs_diff / (scvi_grad.abs() + 1e-10)).mean().item()
-                print(f"  Max abs diff: {max_diff:.6f}")
-                print(f"  Mean abs diff: {mean_diff:.6f}")
-                print(f"  Mean rel diff: {rel_diff:.6f}")
-                # Print a few example values
-                if cell_grad.numel() > 0:
-                    flat_cell = cell_grad.flatten()
-                    flat_scvi = scvi_grad.flatten()
-                    max_idx = abs_diff.flatten().argmax().item()
-                    print(f"  Example at max diff - Cellarium: {flat_cell[max_idx]:.6f}, scvi-tools: {flat_scvi[max_idx]:.6f}")
+        except AssertionError:
+            abs_diff = (cell_grad - scvi_grad).abs()
+            max_diff = abs_diff.max().item()
+            mean_diff = abs_diff.mean().item()
+            rel_diff = (abs_diff / (scvi_grad.abs() + 1e-10)).mean().item()
+            print(f"{name} gradients do not match.\n"
+                  f"\tMax abs diff: {max_diff:.6f}, Mean abs diff: {mean_diff:.6f}, Mean rel diff: {rel_diff:.6f}")
             return False
         
-    grads_match = []
+    # Set up all the comparisons
+        
+    comparisons = {
+        # Encoder gradients
+        "Encoder layer 1 non-batch weights": [
+            data["cellarium_model"].z_encoder.fully_connected.module_list[0].layer.weight.grad,
+            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][0].weight.grad[:, :data["g"]]
+        ],
+        "Encoder layer 1 batch weights": [
+            data["cellarium_model"].z_encoder.fully_connected.module_list[0].layer.bias_decoder.module_list[0].weight.grad,
+            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][0].weight.grad[:, data["g"]:]
+        ],
+        "Encoder layer 1 bias": [
+            data["cellarium_model"].z_encoder.fully_connected.module_list[0].layer.bias.grad,
+            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][0].bias.grad,
+        ],
+        "Encoder mean projection weights": [
+            data["cellarium_model"].z_encoder.mean_encoder.weight.grad,
+            data["scvi_model"].module.z_encoder.mean_encoder.weight.grad,
+        ],
+        "Encoder mean projection bias": [
+            data["cellarium_model"].z_encoder.mean_encoder.bias.grad,
+            data["scvi_model"].module.z_encoder.mean_encoder.bias.grad,
+        ],
+        "Encoder var projection weights": [
+            data["cellarium_model"].z_encoder.var_encoder.weight.grad,
+            data["scvi_model"].module.z_encoder.var_encoder.weight.grad,
+        ],
+        "Encoder var projection bias": [
+            data["cellarium_model"].z_encoder.var_encoder.bias.grad,
+            data["scvi_model"].module.z_encoder.var_encoder.bias.grad,
+        ],
+    }
 
-    print("\n--- Encoder Gradients ---")
-    # Compare encoder first layer weights
-    print("\nEncoder layer 1 weights:")
-    grads_match.append(compare_gradients(
-        "Encoder layer 1 weights",
-        cellarium_model.z_encoder.fully_connected.module_list[0].layer.weight.grad,
-        scvi_model.module.z_encoder.encoder.fc_layers[0][0].weight.grad[:, :g],
-    ))
+    if data["use_batchnorm"]:
+        comparisons.update({
+            "Encoder batch norm weight": [
+                data["cellarium_model"].z_encoder.fully_connected.module_list[0].dressing[0].weight.grad,
+                data["scvi_model"].module.z_encoder.encoder.fc_layers[0][1].weight.grad,
+            ],
+            "Encoder batch norm bias": [
+                data["cellarium_model"].z_encoder.fully_connected.module_list[0].dressing[0].bias.grad,
+                data["scvi_model"].module.z_encoder.encoder.fc_layers[0][1].bias.grad,
+            ],
+        })
+    
+    comparisons.update({
+        # Decoder gradients
+        "Decoder layer 1 non-batch weights": [
+            data["cellarium_model"].decoder.fully_connected.module_list[0].layer.weight.grad,
+            data["scvi_model"].module.decoder.px_decoder.fc_layers[0][0].weight.grad[:, :data["n_latent"]],
+        ],
+        "Decoder layer 1 batch weights": [
+            data["cellarium_model"].decoder.fully_connected.module_list[0].layer.bias_decoder.module_list[0].weight.grad,
+            data["scvi_model"].module.decoder.px_decoder.fc_layers[0][0].weight.grad[:, data["n_latent"]:],
+        ],
+        "Decoder layer 1 bias": [
+            data["cellarium_model"].decoder.fully_connected.module_list[0].layer.bias.grad,
+            data["scvi_model"].module.decoder.px_decoder.fc_layers[0][0].bias.grad,
+        ],
+        "Decoder output layer weights": [
+            data["cellarium_model"].decoder.normalized_count_decoder.weight.grad,
+            data["scvi_model"].module.decoder.px_scale_decoder[0].weight.grad,
+        ],
+        "Decoder output layer bias": [
+            data["cellarium_model"].decoder.normalized_count_decoder.bias.grad,
+            data["scvi_model"].module.decoder.px_scale_decoder[0].bias.grad,
+        ],
+    })
 
-    # Compare encoder first layer bias
-    print("\nEncoder layer 1 bias:")
-    grads_match.append(compare_gradients(
-        "Encoder layer 1 bias",
-        cellarium_model.z_encoder.fully_connected.module_list[0].layer.bias.grad,
-        scvi_model.module.z_encoder.encoder.fc_layers[0][0].bias.grad,
-    ))
+    if data["use_batchnorm"]:
+        comparisons.update({
+            "Decoder batch norm weight": [
+                data["cellarium_model"].decoder.fully_connected.module_list[0].dressing[0].weight.grad,
+                data["scvi_model"].module.decoder.px_decoder.fc_layers[0][1].weight.grad,
+            ],
+            "Decoder batch norm bias": [
+                data["cellarium_model"].decoder.fully_connected.module_list[0].dressing[0].bias.grad,
+                data["scvi_model"].module.decoder.px_decoder.fc_layers[0][1].bias.grad,
+            ],
+        })
 
-    # Compare encoder batch injection weights
-    print("\nEncoder batch injection weights:")
-    grads_match.append(compare_gradients(
-        "Encoder batch injection weights",
-        cellarium_model.z_encoder.fully_connected.module_list[0].layer.bias_decoder.module_list[0].weight.grad,
-        scvi_model.module.z_encoder.encoder.fc_layers[0][0].weight.grad[:, g:],
-    ))
+    if data["gene_likelihood"] == "nb":
+        # Compare dispersion parameter gradients if using negative binomial
+        comparisons.update({
+            "Negative binomial dispersion": [
+                data["cellarium_model"].px_r.grad,
+                data["scvi_model"].module.px_r.grad,
+            ],
+        })
 
-    # Compare encoder mean projection weights
-    print("\nEncoder mean projection weights:")
-    grads_match.append(compare_gradients(
-        "Encoder mean projection weights",
-        cellarium_model.z_encoder.mean_encoder.weight.grad,
-        scvi_model.module.z_encoder.mean_encoder.weight.grad,
-    ))
+    # Perform all comparisons
+    print("\n================= Comparing gradients between Cellarium and scvi-tools =================")
+    all_match = True
+    for name, (cell_grad, scvi_grad) in comparisons.items():
+        match = compare_gradients(name, cell_grad, scvi_grad)
+        all_match = all_match and match
 
-    # Compare encoder mean projection bias
-    print("\nEncoder mean projection bias:")
-    grads_match.append(compare_gradients(
-        "Encoder mean projection bias",
-        cellarium_model.z_encoder.mean_encoder.bias.grad,
-        scvi_model.module.z_encoder.mean_encoder.bias.grad,
-    ))
-
-    # Compare encoder var projection weights
-    print("\nEncoder var projection weights:")
-    grads_match.append(compare_gradients(
-        "Encoder var projection weights",
-        cellarium_model.z_encoder.var_encoder.weight.grad,
-        scvi_model.module.z_encoder.var_encoder.weight.grad,
-    ))
-
-    # Compare encoder var projection bias
-    print("\nEncoder var projection bias:")
-    grads_match.append(compare_gradients(
-        "Encoder var projection bias",
-        cellarium_model.z_encoder.var_encoder.bias.grad,
-        scvi_model.module.z_encoder.var_encoder.bias.grad,
-    ))
-
-    # Compare encoder batch norm params if they exist
-    # if hasattr(cellarium_model.z_encoder.fully_connected.module_list[0], "dressing") and len(cellarium_model.z_encoder.fully_connected.module_list[0].dressing) > 0:
-    if use_batchnorm:
-        print("\nEncoder batch norm weight:")
-        grads_match.append(compare_gradients(
-            "Encoder batch norm weight",
-            cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].weight.grad,
-            scvi_model.module.z_encoder.encoder.fc_layers[0][1].weight.grad,
-        ))
-
-        print("\nEncoder batch norm bias:")
-        grads_match.append(compare_gradients(
-            "Encoder batch norm bias",
-            cellarium_model.z_encoder.fully_connected.module_list[0].dressing[0].bias.grad,
-            scvi_model.module.z_encoder.encoder.fc_layers[0][1].bias.grad,
-        ))
-
-    print("\n--- Decoder Gradients ---")
-    # Compare decoder first layer weights
-    print("\nDecoder layer 1 weights:")
-    grads_match.append(compare_gradients(
-        "Decoder layer 1 weights",
-        cellarium_model.decoder.fully_connected.module_list[0].layer.weight.grad,
-        scvi_model.module.decoder.px_decoder.fc_layers[0][0].weight.grad[:, :n_latent],
-    ))
-
-    # Compare decoder first layer bias
-    print("\nDecoder layer 1 bias:")
-    grads_match.append(compare_gradients(
-        "Decoder layer 1 bias",
-        cellarium_model.decoder.fully_connected.module_list[0].layer.bias.grad,
-        scvi_model.module.decoder.px_decoder.fc_layers[0][0].bias.grad,
-    ))
-
-    # Compare decoder batch injection weights
-    print("\nDecoder batch injection weights:")
-    grads_match.append(compare_gradients(
-        "Decoder batch injection weights",
-        cellarium_model.decoder.fully_connected.module_list[0].layer.bias_decoder.module_list[0].weight.grad,
-        scvi_model.module.decoder.px_decoder.fc_layers[0][0].weight.grad[:, n_latent:],
-    ))
-
-    # Compare decoder output layer weights
-    print("\nDecoder output layer weights:")
-    grads_match.append(compare_gradients(
-        "Decoder output layer weights",
-        cellarium_model.decoder.normalized_count_decoder.weight.grad,
-        scvi_model.module.decoder.px_scale_decoder[0].weight.grad,
-    ))
-
-    # Compare decoder output layer bias
-    print("\nDecoder output layer bias:")
-    grads_match.append(compare_gradients(
-        "Decoder output layer bias",
-        cellarium_model.decoder.normalized_count_decoder.bias.grad,
-        scvi_model.module.decoder.px_scale_decoder[0].bias.grad,
-    ))
-
-    # Compare decoder batch norm params if they exist
-    # if hasattr(cellarium_model.decoder.fully_connected.module_list[0], "dressing") and len(cellarium_model.decoder.fully_connected.module_list[0].dressing) > 0:
-    if use_batchnorm:
-        print("\nDecoder batch norm weight:")
-        grads_match.append(compare_gradients(
-            "Decoder batch norm weight",
-            cellarium_model.decoder.fully_connected.module_list[0].dressing[0].weight.grad,
-            scvi_model.module.decoder.px_decoder.fc_layers[0][1].weight.grad,
-        ))
-
-        print("\nDecoder batch norm bias:")
-        grads_match.append(compare_gradients(
-            "Decoder batch norm bias",
-            cellarium_model.decoder.fully_connected.module_list[0].dressing[0].bias.grad,
-            scvi_model.module.decoder.px_decoder.fc_layers[0][1].bias.grad,
-        ))
-
-    # Compare dispersion parameter gradients if using negative binomial
-    if gene_likelihood == "nb":
-        print("\nNegative binomial dispersion parameter:")
-        grads_match.append(compare_gradients(
-            "Negative binomial dispersion",
-            cellarium_model.px_r.grad,
-            scvi_model.module.px_r.grad,
-        ))
-
-    assert all(grads_match), "Some gradients do not match between Cellarium and scvi-tools"
+    assert all_match, "Some gradients did not match. Check the printed differences above."
