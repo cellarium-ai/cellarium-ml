@@ -1,10 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
-from typing import Literal
+
 import re
 import shutil
 import tempfile
 import urllib.request
+from typing import Literal
 
 from anndata import AnnData, read_h5ad
 from google.cloud.storage import Client
@@ -12,7 +13,11 @@ from google.cloud.storage import Client
 url_schemes = ("http:", "https:", "ftp:")
 
 
-def read_h5ad_gcs(filename: str, storage_client: Client | None = None, backed: Literal['r', 'r+'] | bool | None = None) -> AnnData:
+def read_h5ad_gcs(
+    filename: str,
+    storage_client: Client | None = None,
+    backed: Literal["r", "r+"] | bool | None = None,
+) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
 
@@ -39,10 +44,10 @@ def read_h5ad_gcs(filename: str, storage_client: Client | None = None, backed: L
     blob = bucket.blob(blob_name)
 
     with blob.open("rb") as f:
-        return read_h5ad(f,backed=backed)
+        return read_h5ad(f, backed=backed)
 
 
-def read_h5ad_url(filename: str,backed: Literal['r', 'r+'] | bool | None = None) -> AnnData:
+def read_h5ad_url(filename: str, backed: Literal["r", "r+"] | bool | None = None) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the URL.
 
@@ -67,10 +72,10 @@ def read_h5ad_url(filename: str,backed: Literal['r', 'r+'] | bool | None = None)
     with urllib.request.urlopen(filename) as response:
         with tempfile.TemporaryFile() as tmp_file:
             shutil.copyfileobj(response, tmp_file)
-            return read_h5ad(tmp_file,backed=backed)
+            return read_h5ad(tmp_file, backed=backed)
 
 
-def read_h5ad_local(filename: str,str,backed: Literal['r', 'r+'] | bool | None = None) -> AnnData:
+def read_h5ad_local(filename: str, backed: Literal["r", "r+"] | bool | None = None) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the local disk.
 
@@ -84,10 +89,10 @@ def read_h5ad_local(filename: str,str,backed: Literal['r', 'r+'] | bool | None =
     if not filename.startswith("file:"):
         raise ValueError("The filename must start with 'file:' protocol name.")
     filename = re.sub(r"^file://?", "", filename)
-    return read_h5ad(filename,backed=backed)
+    return read_h5ad(filename, backed=backed)
 
 
-def read_h5ad_file(filename: str, backed: Literal['r', 'r+'] | bool | None = None, **kwargs) -> AnnData:
+def read_h5ad_file(filename: str, backed: Literal["r", "r+"] | bool | None = None, **kwargs) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from a filename.
 
@@ -107,4 +112,4 @@ def read_h5ad_file(filename: str, backed: Literal['r', 'r+'] | bool | None = Non
     if any(filename.startswith(scheme) for scheme in url_schemes):
         return read_h5ad_url(filename)
 
-    return read_h5ad(filename,backed=backed)
+    return read_h5ad(filename, backed=backed)
