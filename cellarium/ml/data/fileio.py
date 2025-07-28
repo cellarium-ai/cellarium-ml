@@ -11,12 +11,13 @@ from anndata import AnnData, read_h5ad
 from google.cloud.storage import Client
 
 url_schemes = ("http:", "https:", "ftp:")
+backed_mode_default: Literal["r", "r+"] | bool | None = "r"
 
 
 def read_h5ad_gcs(
     filename: str,
     storage_client: Client | None = None,
-    backed: Literal["r", "r+"] | bool | None = None,
+    backed: Literal["r", "r+"] | bool | None = backed_mode_default,
 ) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
@@ -47,7 +48,7 @@ def read_h5ad_gcs(
         return read_h5ad(f, backed=backed)
 
 
-def read_h5ad_url(filename: str, backed: Literal["r", "r+"] | bool | None = None) -> AnnData:
+def read_h5ad_url(filename: str, backed: Literal["r", "r+"] | bool | None = backed_mode_default) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the URL.
 
@@ -75,7 +76,7 @@ def read_h5ad_url(filename: str, backed: Literal["r", "r+"] | bool | None = None
             return read_h5ad(tmp_file, backed=backed)
 
 
-def read_h5ad_local(filename: str, backed: Literal["r", "r+"] | bool | None = None) -> AnnData:
+def read_h5ad_local(filename: str, backed: Literal["r", "r+"] | bool | None = backed_mode_default) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the local disk.
 
@@ -92,7 +93,7 @@ def read_h5ad_local(filename: str, backed: Literal["r", "r+"] | bool | None = No
     return read_h5ad(filename, backed=backed)
 
 
-def read_h5ad_file(filename: str, backed: Literal["r", "r+"] | bool | None = None, **kwargs) -> AnnData:
+def read_h5ad_file(filename: str, backed: Literal["r", "r+"] | bool | None = backed_mode_default, **kwargs) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from a filename.
 
