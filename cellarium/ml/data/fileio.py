@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
 import re
 import shutil
 import tempfile
@@ -44,8 +45,17 @@ def read_h5ad_gcs(
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
-    with blob.open("rb") as f:
-        return read_h5ad(f, backed=backed)
+    # write to a named temporary file
+    with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp_file:
+        temp_path = tmp_file.name
+        blob.download_to_file(tmp_file)
+        try:
+            return read_h5ad(temp_path, backed=backed)
+        finally:
+            try:
+                os.unlink(temp_path)  # clean up the temp file
+            except OSError:
+                pass  # if there's an error during cleanup, continue
 
 
 def read_h5ad_url(filename: str, backed: Literal["r", "r+"] | bool | None = backed_mode_default) -> AnnData:
@@ -70,10 +80,19 @@ def read_h5ad_url(filename: str, backed: Literal["r", "r+"] | bool | None = back
     """
     if not any(filename.startswith(scheme) for scheme in url_schemes):
         raise ValueError("The filename must start with 'http:', 'https:', or 'ftp:' protocol name.")
-    with urllib.request.urlopen(filename) as response:
-        with tempfile.TemporaryFile() as tmp_file:
+
+    # write to a named temporary file
+    with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp_file:
+        temp_path = tmp_file.name
+        with urllib.request.urlopen(filename) as response:
             shutil.copyfileobj(response, tmp_file)
-            return read_h5ad(tmp_file, backed=backed)
+        try:
+            return read_h5ad(temp_path, backed=backed)
+        finally:
+            try:
+                os.unlink(temp_path)  # clean up the temp file
+            except OSError:
+                pass  # if there's an error during cleanup, continue
 
 
 def read_h5ad_local(filename: str, backed: Literal["r", "r+"] | bool | None = backed_mode_default) -> AnnData:
