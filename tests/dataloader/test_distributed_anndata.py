@@ -69,22 +69,31 @@ def adatas_path(tmp_path: Path):
 
 @pytest.fixture
 def adt(adatas_path: Path):
-    # single anndata
+    # single anndata in memory
     adt = read_h5ad_file(str(os.path.join(adatas_path, "adata.h5ad")), backed=None)
     return adt
 
 
-@pytest.fixture(params=[(i, j) for i in (1, 2, 3) for j in (True, False)])
+@pytest.fixture(
+    params=[(i, j, k) for i in (1, 2, 3) for j in (True, False) for k in (None, "r")],
+    ids=[
+        f"cache{i}-enforce{j}-{'memory' if k is None else 'backed'}"
+        for i in (1, 2, 3)
+        for j in (True, False)
+        for k in (None, "r")
+    ],
+)
 def dat(adatas_path: Path, request: pytest.FixtureRequest):
     # distributed anndata
     filenames = str(os.path.join(adatas_path, "adata.{000..002}.h5ad"))
     limits = [2, 5, 10]
-    max_cache_size, cache_size_strictly_enforced = request.param
+    max_cache_size, cache_size_strictly_enforced, backed_mode = request.param
     dat = DistributedAnnDataCollection(
         filenames,
         limits,
         max_cache_size=max_cache_size,
         cache_size_strictly_enforced=cache_size_strictly_enforced,
+        backed=backed_mode,
     )
     return dat
 
@@ -132,7 +141,6 @@ def test_init_shard_size(adatas_path: Path, num_shards: int, last_shard_size: in
     ids=["one adata", "two adatas", "sorted two adatas", "unsorted three adatas"],
 )
 @pytest.mark.parametrize("vidx", [slice(0, 2), [3, 1, 0]])
-# @pytest.mark.parametrize("adt", [None, "r"], ids=["memory", "backed"], indirect=True)
 def test_indexing(
     adt: AnnData,
     dat: DistributedAnnDataCollection,
