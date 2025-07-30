@@ -70,7 +70,7 @@ def adatas_path(tmp_path: Path):
 @pytest.fixture
 def adt(adatas_path: Path):
     # single anndata
-    adt = read_h5ad_file(str(os.path.join(adatas_path, "adata.h5ad")))
+    adt = read_h5ad_file(str(os.path.join(adatas_path, "adata.h5ad")), backed=None)
     return adt
 
 
@@ -132,6 +132,7 @@ def test_init_shard_size(adatas_path: Path, num_shards: int, last_shard_size: in
     ids=["one adata", "two adatas", "sorted two adatas", "unsorted three adatas"],
 )
 @pytest.mark.parametrize("vidx", [slice(0, 2), [3, 1, 0]])
+# @pytest.mark.parametrize("adt", [None, "r"], ids=["memory", "backed"], indirect=True)
 def test_indexing(
     adt: AnnData,
     dat: DistributedAnnDataCollection,
