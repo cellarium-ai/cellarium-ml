@@ -30,9 +30,9 @@ def read_h5ad_gcs(
 
     Args:
         filename: Path to the data file in Cloud Storage.
-        backed: If 'r', load in backed mode instead of fully loading into memory.
-               If 'r+', load in backed mode with write access (only X can be modified).
-               If True, equivalent to 'r'. Default is None (load into memory).
+        backed: See :func:`anndata.read_h5ad` for details on backed mode.
+            ['r', True] will load in backed mode instead of fully loading into memory.
+            [False, None] will use in-memory mode.
     """
     if not filename.startswith("gs:"):
         raise ValueError("The filename must start with 'gs:' protocol name.")
@@ -75,9 +75,9 @@ def read_h5ad_url(filename: str, backed: backed_mode_type = backed_mode_default)
 
     Args:
         filename: URL of the data file.
-         backed: If 'r', load in backed mode instead of fully loading into memory.
-               If 'r+', load in backed mode with write access (only X can be modified).
-               If True, equivalent to 'r'. Default is None (load into memory).
+        backed: See :func:`anndata.read_h5ad` for details on backed mode.
+            ['r', True] will load in backed mode instead of fully loading into memory.
+            [False, None] will use in-memory mode.
     """
     if not any(filename.startswith(scheme) for scheme in url_schemes):
         raise ValueError("The filename must start with 'http:', 'https:', or 'ftp:' protocol name.")
@@ -102,10 +102,9 @@ def read_h5ad_local(filename: str, backed: backed_mode_type = backed_mode_defaul
 
     Args:
         filename: Path to the local data file.
-        backed: If 'r', load in backed mode instead of fully loading into memory.
-               If 'r+', load in backed mode with write access (only X can be modified).
-               If True, equivalent to 'r'. Default is None (load into memory).
-
+        backed: See :func:`anndata.read_h5ad` for details on backed mode.
+            ['r', True] will load in backed mode instead of fully loading into memory.
+            [False, None] will use in-memory mode.
     """
     if not filename.startswith("file:"):
         raise ValueError("The filename must start with 'file:' protocol name.")
@@ -119,10 +118,9 @@ def read_h5ad_file(filename: str, backed: backed_mode_type = backed_mode_default
 
     Args:
         filename: Path to the data file.
-        backed: If 'r', load in backed mode instead of fully loading into memory.
-               If 'r+', load in backed mode with write access (only X can be modified).
-               If True, equivalent to 'r'. Default is None (load into memory).
-
+        backed: See :func:`anndata.read_h5ad` for details on backed mode.
+            ['r', True] will load in backed mode instead of fully loading into memory.
+            [False, None] will use in-memory mode.
     """
     if filename.startswith("gs:"):
         return read_h5ad_gcs(filename, **kwargs)
