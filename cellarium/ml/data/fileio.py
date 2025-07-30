@@ -19,7 +19,7 @@ backed_mode_default: backed_mode_type = "r"
 def read_h5ad_gcs(
     filename: str,
     storage_client: Client | None = None,
-    backed: Literal["r", "r+"] | bool | None = backed_mode_default,
+    backed: backed_mode_type = backed_mode_default,
 ) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the Google Cloud Storage.
@@ -59,7 +59,7 @@ def read_h5ad_gcs(
                 pass  # if there's an error during cleanup, continue
 
 
-def read_h5ad_url(filename: str, backed: Literal["r", "r+"] | bool | None = backed_mode_default) -> AnnData:
+def read_h5ad_url(filename: str, backed: backed_mode_type = backed_mode_default) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the URL.
 
@@ -96,7 +96,7 @@ def read_h5ad_url(filename: str, backed: Literal["r", "r+"] | bool | None = back
                 pass  # if there's an error during cleanup, continue
 
 
-def read_h5ad_local(filename: str, backed: Literal["r", "r+"] | bool | None = backed_mode_default) -> AnnData:
+def read_h5ad_local(filename: str, backed: backed_mode_type = backed_mode_default) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from the local disk.
 
@@ -113,7 +113,7 @@ def read_h5ad_local(filename: str, backed: Literal["r", "r+"] | bool | None = ba
     return read_h5ad(filename, backed=backed)
 
 
-def read_h5ad_file(filename: str, backed: Literal["r", "r+"] | bool | None = backed_mode_default, **kwargs) -> AnnData:
+def read_h5ad_file(filename: str, backed: backed_mode_type = backed_mode_default, **kwargs) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from a filename.
 
