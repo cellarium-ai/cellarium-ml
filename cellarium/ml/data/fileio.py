@@ -12,7 +12,8 @@ from anndata import AnnData, read_h5ad
 from google.cloud.storage import Client
 
 url_schemes = ("http:", "https:", "ftp:")
-backed_mode_default: Literal["r", "r+"] | bool | None = "r"
+backed_mode_type = Literal["r"] | bool | None
+backed_mode_default: backed_mode_type = "r"
 
 
 def read_h5ad_gcs(
