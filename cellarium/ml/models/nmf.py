@@ -13,11 +13,10 @@ import torch
 import torch.nn.functional as F
 import tqdm
 from lightning.pytorch.strategies import DDPStrategy
-from sklearn.metrics import silhouette_score
-from torch.utils.data import DataLoader, IterableDataset
-
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, IterableDataset
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin
 from cellarium.ml.transforms import Filter
@@ -28,10 +27,12 @@ from cellarium.ml.utilities.testing import (
 
 warnings.filterwarnings("ignore")
 
+
 def get_mean_var(X):
     scaler = StandardScaler(with_mean=False)
     scaler.fit(X)
-    return(scaler.mean_, scaler.var_)
+    return (scaler.mean_, scaler.var_)
+
 
 def calculate_rec_error(
     dataset: DataLoader | IterableDataset,
@@ -116,15 +117,15 @@ def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neigh
         topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
         topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
         d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
-        
+
         df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
-        kmeans = KMeans(n_clusters=k, random_state=1) # n_init=10, 
+        kmeans = KMeans(n_clusters=k, random_state=1)  # n_init=10,
         kmeans.fit(df_d_norm_mg)
-        kmeans_cluster_labels = pd.Series(kmeans.labels_+1, index=df_d_norm_mg.index)
+        kmeans_cluster_labels = pd.Series(kmeans.labels_ + 1, index=df_d_norm_mg.index)
 
         silhouette = silhouette_score(df_d_norm_mg.values, kmeans_cluster_labels, metric="cosine")
 
-        median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median() # mean() # quantile(0.9) # 
+        median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median()  # mean() # quantile(0.9) #
         median_D = torch.Tensor(median_D.values)
         median_D = F.normalize(median_D, dim=1, p=1)
 
@@ -141,26 +142,23 @@ def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neigh
         "stability": silhouette,
     }
 
-def update_consensusD(
-    pipeline,
-    density_threshold = 0.2,
-    local_neighborhood_size = 0.1
-):
+
+def update_consensusD(pipeline, density_threshold=0.2, local_neighborhood_size=0.1):
     torch.manual_seed(0)
     k_range = pipeline[-1].k_values
     consensus_stat = {}
     for k in k_range:
-
         D_rkg = getattr(pipeline[-1], f"D_{k}_rkg")
-        consensus_output = consensus(D_rkg=D_rkg, k=k,
-                                     density_threshold=density_threshold,
-                                     local_neighborhood_size=local_neighborhood_size)
-        setattr(pipeline[-1], f"D_{k}_kg", consensus_output['consensus_D'])
+        consensus_output = consensus(
+            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
+        )
+        setattr(pipeline[-1], f"D_{k}_kg", consensus_output["consensus_D"])
 
         consensus_stat[k] = consensus_output
-        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output['stability'], 4))))
+        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
 
     return consensus_stat
+
 
 def get_full_D(A_kk, B_kg, factors_kg, n_iterations):
     """
@@ -178,7 +176,6 @@ def get_full_D(A_kk, B_kg, factors_kg, n_iterations):
 
     for _ in range(n_iterations):
         for k in range(k_dimension):
-
             scalar = A_kk[k, k]
             a_1k = A_kk[k, :]
             b_1g = B_kg[k, :]
@@ -200,12 +197,13 @@ def get_full_D(A_kk, B_kg, factors_kg, n_iterations):
 
     return factors_kg
 
+
 def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
     """
     Solve OLS: Beta = (X^T X)^{-1} X^T Y,
     accumulating X^T X and X^T Y in row-batches.
-    
-    Optionally mean/variance-normalize each column of Y *globally* 
+
+    Optionally mean/variance-normalize each column of Y *globally*
     (using the entire dataset's mean/var), while still only converting
     each row-batch to dense on-the-fly.
 
@@ -218,7 +216,7 @@ def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
     batch_size : int
         Number of rows to process per chunk.
     normalize_y : bool
-        If True, compute global mean & var of Y columns, then subtract mean 
+        If True, compute global mean & var of Y columns, then subtract mean
         and divide by std for each batch.
 
     Returns
@@ -226,7 +224,7 @@ def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
     Beta : np.ndarray, shape (n_predictors, n_targets)
         The OLS coefficients for each target.
     """
-    
+
     # -- Optionally compute global mean & variance of Y columns
     if normalize_y:
         meanY, varY = get_mean_var(Y)
@@ -235,11 +233,11 @@ def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
         eps = 1e-12
         varY[varY < eps] = eps
         stdY = np.sqrt(varY)
-    
+
     # -- Optionally apply normalization
     if normalize_y:
         Y = (Y - meanY) / stdY
-        
+
     # -- Accumulate partial sums
     XtX += X.T @ X
     XtY += X.T @ Y
@@ -275,16 +273,16 @@ def compute_loadings(
     """
     n, _ = x_ng.shape
     r, n_factors, g = factors_rkg.shape
-    
+
     alpha_rnk = torch.rand((r, n, n_factors), device=factors_rkg.device).abs()
     # factor = np.sqrt(transformed_data_mean / n_factors)
     # alpha_rnk = factor * torch.randn((r, n, n_factors), device=factors_rkg.device).abs()
     # alpha_rnk = factor * torch.zeros((r, n, n_factors), device=factors_rkg.device).abs()
     alpha_buffer_rnk = alpha_rnk.clone()
-    
+
     DDT = torch.bmm(factors_rkg, factors_rkg.transpose(1, 2))
     xDT = torch.bmm(x_ng.expand(r, n, g), factors_rkg.transpose(1, 2))
-    
+
     for i in range(n_iterations):
         for k in range(n_factors):
             scalar = DDT[:, k, k].view(r, 1, 1)
@@ -305,8 +303,9 @@ def compute_loadings(
         if alpha_max_diff <= alpha_tol:
             break
         alpha_buffer_rnk = alpha_rnk.clone()
-    
+
     return alpha_rnk
+
 
 def compute_factors(
     A_rkk: torch.Tensor,
@@ -678,12 +677,12 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             ## get the final D for full transcrptome
             if self.if_get_full_D:
                 x_ng = (x_ng.T / x_ng.sum(1)).T * 1e6
-                
+
                 ## update A and B, Mairal Algorithm 1 step 5 and 6
                 A_kk = getattr(self, f"full_A_{k}_kk")
                 B_kg = getattr(self, f"full_B_{k}_kg")
                 # full_D_kg = getattr(self, f"full_D_{k}_kg")
-                
+
                 # A = A_kk + torch.matmul(alpha_nk.T, alpha_nk) / x_.shape[0]
                 # B = B_kg + torch.matmul(alpha_nk.T, x_) / x_.shape[0]
                 # setattr(self, f"full_A_{k}_kk", A)
@@ -696,10 +695,9 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
                 #     factors_kg=full_D_kg,
                 #     n_iterations=200,
                 # )
-                D, A, B = efficient_ols_all_cols(alpha_nk.cpu().numpy(), 
-                                                 x_ng.cpu().numpy(), 
-                                                 A_kk.cpu().numpy(), 
-                                                 B_kg.cpu().numpy())
+                D, A, B = efficient_ols_all_cols(
+                    alpha_nk.cpu().numpy(), x_ng.cpu().numpy(), A_kk.cpu().numpy(), B_kg.cpu().numpy()
+                )
                 setattr(self, f"full_D_{k}_kg", torch.tensor(D))
                 setattr(self, f"full_A_{k}_kk", torch.tensor(A))
                 setattr(self, f"full_B_{k}_kg", torch.tensor(B))
