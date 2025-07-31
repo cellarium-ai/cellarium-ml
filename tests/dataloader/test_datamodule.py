@@ -177,15 +177,15 @@ def test_cpu_transforms(
     "accelerator",
     ["cpu", pytest.param("gpu", marks=pytest.mark.skipif(not USE_CUDA, reason="requires_cuda"))],
 )
-@pytest.mark.parametrize("batch_size", [50, None])
-def test_datamodule(tmp_path: Path, batch_size: int | None, accelerator: str) -> None:
+@pytest.mark.parametrize("batch_size", [50, 100])
+def test_datamodule(tmp_path: Path, batch_size: int, accelerator: str) -> None:
     dadc = DistributedAnnDataCollection(
         filenames="https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
         shard_size=100,
     )
     datamodule = CellariumAnnDataDataModule(
         dadc=dadc,
-        batch_size=100,
+        batch_size=batch_size,
         batch_keys={
             "x_ng": AnnDataField(attr="X", convert_fn=densify),
         },
@@ -203,6 +203,68 @@ def test_datamodule(tmp_path: Path, batch_size: int | None, accelerator: str) ->
     assert loaded_datamodule.batch_keys == datamodule.batch_keys
     assert loaded_datamodule.batch_size == batch_size or datamodule.batch_size
     assert loaded_datamodule.dadc is dadc
+
+
+@pytest.fixture
+def fake_massive_dense_h5ad(tmp_path: Path) -> Path:
+    import h5py
+    import numpy as np
+    
+    # Create a dataset that CLAIMS to be ~40GB but uses almost no disk space
+    n_obs = 2_000_000  # 2 million cells  
+    n_vars = 5_000     # 5k genes
+    
+    h5ad_path = tmp_path / "massive_fake.h5ad"
+    
+    with h5py.File(h5ad_path, "w") as f:
+        # Create X dataset with claimed huge size but minimal actual storage
+        # Using fillvalue=0.0 with chunking - chunks are only allocated when written to
+        f.create_dataset(
+            "X", 
+            shape=(n_obs, n_vars),
+            dtype=np.float32,
+            fillvalue=0.0,
+            chunks=True,  # Enable chunking so not all data needs to be stored
+            compression=None  # No compression to keep it simple
+        )
+        
+        # Create minimal obs metadata - just the index is required
+        obs_group = f.create_group("obs")
+        # Create a small obs index but tell HDF5 it could expand to n_obs
+        obs_index_data = np.array([f"CELL_{i:07d}".encode('utf-8') for i in range(n_obs)])
+        obs_group.create_dataset("_index", data=obs_index_data, maxshape=(n_obs,), dtype="S12")
+        
+        # Create minimal var metadata - just the index is required  
+        var_group = f.create_group("var")
+        var_index_data = np.array([f"GENE_{i:05d}".encode('utf-8') for i in range(n_vars)])
+        var_group.create_dataset("_index", data=var_index_data, dtype="S10")
+        
+        # Set minimal h5ad format attributes that anndata expects
+        f.attrs["encoding-type"] = "anndata"
+        f.attrs["encoding-version"] = "0.1.0"
+        
+    return h5ad_path
+
+
+def test_datamodule_massive_h5ad_backed(tmp_path: Path, fake_massive_dense_h5ad: Path) -> None:
+    # try training using a massive (faked) h5ad file which should only succeed if backed mode works
+    dadc = DistributedAnnDataCollection(
+        filenames=str(fake_massive_dense_h5ad),  # Use full path instead of just name
+        shard_size=2_000_000,
+        backed=True,
+    )
+    datamodule = CellariumAnnDataDataModule(
+        dadc=dadc,
+        batch_size=100,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),  # already dense
+        },
+    )
+    module = CellariumModule(model=BoringModel())
+    trainer = pl.Trainer(accelerator='cpu', devices=1, max_steps=1, default_root_dir=tmp_path)
+    trainer.fit(module, datamodule)
+    # the idea is if this can run without a memory overflow, backed mode is implemented correctly
+    # we have separately verified that backed=False will crash due to 40GB memory use
 
 
 @pytest.mark.parametrize(
