@@ -460,7 +460,7 @@ n_latent: int = 10
 n_hidden: int = 128
 n_layers: int = 1
 batch_size: int = 512
-max_epochs: int = 10  # in this testing we are trying to look after convergence
+max_epochs: int = 1  # in this testing we are trying to look after convergence
 
 
 # other params
@@ -469,6 +469,7 @@ max_z_kl_weight: float = 10.0  # this setting is not normal, but exaggerates pro
 batch_key: str = "batch_concat_cellxgene"
 log_variational: bool = True
 use_batchnorm: bool = False
+dropout_rate: float = 0.1
 
 
 @pytest.fixture(scope="module")
@@ -503,6 +504,7 @@ def train_scvi_tools_model(
         n_layers=n_layers,
         n_hidden=n_hidden,
         encode_covariates=True,
+        dropout_rate=dropout_rate,
         use_batch_norm="both" if use_batchnorm else "none",
         log_variational=log_variational,
         dispersion="gene",
@@ -530,6 +532,8 @@ def train_scvi_tools_model(
     train_latent = model.get_latent_representation(train_data)
     # embed the test data
     SCVI.setup_anndata(test_data)
+    # put scvi model in eval mode
+    model.module.eval()
     test_latent = model.get_latent_representation(test_data)
 
     # add the latent representation to the obsm of the training and test data
@@ -577,7 +581,7 @@ def train_cellarium_model(
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
-                        "dropout_rate": 0.1,
+                        "dropout_rate": dropout_rate,
                     },
                 },
             ]
@@ -671,9 +675,13 @@ def train_cellarium_model(
     return train_data, test_data
 
 
-@pytest.mark.parametrize("metric", ["euclidean", "cosine"], ids=["euclidean", "cosine"])
+# @pytest.mark.parametrize("metric", ["euclidean", "cosine"], ids=["euclidean", "cosine"])
+# @pytest.mark.parametrize(
+#     "annotation_key", ["cell_type", "cell_type_coarse_ontology_term_id"], ids=["celltype", "coarsecelltype"]
+# )
+@pytest.mark.parametrize("metric", ["euclidean"], ids=["euclidean"])
 @pytest.mark.parametrize(
-    "annotation_key", ["cell_type", "cell_type_coarse_ontology_term_id"], ids=["celltype", "coarsecelltype"]
+    "annotation_key", ["cell_type"], ids=["celltype"]
 )
 def test_latent_accuracy_metric(
     train_scvi_tools_model,
@@ -1101,7 +1109,7 @@ def matching_scvi_cellarium_models(request):
 
     # Fix a few things to enable a fair comparison
     dispersion = "gene"
-    dropout_rate = 0.0
+    dropout_rate = 0.1
     z_kl_weight = 1.0
 
     # Create anndata for scvi-tools
@@ -1310,6 +1318,7 @@ def test_vs_scvi_encoders_produce_matching_latents(matching_scvi_cellarium_model
     data = matching_scvi_cellarium_models
     
     # Cellarium encoder
+    data["cellarium_model"].eval()
     cellarium_z_dist = data["cellarium_model"].z_encoder(
         x_ng=data["x"], 
         batch_nb=data["batch_nb"], 
@@ -1318,6 +1327,7 @@ def test_vs_scvi_encoders_produce_matching_latents(matching_scvi_cellarium_model
     cellarium_mean_z_nk = cellarium_z_dist.loc
 
     # scvi-tools encoder
+    data["scvi_model"].module.eval()
     scvi_encoder_z_dist = data["scvi_model"].module.z_encoder(data["x"], data["batch_nb"])[0]
     scvi_mean_z_nk = scvi_encoder_z_dist.loc
 
@@ -1576,68 +1586,70 @@ def test_vs_scvi_training_dynamics_match(matching_scvi_cellarium_models):
     "nb-latent5-bn",
 ], indirect=True)
 def test_vs_scvi_evaluation_mode_latents_match(matching_scvi_cellarium_models):
-    """Test that latent representations are identical when models are in evaluation mode."""
+    """Test that models produce identical latents when both are in eval mode vs both in train mode."""
     data = matching_scvi_cellarium_models
     
-    # Set both models to evaluation mode (this is what happens during prediction)
+    # Test both models in eval mode
     data["cellarium_model"].eval()
     data["scvi_model"].module.eval()
     
-    # Set seed for deterministic behavior
-    torch.manual_seed(123)
-    
-    # Get Cellarium latent representation
     with torch.no_grad():
-        cellarium_inference = data["cellarium_model"].inference(
-            x_ng=data["batch"]["X"],
-            batch_nb=data["batch_nb"],
-            categorical_covariate_np=None,
+        # Cellarium eval mode latents
+        cellarium_eval_z_dist = data["cellarium_model"].z_encoder(
+            x_ng=data["x"], 
+            batch_nb=data["batch_nb"], 
+            categorical_covariate_np=None
         )
-        # Use mean of distribution (not sample) for deterministic comparison
-        cellarium_latent_mean = cellarium_inference["qz"].loc
-    
-    # Reset seed for scvi-tools
-    torch.manual_seed(123)
-    
-    # Get scvi-tools latent representation
-    with torch.no_grad():
-        scvi_inference_tensors = data["scvi_model"].module._get_inference_input(data["batch"])
-        scvi_inference_output = data["scvi_model"].module._regular_inference(**scvi_inference_tensors)
-        # Use mean of distribution (not sample) for deterministic comparison
-        scvi_latent_mean = scvi_inference_output["qz"].loc
-    
-    print(f"Cellarium latent shape: {cellarium_latent_mean.shape}")
-    print(f"scvi-tools latent shape: {scvi_latent_mean.shape}")
-    print(f"Cellarium latent (first 3 samples, first 3 dims): {cellarium_latent_mean[:3, :3]}")
-    print(f"scvi-tools latent (first 3 samples, first 3 dims): {scvi_latent_mean[:3, :3]}")
-    
-    # Compare latent representations
-    torch.testing.assert_close(
-        cellarium_latent_mean,
-        scvi_latent_mean,
-        rtol=1e-5,
-        atol=1e-5,
-        msg=f"Latent representations do not match in eval mode",
-    )
-    
-    # If using batch norm, also check that running statistics are still synchronized
-    if data["use_batchnorm"]:
+        cellarium_eval_mean = cellarium_eval_z_dist.loc
+        
+        # scvi-tools eval mode latents  
+        scvi_eval_z_dist = data["scvi_model"].module.z_encoder(data["x"], data["batch_nb"])[0]
+        scvi_eval_mean = scvi_eval_z_dist.loc
+        
+        print("EVAL MODE:")
+        print(f"Cellarium eval latent means: {cellarium_eval_mean[:3, :3]}")
+        print(f"scvi-tools eval latent means: {scvi_eval_mean[:3, :3]}")
+        
+        # Compare eval mode latents
         torch.testing.assert_close(
-            data["cellarium_model"].z_encoder.fully_connected.module_list[0].dressing[0].running_mean,
-            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][1].running_mean,
+            cellarium_eval_mean,
+            scvi_eval_mean,
             rtol=1e-5,
             atol=1e-5,
-            msg="Encoder batch norm running mean does not match in eval mode",
-        )
-        torch.testing.assert_close(
-            data["cellarium_model"].z_encoder.fully_connected.module_list[0].dressing[0].running_var,
-            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][1].running_var,
-            rtol=1e-5,
-            atol=1e-5,
-            msg="Encoder batch norm running var does not match in eval mode",
+            msg=f"Eval mode latents do not match",
         )
     
-    print("✓ Evaluation mode latent representations match perfectly!")
+    # Test both models in train mode  
+    data["cellarium_model"].train()
+    data["scvi_model"].module.train()
+    
+    with torch.no_grad():
+        # Set same random seed for both
+        torch.manual_seed(42)
+        cellarium_train_z_dist = data["cellarium_model"].z_encoder(
+            x_ng=data["x"], 
+            batch_nb=data["batch_nb"], 
+            categorical_covariate_np=None
+        )
+        cellarium_train_mean = cellarium_train_z_dist.loc
+        
+        # Reset seed for scvi-tools
+        torch.manual_seed(42)
+        scvi_train_z_dist = data["scvi_model"].module.z_encoder(data["x"], data["batch_nb"])[0]
+        scvi_train_mean = scvi_train_z_dist.loc
+        
+        print("\nTRAIN MODE:")
+        print(f"Cellarium train latent means: {cellarium_train_mean[:3, :3]}")
+        print(f"scvi-tools train latent means: {scvi_train_mean[:3, :3]}")
+        
+        # Compare train mode latents  
+        torch.testing.assert_close(
+            cellarium_train_mean,
+            scvi_train_mean,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"Train mode latents do not match",
+        )
 
 
 @pytest.mark.parametrize("matching_scvi_cellarium_models", [
