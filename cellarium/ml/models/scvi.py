@@ -5,8 +5,10 @@
 
 import importlib
 import itertools
+import logging
 from typing import Any, Literal, Sequence
 
+import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import torch
@@ -24,6 +26,9 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
+# get a logger for use with pytorch lightning
+# (this is the same logger as in scvi-tools)
+logger = logging.getLogger(__name__)
 
 
 def class_from_class_path(class_path: str):
@@ -157,14 +162,14 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
             out_features = in_features
         else:
             module_list = torch.nn.ModuleList()
-            n_hidden = [layer["init_args"].pop("out_features") for layer in layers]
+            n_hidden = [layer["init_args"].get("out_features") for layer in layers]
             for layer, n_in, n_out in zip(layers, [in_features] + n_hidden, n_hidden):
+                layer["init_args"]["out_features"] = n_out
                 module_list.append(
                     DressedLayer(
                         instantiate_from_class_path(
                             layer["class_path"],
                             in_features=n_in,
-                            out_features=n_out,
                             bias=True,
                             **layer["init_args"],
                         ),
@@ -417,8 +422,16 @@ def compute_annealed_kl_weight(
 ) -> float | torch.Tensor:
     """Computes the kl weight for the current step or epoch.
 
+def compute_annealed_kl_weight(
+    epoch: int,
+    step: int,
+    n_epochs_kl_warmup: int | None,
+    n_steps_kl_warmup: int | None,
+    max_kl_weight: float = 1.0,
+    min_kl_weight: float = 0.0,
+) -> float:
+    """Computes the kl weight for the current step or epoch.
     If both `n_epochs_kl_warmup` and `n_steps_kl_warmup` are None `max_kl_weight` is returned.
-
     Args:
         epoch: Current epoch.
         step: Current step.
@@ -426,14 +439,11 @@ def compute_annealed_kl_weight(
         n_steps_kl_warmup: Number of steps to warm up the KL weight.
         max_kl_weight: Maximum KL weight.
         min_kl_weight: Minimum KL weight.
-
     Returns:
         The KL weight for the current step or epoch.
     """
     if min_kl_weight > max_kl_weight:
-        raise ValueError(
-            f"min_kl_weight={min_kl_weight} is larger than max_kl_weight={max_kl_weight}."
-        )
+        raise ValueError(f"min_kl_weight={min_kl_weight} is larger than max_kl_weight={max_kl_weight}.")
 
     slope = max_kl_weight - min_kl_weight
     if n_epochs_kl_warmup:
@@ -536,7 +546,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_kl_weight_max: float = 0.0,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
-        kl_warmup_epochs: int | None = None,
+        kl_warmup_epochs: int | None = 400,
         kl_warmup_steps: int | None = None,
         kl_annealing_start: float = 0.0,
         use_size_factor_key: bool = False,
@@ -561,17 +571,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
         if not (kl_annealing_start >= 0.0 and kl_annealing_start <= 1.0):
-            raise ValueError(
-                f"kl_annealing_start={kl_annealing_start} must be in the range [0.0, 1.0]."
-            )
+            raise ValueError(f"kl_annealing_start={kl_annealing_start} must be in the range [0.0, 1.0].")
         self.kl_annealing_start = kl_annealing_start
         assert not ((kl_warmup_steps is not None) and (kl_warmup_epochs is not None)), (
             "Only one of kl_warmup_epochs or kl_warmup_steps can be specified, not both."
         )
         self.kl_warmup_epochs = kl_warmup_epochs
         self.kl_warmup_steps = kl_warmup_steps
-        self.reconstruction_genes = reconstruction_genes
-        self.build_reconstructions = build_reconstructions
         assert batch_kl_weight_max >= 0.0, "batch_kl_weight must be non-negative"
         self.batch_kl_weight_max = batch_kl_weight_max
         assert z_kl_weight_max >= 0.0, "z_kl_weight must be non-negative"
@@ -640,9 +646,24 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
             if "dressing_init_args" not in layer:
                 layer["dressing_init_args"] = {}
-            layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_encoder
-            layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_encoder
-            layer["dressing_init_args"]["dropout_rate"] = dropout_rate
+            if "use_batch_norm" not in layer["dressing_init_args"]:
+                logger.info(
+                    "use_batch_norm not specified individually in encoder hidden layer, "
+                    f"setting to {use_batch_norm_encoder}"
+                )
+                layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_encoder
+            if "use_layer_norm" not in layer["dressing_init_args"]:
+                logger.info(
+                    "use_layer_norm not specified individually in encoder hidden layer, "
+                    f"setting to {use_layer_norm_encoder}"
+                )
+                layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_encoder
+            if "dropout_rate" not in layer["dressing_init_args"]:
+                logger.info(
+                    "dropout_rate not specified individually in encoder hidden layer, "
+                    f"setting to {dropout_rate}"
+                )
+                layer["dressing_init_args"]["dropout_rate"] = dropout_rate
         assert isinstance(encoder["final_layer"], dict)
         if encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
             encoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
@@ -656,9 +677,25 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
             if "dressing_init_args" not in layer:
                 layer["dressing_init_args"] = {}
-            layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_decoder
-            layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_decoder
-            layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
+            if "use_batch_norm" not in layer["dressing_init_args"]:
+                logger.info(
+                    "use_batch_norm not specified individually in decoder hidden layer, "
+                    f"setting to {use_batch_norm_decoder}"
+                )
+                layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_decoder
+            if "use_layer_norm" not in layer["dressing_init_args"]:
+                logger.info(
+                    "use_layer_norm not specified individually in decoder hidden layer, "
+                    f"setting to {use_layer_norm_decoder}"
+                )
+                layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_decoder
+            if "dropout_rate" in layer["dressing_init_args"]:
+                if layer["dressing_init_args"]["dropout_rate"] != 0.0:
+                    logger.warning(
+                        "Dropout is not supported in the decoder of scVI. "
+                        "dropout_rate is being set to 0.0 in all decoder hidden layers."
+                    )
+                    layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
         assert isinstance(decoder["final_layer"], dict)
         if decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
             decoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
@@ -901,20 +938,38 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         else:
             kl_divergence_batch = 0
 
+        # compute the annealed KL weight
+        kl_annealing_weight = compute_annealed_kl_weight(
+            epoch=self.epoch,
+            step=self.step,
+            n_epochs_kl_warmup=self.kl_warmup_epochs,
+            n_steps_kl_warmup=self.kl_warmup_steps,
+            max_kl_weight=1.0,
+            min_kl_weight=self.kl_annealing_start,
+        )
+
         # reconstruction loss
         rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         # full loss
+        assert kl_annealing_weight >= 0.0 and kl_annealing_weight <= 1.0, (
+            f"Invalid KL annealing weight: {kl_annealing_weight}"
+        )
         loss = torch.mean(
-            rec_loss
+            rec_loss 
             + kl_annealing_weight * (
-                self.z_kl_weight_max * kl_divergence_z
+                self.z_kl_weight_max * kl_divergence_z 
                 + self.batch_kl_weight_max * kl_divergence_batch
-            )
+            ),
+            dim=0,
         )
 
-
-        return {"loss": loss}
+        return {
+            "loss": loss, 
+            "reconstruction_loss": rec_loss, 
+            "kl_divergence_z": kl_divergence_z, 
+            "z_nk": inference_outputs["z"],
+        }
 
     def predict(
         self,
@@ -1081,6 +1136,25 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         x_tilde_np = output_counts_sum_np / len(transformed_batch_index_n_list)
         return {"x_ng": x_tilde_np}
+    
+    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
+        self.step = trainer.global_step
+        self.epoch = trainer.current_epoch
+        # log these values to pytorch lightning logger
+        if trainer.logger is not None:
+            trainer.logger.log_metrics(
+                {
+                    "kl_annealing_weight": compute_annealed_kl_weight(
+                        epoch=self.epoch,
+                        step=self.step,
+                        n_epochs_kl_warmup=self.kl_warmup_epochs,
+                        n_steps_kl_warmup=self.kl_warmup_steps,
+                        max_kl_weight=1.0,
+                        min_kl_weight=self.kl_annealing_start,
+                    )
+                },
+                step=trainer.global_step,
+            )
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         self.step = trainer.global_step
