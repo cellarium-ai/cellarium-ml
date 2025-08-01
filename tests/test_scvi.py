@@ -465,15 +465,20 @@ max_epochs: int = 5  # in this testing we are trying to look after convergence
 
 # other params
 n_epochs_kl_warmup: int = max_epochs
-max_z_kl_weight: float = 10.0  # this setting is not normal, but exaggerates problems
 batch_key: str = "batch_concat_cellxgene"
 log_variational: bool = True
 use_batchnorm: bool = False
 dropout_rate: float = 0.1
 
 
+@pytest.fixture(scope="module", params=[1, 10], ids=["kl1", "kl10"])
+def max_z_kl_weight(request):
+    return request.param
+
+
 @pytest.fixture(scope="module")
 def train_scvi_tools_model(
+    max_z_kl_weight,
     testing_anndatas,
     latent_obsm_key: str = "X_scvi",
 ) -> tuple[np.ndarray, np.ndarray, anndata.AnnData, anndata.AnnData]:
@@ -484,6 +489,8 @@ def train_scvi_tools_model(
         - train_data: the training data with the model's latent representation added to obsm[latent_obsm_key]
         - test_data: the test data with the model's latent representation added to obsm[latent_obsm_key]
     """
+    # fix the random seed
+    pl.seed_everything(0)
 
     # retrieve the training and test data from the fixture
     train_data, test_data = testing_anndatas
@@ -513,9 +520,6 @@ def train_scvi_tools_model(
     print(model)
     print(model.module.z_encoder)
     print(model.module.decoder)
-
-    # fix the random seed
-    pl.seed_everything(0)
 
     # run training
     model.train(
@@ -552,6 +556,7 @@ def train_scvi_tools_model(
 
 @pytest.fixture(scope="module")
 def train_cellarium_model(
+    max_z_kl_weight,
     testing_anndatas,
     latent_obsm_key: str = "X_cellarium",
 ) -> tuple[anndata.AnnData, anndata.AnnData]:
@@ -562,6 +567,8 @@ def train_cellarium_model(
         - train_data: the training data with the model's latent representation added to obsm[latent_obsm_key]
         - test_data: the test data with the model's latent representation added to obsm[latent_obsm_key]
     """
+    # fix the random seed
+    pl.seed_everything(0)
 
     # retrieve the training and test data from the fixture
     train_data, test_data = testing_anndatas
@@ -661,9 +668,6 @@ def train_cellarium_model(
         gradient_clip_algorithm="norm",
         gradient_clip_val=50.0,
     )
-
-    # fix the random seed
-    pl.seed_everything(0)
 
     # fit
     trainer.fit(module, train_datamodule)
