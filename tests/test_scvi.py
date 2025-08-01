@@ -1460,6 +1460,187 @@ def test_vs_scvi_reconstruction_losses_match(matching_scvi_cellarium_models):
 
 
 @pytest.mark.parametrize("matching_scvi_cellarium_models", [
+    {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": False},
+    {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": True},
+], ids=[
+    "nb-latent5-no_bn",
+    "nb-latent5-bn",
+], indirect=True)
+def test_vs_scvi_training_dynamics_match(matching_scvi_cellarium_models):
+    """Test that losses remain identical over multiple training steps."""
+    data = matching_scvi_cellarium_models
+    
+    # Create optimizers for both models
+    cellarium_optimizer = torch.optim.Adam(
+        data["cellarium_model"].parameters(),
+        lr=1e-3,
+        weight_decay=1e-6,
+        eps=0.01
+    )
+    
+    scvi_optimizer = torch.optim.Adam(
+        data["scvi_model"].module.parameters(),
+        lr=1e-3,
+        weight_decay=1e-6,
+        eps=0.01
+    )
+    
+    # Store losses for comparison
+    cellarium_losses = []
+    scvi_losses = []
+    
+    # Train for several steps
+    n_steps = 5
+    
+    for step in range(n_steps):
+        print(f"\n--- Training Step {step + 1} ---")
+        
+        # Zero gradients
+        cellarium_optimizer.zero_grad()
+        scvi_optimizer.zero_grad()
+        
+        # Set the same random seed for each step to ensure identical sampling
+        torch.manual_seed(42 + step)
+        
+        # Forward pass for Cellarium
+        cellarium_loss = data["cellarium_model"](
+            x_ng=data["batch"]["X"],
+            var_names_g=np.array(data["var_names_g"]),
+            batch_index_n=data["batch"]["batch"],
+        )
+        
+        # Reset seed for scvi-tools
+        torch.manual_seed(42 + step)
+        
+        # Forward pass for scvi-tools
+        scvi_inference_tensors = data["scvi_model"].module._get_inference_input(data["batch"])
+        scvi_inference_output = data["scvi_model"].module._regular_inference(**scvi_inference_tensors)
+        scvi_generative_tensors = data["scvi_model"].module._get_generative_input(data["batch"], scvi_inference_output)
+        scvi_generative_output = data["scvi_model"].module.generative(**scvi_generative_tensors)
+        scvi_loss = data["scvi_model"].module.loss(
+            tensors=data["batch"],
+            inference_outputs=scvi_inference_output,
+            generative_outputs=scvi_generative_output,
+            kl_weight=1.0,
+        )
+        
+        # Store losses
+        cellarium_loss_val = cellarium_loss["loss"].item()
+        scvi_loss_val = scvi_loss.loss.item()
+        cellarium_losses.append(cellarium_loss_val)
+        scvi_losses.append(scvi_loss_val)
+        
+        print(f"Cellarium loss: {cellarium_loss_val:.6f}")
+        print(f"scvi-tools loss: {scvi_loss_val:.6f}")
+        print(f"Loss difference: {abs(cellarium_loss_val - scvi_loss_val):.8f}")
+        
+        # Verify losses match at this step
+        torch.testing.assert_close(
+            cellarium_loss["loss"],
+            scvi_loss.loss,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"Losses do not match at step {step + 1}: "
+                f"cellarium {cellarium_loss_val:.6f} vs scvi-tools {scvi_loss_val:.6f}",
+        )
+        
+        # Backward pass
+        cellarium_loss["loss"].backward()
+        scvi_loss.loss.backward()
+        
+        # Optimization step
+        cellarium_optimizer.step()
+        scvi_optimizer.step()
+        
+        # Compare a few key parameters after optimization to ensure they're still synchronized
+        if step < n_steps - 1:  # Skip last step since we don't need to check after final update
+            torch.testing.assert_close(
+                data["cellarium_model"].z_encoder.mean_encoder.weight,
+                data["scvi_model"].module.z_encoder.mean_encoder.weight,
+                rtol=1e-5,
+                atol=1e-5,
+                msg=f"Encoder mean weights diverged after step {step + 1}",
+            )
+    
+    print(f"\nTraining completed successfully!")
+    print(f"Cellarium losses: {cellarium_losses}")
+    print(f"scvi-tools losses: {scvi_losses}")
+    print(f"Max loss difference: {max(abs(c - s) for c, s in zip(cellarium_losses, scvi_losses)):.8f}")
+
+
+@pytest.mark.parametrize("matching_scvi_cellarium_models", [
+    {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": False},
+    {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": True},
+], ids=[
+    "nb-latent5-no_bn",
+    "nb-latent5-bn",
+], indirect=True)
+def test_vs_scvi_evaluation_mode_latents_match(matching_scvi_cellarium_models):
+    """Test that latent representations are identical when models are in evaluation mode."""
+    data = matching_scvi_cellarium_models
+    
+    # Set both models to evaluation mode (this is what happens during prediction)
+    data["cellarium_model"].eval()
+    data["scvi_model"].module.eval()
+    
+    # Set seed for deterministic behavior
+    torch.manual_seed(123)
+    
+    # Get Cellarium latent representation
+    with torch.no_grad():
+        cellarium_inference = data["cellarium_model"].inference(
+            x_ng=data["batch"]["X"],
+            batch_nb=data["batch_nb"],
+            categorical_covariate_np=None,
+        )
+        # Use mean of distribution (not sample) for deterministic comparison
+        cellarium_latent_mean = cellarium_inference["qz"].loc
+    
+    # Reset seed for scvi-tools
+    torch.manual_seed(123)
+    
+    # Get scvi-tools latent representation
+    with torch.no_grad():
+        scvi_inference_tensors = data["scvi_model"].module._get_inference_input(data["batch"])
+        scvi_inference_output = data["scvi_model"].module._regular_inference(**scvi_inference_tensors)
+        # Use mean of distribution (not sample) for deterministic comparison
+        scvi_latent_mean = scvi_inference_output["qz"].loc
+    
+    print(f"Cellarium latent shape: {cellarium_latent_mean.shape}")
+    print(f"scvi-tools latent shape: {scvi_latent_mean.shape}")
+    print(f"Cellarium latent (first 3 samples, first 3 dims): {cellarium_latent_mean[:3, :3]}")
+    print(f"scvi-tools latent (first 3 samples, first 3 dims): {scvi_latent_mean[:3, :3]}")
+    
+    # Compare latent representations
+    torch.testing.assert_close(
+        cellarium_latent_mean,
+        scvi_latent_mean,
+        rtol=1e-5,
+        atol=1e-5,
+        msg=f"Latent representations do not match in eval mode",
+    )
+    
+    # If using batch norm, also check that running statistics are still synchronized
+    if data["use_batchnorm"]:
+        torch.testing.assert_close(
+            data["cellarium_model"].z_encoder.fully_connected.module_list[0].dressing[0].running_mean,
+            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][1].running_mean,
+            rtol=1e-5,
+            atol=1e-5,
+            msg="Encoder batch norm running mean does not match in eval mode",
+        )
+        torch.testing.assert_close(
+            data["cellarium_model"].z_encoder.fully_connected.module_list[0].dressing[0].running_var,
+            data["scvi_model"].module.z_encoder.encoder.fc_layers[0][1].running_var,
+            rtol=1e-5,
+            atol=1e-5,
+            msg="Encoder batch norm running var does not match in eval mode",
+        )
+    
+    print("✓ Evaluation mode latent representations match perfectly!")
+
+
+@pytest.mark.parametrize("matching_scvi_cellarium_models", [
     {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
     {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": True},
     {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": False},
