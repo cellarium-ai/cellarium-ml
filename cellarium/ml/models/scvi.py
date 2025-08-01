@@ -612,8 +612,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_encoder
             if "dropout_rate" not in layer["dressing_init_args"]:
                 logger.info(
-                    "dropout_rate not specified individually in encoder hidden layer, "
-                    f"setting to {dropout_rate}"
+                    f"dropout_rate not specified individually in encoder hidden layer, setting to {dropout_rate}"
                 )
                 layer["dressing_init_args"]["dropout_rate"] = dropout_rate
         assert isinstance(encoder["final_layer"], dict)
@@ -895,18 +894,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             f"Invalid KL annealing weight: {kl_annealing_weight}"
         )
         loss = torch.mean(
-            rec_loss 
-            + kl_annealing_weight * (
-                self.z_kl_weight_max * kl_divergence_z 
-                + self.batch_kl_weight_max * kl_divergence_batch
-            ),
+            rec_loss
+            + kl_annealing_weight
+            * (self.z_kl_weight_max * kl_divergence_z + self.batch_kl_weight_max * kl_divergence_batch),
             dim=0,
         )
 
         return {
-            "loss": loss, 
-            "reconstruction_loss": rec_loss, 
-            "kl_divergence_z": kl_divergence_z, 
+            "loss": loss,
+            "reconstruction_loss": rec_loss,
+            "kl_divergence_z": kl_divergence_z,
             "z_nk": inference_outputs["z"],
         }
 
@@ -1075,7 +1072,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         x_tilde_np = output_counts_sum_np / len(transformed_batch_index_n_list)
         return {"x_ng": x_tilde_np}
-    
+
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         self.step = trainer.global_step
         self.epoch = trainer.current_epoch
