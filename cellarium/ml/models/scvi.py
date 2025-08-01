@@ -25,8 +25,6 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
-# get a logger for use with pytorch lightning
-# (this is the same logger as in scvi-tools)
 logger = logging.getLogger(__name__)
 
 
