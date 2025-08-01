@@ -27,6 +27,56 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
+def test_probabilistic_pca_multi_device(
+    x_ng: np.ndarray, minibatch: bool, ppca_flavor: Literal["marginalized", "linear_vae"], learn_mean: bool
+):
+    n, g = x_ng.shape
+    k = 3
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
+    if learn_mean:
+        x_mean_g = None
+    else:
+        x_mean_g = torch.as_tensor(x_ng.mean(axis=0))
+
+    # dataloader
+    batch_size = n // 2 if minibatch else n
+    train_loader = torch.utils.data.DataLoader(
+        BoringDataset(
+            x_ng,
+            np.array([f"gene_{i}" for i in range(g)]),
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+    )
+    # model
+    ppca = ProbabilisticPCA(
+        n_obs=n,
+        var_names_g=np.array([f"gene_{i}" for i in range(g)]),
+        n_components=k,
+        ppca_flavor=ppca_flavor,
+        mean_g=x_mean_g,
+        W_init_scale=w,
+        sigma_init_scale=s,
+    )
+    module = CellariumModule(
+        model=ppca,
+        optim_fn=torch.optim.Adam,
+        optim_kwargs={"lr": 3e-2},
+        scheduler_fn=torch.optim.lr_scheduler.CosineAnnealingLR,
+        scheduler_kwargs={"T_max": 1000},  # one cycle
+    )
+    # trainer
+    trainer = pl.Trainer(
+        barebones=True,
+        accelerator="cpu",
+        devices=devices,
+        max_steps=1000,
+    )
+    # fit
+    trainer.fit(module, train_dataloaders=train_loader)
+
+
 def d_uncorrelated_kg(k, g, gene_set_sparsity_factor=gene_set_sparsity_factor) -> torch.Tensor:
     """Gene programs for NMF which are uncorrelated."""
     torch.manual_seed(0)
@@ -153,7 +203,6 @@ def run_cellarium_nmf(
 
     # model
     cellarium_nmf = NonNegativeMatrixFactorization(
-        var_names_g=var_names_g.tolist(),
         var_names_hvg=var_names_g.tolist(),
         k_values=[k],
         r=1,

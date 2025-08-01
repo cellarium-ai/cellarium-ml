@@ -413,24 +413,23 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
 
     def __init__(
         self,
-        var_names_g: Sequence[str],
+        # var_names_g: Sequence[str],
+        full_g: int,
         var_names_hvg: Sequence[str],
         k_values: list[int],
         r: int,
-        full_g: int,
-        log_variational: bool,
+        log_variational: bool = False,
         algorithm: Literal["mairal"] = "mairal",
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
     ) -> None:
         super().__init__()
-        self.var_names_g = np.array(var_names_g)
+        # self.var_names_g = np.array(var_names_g)
         self.var_names_hvg = np.array(var_names_hvg)
         g = len(self.var_names_hvg)
-        self.n_vars = g
+        # full_g = len(var_names_g)
         self.algorithm = algorithm
         self.log_variational = log_variational
-        self.full_g = full_g
         self.k_values = k_values
         self.the_best_k = k_values[0]  # default and has to be reassigned
         self.get_rec_error = True
@@ -446,11 +445,12 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_kg", torch.empty(i, g))
-            self._dummy_param = torch.nn.Parameter(torch.empty(()))
 
             self.register_buffer(f"full_A_{i}_kk", torch.empty(i, i))
             self.register_buffer(f"full_B_{i}_kg", torch.empty(i, full_g))
             self.register_buffer(f"full_D_{i}_kg", torch.empty(i, full_g))
+
+        self._dummy_param = torch.nn.Parameter(torch.empty(()))
 
         self._D_tol = 1e-5
         self._alpha_tol = 1e-5
@@ -581,7 +581,7 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
             An empty dictionary.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_hvg", self.var_names_hvg)
 
         if self.log_variational:
             x_ = torch.log1p(x_ng)

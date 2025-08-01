@@ -114,6 +114,7 @@ class CellariumModule(pl.LightningModule):
         if self.pipeline is not None:
             return
 
+        print(self.hparams)
         model, self.hparams["model"] = copy_module(
             self.hparams["model"], self_device=self.device, copy_device=torch.device("meta")
         )
