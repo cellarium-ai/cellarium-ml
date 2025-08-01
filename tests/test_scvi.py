@@ -467,6 +467,7 @@ max_epochs: int = 10  # in this testing we are trying to look after convergence
 n_epochs_kl_warmup: int = max_epochs
 max_z_kl_weight: float = 10.0  # this setting is not normal, but exaggerates problems
 batch_key: str = "batch_concat_cellxgene"
+log_variational: bool = True
 
 
 @pytest.fixture(scope="module")
@@ -500,6 +501,7 @@ def train_scvi_tools_model(
         n_latent=n_latent,
         n_layers=n_layers,
         n_hidden=n_hidden,
+        log_variational=log_variational,
         dispersion="gene",
         deeply_inject_covariates=True,
     )
@@ -552,6 +554,7 @@ def train_cellarium_model(
         var_names_g=train_data.var_names.values,
         n_batch=train_data.obs[batch_key].nunique(),
         n_latent=n_latent,
+        log_variational=log_variational,
         kl_annealing_start=0.0,
         kl_warmup_epochs=n_epochs_kl_warmup,
         z_kl_weight_max=max_z_kl_weight,
@@ -632,6 +635,8 @@ def train_cellarium_model(
         devices=1,
         max_epochs=max_epochs,
         default_root_dir=tempfile.gettempdir(),
+        gradient_clip_algorithm="norm",
+        gradient_clip_val=50.0,
     )
 
     # fit
@@ -706,6 +711,7 @@ def test_latent_accuracy_metric(
     print(f"cellarium accuracy ({metric}): {accuracy_cellarium:.4f}")
 
     assert accuracy_cellarium > accuracy_scvi_tools - tolerable_discrepancy, (
+    # assert 0, (
         f"Cellarium ({accuracy_cellarium:.4f}); scvi-tools ({accuracy_scvi_tools:.4f})"
     )
 
@@ -1235,6 +1241,9 @@ def matching_scvi_cellarium_models(request):
     )
     batch = next(iter(train_dl))
 
+    # Synchronize random sampling between models using fixed seed
+    torch.manual_seed(42)
+    
     # Get Cellarium outputs
     cellarium_loss = cellarium_model(
         x_ng=batch["X"],
@@ -1242,11 +1251,12 @@ def matching_scvi_cellarium_models(request):
         batch_index_n=batch["batch"],
     )
 
+    # Reset seed for scvi-tools 
+    torch.manual_seed(42)
+    
     # Get scvi-tools outputs
     scvi_inference_tensors = scvi_model.module._get_inference_input(batch)
     scvi_inference_output = scvi_model.module._regular_inference(**scvi_inference_tensors)
-    with torch.no_grad():
-        scvi_inference_output["z"] = cellarium_loss["z_nk"]  # cellarium's z_nk to avoid disagreement due to sampling
 
     scvi_generative_tensors = scvi_model.module._get_generative_input(batch, scvi_inference_output)
     scvi_generative_output = scvi_model.module.generative(**scvi_generative_tensors)
@@ -1445,14 +1455,14 @@ def test_vs_scvi_reconstruction_losses_match(matching_scvi_cellarium_models):
 
 @pytest.mark.parametrize("matching_scvi_cellarium_models", [
     {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
-    # {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": True},
-    # {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": False},
-    # {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
+    {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": True},
+    {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": False},
+    {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
 ], ids=[
     "poisson-latent5-no_bn",
-    # "poisson-latent5-bn",
-    # "nb-latent10-no_bn",
-    # "nb-latent10-bn",
+    "poisson-latent5-bn",
+    "nb-latent10-no_bn",
+    "nb-latent10-bn",
 ], indirect=True)
 def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
     """Test that gradients match layer by layer."""
@@ -1462,11 +1472,35 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
     data["scvi_model"].module.zero_grad()
     data["cellarium_model"].zero_grad()
 
-    # Perform backward pass for scvi-tools
-    data["scvi_loss"].loss.backward(retain_graph=True)
+    # Instead of manually recomputing, let's use a fixed seed approach
+    # Set the random seed to ensure deterministic sampling
+    torch.manual_seed(42)
+    
+    # Run cellarium forward pass
+    cellarium_loss = data["cellarium_model"](
+        x_ng=data["batch"]["X"],
+        var_names_g=np.array(data["var_names_g"]),
+        batch_index_n=data["batch"]["batch"],
+    )
 
-    # Perform backward pass for cellarium
-    data["cellarium_loss"]["loss"].backward()
+    # Reset seed and run scvi-tools forward pass with the same seed
+    torch.manual_seed(42)
+    
+    # Get scvi-tools outputs with the same random seed
+    scvi_inference_tensors = data["scvi_model"].module._get_inference_input(data["batch"])
+    scvi_inference_output = data["scvi_model"].module._regular_inference(**scvi_inference_tensors)
+    scvi_generative_tensors = data["scvi_model"].module._get_generative_input(data["batch"], scvi_inference_output)
+    scvi_generative_output = data["scvi_model"].module.generative(**scvi_generative_tensors)
+    scvi_loss = data["scvi_model"].module.loss(
+        tensors=data["batch"],
+        inference_outputs=scvi_inference_output,
+        generative_outputs=scvi_generative_output,
+        kl_weight=1.0,
+    )
+
+    # Perform backward passes
+    scvi_loss.loss.backward(retain_graph=True)
+    cellarium_loss["loss"].backward()
     
     # Helper function to compare gradients and print differences
     def compare_gradients(name, cell_grad, scvi_grad, rtol=1e-5, atol=1e-5) -> bool:
