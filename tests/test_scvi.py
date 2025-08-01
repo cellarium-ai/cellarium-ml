@@ -460,7 +460,7 @@ n_latent: int = 10
 n_hidden: int = 128
 n_layers: int = 1
 batch_size: int = 512
-max_epochs: int = 1  # in this testing we are trying to look after convergence
+max_epochs: int = 5  # in this testing we are trying to look after convergence
 
 
 # other params
@@ -513,6 +513,11 @@ def train_scvi_tools_model(
     print(model)
     print(model.module.z_encoder)
     print(model.module.decoder)
+
+    # fix the random seed
+    pl.seed_everything(0)
+
+    # run training
     model.train(
         max_epochs=max_epochs,
         train_size=1,
@@ -526,15 +531,17 @@ def train_scvi_tools_model(
             "weight_decay": 1e-6,
             "eps": 0.01,
             "optimizer": "Adam",
+            "lr_factor": 1.0,
         },
+        datasplitter_kwargs={"drop_last": False},
     )
     # embed the training data
-    train_latent = model.get_latent_representation(train_data)
+    train_latent = model.get_latent_representation(train_data, give_mean=True)
     # embed the test data
     SCVI.setup_anndata(test_data)
     # put scvi model in eval mode
     model.module.eval()
-    test_latent = model.get_latent_representation(test_data)
+    test_latent = model.get_latent_representation(test_data, give_mean=True)
 
     # add the latent representation to the obsm of the training and test data
     train_data.obsm[latent_obsm_key] = train_latent
@@ -624,8 +631,11 @@ def train_cellarium_model(
         },
         batch_size=batch_size,
         num_workers=0,
+        drop_incomplete_batch=False,
+        drop_last_indices=False,
         shuffle=True,
     )
+    train_datamodule.setup(stage="fit")
     test_datamodule = CellariumAnnDataDataModule(
         dadc=test_data,
         batch_keys={
@@ -637,7 +647,10 @@ def train_cellarium_model(
         batch_size=batch_size,
         num_workers=0,
         shuffle=False,
+        drop_incomplete_batch=False,
+        drop_last_indices=False,
     )
+    test_datamodule.setup(stage="predict")
 
     # trainer
     trainer = pl.Trainer(
@@ -648,6 +661,9 @@ def train_cellarium_model(
         gradient_clip_algorithm="norm",
         gradient_clip_val=50.0,
     )
+
+    # fix the random seed
+    pl.seed_everything(0)
 
     # fit
     trainer.fit(module, train_datamodule)
@@ -675,13 +691,9 @@ def train_cellarium_model(
     return train_data, test_data
 
 
-# @pytest.mark.parametrize("metric", ["euclidean", "cosine"], ids=["euclidean", "cosine"])
-# @pytest.mark.parametrize(
-#     "annotation_key", ["cell_type", "cell_type_coarse_ontology_term_id"], ids=["celltype", "coarsecelltype"]
-# )
-@pytest.mark.parametrize("metric", ["euclidean"], ids=["euclidean"])
+@pytest.mark.parametrize("metric", ["euclidean", "cosine"], ids=["euclidean", "cosine"])
 @pytest.mark.parametrize(
-    "annotation_key", ["cell_type"], ids=["celltype"]
+    "annotation_key", ["cell_type", "cell_type_coarse_ontology_term_id"], ids=["celltype", "coarsecelltype"]
 )
 def test_latent_accuracy_metric(
     train_scvi_tools_model,
@@ -1256,7 +1268,7 @@ def matching_scvi_cellarium_models(request):
     batch = next(iter(train_dl))
 
     # Synchronize random sampling between models using fixed seed
-    torch.manual_seed(42)
+    torch.manual_seed(0)
     
     # Get Cellarium outputs
     cellarium_loss = cellarium_model(
@@ -1266,7 +1278,7 @@ def matching_scvi_cellarium_models(request):
     )
 
     # Reset seed for scvi-tools 
-    torch.manual_seed(42)
+    torch.manual_seed(0)
     
     # Get scvi-tools outputs
     scvi_inference_tensors = scvi_model.module._get_inference_input(batch)
@@ -1510,8 +1522,8 @@ def test_vs_scvi_training_dynamics_match(matching_scvi_cellarium_models):
         scvi_optimizer.zero_grad()
         
         # Set the same random seed for each step to ensure identical sampling
-        torch.manual_seed(42 + step)
-        
+        torch.manual_seed(0 + step)
+
         # Forward pass for Cellarium
         cellarium_loss = data["cellarium_model"](
             x_ng=data["batch"]["X"],
@@ -1520,7 +1532,7 @@ def test_vs_scvi_training_dynamics_match(matching_scvi_cellarium_models):
         )
         
         # Reset seed for scvi-tools
-        torch.manual_seed(42 + step)
+        torch.manual_seed(0 + step)
         
         # Forward pass for scvi-tools
         scvi_inference_tensors = data["scvi_model"].module._get_inference_input(data["batch"])
@@ -1625,7 +1637,7 @@ def test_vs_scvi_evaluation_mode_latents_match(matching_scvi_cellarium_models):
     
     with torch.no_grad():
         # Set same random seed for both
-        torch.manual_seed(42)
+        torch.manual_seed(0)
         cellarium_train_z_dist = data["cellarium_model"].z_encoder(
             x_ng=data["x"], 
             batch_nb=data["batch_nb"], 
@@ -1634,7 +1646,7 @@ def test_vs_scvi_evaluation_mode_latents_match(matching_scvi_cellarium_models):
         cellarium_train_mean = cellarium_train_z_dist.loc
         
         # Reset seed for scvi-tools
-        torch.manual_seed(42)
+        torch.manual_seed(0)
         scvi_train_z_dist = data["scvi_model"].module.z_encoder(data["x"], data["batch_nb"])[0]
         scvi_train_mean = scvi_train_z_dist.loc
         
@@ -1673,7 +1685,7 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
 
     # Instead of manually recomputing, let's use a fixed seed approach
     # Set the random seed to ensure deterministic sampling
-    torch.manual_seed(42)
+    torch.manual_seed(0)
     
     # Run cellarium forward pass
     cellarium_loss = data["cellarium_model"](
@@ -1683,7 +1695,7 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
     )
 
     # Reset seed and run scvi-tools forward pass with the same seed
-    torch.manual_seed(42)
+    torch.manual_seed(0)
     
     # Get scvi-tools outputs with the same random seed
     scvi_inference_tensors = data["scvi_model"].module._get_inference_input(data["batch"])
