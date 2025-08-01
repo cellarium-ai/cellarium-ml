@@ -858,6 +858,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
+
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
         inference_outputs = self.inference(
@@ -889,6 +890,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
         #print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
 
+
         # optional KL divergence for batch representation
         kl_divergence_batch: torch.Tensor | int
         if self.batch_representation_sampled and (self.batch_kl_weight_max > 0):
@@ -904,12 +906,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         # full loss
         loss = torch.mean(
-            rec_loss 
+            rec_loss
             + kl_annealing_weight * (
-                self.z_kl_weight_max * kl_divergence_z 
+                self.z_kl_weight_max * kl_divergence_z
                 + self.batch_kl_weight_max * kl_divergence_batch
             )
         )
+
 
         return {"loss": loss}
 
@@ -968,7 +971,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
     def get_reconstruct_gene_list(self,reconstruction_genes: list | None) -> list[str]:
         """Return ordered list of genes from glyco gene file, checking which are present in model."""
-        #TODO: if predict gene list is None, keep all genes (self.var_names_g)
         if reconstruction_genes is not None:
             if getattr(self, "glyco_gene_set", None) is None:
                 # df = pd.read_csv("/home/sfleming/cellarium-ml/data/glyco_df_20241216.tsv", sep="\t")
