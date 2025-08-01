@@ -912,6 +912,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             "z_nk": inference_outputs["z"],
         }
 
+    def _latent_value_from_latent_distribution(self, d: Distribution) -> torch.Tensor:
+        """Get the latent variable from the latent distribution."""
+        return d.mean
+
     def predict(
         self,
         x_ng: torch.Tensor,
@@ -957,12 +961,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
-        z_nk = self.inference(
-            x_ng=x_ng,
-            batch_nb=batch_nb,
-            continuous_covariates_nc=continuous_covariates_nc,
-            categorical_covariate_np=categorical_covariate_np,
-        )["z"]
+        z_nk = self._latent_value_from_latent_distribution(
+            self.inference(
+                x_ng=x_ng,
+                batch_nb=batch_nb,
+                continuous_covariates_nc=continuous_covariates_nc,
+                categorical_covariate_np=categorical_covariate_np,
+            )["qz"]
+        )
         return {"x_ng": z_nk}
 
     def get_glyco_gene_list(self) -> list[str]:
@@ -1054,7 +1060,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             batch_nb = self.batch_representation_from_batch_index(transformed_batch_index_n)
 
             generative_outputs = self.generative(
-                z_nk=inference_outputs["z"],
+                z_nk=self._latent_value_from_latent_distribution(inference_outputs["qz"]),
                 library_size_n1=inference_outputs["library_size_n1"],
                 batch_nb=batch_nb,
                 continuous_covariates_nc=continuous_covariates_nc,
