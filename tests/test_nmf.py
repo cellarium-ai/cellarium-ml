@@ -4,17 +4,33 @@
 import os
 from typing import Literal
 
+import anndata
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 from sklearn.decomposition import NMF
 
-from cellarium.ml import CellariumModule
+from cellarium.ml import CellariumModule, CellariumAnnDataDataModule
 from cellarium.ml.models import NonNegativeMatrixFactorization
 from cellarium.ml.models.nmf import compute_consensus_factors, get_embedding
-from cellarium.ml.utilities.data import collate_fn
+from cellarium.ml.transforms import Filter
+from cellarium.ml.utilities.data import collate_fn, AnnDataField
 from tests.common import BoringDataset
+
+
+@pytest.fixture
+def small_adata():
+    n, g, k = 1000, 10, 3
+    rng = np.random.default_rng(0)
+    z_nk = rng.standard_normal(size=(n, k), dtype=np.float32)
+    w_kg = rng.standard_normal(size=(k, g), dtype=np.float32)
+    sigma = 0.6
+    noise = sigma * rng.standard_normal(size=(n, g), dtype=np.float32)
+    x_ng = z_nk @ w_kg + noise
+    return anndata.AnnData(X=x_ng, var=pd.DataFrame(index=[f"gene_{i}" for i in range(g)]))
+
 
 # set the number of cells, genes, cell types, and factors
 n = 1000
@@ -27,54 +43,44 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-def test_probabilistic_pca_multi_device(
-    x_ng: np.ndarray, minibatch: bool, ppca_flavor: Literal["marginalized", "linear_vae"], learn_mean: bool
+def test_nmf_multi_device(
+    small_adata: anndata.AnnData
 ):
-    n, g = x_ng.shape
-    k = 3
+    n, g = small_adata.shape
+    k_values = [3, 4]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
-    if learn_mean:
-        x_mean_g = None
-    else:
-        x_mean_g = torch.as_tensor(x_ng.mean(axis=0))
 
     # dataloader
-    batch_size = n // 2 if minibatch else n
-    train_loader = torch.utils.data.DataLoader(
-        BoringDataset(
-            x_ng,
-            np.array([f"gene_{i}" for i in range(g)]),
-        ),
+    batch_size = n // 2
+    dm = CellariumAnnDataDataModule(
+        dadc=small_adata,
         batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),
+            "var_names_g": AnnDataField(attr="var_names"),
+        },
     )
+    dm.setup(stage="fit")
     # model
-    ppca = ProbabilisticPCA(
-        n_obs=n,
-        var_names_g=np.array([f"gene_{i}" for i in range(g)]),
-        n_components=k,
-        ppca_flavor=ppca_flavor,
-        mean_g=x_mean_g,
-        W_init_scale=w,
-        sigma_init_scale=s,
+    nmf = NonNegativeMatrixFactorization(
+        full_g=g,
+        var_names_hvg=[f"gene_{i}" for i in range(g)],
+        k_values=k_values,
+        r=5,
     )
     module = CellariumModule(
-        model=ppca,
-        optim_fn=torch.optim.Adam,
-        optim_kwargs={"lr": 3e-2},
-        scheduler_fn=torch.optim.lr_scheduler.CosineAnnealingLR,
-        scheduler_kwargs={"T_max": 1000},  # one cycle
+        cpu_transforms=[Filter([f"gene_{i}" for i in range(g)])],
+        model=nmf,
     )
     # trainer
     trainer = pl.Trainer(
         barebones=True,
         accelerator="cpu",
         devices=devices,
-        max_steps=1000,
+        max_epochs=1,
     )
     # fit
-    trainer.fit(module, train_dataloaders=train_loader)
+    trainer.fit(module, dm)
 
 
 def d_uncorrelated_kg(k, g, gene_set_sparsity_factor=gene_set_sparsity_factor) -> torch.Tensor:
