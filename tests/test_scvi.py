@@ -468,6 +468,7 @@ n_epochs_kl_warmup: int = max_epochs
 max_z_kl_weight: float = 10.0  # this setting is not normal, but exaggerates problems
 batch_key: str = "batch_concat_cellxgene"
 log_variational: bool = True
+use_batchnorm: bool = False
 
 
 @pytest.fixture(scope="module")
@@ -501,10 +502,15 @@ def train_scvi_tools_model(
         n_latent=n_latent,
         n_layers=n_layers,
         n_hidden=n_hidden,
+        encode_covariates=True,
+        use_batch_norm="both" if use_batchnorm else "none",
         log_variational=log_variational,
         dispersion="gene",
         deeply_inject_covariates=True,
     )
+    print(model)
+    print(model.module.z_encoder)
+    print(model.module.decoder)
     model.train(
         max_epochs=max_epochs,
         train_size=1,
@@ -569,7 +575,7 @@ def train_cellarium_model(
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
                     "init_args": {"out_features": n_hidden, "batch_to_bias_hidden_layers": []},
                     "dressing_init_args": {
-                        "use_batch_norm": True,
+                        "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
                         "dropout_rate": 0.1,
                     },
@@ -584,7 +590,7 @@ def train_cellarium_model(
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
                     "init_args": {"out_features": n_hidden, "batch_to_bias_hidden_layers": []},
                     "dressing_init_args": {
-                        "use_batch_norm": True,
+                        "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
                         "dropout_rate": 0.0,
                     },
