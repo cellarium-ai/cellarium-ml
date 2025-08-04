@@ -410,17 +410,6 @@ class DecoderSCVI(torch.nn.Module):
                 raise NotImplementedError("ZINB is not currently implemented")
                 # dist = ZeroInflatedNegativeBinomial(count_mean_ng + self.eps, inverse_overdispersion + self.eps, self.dropout_decoder(q_nh))
         return dist
-    
-
-def compute_annealed_kl_weight(
-    epoch: int,
-    step: int,
-    n_epochs_kl_warmup: int | None,
-    n_steps_kl_warmup: int | None,
-    max_kl_weight: float = 1.0,
-    min_kl_weight: float = 0.0,
-) -> float | torch.Tensor:
-    """Computes the kl weight for the current step or epoch.
 
 def compute_annealed_kl_weight(
     epoch: int,
