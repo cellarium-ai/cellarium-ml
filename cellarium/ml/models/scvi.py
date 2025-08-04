@@ -571,6 +571,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.z_kl_weight_max = z_kl_weight_max
         self.epoch = 0
         self.step = 0
+        self.reconstruction_genes = reconstruction_genes
+        self.build_reconstructions = build_reconstructions
 
 
         if n_continuous_cov > 0:
@@ -901,18 +903,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         # KL divergence for z
         kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
-
-        # compute the annealed KL weight
-        kl_annealing_weight = compute_annealed_kl_weight(
-            epoch=self.epoch,
-            step=self.step,
-            n_epochs_kl_warmup=self.kl_warmup_epochs,
-            n_steps_kl_warmup=self.kl_warmup_steps,
-            max_kl_weight=1.0,
-            min_kl_weight=self.kl_annealing_start,
-        )
-        #print(f"z_kl_weight: {z_kl_weight}, epoch: {epoch}")
-
 
         # optional KL divergence for batch representation
         kl_divergence_batch: torch.Tensor | int
