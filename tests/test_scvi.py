@@ -1919,3 +1919,141 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
         all_match = all_match and match
 
     assert all_match, "Some gradients did not match. Check the printed differences above."
+
+
+@pytest.mark.parametrize("reconstruct_counts_on_predict", [True, False], ids=["reconstruct_counts", "latent_repr"])
+@pytest.mark.parametrize("reconstruction_sampled", [True, False], ids=["sampled", "mean"])
+@pytest.mark.parametrize(
+    "reconstruction_transform_batch",
+    [None, 0, 1, "mean"],
+    ids=["original_batch", "batch_0", "batch_1", "mean_batch"],
+)
+def test_reconstruction_functionality(
+    reconstruct_counts_on_predict,
+    reconstruction_sampled,
+    reconstruction_transform_batch,
+):
+    """Test the reconstruction functionality added via reconstruct_counts_on_predict, reconstruction_var_names_g,
+    reconstruction_transform_batch, and reconstruction_sampled parameters."""
+
+    n, g = 50, 20
+    n_batch = 3
+    var_names_g = [f"gene_{i}" for i in range(g)]
+    reconstruction_var_names_g = var_names_g[:10]  # reconstruct first 10 genes
+
+    # Create test data
+    X = np.random.poisson(lam=2.0, size=(n, g))
+    batch_indices = np.random.randint(0, n_batch, size=n)
+
+    # Initialize model with reconstruction parameters
+    model = SingleCellVariationalInference(
+        var_names_g=var_names_g,
+        n_batch=n_batch,
+        n_latent=5,
+        reconstruct_counts_on_predict=reconstruct_counts_on_predict,
+        reconstruction_var_names_g=reconstruction_var_names_g,
+        reconstruction_transform_batch=reconstruction_transform_batch,
+        reconstruction_sampled=reconstruction_sampled,
+        encoder=linear_encoder_kwargs,
+        decoder=linear_decoder_kwargs,
+    )
+
+    # Test that reconstruction parameters are set correctly
+    assert model.reconstruct_counts_on_predict == reconstruct_counts_on_predict
+    assert model.reconstruction_var_names_g == reconstruction_var_names_g
+    assert model.reconstruction_transform_batch == reconstruction_transform_batch
+    assert model.reconstruction_sampled == reconstruction_sampled
+
+    # Create test batch
+    x_ng = torch.tensor(X, dtype=torch.float32)
+    batch_index_n = torch.tensor(batch_indices, dtype=torch.long)
+    var_names_array = np.array(var_names_g)
+
+    model.eval()
+    with torch.no_grad():
+        # Test predict method
+        output = model.predict(
+            x_ng=x_ng,
+            var_names_g=var_names_array,
+            batch_index_n=batch_index_n,
+        )
+
+        # Validate output shape and content
+        assert "x_ng" in output
+
+        if reconstruct_counts_on_predict:
+            # Should reconstruct gene counts for specified genes
+            expected_genes = len(reconstruction_var_names_g)
+            assert output["x_ng"].shape == (n, expected_genes)
+            # Values should be non-negative (gene counts)
+            assert torch.all(output["x_ng"] >= 0)
+        else:
+            # Should return latent representation
+            assert output["x_ng"].shape == (n, model.n_latent)
+
+
+def test_reconstruction_var_names_validation():
+    """Test that invalid reconstruction_var_names_g are handled correctly."""
+    var_names_g = [f"gene_{i}" for i in range(10)]
+    invalid_reconstruction_var_names = ["gene_0", "gene_1", "invalid_gene"]  # includes non-existent gene
+
+    # Should warn and filter out invalid gene names
+    with pytest.warns(UserWarning, match="reconstruction_var_names_g invalid_gene not found*"):
+        model = SingleCellVariationalInference(
+            var_names_g=var_names_g,
+            reconstruction_var_names_g=invalid_reconstruction_var_names,
+            encoder=linear_encoder_kwargs,
+            decoder=linear_decoder_kwargs,
+        )
+
+    # Should only keep valid gene names
+    assert model.reconstruction_var_names_g == ["gene_0", "gene_1"]
+
+
+def test_reconstruction_transform_batch_validation():
+    """Test validation of reconstruction_transform_batch parameter."""
+    var_names_g = [f"gene_{i}" for i in range(5)]
+    n_batch = 2
+
+    model = SingleCellVariationalInference(
+        var_names_g=var_names_g,
+        n_batch=n_batch,
+        reconstruction_var_names_g=var_names_g[:3],
+        encoder=linear_encoder_kwargs,
+        decoder=linear_decoder_kwargs,
+    )
+
+    x_ng = torch.poisson(torch.exp(torch.randn(10, 5)))
+    batch_index_n = torch.zeros(10, dtype=torch.long)
+
+    model.eval()
+    with torch.no_grad():
+        # Valid batch index
+        output = model.reconstruct(
+            x_ng=x_ng,
+            var_names_g=np.array(var_names_g),
+            gene_inds=[0, 1, 2],
+            batch_index_n=batch_index_n,
+            transform_batch=0,
+        )
+        assert output["x_ng"].shape == (10, 3)
+
+        # Invalid batch index should raise error
+        with pytest.raises(ValueError, match="transform_batch must be less than self.n_batch"):
+            model.reconstruct(
+                x_ng=x_ng,
+                var_names_g=np.array(var_names_g),
+                gene_inds=[0, 1, 2],
+                batch_index_n=batch_index_n,
+                transform_batch=n_batch,  # >= n_batch
+            )
+
+        # Invalid string should raise error
+        with pytest.raises(ValueError, match='If transform_batch is a string, it must be "mean"'):
+            model.reconstruct(
+                x_ng=x_ng,
+                var_names_g=np.array(var_names_g),
+                gene_inds=[0, 1, 2],
+                batch_index_n=batch_index_n,
+                transform_batch="invalid",
+            )
