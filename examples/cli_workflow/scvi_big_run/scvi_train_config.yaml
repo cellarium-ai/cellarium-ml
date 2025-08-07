@@ -33,14 +33,14 @@ trainer:
   detect_anomaly: false
   sync_batchnorm: false
   reload_dataloaders_every_n_epochs: 0
-  default_root_dir: /home/sfleming/scvi_runs
+  default_root_dir: /path/to/lightning_logs
 model:
   cpu_transforms:
     - class_path: cellarium.ml.transforms.Filter
       init_args:
         filter_list:
           !FileLoader
-          file_path: /home/sfleming/scvi_runs/all_training_genes_hvg_plus_glyco_20241216.txt
+          file_path: /path/to/training_genes.txt
           loader_fn: pandas.read_csv
           attr: "ensembl_id"
           convert_fn: pandas.Series.to_list
