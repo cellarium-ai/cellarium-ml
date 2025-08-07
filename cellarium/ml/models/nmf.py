@@ -7,6 +7,7 @@ from typing import Literal
 
 import anndata
 import lightning.pytorch as pl
+from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -103,20 +104,46 @@ def nmf_frobenius_loss(x: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: t
     return F.mse_loss(torch.matmul(loadings_nk, factors_kg), x, reduction="sum")
 
 
-def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neighborhood_size: float):
+def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neighborhood_size: float, plot=False):
+    assert local_neighborhood_size > 0 and local_neighborhood_size < 1, (
+        "local_neighborhood_size must be between 0 and 1"
+    )
+    assert density_threshold > 0 and density_threshold < 1, (
+        "density_threshold must be between 0 and 1"
+    )
     r, num_component, g = D_rkg.shape
     d_norm_rkg = F.normalize(D_rkg, dim=2, p=2)
     d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
 
     if r > 1:
         L = int(r * local_neighborhood_size)
+        if L < 5:
+            raise UserWarning(
+                f"local_neighborhood_size {local_neighborhood_size} is too small for k={k}. "
+                f"n_neighbors = int(replicates * local_neighborhood_size) = {L}. "
+                "Increase local_neighborhood_size."
+            )
+        
         euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
         L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
         local_neigh_dist = L_nearest_neigh.sum(1) / L
+        if plot:
+            import matplotlib.pyplot as plt
+            plt.figure(figsize=(5, 2))
+            plt.hist(local_neigh_dist.cpu().numpy())
+            plt.title(f"Local Neighborhood Distances: k = {k}")
+            plt.ylabel("Number of NMF runs\n(total is replicates times k)")
+            plt.xlabel("Distance")
+            plt.show()
 
         topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
         topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
         d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
+        if len(d_norm_mg) == 0:
+            raise UserWarning(
+                f"No samples found for k={k} after applying density threshold {density_threshold}. "
+                "Please run with plot=True and consult histogram"
+            )
 
         df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
         kmeans = KMeans(n_clusters=k, random_state=1)  # n_init=10,
@@ -712,10 +739,69 @@ class NonNegativeMatrixFactorization(CellariumModel, PredictMixin):
         return {k: getattr(self, f"D_{k}_kg") for k in self.k_values}
 
 
+def plot_density_histograms(
+    nmf_model: NonNegativeMatrixFactorization,
+    local_neighborhood_size: float = 0.3, 
+    k_values: list[int] | None = None,
+):
+    """
+    Plot a histogram of local neighborhood distances for each value of k.
+
+    Args:            
+        local_neighborhood_size: Determines number of neighbors to use for calculating kNN distance as 
+            int(local_neighborhood_size * replicates * k)
+        k_values: A list of k values to plot histograms for (default: None, which loops over all k values)
+    """
+    import matplotlib.pyplot as plt
+
+    if not isinstance(nmf_model, NonNegativeMatrixFactorization):
+        raise TypeError("nmf_model must be an instance of NonNegativeMatrixFactorization")
+    assert local_neighborhood_size > 0 and local_neighborhood_size < 1, (
+        "local_neighborhood_size must be between 0 and 1"
+    )
+    if nmf_model.n_nmf == 1:
+        raise UserWarning("Only one NMF run found (input arg r=1): cannot compute local neighborhood.")
+    if isinstance(k_values, int):
+        k_values = [k_values]
+    if k_values is None:
+        k_values = nmf_model.k_values
+    for k in k_values:
+        if k not in nmf_model.k_values:
+            warnings.warn(f"k={k} not found in nmf_model.k_values : will skip")
+            continue
+        D_rkg = getattr(nmf_model, f"D_{k}_rkg")
+
+        r, num_component, g = D_rkg.shape
+        d_norm_rkg = F.normalize(D_rkg, dim=2, p=2)
+        d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
+
+        L = int(r * local_neighborhood_size)
+        if L < 1:
+            raise UserWarning(
+                f"local_neighborhood_size {local_neighborhood_size} is too small for k={k}. "
+                f"n_neighbors = int(replicates * local_neighborhood_size) = {L}. "
+                "Increase local_neighborhood_size."
+            )
+        
+        euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+        L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
+        print(L_nearest_neigh.shape)
+        local_neigh_dist = L_nearest_neigh.mean(1) / L
+        print(len(local_neigh_dist))
+
+        plt.figure(figsize=(5, 2))
+        plt.hist(local_neigh_dist.cpu().numpy())
+        plt.title(f"Local Neighborhood Distances: k = {k}")
+        plt.ylabel("Number of NMF runs\n(total is replicates times k)")
+        plt.xlabel("Distance")
+        plt.show()
+
+
 def compute_consensus_factors(
     nmf_model: NonNegativeMatrixFactorization,
     density_threshold=0.2,
     local_neighborhood_size=0.3,
+    plot=False,
 ):
     """
     Run the consensus step of consensus NMF, and store the consensus factors as attributes of `nmf_model`.
@@ -735,7 +821,7 @@ def compute_consensus_factors(
     for k in k_values:
         D_rkg = getattr(nmf_model, f"D_{k}_rkg")
         consensus_output = consensus(
-            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size
+            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size, plot=plot,
         )
         setattr(nmf_model, f"D_{k}_kg", consensus_output["consensus_D"])
 
