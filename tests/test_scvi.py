@@ -4,7 +4,6 @@
 import copy
 import math
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Literal, Sequence, TypedDict
@@ -18,6 +17,7 @@ import torch
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml.data.fileio import read_h5ad_file
 from cellarium.ml.models import SingleCellVariationalInference
 from cellarium.ml.models.scvi import DecoderSCVI, EncoderSCVI
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes, collate_fn, densify
@@ -411,41 +411,14 @@ def compute_neighbor_accuracy(
 def testing_anndatas() -> tuple[anndata.AnnData, anndata.AnnData]:
     """
     Get the train and test data.
+    This downloads data that is not super small.
+    Currently we feel it is necessary to use this real data to test for regressions.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        # data
-        train_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_train.h5ad"
-        test_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_test.h5ad"
-
-        # download the data
-        train_path = tmpdir_path / "train.h5ad"
-        test_path = tmpdir_path / "test.h5ad"
-        import requests
-
-        response = requests.get(train_data)
-        response.raise_for_status()
-        with open(train_path, "wb") as f:
-            f.write(response.content)
-
-        response = requests.get(test_data)
-        response.raise_for_status()
-        with open(test_path, "wb") as f:
-            f.write(response.content)
-
-        # # temp hack to avoid downloads ==============================
-        # train_path = Path("/Users/sfleming/Downloads/UBERON_0002115_train.h5ad")
-        # test_path = Path("/Users/sfleming/Downloads/UBERON_0002115_test.h5ad")
-        # shutil.copy(train_path, tmpdir_path / "train.h5ad")
-        # shutil.copy(test_path, tmpdir_path / "test.h5ad")
-        # # ===========================================================
-
-        # print out the contents of the temp directory
-        print(f"tmpdir contents: {os.listdir(tmpdir_path)}")
-
-        train_data = anndata.read_h5ad(tmpdir_path / "train.h5ad")
-        test_data = anndata.read_h5ad(tmpdir_path / "test.h5ad")
-        return train_data, test_data
+    train_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_train.h5ad"
+    test_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_test.h5ad"
+    train_data = read_h5ad_file(train_data)
+    test_data = read_h5ad_file(test_data)
+    return train_data, test_data
 
 
 # # Lys test case
