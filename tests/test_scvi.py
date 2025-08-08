@@ -414,31 +414,31 @@ def testing_anndatas() -> tuple[anndata.AnnData, anndata.AnnData]:
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
-        # # data
-        # train_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_train.h5ad"
-        # test_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_test.h5ad"
+        # data
+        train_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_train.h5ad"
+        test_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_test.h5ad"
 
-        # # download the data
-        # train_path = tmpdir_path / "train.h5ad"
-        # test_path = tmpdir_path / "test.h5ad"
-        # import requests
+        # download the data
+        train_path = tmpdir_path / "train.h5ad"
+        test_path = tmpdir_path / "test.h5ad"
+        import requests
 
-        # response = requests.get(train_data)
-        # response.raise_for_status()
-        # with open(train_path, "wb") as f:
-        #     f.write(response.content)
+        response = requests.get(train_data)
+        response.raise_for_status()
+        with open(train_path, "wb") as f:
+            f.write(response.content)
 
-        # response = requests.get(test_data)
-        # response.raise_for_status()
-        # with open(test_path, "wb") as f:
-        #     f.write(response.content)
+        response = requests.get(test_data)
+        response.raise_for_status()
+        with open(test_path, "wb") as f:
+            f.write(response.content)
 
-        # temp hack because I'm on slow wifi =======================
-        train_path = Path("/Users/sfleming/Downloads/UBERON_0002115_train.h5ad")
-        test_path = Path("/Users/sfleming/Downloads/UBERON_0002115_test.h5ad")
-        shutil.copy(train_path, tmpdir_path / "train.h5ad")
-        shutil.copy(test_path, tmpdir_path / "test.h5ad")
-        # ===========================================================
+        # # temp hack to avoid downloads ==============================
+        # train_path = Path("/Users/sfleming/Downloads/UBERON_0002115_train.h5ad")
+        # test_path = Path("/Users/sfleming/Downloads/UBERON_0002115_test.h5ad")
+        # shutil.copy(train_path, tmpdir_path / "train.h5ad")
+        # shutil.copy(test_path, tmpdir_path / "test.h5ad")
+        # # ===========================================================
 
         # print out the contents of the temp directory
         print(f"tmpdir contents: {os.listdir(tmpdir_path)}")
