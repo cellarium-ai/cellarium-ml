@@ -104,7 +104,7 @@ def nmf_frobenius_loss(x: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: t
     return F.mse_loss(torch.matmul(loadings_nk, factors_kg), x, reduction="sum")
 
 
-def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neighborhood_size: float, plot=False):
+def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neighborhood_size: float, plot_only=False):
     assert local_neighborhood_size > 0 and local_neighborhood_size < 1, (
         "local_neighborhood_size must be between 0 and 1"
     )
@@ -112,60 +112,76 @@ def consensus(D_rkg: torch.Tensor, k: int, density_threshold: float, local_neigh
         "density_threshold must be between 0 and 1"
     )
     r, num_component, g = D_rkg.shape
-    d_norm_rkg = F.normalize(D_rkg, dim=2, p=2)
+    d_norm_rkg = F.normalize(D_rkg, dim=-1, p=2)
     d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
 
     if r > 1:
-        L = int(r * local_neighborhood_size)
-        if L < 5:
+        n_neighbors = int(r * local_neighborhood_size)
+        if n_neighbors < 2:
             raise UserWarning(
                 f"local_neighborhood_size {local_neighborhood_size} is too small for k={k}. "
-                f"n_neighbors = int(replicates * local_neighborhood_size) = {L}. "
-                "Increase local_neighborhood_size."
+                f"n_neighbors = int(replicates * local_neighborhood_size) = {n_neighbors}. "
+                "We want n_neighbors >= 2. Increase local_neighborhood_size."
             )
         
-        euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
-        L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
-        local_neigh_dist = L_nearest_neigh.sum(1) / L
-        if plot:
+        # euclidean distance to every other run
+        euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+
+        # top n_neighbors plus self (distance 0)
+        n_nearest_dist_including_self_mL, _ = torch.topk(euclidean_dist_mm, n_neighbors + 1, largest=False)
+
+        # distances to top n_neighbors
+        n_nearest_dist_ml = n_nearest_dist_including_self_mL[:, 1:]
+
+        # mean distance to top n_neighbors
+        mean_neighbor_distance_m = n_nearest_dist_ml.mean(dim=1)
+
+        if plot_only:
             import matplotlib.pyplot as plt
             plt.figure(figsize=(5, 2))
-            plt.hist(local_neigh_dist.cpu().numpy())
+            plt.hist(mean_neighbor_distance_m.cpu().numpy())
             plt.title(f"Local Neighborhood Distances: k = {k}")
             plt.ylabel("Number of NMF runs\n(total is replicates times k)")
             plt.xlabel("Distance")
             plt.show()
+            return
 
-        topk_euc_dist = euc_dist[local_neigh_dist < density_threshold, :]
-        topk_euc_dist = topk_euc_dist[:, local_neigh_dist < density_threshold]
-        d_norm_mg = d_norm_mg[local_neigh_dist < density_threshold, :]
-        if len(d_norm_mg) == 0:
+        # filter out runs considered outliers based on threshold
+        logic = mean_neighbor_distance_m < density_threshold
+        euclidean_dist_ff = euclidean_dist_mm[logic, logic]
+        n_nearest_dist_fl = n_nearest_dist_ml[logic, :]
+        d_norm_fg = d_norm_mg[logic, :]
+
+        if len(d_norm_fg) == 0:
             raise UserWarning(
                 f"No samples found for k={k} after applying density threshold {density_threshold}. "
                 "Please run with plot=True and consult histogram"
             )
 
-        df_d_norm_mg = pd.DataFrame(d_norm_mg.cpu().numpy())
-        kmeans = KMeans(n_clusters=k, random_state=1)  # n_init=10,
-        kmeans.fit(df_d_norm_mg)
-        kmeans_cluster_labels = pd.Series(kmeans.labels_ + 1, index=df_d_norm_mg.index)
+        # run k-means clustering on the remaining f programs
+        df_d_norm_fg = pd.DataFrame(d_norm_fg.cpu().numpy())
+        kmeans = KMeans(n_clusters=k, n_init=10, random_state=1)
+        kmeans.fit(df_d_norm_fg)
+        kmeans_cluster_labels_f = pd.Series(kmeans.labels_ + 1, index=df_d_norm_fg.index)
 
-        silhouette = silhouette_score(df_d_norm_mg.values, kmeans_cluster_labels, metric="cosine")
+        # compute the consensus k programs as the median of each cluster
+        median_D_kg = df_d_norm_fg.groupby(kmeans_cluster_labels_f).median()
+        median_D_kg = torch.tensor(median_D_kg.values)
 
-        median_D = df_d_norm_mg.groupby(kmeans_cluster_labels).median()  # mean() # quantile(0.9) #
-        median_D = torch.Tensor(median_D.values)
-        median_D = F.normalize(median_D, dim=1, p=1)
+        silhouette = silhouette_score(df_d_norm_fg.values, kmeans_cluster_labels_f, metric="euclidean")
 
     else:
-        topk_euc_dist = None
-        local_neigh_dist = None
-        median_D = F.normalize(d_norm_mg, dim=1, p=1)
+        euclidean_dist_ff = None
+        n_nearest_dist_fl = None
+        median_D_kg = d_norm_mg  # if r = 1, then m = r * k = k
         silhouette = 1.0
 
+    norm_median_D_kg = F.normalize(median_D_kg, dim=-1, p=1)
+
     return {
-        "topk_euc_dist": topk_euc_dist,
-        "local_neigh_dist": local_neigh_dist,
-        "consensus_D": median_D,
+        "filtered_euclidean_distance_matrix": euclidean_dist_ff,
+        "filtered_neighbor_distances": n_nearest_dist_fl,
+        "consensus_D_kg": norm_median_D_kg,
         "stability": silhouette,
     }
 
@@ -752,56 +768,22 @@ def plot_density_histograms(
             int(local_neighborhood_size * replicates * k)
         k_values: A list of k values to plot histograms for (default: None, which loops over all k values)
     """
-    import matplotlib.pyplot as plt
-
-    if not isinstance(nmf_model, NonNegativeMatrixFactorization):
-        raise TypeError("nmf_model must be an instance of NonNegativeMatrixFactorization")
-    assert local_neighborhood_size > 0 and local_neighborhood_size < 1, (
-        "local_neighborhood_size must be between 0 and 1"
-    )
-    if nmf_model.n_nmf == 1:
-        raise UserWarning("Only one NMF run found (input arg r=1): cannot compute local neighborhood.")
-    if isinstance(k_values, int):
-        k_values = [k_values]
     if k_values is None:
         k_values = nmf_model.k_values
     for k in k_values:
-        if k not in nmf_model.k_values:
-            warnings.warn(f"k={k} not found in nmf_model.k_values : will skip")
-            continue
-        D_rkg = getattr(nmf_model, f"D_{k}_rkg")
-
-        r, num_component, g = D_rkg.shape
-        d_norm_rkg = F.normalize(D_rkg, dim=2, p=2)
-        d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
-
-        L = int(r * local_neighborhood_size)
-        if L < 1:
-            raise UserWarning(
-                f"local_neighborhood_size {local_neighborhood_size} is too small for k={k}. "
-                f"n_neighbors = int(replicates * local_neighborhood_size) = {L}. "
-                "Increase local_neighborhood_size."
-            )
-        
-        euc_dist = torch.cdist(d_norm_mg, d_norm_mg, p=2)
-        L_nearest_neigh, _ = torch.topk(euc_dist, L + 1, largest=False)
-        print(L_nearest_neigh.shape)
-        local_neigh_dist = L_nearest_neigh.mean(1) / L
-        print(len(local_neigh_dist))
-
-        plt.figure(figsize=(5, 2))
-        plt.hist(local_neigh_dist.cpu().numpy())
-        plt.title(f"Local Neighborhood Distances: k = {k}")
-        plt.ylabel("Number of NMF runs\n(total is replicates times k)")
-        plt.xlabel("Distance")
-        plt.show()
+        consensus(
+            D_rkg=getattr(nmf_model, f"D_{k}_rkg"), 
+            k=k, 
+            density_threshold=0.5,  # ignored when plot_only=True
+            local_neighborhood_size=local_neighborhood_size, 
+            plot_only=True,
+        )
 
 
 def compute_consensus_factors(
     nmf_model: NonNegativeMatrixFactorization,
     density_threshold=0.2,
     local_neighborhood_size=0.3,
-    plot=False,
 ):
     """
     Run the consensus step of consensus NMF, and store the consensus factors as attributes of `nmf_model`.
@@ -821,11 +803,15 @@ def compute_consensus_factors(
     for k in k_values:
         D_rkg = getattr(nmf_model, f"D_{k}_rkg")
         consensus_output = consensus(
-            D_rkg=D_rkg, k=k, density_threshold=density_threshold, local_neighborhood_size=local_neighborhood_size, plot=plot,
+            D_rkg=D_rkg, 
+            k=k, 
+            density_threshold=density_threshold, 
+            local_neighborhood_size=local_neighborhood_size, 
+            plot_only=False,
         )
-        setattr(nmf_model, f"D_{k}_kg", consensus_output["consensus_D"])
+        setattr(nmf_model, f"D_{k}_kg", consensus_output["consensus_D_kg"])
 
         consensus_stat[k] = consensus_output
-        print("silhouette score of k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
+        print("silhouette score for k=%d: %s" % (k, str(round(consensus_output["stability"], 4))))
 
     return consensus_stat
