@@ -432,6 +432,29 @@ def compute_annealed_kl_weight(
     if min_kl_weight > max_kl_weight:
         raise ValueError(f"min_kl_weight={min_kl_weight} is larger than max_kl_weight={max_kl_weight}.")
 
+def compute_annealed_kl_weight(
+    epoch: int,
+    step: int,
+    n_epochs_kl_warmup: int | None,
+    n_steps_kl_warmup: int | None,
+    max_kl_weight: float = 1.0,
+    min_kl_weight: float = 0.0,
+) -> float:
+    """Computes the kl weight for the current step or epoch.
+    If both `n_epochs_kl_warmup` and `n_steps_kl_warmup` are None `max_kl_weight` is returned.
+    Args:
+        epoch: Current epoch.
+        step: Current step.
+        n_epochs_kl_warmup: Number of epochs to warm up the KL weight.
+        n_steps_kl_warmup: Number of steps to warm up the KL weight.
+        max_kl_weight: Maximum KL weight.
+        min_kl_weight: Minimum KL weight.
+    Returns:
+        The KL weight for the current step or epoch.
+    """
+    if min_kl_weight > max_kl_weight:
+        raise ValueError(f"min_kl_weight={min_kl_weight} is larger than max_kl_weight={max_kl_weight}.")
+
     slope = max_kl_weight - min_kl_weight
     if n_epochs_kl_warmup:
         if epoch < n_epochs_kl_warmup:
@@ -497,19 +520,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             ``size_factor_key`` parameter in the model's ``setup_anndata`` method as the scaling
             factor in the mean of the conditional distribution. Takes priority over
             ``use_observed_lib_size``.
-        use_observed_lib_size: If ``True``, use the observed library size for RNA as the scaling factor in the mean of the
-            conditional distribution.
-        library_log_means: :class:`~numpy.ndarray` of shape ``(1, n_batch)`` of means of the log library sizes that
-            parameterize the prior on library size if ``use_size_factor_key`` is ``False`` and
-            ``use_observed_lib_size`` is ``False``.
-        library_log_vars: :class:`~numpy.ndarray` of shape ``(1, n_batch)`` of variances of the log library sizes
-            that parameterize the prior on library size if ``use_size_factor_key`` is ``False`` and
-            ``use_observed_lib_size`` is ``False``.
-        batch_embedding_kwargs: Keyword arguments passed into :class:`~scvi.nn.Embedding` if ``batch_representation`` is
-            set to ``"embedding"
-        reconstruction_genes: List of genes to be reconstructed
-        build_reconstructions: True to sample the reconstructed expressions, False to sample the latent representations
-            ``.
+        use_observed_lib_size: If ``True``, use the observed library size for RNA as the scaling factor in the
+            mean of the conditional distribution. (currently must be ``True``)
+        reconstruct_counts_on_predict: Changes the behavior of :meth:`predict`. True will reconstruct gene
+            expression count data, False will return the latent representations
+        reconstruction_var_names_g: List of var_names to be reconstructed (outputs are dense matrices)
+        reconstruction_transform_batch: None will reconstruct in the original data batch. This is like
+            imputation or smoothing. An integer will reconstruct counts in the specified batch index.
+            The string "mean" will reconstruct counts in the first 10 batches and return the mean.
+        reconstruction_sampled: True will sample from the posterior distribution for the reconstructed counts,
+            while False will use the posterior mean.
     """
 
     def __init__(
@@ -538,8 +558,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         kl_annealing_start: float = 0.0,
         use_size_factor_key: bool = False,
         use_observed_lib_size: bool = True,
-        reconstruction_genes: list | None = None,
-        build_reconstructions: bool = False,
+        reconstruct_counts_on_predict: bool = False,
+        reconstruction_var_names_g: list | None = None,
+        reconstruction_transform_batch: None | int | str = 0,
+        reconstruction_sampled: bool = False,
     ):
 
         super().__init__()
@@ -571,9 +593,26 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.z_kl_weight_max = z_kl_weight_max
         self.epoch = 0
         self.step = 0
-        self.reconstruction_genes = reconstruction_genes
-        self.build_reconstructions = build_reconstructions
+        self.reconstruction_var_names_g = reconstruction_var_names_g
+        if reconstruction_var_names_g is not None:
+            allowed_var_names_g = []
+            model_var_names = set(self.var_names_g)
+            for var_name in reconstruction_var_names_g:
+                if var_name not in model_var_names:
+                    import warnings
 
+                    warnings.warn(
+                        f"reconstruction_var_names_g {var_name} not found in model var_names_g. "
+                        "It will not be included in the reconstructed output. Check "
+                        "model.reconstruction_var_names_g for the included var_names.",
+                        UserWarning,
+                    )
+                else:
+                    allowed_var_names_g.append(var_name)
+            self.reconstruction_var_names_g = allowed_var_names_g
+        self.reconstruct_counts_on_predict = reconstruct_counts_on_predict
+        self.reconstruction_transform_batch = reconstruction_transform_batch
+        self.reconstruction_sampled = reconstruction_sampled
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")
@@ -877,7 +916,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 Library size factor for each cell.
 
         Returns:
-            A dictionary with the loss value.
+            A dictionary with keys:
+                - "loss": The total loss value.
+                - "reconstruction_loss": The reconstruction loss value.
+                - "kl_divergence_z": The KL divergence for the latent variable z.
+                - "z_nk": The latent variable z.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
@@ -974,18 +1017,27 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the following keys:
 
-            - ``x_ng``: (x_ng is a notational misnomer) Embedding of the input data into the scVI latent space.
+            - ``x_ng``:
+                - If :attr:`self.reconstruct_counts_on_predict` is True:
+                    - (x_ng is a notational misnomer) Embedding of the input data into the scVI latent space,
+                        typically referred to as ``z_nk``.
+                - If :attr:`self.reconstruct_counts_on_predict` is False:
+                    - (the g in x_ng is a notational misnomer) Reconstruction of the input data: ``x_ng'``, which
+                        will have a different number of genes depending on :attr:`self.reconstruction_var_names_g`.
         """
 
-        if self.build_reconstructions:
+        if self.reconstruct_counts_on_predict:
+            assert self.reconstruction_var_names_g is not None
+            gene_inds = [np.where(var_names_g == gid)[0][0] for gid in self.reconstruction_var_names_g]
             return self.reconstruct(
                 x_ng=x_ng,
                 var_names_g=var_names_g,
+                gene_inds=gene_inds,
                 batch_index_n=batch_index_n,
                 continuous_covariates_nc=continuous_covariates_nc,
                 categorical_covariate_index_nd=categorical_covariate_index_nd,
-                transform_batch="mean",
-                sample=False,
+                transform_batch=self.reconstruction_transform_batch,
+                sample=self.reconstruction_sampled,
             )
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
@@ -1004,37 +1056,18 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
         return {"x_ng": z_nk}
 
-    def get_reconstruct_gene_list(self,reconstruction_genes: list | None) -> list[str]:
-        """Return ordered list of genes from glyco gene file, checking which are present in model."""
-        if reconstruction_genes is not None:
-            if getattr(self, "glyco_gene_set", None) is None:
-                # df = pd.read_csv("/home/sfleming/cellarium-ml/data/glyco_df_20241216.tsv", sep="\t")
-                # self.glyco_gene_list = df["ensembl_gene_id"].values.tolist()
-
-                self.reconstruct_gene_list = reconstruction_genes
-
-                i = 0
-                for gid in self.reconstruct_gene_list:
-                    if gid not in self.var_names_g:
-                        print(f"WARNING: {gid} not in var_names_g")
-                        i += 1
-                if i > 0:
-                    print(f"WARNING: {i} genes in reconstruct_gene_list not in var_names_g")
-        else:
-            self.reconstruct_gene_list = self.var_names_g
-        return self.reconstruct_gene_list
-
     @torch.no_grad()
     def reconstruct(
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
+        gene_inds: np.ndarray | list[int],
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
         size_factor_n: torch.Tensor | None = None,
         transform_batch: str | int | None = None,
-        sample: bool = True,
+        sample: bool = False,
     ):
         """
         Reconstruct the data using the VAE, optionally transforming the batch.
@@ -1044,6 +1077,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 Gene counts matrix.
             var_names_g:
                 The list of the variable names in the input data.
+            gene_inds:
+                The indices of the genes from var_names_g to be reconstructed. Output order preserves this order.
             batch_index_n:
                 Batch indices of input cells as integers.
             continuous_covariates_nc:
@@ -1056,6 +1091,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 If not None, transform the batch to this index before reconstruction.
             sample:
                 If True, sample from the generative model. If False, use the mean.
+
+        Returns:
+            A dictionary with the following keys:
+
+            - ``x_ng``: Model's reconstruction of the input data, possibly de-batched. The notational misnomer
+                here is that "g" no longer stands for all genes, but the genes in `gene_inds`.
         """
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
@@ -1069,8 +1110,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             if isinstance(transform_batch, str):
                 if transform_batch != "mean":
                     raise ValueError(
-                        'transform_batch must be an integer or the string "mean" which '
-                        "will project counts into each batch and compute the mean"
+                        'If transform_batch is a string, it must be "mean" which '
+                        "will project counts into each batch and compute the mean, "
+                        "otherwise specify a particular batch using its integer index"
                     )
                 for i in range(self.n_batch)[:10]:
                     transformed_batch_index_n_list.append(torch.ones_like(batch_index_n) * i)
@@ -1090,9 +1132,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
 
         output_counts_sum_np: int | torch.Tensor = 0
-        gid_list = self.get_reconstruct_gene_list(self.reconstruction_genes)
-        # get the genes in the order of the glyco gene list
-        gene_inds = [np.where(var_names_g == gid)[0][0] for gid in gid_list]
 
         # go through each output batch projection (just one unless transform_batch == "mean")
         for transformed_batch_index_n in transformed_batch_index_n_list:
@@ -1116,25 +1155,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         x_tilde_np = output_counts_sum_np / len(transformed_batch_index_n_list)
         return {"x_ng": x_tilde_np}
-
-    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
-        self.step = trainer.global_step
-        self.epoch = trainer.current_epoch
-        # log these values to pytorch lightning logger
-        if trainer.logger is not None:
-            trainer.logger.log_metrics(
-                {
-                    "kl_annealing_weight": compute_annealed_kl_weight(
-                        epoch=self.epoch,
-                        step=self.step,
-                        n_epochs_kl_warmup=self.kl_warmup_epochs,
-                        n_steps_kl_warmup=self.kl_warmup_steps,
-                        max_kl_weight=1.0,
-                        min_kl_weight=self.kl_annealing_start,
-                    )
-                },
-                step=trainer.global_step,
-            )
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         self.step = trainer.global_step

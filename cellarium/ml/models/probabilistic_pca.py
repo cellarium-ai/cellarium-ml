@@ -134,7 +134,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
                 )
                 pyro.sample(
                     "counts",
-                    dist.Normal(self.mean_g + z_nk @ self.W_kg, self.sigma).to_event(1),
+                    dist.Normal(self.mean_g + z_nk @ self.W_kg, self.sigma).to_event(1),  # type: ignore[arg-type]
                     obs=x_ng,
                 )
 

@@ -4,7 +4,6 @@
 import copy
 import math
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Literal, Sequence, TypedDict
@@ -18,6 +17,7 @@ import torch
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml.data.fileio import read_h5ad_file
 from cellarium.ml.models import SingleCellVariationalInference
 from cellarium.ml.models.scvi import DecoderSCVI, EncoderSCVI
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes, collate_fn, densify
@@ -414,68 +414,37 @@ def compute_neighbor_accuracy(
 def testing_anndatas() -> tuple[anndata.AnnData, anndata.AnnData]:
     """
     Get the train and test data.
+    This downloads data that is not super small.
+    Currently we feel it is necessary to use this real data to test for regressions.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        # # data
-        # train_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_train.h5ad"
-        # test_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_test.h5ad"
-
-        # # download the data
-        # train_path = tmpdir_path / "train.h5ad"
-        # test_path = tmpdir_path / "test.h5ad"
-        # import requests
-
-        # response = requests.get(train_data)
-        # response.raise_for_status()
-        # with open(train_path, "wb") as f:
-        #     f.write(response.content)
-
-        # response = requests.get(test_data)
-        # response.raise_for_status()
-        # with open(test_path, "wb") as f:
-        #     f.write(response.content)
-
-        # temp hack because I'm on slow wifi =======================
-        train_path = Path("/Users/sfleming/Downloads/UBERON_0002115_train.h5ad")
-        test_path = Path("/Users/sfleming/Downloads/UBERON_0002115_test.h5ad")
-        train_path = "/home/lys/Dropbox/PostDoc_Glycomics/Laedingr/laedingr/src/laedingr/data/coarsed_normal/concatenated/UBERON:0002115_train.h5ad"
-        test_path = "/home/lys/Dropbox/PostDoc_Glycomics/Laedingr/laedingr/src/laedingr/data/coarsed_normal/concatenated/UBERON:0002115_test.h5ad"
-
-        shutil.copy(train_path, tmpdir_path / "train.h5ad")
-        shutil.copy(test_path, tmpdir_path / "test.h5ad")
-        # ===========================================================
-
-        # print out the contents of the temp directory
-        print(f"tmpdir contents: {os.listdir(tmpdir_path)}")
-
-        train_data = anndata.read_h5ad(tmpdir_path / "train.h5ad")
-        test_data = anndata.read_h5ad(tmpdir_path / "test.h5ad")
-        return train_data, test_data
+    train_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_train.h5ad"
+    test_data = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/UBERON_0002115_test.h5ad"
+    train_data = read_h5ad_file(train_data)
+    test_data = read_h5ad_file(test_data)
+    return train_data, test_data
 
 
 # # Lys test case
-n_latent: int = 50
-n_hidden: int = 512
-n_layers: int = 2
-batch_size: int = 1024
-max_epochs: int = 5  # 5 is not converged, 10 is
+# n_latent: int = 50
+# n_hidden: int = 512
+# n_layers: int = 2
+# batch_size: int = 1024
+# max_epochs: int = 5  # 5 is not converged, 10 is
 
 # small dataset test case
-# n_latent: int = 10
-# n_hidden: int = 128
-# n_layers: int = 1
-# batch_size: int = 512
-# max_epochs: int = 5  # in this testing we are trying to look after convergence
+n_latent: int = 10
+n_hidden: int = 128
+n_layers: int = 1
+batch_size: int = 512
+max_epochs: int = 5  # in this testing we are trying to look after convergence
 
 
 # other params
-n_epochs_kl_warmup: int = 5 #max_epochs
+n_epochs_kl_warmup: int = max_epochs
 batch_key: str = "batch_concat_cellxgene"
 log_variational: bool = True
 use_batchnorm: bool = False
 dropout_rate: float = 0.1
-random_seed = 0
 
 
 @pytest.fixture(scope="module", params=[1, 10], ids=["kl1", "kl10"])
@@ -497,7 +466,7 @@ def train_scvi_tools_model(
         - test_data: the test data with the model's latent representation added to obsm[latent_obsm_key]
     """
     # fix the random seed
-    pl.seed_everything(random_seed)
+    pl.seed_everything(0)
 
     # retrieve the training and test data from the fixture
     train_data, test_data = testing_anndatas
@@ -575,7 +544,7 @@ def train_cellarium_model(
         - test_data: the test data with the model's latent representation added to obsm[latent_obsm_key]
     """
     # fix the random seed
-    pl.seed_everything(random_seed)
+    pl.seed_everything(0)
 
     # retrieve the training and test data from the fixture
     train_data, test_data = testing_anndatas
@@ -644,7 +613,7 @@ def train_cellarium_model(
             "obs_names_n": AnnDataField(attr="obs_names"),
         },
         batch_size=batch_size,
-        num_workers=num_workers,
+        num_workers=0,
         drop_incomplete_batch=False,
         drop_last_indices=False,
         shuffle=True,
@@ -659,7 +628,7 @@ def train_cellarium_model(
             "obs_names_n": AnnDataField(attr="obs_names"),
         },
         batch_size=batch_size,
-        num_workers=num_workers,
+        num_workers=0,
         shuffle=False,
         drop_incomplete_batch=False,
         drop_last_indices=False,
@@ -668,7 +637,7 @@ def train_cellarium_model(
 
     # trainer
     trainer = pl.Trainer(
-        accelerator=accelerator,
+        accelerator="cpu",
         devices=1,
         max_epochs=max_epochs,
         default_root_dir=tempfile.gettempdir(),
@@ -725,7 +694,6 @@ def test_latent_accuracy_metric(
 
     Compare the accuracy metric to that same metric computed via scvi-tools (with some margin of error).
     """
-    print("running latent accuracy metric test")
     tolerable_discrepancy = 0.05  # this level of variation is like (scvi-tools with different random seeds * 2)
 
     # compute the accuracy metric for scvi-tools
@@ -1314,7 +1282,7 @@ def matching_scvi_cellarium_models(request):
     batch = next(iter(train_dl))
 
     # Synchronize random sampling between models using fixed seed
-    torch.manual_seed(random_seed)
+    torch.manual_seed(0)
 
     # Get Cellarium outputs
     cellarium_loss = cellarium_model(
@@ -1324,7 +1292,7 @@ def matching_scvi_cellarium_models(request):
     )
 
     # Reset seed for scvi-tools
-    torch.manual_seed(random_seed)
+    torch.manual_seed(0)
 
     # Get scvi-tools outputs
     scvi_inference_tensors = scvi_model.module._get_inference_input(batch)
@@ -1589,7 +1557,7 @@ def test_vs_scvi_training_dynamics_match(matching_scvi_cellarium_models):
         scvi_optimizer.zero_grad()
 
         # Set the same random seed for each step to ensure identical sampling
-        torch.manual_seed(random_seed + step)
+        torch.manual_seed(0 + step)
 
         # Forward pass for Cellarium
         cellarium_loss = data["cellarium_model"](
@@ -1599,7 +1567,7 @@ def test_vs_scvi_training_dynamics_match(matching_scvi_cellarium_models):
         )
 
         # Reset seed for scvi-tools
-        torch.manual_seed(random_seed + step)
+        torch.manual_seed(0 + step)
 
         # Forward pass for scvi-tools
         scvi_inference_tensors = data["scvi_model"].module._get_inference_input(data["batch"])
@@ -1707,14 +1675,14 @@ def test_vs_scvi_evaluation_mode_latents_match(matching_scvi_cellarium_models):
 
     with torch.no_grad():
         # Set same random seed for both
-        torch.manual_seed(random_seed)
+        torch.manual_seed(0)
         cellarium_train_z_dist = data["cellarium_model"].z_encoder(
             x_ng=data["x"], batch_nb=data["batch_nb"], categorical_covariate_np=None
         )
         cellarium_train_mean = cellarium_train_z_dist.loc
 
         # Reset seed for scvi-tools
-        torch.manual_seed(random_seed)
+        torch.manual_seed(0)
         scvi_train_z_dist = data["scvi_model"].module.z_encoder(data["x"], data["batch_nb"])[0]
         scvi_train_mean = scvi_train_z_dist.loc
 
@@ -1758,7 +1726,7 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
 
     # Instead of manually recomputing, let's use a fixed seed approach
     # Set the random seed to ensure deterministic sampling
-    torch.manual_seed(random_seed)
+    torch.manual_seed(0)
 
     # Run cellarium forward pass
     cellarium_loss = data["cellarium_model"](
@@ -1768,7 +1736,7 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
     )
 
     # Reset seed and run scvi-tools forward pass with the same seed
-    torch.manual_seed(random_seed)
+    torch.manual_seed(0)
 
     # Get scvi-tools outputs with the same random seed
     scvi_inference_tensors = data["scvi_model"].module._get_inference_input(data["batch"])
@@ -1927,3 +1895,141 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
         all_match = all_match and match
 
     assert all_match, "Some gradients did not match. Check the printed differences above."
+
+
+@pytest.mark.parametrize("reconstruct_counts_on_predict", [True, False], ids=["reconstruct_counts", "latent_repr"])
+@pytest.mark.parametrize("reconstruction_sampled", [True, False], ids=["sampled", "mean"])
+@pytest.mark.parametrize(
+    "reconstruction_transform_batch",
+    [None, 0, 1, "mean"],
+    ids=["original_batch", "batch_0", "batch_1", "mean_batch"],
+)
+def test_reconstruction_functionality(
+    reconstruct_counts_on_predict,
+    reconstruction_sampled,
+    reconstruction_transform_batch,
+):
+    """Test the reconstruction functionality added via reconstruct_counts_on_predict, reconstruction_var_names_g,
+    reconstruction_transform_batch, and reconstruction_sampled parameters."""
+
+    n, g = 50, 20
+    n_batch = 3
+    var_names_g = [f"gene_{i}" for i in range(g)]
+    reconstruction_var_names_g = var_names_g[:10]  # reconstruct first 10 genes
+
+    # Create test data
+    X = np.random.poisson(lam=2.0, size=(n, g))
+    batch_indices = np.random.randint(0, n_batch, size=n)
+
+    # Initialize model with reconstruction parameters
+    model = SingleCellVariationalInference(
+        var_names_g=var_names_g,
+        n_batch=n_batch,
+        n_latent=5,
+        reconstruct_counts_on_predict=reconstruct_counts_on_predict,
+        reconstruction_var_names_g=reconstruction_var_names_g,
+        reconstruction_transform_batch=reconstruction_transform_batch,
+        reconstruction_sampled=reconstruction_sampled,
+        encoder=linear_encoder_kwargs,
+        decoder=linear_decoder_kwargs,
+    )
+
+    # Test that reconstruction parameters are set correctly
+    assert model.reconstruct_counts_on_predict == reconstruct_counts_on_predict
+    assert model.reconstruction_var_names_g == reconstruction_var_names_g
+    assert model.reconstruction_transform_batch == reconstruction_transform_batch
+    assert model.reconstruction_sampled == reconstruction_sampled
+
+    # Create test batch
+    x_ng = torch.tensor(X, dtype=torch.float32)
+    batch_index_n = torch.tensor(batch_indices, dtype=torch.long)
+    var_names_array = np.array(var_names_g)
+
+    model.eval()
+    with torch.no_grad():
+        # Test predict method
+        output = model.predict(
+            x_ng=x_ng,
+            var_names_g=var_names_array,
+            batch_index_n=batch_index_n,
+        )
+
+        # Validate output shape and content
+        assert "x_ng" in output
+
+        if reconstruct_counts_on_predict:
+            # Should reconstruct gene counts for specified genes
+            expected_genes = len(reconstruction_var_names_g)
+            assert output["x_ng"].shape == (n, expected_genes)
+            # Values should be non-negative (gene counts)
+            assert torch.all(output["x_ng"] >= 0)
+        else:
+            # Should return latent representation
+            assert output["x_ng"].shape == (n, model.n_latent)
+
+
+def test_reconstruction_var_names_validation():
+    """Test that invalid reconstruction_var_names_g are handled correctly."""
+    var_names_g = [f"gene_{i}" for i in range(10)]
+    invalid_reconstruction_var_names = ["gene_0", "gene_1", "invalid_gene"]  # includes non-existent gene
+
+    # Should warn and filter out invalid gene names
+    with pytest.warns(UserWarning, match="reconstruction_var_names_g invalid_gene not found*"):
+        model = SingleCellVariationalInference(
+            var_names_g=var_names_g,
+            reconstruction_var_names_g=invalid_reconstruction_var_names,
+            encoder=linear_encoder_kwargs,
+            decoder=linear_decoder_kwargs,
+        )
+
+    # Should only keep valid gene names
+    assert model.reconstruction_var_names_g == ["gene_0", "gene_1"]
+
+
+def test_reconstruction_transform_batch_validation():
+    """Test validation of reconstruction_transform_batch parameter."""
+    var_names_g = [f"gene_{i}" for i in range(5)]
+    n_batch = 2
+
+    model = SingleCellVariationalInference(
+        var_names_g=var_names_g,
+        n_batch=n_batch,
+        reconstruction_var_names_g=var_names_g[:3],
+        encoder=linear_encoder_kwargs,
+        decoder=linear_decoder_kwargs,
+    )
+
+    x_ng = torch.poisson(torch.exp(torch.randn(10, 5)))
+    batch_index_n = torch.zeros(10, dtype=torch.long)
+
+    model.eval()
+    with torch.no_grad():
+        # Valid batch index
+        output = model.reconstruct(
+            x_ng=x_ng,
+            var_names_g=np.array(var_names_g),
+            gene_inds=[0, 1, 2],
+            batch_index_n=batch_index_n,
+            transform_batch=0,
+        )
+        assert output["x_ng"].shape == (10, 3)
+
+        # Invalid batch index should raise error
+        with pytest.raises(ValueError, match="transform_batch must be less than self.n_batch"):
+            model.reconstruct(
+                x_ng=x_ng,
+                var_names_g=np.array(var_names_g),
+                gene_inds=[0, 1, 2],
+                batch_index_n=batch_index_n,
+                transform_batch=n_batch,  # >= n_batch
+            )
+
+        # Invalid string should raise error
+        with pytest.raises(ValueError, match='If transform_batch is a string, it must be "mean"'):
+            model.reconstruct(
+                x_ng=x_ng,
+                var_names_g=np.array(var_names_g),
+                gene_inds=[0, 1, 2],
+                batch_index_n=batch_index_n,
+                transform_batch="invalid",
+            )
