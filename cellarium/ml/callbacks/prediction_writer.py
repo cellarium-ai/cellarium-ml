@@ -14,11 +14,14 @@ import pandas as pd
 import torch
 
 
+
 def write_prediction(
     prediction: torch.Tensor,
+    var_names_g: np.ndarray,
     obs_names_n: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
+    reconstruct_counts_on_predict: bool = False,
     gzip: bool = True,
     executor: ThreadPoolExecutor | None = None,
 ) -> None:
@@ -28,12 +31,16 @@ def write_prediction(
     Args:
         prediction:
             The prediction to write.
+        var_names_g:
+            The IDs of the transcripts.
         obs_names_n:
             The IDs of the cells.
         output_dir:
             The directory to write the prediction to.
         postfix:
             A postfix to add to the CSV file name.
+        reconstruct_counts_on_predict:
+            If True, then we are predicting the expression matrix, add the gene names as columns
         gzip:
             Whether to compress the CSV file using gzip.
         executor:
@@ -43,6 +50,9 @@ def write_prediction(
         os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(prediction.cpu())
     df.insert(0, "obs_names_n", obs_names_n)
+    if reconstruct_counts_on_predict:
+        df.columns = ["obs_names_n"] + var_names_g.tolist()
+
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv" + (".gz" if gzip else ""))
     to_csv_kwargs: dict[str, str | bool] = {"header": False, "index": False}
     if gzip:
@@ -185,8 +195,12 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
                 "PredictionWriter callback requires the batch_key 'obs_names_n'. Add this to the YAML config."
             )
         assert isinstance(batch["obs_names_n"], np.ndarray)
+
+
         write_prediction(
             prediction=prediction_np,
+            reconstruct_counts_on_predict = pl_module.model.reconstruct_counts_on_predict,
+            var_names_g = batch["var_names_g"],
             obs_names_n=batch["obs_names_n"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,

@@ -59,16 +59,23 @@ class AnnDataSchema:
                         ".obs attribute columns for anndata passed in does not match .obs attribute columns "
                         "of the reference anndata."
                     )
+
+
+                #ref_value_dtypes = [ref_value[col].cat.codes.dtype for col in ref_value.columns if isinstance(ref_value[col].dtype,pd.CategoricalDtype)]
+
+
                 if not ref_value.dtypes.equals(value.dtypes):
+                #if not (ref_value.dtypes.apply(lambda dt: dt.name)== value.dtypes.apply(lambda dt: dt.name)).all():
                     for col in ref_value.columns:
                         if ref_value[col].dtype != value[col].dtype:
+                        #if ref_value[col].cat.codes.dtype != value[col].cat.codes.dtype:
                             if ref_value[col].dtype == "category":
                                 diff = set(ref_value[col].cat.categories).symmetric_difference(
                                     set(value[col].cat.categories)
                                 )
                                 raise ValueError(
                                     f".obs['{col}'].cat.categories for anndata passed in "
-                                    f"do not match those in the reference anndata. symmetric_differece: {diff}"
+                                    f"do not match those in the reference anndata. symmetric_difference: {sorted(diff)}"
                                 )
                             raise ValueError(
                                 f".obs['{col}'] dtype for anndata passed in ({value[col].dtype}) "

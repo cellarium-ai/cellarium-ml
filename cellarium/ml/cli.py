@@ -366,7 +366,6 @@ def compute_var_names_g(
     # if batch["batch_index_n"] is None:
     #     warnings.warn("Batch information has not been specified, setting it to np.array([3],dtype=np.int8)")
     #     batch["batch_index_n"] = np.array([3],dtype=np.int8)
-
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
         with FakeCopyMode(fake_mode):
