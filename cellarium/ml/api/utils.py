@@ -1,7 +1,6 @@
 import requests
 
 import gcsfs
-import google.cloud.storage as gcs
 import h5py
 import numpy as np
 
@@ -57,23 +56,46 @@ class SeekableHTTPFile:
         self.close()
 
 
+def _h5py_read_n_obs(h5handle: h5py.File) -> int:
+    idx_col = h5handle["obs"].attrs["_index"]
+    try:
+        n_obs = h5handle[f"obs/{idx_col}"].shape[0]
+    except AttributeError:
+        # can happen if somehow the obs index is saved as a categorical (not supposed to be allowed)
+        n_obs = h5handle[f"obs/{idx_col}/codes"].shape[0]
+    return n_obs
+
+
+def _h5py_read_var_names(h5handle: h5py.File) -> np.ndarray:
+    idx_col = h5handle["var"].attrs["_index"]
+    try:
+        var_names = h5handle[f"var/{idx_col}"][:]
+    except AttributeError:
+        # can happen if somehow the var index is saved as a categorical (not supposed to be allowed)
+        var_names = h5handle[f"var/{idx_col}/categories"][:]
+    return var_names
+
+
+def get_h5ad_file_n_cells(h5ad_path: str) -> int:
+    """
+    Get the number of cells in each h5ad file in a list of paths.
+    """
+    n_cells = _h5ad_file_read_elem(h5ad_path, fun=_h5py_read_n_obs)
+    return n_cells
+
+
 def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
     """
     Get the number of cells in each h5ad file in a list of paths.
     """
-    n_cells_list = []
-    for h5ad_path in h5ad_paths:
-        n_cells = _h5ad_file_read_elem(h5ad_path, fun=lambda x: x["obs/_index"].shape[0])
-        n_cells_list.append(n_cells)
-
-    return n_cells_list
+    return [get_h5ad_file_n_cells(h5ad_path) for h5ad_path in h5ad_paths]
 
 
 def get_h5ad_file_var_names_g(h5ad_path: str) -> np.ndarray:
     """
     Get var_names_g from an h5ad file.
     """
-    var_names_g = _h5ad_file_read_elem(h5ad_path, fun=lambda x: x["var/_index"][:])
+    var_names_g = _h5ad_file_read_elem(h5ad_path, fun=_h5py_read_var_names)
     return var_names_g.astype(str)
 
 
@@ -113,8 +135,6 @@ def h5ad_paths_from_google_bucket(gs_bucket_path: str) -> list[str]:
     """
     if not gs_bucket_path.startswith("gs://"):
         raise ValueError("Invalid Google Cloud Storage bucket path -- must start with 'gs://'")
-    client = gcs.Client()
-    bucket = gs_bucket_path.split("/")[2]
-    prefix = "/".join(gs_bucket_path.split("/")[3:]) + "/"
-    blobs = client.list_blobs(bucket)
-    return [f"gs://{bucket}/{blob.name}" for blob in blobs if blob.name.startswith(prefix) and blob.name.endswith(".h5ad")]
+    fs = gcsfs.GCSFileSystem()
+    paths = fs.ls(gs_bucket_path[5:])
+    return [f"gs://{path}" for path in paths if path.endswith(".h5ad")]
