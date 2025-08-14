@@ -1102,6 +1102,7 @@ def matching_scvi_cellarium_models(request):
     gene_likelihood = request.param["gene_likelihood"]
     n_latent = request.param["n_latent"]
     use_batchnorm = request.param["use_batchnorm"]
+    use_categorical_covariates = request.param.get("use_categorical_covariates", False)
 
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
@@ -1110,9 +1111,11 @@ def matching_scvi_cellarium_models(request):
     # Setup test data
     n, g = 100, 50
     n_batch = 2
+    n_cat_categories = 3
     var_names_g = [f"gene_{i}" for i in range(g)]
     X = np.random.poisson(lam=2.0, size=(n, g))
     batch_indices = np.random.randint(0, n_batch, size=n)
+    assay_indices = np.random.randint(0, n_cat_categories, size=n)
 
     # Fix a few things to enable a fair comparison
     dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene"
@@ -1123,9 +1126,14 @@ def matching_scvi_cellarium_models(request):
     adata = anndata.AnnData(X)
     adata.var_names = var_names_g
     adata.obs["batch"] = batch_indices
+    adata.obs["assay"] = assay_indices
 
     # Initialize scvi-tools model
-    scvi.model.SCVI.setup_anndata(adata, batch_key="batch")
+    scvi.model.SCVI.setup_anndata(
+        adata, 
+        batch_key="batch", 
+        categorical_covariate_keys=["assay"] if use_categorical_covariates else None,
+    )
     scvi_model = scvi.model.SCVI(
         adata,
         n_hidden=32,
@@ -1137,6 +1145,7 @@ def matching_scvi_cellarium_models(request):
         encode_covariates=True,
         dispersion=dispersion,
         dropout_rate=dropout_rate,
+        # n_cats_per_cov=None if not n_cats_per_cov else n_cats_per_cov,
     )
     print("scvi params")
     print(scvi_model._module_kwargs)
@@ -1152,6 +1161,7 @@ def matching_scvi_cellarium_models(request):
         n_batch=n_batch,
         n_latent=n_latent,
         gene_likelihood=gene_likelihood,
+        n_cats_per_cov=[n_cat_categories],
         kl_annealing_start=1.0,
         kl_warmup_epochs=None,
         kl_warmup_steps=None,
@@ -1282,10 +1292,14 @@ def matching_scvi_cellarium_models(request):
     torch.manual_seed(0)
 
     # Get Cellarium outputs
+    print("batch keys from scvi dataloader")
+    print(batch.keys())
+
     cellarium_loss = cellarium_model(
         x_ng=batch["X"],
         var_names_g=np.array(var_names_g),
         batch_index_n=batch["batch"],
+        categorical_covariate_index_nd=batch.get("extra_categorical_covs", None),
     )
 
     # Reset seed for scvi-tools
@@ -1523,10 +1537,12 @@ def test_vs_scvi_reconstruction_losses_match(matching_scvi_cellarium_models):
     [
         {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": False},
         {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": True},
+        {"gene_likelihood": "nb", "n_latent": 5, "use_batchnorm": True, "use_categorical_covariates": True},
     ],
     ids=[
         "nb-latent5-no_bn",
         "nb-latent5-bn",
+        "nb-latent5-bn-categoricals",
     ],
     indirect=True,
 )
@@ -1561,6 +1577,7 @@ def test_vs_scvi_training_dynamics_match(matching_scvi_cellarium_models):
             x_ng=data["batch"]["X"],
             var_names_g=np.array(data["var_names_g"]),
             batch_index_n=data["batch"]["batch"],
+            categorical_covariate_index_nd=data["batch"].get("extra_categorical_covs", None),
         )
 
         # Reset seed for scvi-tools
@@ -1704,12 +1721,14 @@ def test_vs_scvi_evaluation_mode_latents_match(matching_scvi_cellarium_models):
         {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": True},
         {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": False},
         {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
+        {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True, "use_categorical_covariates": True}
     ],
     ids=[
         "poisson-latent5-no_bn",
         "poisson-latent5-bn",
         "nb-latent10-no_bn",
         "nb-latent10-bn",
+        "nb-latent10-bn-categoricals",
     ],
     indirect=True,
 )
@@ -1730,6 +1749,7 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
         x_ng=data["batch"]["X"],
         var_names_g=np.array(data["var_names_g"]),
         batch_index_n=data["batch"]["batch"],
+        categorical_covariate_index_nd=data["batch"].get("extra_categorical_covs", None),
     )
 
     # Reset seed and run scvi-tools forward pass with the same seed
