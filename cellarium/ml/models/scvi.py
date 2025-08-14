@@ -490,6 +490,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         reconstruction_n_latent_samples: Number of latent samples to use for reconstruction. Each latent sample
             will be used to compute the mean of the generative distribution, and the final output will be the
             mean of those.
+        reconstructed_library_size: The library size to use for the reconstruction, common to all cells.
     """
 
     def __init__(
@@ -522,6 +523,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         reconstruction_var_names_g: list | None = None,
         reconstruction_transform_batch: None | int | str = 0,
         reconstruction_n_latent_samples: int = 30,
+        reconstructed_library_size: int = 10_000,
     ):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -572,6 +574,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.reconstruct_counts_on_predict = reconstruct_counts_on_predict
         self.reconstruction_transform_batch = reconstruction_transform_batch
         self.reconstruction_n_latent_samples = reconstruction_n_latent_samples
+        self.reconstructed_library_size = reconstructed_library_size
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")
@@ -994,6 +997,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 categorical_covariate_index_nd=categorical_covariate_index_nd,
                 transform_batch=self.reconstruction_transform_batch,
                 n_latent_samples=self.reconstruction_n_latent_samples,
+                log_reconstructed_library_size=np.log(self.reconstructed_library_size),
             )
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
@@ -1021,9 +1025,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-        size_factor_n: torch.Tensor | None = None,
-        transform_batch: str | int | None = None,
+        # size_factor_n: torch.Tensor | None = None,
+        transform_batch: str | int = None,
         n_latent_samples: str | int = 30,
+        log_reconstructed_library_size: float = 10_000,
     ):
         """
         Reconstruct the data using the VAE, optionally transforming the batch.
@@ -1057,6 +1062,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             n_latent_samples:
                 The number of latent samples to use for reconstruction. If "mean", do not sample the latent
                 but rather use the mean of the latent distribution.
+            log_reconstructed_library_size:
+                The log of the library size to use for the reconstruction, common to all cells.
 
         Returns:
             A dictionary with the following keys:
@@ -1075,7 +1082,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     "will use the mean of the latent distribution, "
                     "otherwise specify a particular integer value"
                 )
-            
+
         if n_latent_samples == "mean":
             n = 1
         else:
@@ -1117,13 +1124,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         for transformed_batch_index_n in transformed_batch_index_n_list:
             batch_nb = self.batch_representation_from_batch_index(transformed_batch_index_n)
 
-            for _ in range(n):
+            if n_latent_samples == "mean":
 
-                # take a sample from the latent space
-                if n_latent_samples == "mean":
-                    sampled_z_nk = inference_outputs["qz"].mean
-                else:
-                    sampled_z_nk = inference_outputs["qz"].sample()
+                # use the mean in the latent space
+                sampled_z_nk = inference_outputs["qz"].mean
 
                 # use that latent sample and the transform batch to generate data
                 generative_outputs = self.generative(
@@ -1132,7 +1136,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     batch_nb=batch_nb,
                     continuous_covariates_nc=continuous_covariates_nc,
                     categorical_covariate_np=categorical_covariate_np,
-                    size_factor_n1=size_factor_n,
+                    # size_factor_n1=size_factor_n,
+                    size_factor_n1=log_reconstructed_library_size,
                 )
 
                 # take the mean of the distribution
@@ -1140,7 +1145,32 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 counts_np = counts_ng[:, gene_inds]
                 output_counts_sum_np += counts_np
 
-        x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list) * n)
+                x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list))
+
+            else:
+
+                for _ in range(n_latent_samples):
+
+                    # take a sample from the latent space
+                    sampled_z_nk = inference_outputs["qz"].sample()
+
+                    # use that latent sample and the transform batch to generate data
+                    generative_outputs = self.generative(
+                        z_nk=sampled_z_nk,
+                        library_size_n1=inference_outputs["library_size_n1"],
+                        batch_nb=batch_nb,
+                        continuous_covariates_nc=continuous_covariates_nc,
+                        categorical_covariate_np=categorical_covariate_np,
+                        # size_factor_n1=size_factor_n,
+                        size_factor_n1=log_reconstructed_library_size,
+                    )
+
+                    # take the mean of the distribution
+                    counts_ng = generative_outputs["px"].mean
+                    counts_np = counts_ng[:, gene_inds]
+                    output_counts_sum_np += counts_np
+
+                x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list) * n_latent_samples)
 
         return {"x_ng": x_tilde_np}
 

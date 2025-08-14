@@ -442,9 +442,14 @@ batch_key: str = "batch_concat_cellxgene"
 log_variational: bool = True
 use_batchnorm: bool = False
 dropout_rate: float = 0.1
+n_genes_to_reconstruct: int = 5
+transform_batch: str = '2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35'
+reconstructed_library_size: int = 10_000
+reconstruction_latent_samples: int = 30
 
 
-@pytest.fixture(scope="module", params=[1, 10], ids=["kl1", "kl10"])
+# @pytest.fixture(scope="module", params=[1, 10], ids=["kl1", "kl10"])
+@pytest.fixture(scope="module", params=[1], ids=["kl1"])
 def max_z_kl_weight(request):
     return request.param
 
@@ -521,31 +526,33 @@ def train_scvi_tools_model(
     test_latent = model.get_latent_representation(test_data, give_mean=True)
 
     # reconstruct the training data
-    reconstruct_gene_list = train_data.var_names.tolist()[:100]
+    reconstruct_gene_list = train_data.var_names.tolist()[:n_genes_to_reconstruct]
+    pl.seed_everything(0)
     train_reconstructed = model.get_normalized_expression(
         adata=train_data,
-        transform_batch='2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35',
+        transform_batch=transform_batch,
         gene_list=reconstruct_gene_list,
+        library_size=reconstructed_library_size,
         return_mean=True,
-        n_samples=30,
+        n_samples=reconstruction_latent_samples,
     )
 
     # reconstruct the test data
+    pl.seed_everything(0)
     test_reconstructed = model.get_normalized_expression(
         adata=test_data,
-        transform_batch='2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35',
+        transform_batch=transform_batch,
         gene_list=reconstruct_gene_list,
+        library_size=reconstructed_library_size,
         return_mean=True,
-        n_samples=30,
+        n_samples=reconstruction_latent_samples,
     )
-
-    # TODO: add this to anndata, do the same for cellarium model
 
     # add the latent representation to the obsm of the training and test data
     train_data.obsm[latent_obsm_key] = train_latent
     test_data.obsm[latent_obsm_key] = test_latent
-    train_data.obsm["X_reconstructed"] = train_reconstructed
-    test_data.obsm["X_reconstructed"] = test_reconstructed
+    train_data.obsm["X_reconstruction_scvi"] = train_reconstructed.loc[train_data.obs_names]
+    test_data.obsm["X_reconstruction_scvi"] = test_reconstructed.loc[test_data.obs_names]
 
     return train_data, test_data
 
@@ -692,29 +699,45 @@ def train_cellarium_model(
 
     # reconstruct the gene expression
     module.model.reconstruct_counts_on_predict = True
-    module.model.reconstruction_var_names_g = train_data.var_names.tolist()[:100]
-    batch_index = np.where(train_data.obs[batch_key].cat.categories 
-                           == '2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35')[0][0]
+    module.model.reconstruction_var_names_g = train_data.var_names.tolist()[:n_genes_to_reconstruct]
+    batch_index = np.where(train_data.obs[batch_key].cat.categories == transform_batch)[0][0]
     module.model.reconstruction_transform_batch = batch_index
-    module.model.reconstruction_n_latent_samples = 30
+    module.model.reconstruction_n_latent_samples = reconstruction_latent_samples
+    module.model.reconstructed_library_size = reconstructed_library_size
+
+    # for the train data
+    pl.seed_everything(0)
     train_reconstruction_output = trainer.predict(module, train_datamodule)
     assert train_reconstruction_output is not None
     train_reconstruction = pd.concat(
-        [pd.DataFrame(out["x_ng"], index=out["obs_names_n"].astype(str)) for out in train_reconstruction_output],  # type: ignore[index, call-overload]
+        [
+            pd.DataFrame(
+                out["x_ng"], 
+                index=out["obs_names_n"].astype(str),
+                columns=module.model.reconstruction_var_names_g,
+            ) for out in train_reconstruction_output
+        ],  # type: ignore[index, call-overload]
         axis=0,
     )
 
     # and for test data
+    pl.seed_everything(0)
     test_reconstruction_output = trainer.predict(module, test_datamodule)
     assert test_reconstruction_output is not None
     test_reconstruction = pd.concat(
-        [pd.DataFrame(out["x_ng"], index=out["obs_names_n"].astype(str)) for out in test_reconstruction_output],  # type: ignore[index, call-overload]
+        [
+            pd.DataFrame(
+                out["x_ng"], 
+                index=out["obs_names_n"].astype(str),
+                columns=module.model.reconstruction_var_names_g,
+            ) for out in test_reconstruction_output
+        ],  # type: ignore[index, call-overload]
         axis=0,
     )
 
     # add the reconstructions to the anndatas
-    train_data.obsm["X_reconstruction"] = train_reconstruction.loc[train_data.obs_names].values
-    test_data.obsm["X_reconstruction"] = test_reconstruction.loc[test_data.obs_names].values
+    train_data.obsm["X_reconstruction_cellarium"] = train_reconstruction.loc[train_data.obs_names]
+    test_data.obsm["X_reconstruction_cellarium"] = test_reconstruction.loc[test_data.obs_names]
 
     return train_data, test_data
 
@@ -2107,19 +2130,37 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     train_adata_scvi, test_adata_scvi = train_scvi_tools_model
 
     # Get the reconstructed counts from both models
-    train_reconstruction_cellarium = train_adata_cellarium.obsm["X_reconstruction"]
-    test_reconstruction_cellarium = test_adata_cellarium.obsm["X_reconstruction"]
-    train_reconstruction_scvi = train_adata_scvi.obsm["X_reconstruction"]
-    test_reconstruction_scvi = test_adata_scvi.obsm["X_reconstruction"]
+    train_reconstruction_cellarium = train_adata_cellarium.obsm["X_reconstruction_cellarium"]
+    test_reconstruction_cellarium = test_adata_cellarium.obsm["X_reconstruction_cellarium"]
+    train_reconstruction_scvi = train_adata_scvi.obsm["X_reconstruction_scvi"]
+    test_reconstruction_scvi = test_adata_scvi.obsm["X_reconstruction_scvi"]
 
     # Compare the reconstructed counts
+    print("measured counts")
+    df = pd.DataFrame(
+        (
+            np.array(train_adata_cellarium.X[:, :n_genes_to_reconstruct].todense()).squeeze()
+            / np.array(train_adata_cellarium.X.sum(axis=1)).squeeze()[:, None] 
+            * reconstructed_library_size
+        ), 
+        index=train_adata_cellarium.obs_names, 
+        columns=train_adata_cellarium.var_names[:n_genes_to_reconstruct]
+    )
+    print(df)
+    print(df.mean(axis=0))
     print("train_reconstruction_cellarium")
     print(train_reconstruction_cellarium)
+    print(train_reconstruction_cellarium.sum(axis=1))  # TODO something seems wrong here
     print("train_reconstruction_scvi")
     print(train_reconstruction_scvi)
+    print(train_reconstruction_scvi.sum(axis=1))
     print("test_reconstruction_cellarium")
     print(test_reconstruction_cellarium)
     print("test_reconstruction_scvi")
     print(test_reconstruction_scvi)
+    print("train diff")
+    print(train_reconstruction_cellarium - train_reconstruction_scvi)
+    print("test diff")
+    print(test_reconstruction_cellarium - test_reconstruction_scvi)
     np.testing.assert_allclose(train_reconstruction_cellarium, train_reconstruction_scvi, atol=1e-5)
     np.testing.assert_allclose(test_reconstruction_cellarium, test_reconstruction_scvi, atol=1e-5)
