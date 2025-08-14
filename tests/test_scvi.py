@@ -520,9 +520,32 @@ def train_scvi_tools_model(
     model.module.eval()
     test_latent = model.get_latent_representation(test_data, give_mean=True)
 
+    # reconstruct the training data
+    reconstruct_gene_list = train_data.var_names.tolist()[:100]
+    train_reconstructed = model.get_normalized_expression(
+        adata=train_data,
+        transform_batch='2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35',
+        gene_list=reconstruct_gene_list,
+        return_mean=True,
+        n_samples=30,
+    )
+
+    # reconstruct the test data
+    test_reconstructed = model.get_normalized_expression(
+        adata=test_data,
+        transform_batch='2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35',
+        gene_list=reconstruct_gene_list,
+        return_mean=True,
+        n_samples=30,
+    )
+
+    # TODO: add this to anndata, do the same for cellarium model
+
     # add the latent representation to the obsm of the training and test data
     train_data.obsm[latent_obsm_key] = train_latent
     test_data.obsm[latent_obsm_key] = test_latent
+    train_data.obsm["X_reconstructed"] = train_reconstructed
+    test_data.obsm["X_reconstructed"] = test_reconstructed
 
     return train_data, test_data
 
@@ -666,6 +689,32 @@ def train_cellarium_model(
     # print(train_latent.index)
     train_data.obsm[latent_obsm_key] = train_latent.loc[train_data.obs_names].values
     test_data.obsm[latent_obsm_key] = test_latent.loc[test_data.obs_names].values
+
+    # reconstruct the gene expression
+    module.model.reconstruct_counts_on_predict = True
+    module.model.reconstruction_var_names_g = train_data.var_names.tolist()[:100]
+    batch_index = np.where(train_data.obs[batch_key].cat.categories 
+                           == '2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35')[0][0]
+    module.model.reconstruction_transform_batch = batch_index
+    module.model.reconstruction_n_latent_samples = 30
+    train_reconstruction_output = trainer.predict(module, train_datamodule)
+    assert train_reconstruction_output is not None
+    train_reconstruction = pd.concat(
+        [pd.DataFrame(out["x_ng"], index=out["obs_names_n"].astype(str)) for out in train_reconstruction_output],  # type: ignore[index, call-overload]
+        axis=0,
+    )
+
+    # and for test data
+    test_reconstruction_output = trainer.predict(module, test_datamodule)
+    assert test_reconstruction_output is not None
+    test_reconstruction = pd.concat(
+        [pd.DataFrame(out["x_ng"], index=out["obs_names_n"].astype(str)) for out in test_reconstruction_output],  # type: ignore[index, call-overload]
+        axis=0,
+    )
+
+    # add the reconstructions to the anndatas
+    train_data.obsm["X_reconstruction"] = train_reconstruction.loc[train_data.obs_names].values
+    test_data.obsm["X_reconstruction"] = test_reconstruction.loc[test_data.obs_names].values
 
     return train_data, test_data
 
@@ -1915,7 +1964,7 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
 
 
 @pytest.mark.parametrize("reconstruct_counts_on_predict", [True, False], ids=["reconstruct_counts", "latent_repr"])
-@pytest.mark.parametrize("reconstruction_sampled", [True, False], ids=["sampled", "mean"])
+@pytest.mark.parametrize("reconstruction_n_latent_samples", [1, 5, 10], ids=["1sample", "5samples", "10samples"])
 @pytest.mark.parametrize(
     "reconstruction_transform_batch",
     [None, 0, 1, "mean"],
@@ -1923,7 +1972,7 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
 )
 def test_reconstruction_functionality(
     reconstruct_counts_on_predict,
-    reconstruction_sampled,
+    reconstruction_n_latent_samples,
     reconstruction_transform_batch,
 ):
     """Test the reconstruction functionality added via reconstruct_counts_on_predict, reconstruction_var_names_g,
@@ -1946,7 +1995,7 @@ def test_reconstruction_functionality(
         reconstruct_counts_on_predict=reconstruct_counts_on_predict,
         reconstruction_var_names_g=reconstruction_var_names_g,
         reconstruction_transform_batch=reconstruction_transform_batch,
-        reconstruction_sampled=reconstruction_sampled,
+        reconstruction_n_latent_samples=reconstruction_n_latent_samples,
         encoder=linear_encoder_kwargs,
         decoder=linear_decoder_kwargs,
     )
@@ -1955,7 +2004,7 @@ def test_reconstruction_functionality(
     assert model.reconstruct_counts_on_predict == reconstruct_counts_on_predict
     assert model.reconstruction_var_names_g == reconstruction_var_names_g
     assert model.reconstruction_transform_batch == reconstruction_transform_batch
-    assert model.reconstruction_sampled == reconstruction_sampled
+    assert model.reconstruction_n_latent_samples == reconstruction_n_latent_samples
 
     # Create test batch
     x_ng = torch.tensor(X, dtype=torch.float32)
@@ -2050,3 +2099,27 @@ def test_reconstruction_transform_batch_validation():
                 batch_index_n=batch_index_n,
                 transform_batch="invalid",
             )
+
+
+def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi_tools_model):
+    """Test that the reconstructed counts match between Cellarium and scvi-tools on real data."""
+    train_adata_cellarium, test_adata_cellarium = train_cellarium_model
+    train_adata_scvi, test_adata_scvi = train_scvi_tools_model
+
+    # Get the reconstructed counts from both models
+    train_reconstruction_cellarium = train_adata_cellarium.obsm["X_reconstruction"]
+    test_reconstruction_cellarium = test_adata_cellarium.obsm["X_reconstruction"]
+    train_reconstruction_scvi = train_adata_scvi.obsm["X_reconstruction"]
+    test_reconstruction_scvi = test_adata_scvi.obsm["X_reconstruction"]
+
+    # Compare the reconstructed counts
+    print("train_reconstruction_cellarium")
+    print(train_reconstruction_cellarium)
+    print("train_reconstruction_scvi")
+    print(train_reconstruction_scvi)
+    print("test_reconstruction_cellarium")
+    print(test_reconstruction_cellarium)
+    print("test_reconstruction_scvi")
+    print(test_reconstruction_scvi)
+    np.testing.assert_allclose(train_reconstruction_cellarium, train_reconstruction_scvi, atol=1e-5)
+    np.testing.assert_allclose(test_reconstruction_cellarium, test_reconstruction_scvi, atol=1e-5)
