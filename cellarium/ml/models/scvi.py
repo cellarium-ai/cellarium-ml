@@ -1028,7 +1028,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         # size_factor_n: torch.Tensor | None = None,
         transform_batch: str | int = None,
         n_latent_samples: str | int = 30,
-        log_reconstructed_library_size: float = 10_000,
+        reconstructed_library_size: float = 10_000,
     ):
         """
         Reconstruct the data using the VAE, optionally transforming the batch.
@@ -1062,8 +1062,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             n_latent_samples:
                 The number of latent samples to use for reconstruction. If "mean", do not sample the latent
                 but rather use the mean of the latent distribution.
-            log_reconstructed_library_size:
-                The log of the library size to use for the reconstruction, common to all cells.
+            reconstructed_library_size:
+                The library size to use for the reconstruction, common to all cells.
 
         Returns:
             A dictionary with the following keys:
@@ -1137,13 +1137,15 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     continuous_covariates_nc=continuous_covariates_nc,
                     categorical_covariate_np=categorical_covariate_np,
                     # size_factor_n1=size_factor_n,
-                    size_factor_n1=log_reconstructed_library_size,
+                    # size_factor_n1=log_reconstructed_library_size,
                 )
 
                 # take the mean of the distribution
                 counts_ng = generative_outputs["px"].mean
-                counts_np = counts_ng[:, gene_inds]
-                output_counts_sum_np += counts_np
+                normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True)
+                scaled_counts_ng = reconstructed_library_size * normalized_counts_ng
+                scaled_counts_np = scaled_counts_ng[:, gene_inds]
+                output_counts_sum_np += scaled_counts_np
 
                 x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list))
 
@@ -1162,13 +1164,15 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                         continuous_covariates_nc=continuous_covariates_nc,
                         categorical_covariate_np=categorical_covariate_np,
                         # size_factor_n1=size_factor_n,
-                        size_factor_n1=log_reconstructed_library_size,
+                        # size_factor_n1=log_reconstructed_library_size,
                     )
 
                     # take the mean of the distribution
                     counts_ng = generative_outputs["px"].mean
-                    counts_np = counts_ng[:, gene_inds]
-                    output_counts_sum_np += counts_np
+                    normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True)
+                    scaled_counts_ng = reconstructed_library_size * normalized_counts_ng
+                    scaled_counts_np = scaled_counts_ng[:, gene_inds]
+                    output_counts_sum_np += scaled_counts_np
 
                 x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list) * n_latent_samples)
 
