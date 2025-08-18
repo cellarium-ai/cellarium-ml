@@ -1034,7 +1034,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-        transform_batch: str | int = None,
+        transform_batch: str | int | None = None,
         use_latent_mean: bool = False,
         n_latent_samples: int = 1000,
         use_importance_sampling: bool = False,
@@ -1050,7 +1050,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             - obtain tensor shape [n_transform_batches, n_latent_samples, n_cells, n_genes]
             - take a mean over the batches dimension
             (- they optionally use importance sampling based on sampled z likelihoods)
-            - take a (weighted?) mean over the n_latent_samples dimension 
+            - take a (weighted?) mean over the n_latent_samples dimension
 
         Args:
             x_ng: Gene counts matrix.
@@ -1077,14 +1077,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
-
-        if isinstance(n_latent_samples, str):
-            if n_latent_samples != "mean":
-                raise ValueError(
-                    'If n_latent_samples is a string, it must be "mean" which '
-                    "will use the mean of the latent distribution, "
-                    "otherwise specify a particular integer value"
-                )
 
         if transform_batch is None:
             # make this a list of size one with the measured values as default: an actual reconstruction
@@ -1144,7 +1136,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             batch_nb = self.batch_representation_from_batch_index(transformed_batch_index_n)
 
             if use_latent_mean:
-
                 # use the mean in the latent space
                 mean_z_nk = inference_outputs["qz"].mean
 
@@ -1158,18 +1149,24 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list))
 
             else:
-
                 importance_weight_means = []
 
                 for _ in range(n_latent_samples):
-
                     # take a sample from the latent space
                     sampled_z_nk = inference_outputs["qz"].sample()
                     mean_z_nk = inference_outputs["qz"].mean
 
                     # compute weight for importance sampling
                     if use_importance_sampling:
-                        importance_weight_n1 = (inference_outputs["qz"].log_prob(sampled_z_nk) - inference_outputs["qz"].log_prob(mean_z_nk)).sum(dim=-1).exp().unsqueeze(-1)
+                        importance_weight_n1 = (
+                            (
+                                inference_outputs["qz"].log_prob(sampled_z_nk)
+                                - inference_outputs["qz"].log_prob(mean_z_nk)
+                            )
+                            .sum(dim=-1)
+                            .exp()
+                            .unsqueeze(-1)
+                        )
                         importance_weight_means.append(importance_weight_n1.squeeze().mean())
                     else:
                         importance_weight_n1 = 1.0

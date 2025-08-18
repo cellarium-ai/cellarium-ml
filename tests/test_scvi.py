@@ -443,7 +443,7 @@ log_variational: bool = True
 use_batchnorm: bool = False
 dropout_rate: float = 0.1
 n_genes_to_reconstruct: int = 5
-transform_batch: str = '2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35'
+transform_batch: str = "2adb1f8a-a6b1-4909-8ee8-484814e2d4bf-microwell-seq-cell-Donor35"
 reconstructed_library_size: int = 10_000
 reconstruction_latent_samples: int = 100
 
@@ -698,14 +698,14 @@ def train_cellarium_model(
     test_data.obsm[latent_obsm_key] = test_latent.loc[test_data.obs_names].values
 
     # reconstruct the gene expression
-    module.model.reconstruct_counts_on_predict = True
+    module.model.reconstruct_counts_on_predict = True  # type: ignore[assignment]
     module.model.reconstruction_var_names_g = train_data.var_names.tolist()[:n_genes_to_reconstruct]
     batch_index = np.where(train_data.obs[batch_key].cat.categories == transform_batch)[0][0]
     module.model.reconstruction_transform_batch = batch_index
-    module.model.reconstruction_n_latent_samples = reconstruction_latent_samples
-    module.model.reconstruction_use_latent_mean = False
-    module.model.reconstruction_use_importance_sampling = False
-    module.model.reconstructed_library_size = reconstructed_library_size
+    module.model.reconstruction_n_latent_samples = reconstruction_latent_samples  # type: ignore[assignment]
+    module.model.reconstruction_use_latent_mean = False  # type: ignore[assignment]
+    module.model.reconstruction_use_importance_sampling = False  # type: ignore[assignment]
+    module.model.reconstructed_library_size = reconstructed_library_size  # type: ignore[assignment]
 
     # for the train data
     pl.seed_everything(0)
@@ -714,11 +714,12 @@ def train_cellarium_model(
     train_reconstruction = pd.concat(
         [
             pd.DataFrame(
-                out["x_ng"], 
-                index=out["obs_names_n"].astype(str),
+                out["x_ng"],  # type: ignore[call-overload]
+                index=out["obs_names_n"].astype(str),  # type: ignore[call-overload]
                 columns=module.model.reconstruction_var_names_g,
-            ) for out in train_reconstruction_output
-        ],  # type: ignore[index, call-overload]
+            )
+            for out in train_reconstruction_output
+        ],
         axis=0,
     )
 
@@ -729,11 +730,12 @@ def train_cellarium_model(
     test_reconstruction = pd.concat(
         [
             pd.DataFrame(
-                out["x_ng"], 
-                index=out["obs_names_n"].astype(str),
+                out["x_ng"],  # type: ignore[call-overload]
+                index=out["obs_names_n"].astype(str),  # type: ignore[call-overload]
                 columns=module.model.reconstruction_var_names_g,
-            ) for out in test_reconstruction_output
-        ],  # type: ignore[index, call-overload]
+            )
+            for out in test_reconstruction_output
+        ],
         axis=0,
     )
 
@@ -1204,8 +1206,8 @@ def matching_scvi_cellarium_models(request):
 
     # Initialize scvi-tools model
     scvi.model.SCVI.setup_anndata(
-        adata, 
-        batch_key="batch", 
+        adata,
+        batch_key="batch",
         categorical_covariate_keys=["assay"] if use_categorical_covariates else None,
     )
     scvi_model = scvi.model.SCVI(
@@ -1795,7 +1797,7 @@ def test_vs_scvi_evaluation_mode_latents_match(matching_scvi_cellarium_models):
         {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": True},
         {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": False},
         {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
-        {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True, "use_categorical_covariates": True}
+        {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True, "use_categorical_covariates": True},
     ],
     ids=[
         "poisson-latent5-no_bn",
@@ -2147,11 +2149,11 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     df = pd.DataFrame(
         (
             np.array(train_adata_cellarium.X[:, :n_genes_to_reconstruct].todense()).squeeze()
-            / np.array(train_adata_cellarium.X.sum(axis=1)).squeeze()[:, None] 
+            / np.array(train_adata_cellarium.X.sum(axis=1)).squeeze()[:, None]
             * reconstructed_library_size
-        ), 
-        index=train_adata_cellarium.obs_names, 
-        columns=train_adata_cellarium.var_names[:n_genes_to_reconstruct]
+        ),
+        index=train_adata_cellarium.obs_names,
+        columns=train_adata_cellarium.var_names[:n_genes_to_reconstruct],
     )
     print(df.iloc[:3])
     print("\ntrain_reconstruction_cellarium")
@@ -2196,7 +2198,7 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
     batch = matching_scvi_cellarium_models["batch"]
     var_names_g = matching_scvi_cellarium_models["var_names_g"]
     g = matching_scvi_cellarium_models["g"]
-    
+
     # Set parameters for reconstruction
     n_genes_to_reconstruct = g  # min(5, g)  # Reconstruct first 5 genes or all if fewer
     gene_list = var_names_g[:n_genes_to_reconstruct]
@@ -2204,11 +2206,11 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
     transform_batch = 0  # Transform to batch 0
     reconstruction_latent_samples = 10_000  # this is so high because randomness has not been eliminated
     reconstructed_library_size = 10_000
-    
+
     # Set both models to eval mode for consistent reconstruction
     cellarium_model.eval()
     scvi_model.module.eval()
-    
+
     with torch.no_grad():
         # Set random seed but this is not enough for reproducible reconstruction
         pl.seed_everything(0)
@@ -2238,7 +2240,7 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
             use_importance_sampling=True,
             reconstructed_library_size=reconstructed_library_size,
         )["x_ng"]
-        
+
         # Get Cellarium reconstructions using the reconstruct method
         cellarium_reconstruction = cellarium_model.reconstruct(
             x_ng=x,
@@ -2252,16 +2254,17 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
             use_importance_sampling=False,
             reconstructed_library_size=reconstructed_library_size,
         )["x_ng"]
-        
+
         # Reset random seed but this is not enough for reproducible reconstruction for scvi-tools
         pl.seed_everything(0)
-        
+
         # Create a minimal AnnData object for scvi-tools reconstruction
         import anndata
+
         adata_for_reconstruction = anndata.AnnData(x.numpy())
         adata_for_reconstruction.var_names = var_names_g
         adata_for_reconstruction.obs["batch"] = batch["batch"].numpy()
-        
+
         # Get scvi-tools reconstructions using get_normalized_expression
         scvi_reconstruction = scvi_model.get_normalized_expression(
             adata=adata_for_reconstruction,
@@ -2271,20 +2274,20 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
             return_mean=True,
             n_samples=reconstruction_latent_samples,
         )
-        
+
         # Convert scvi reconstruction to tensor for comparison
         scvi_reconstruction_tensor = torch.tensor(scvi_reconstruction.values, dtype=torch.float32)
-        
+
         print("Cellarium reconstruction shape:", cellarium_reconstruction.shape)
         print("scvi-tools reconstruction shape:", scvi_reconstruction_tensor.shape)
         print("Cellarium reconstruction mean latent (first 3x3):")
-        print(cellarium_reconstruction_mean[:3, :min(3, n_genes_to_reconstruct)])
+        print(cellarium_reconstruction_mean[:3, : min(3, n_genes_to_reconstruct)])
         print("Cellarium reconstruction importance sampling (first 3x3):")
-        print(cellarium_reconstruction_importance[:3, :min(3, n_genes_to_reconstruct)])
+        print(cellarium_reconstruction_importance[:3, : min(3, n_genes_to_reconstruct)])
         print("Cellarium reconstruction (first 3x3):")
-        print(cellarium_reconstruction[:3, :min(3, n_genes_to_reconstruct)])
+        print(cellarium_reconstruction[:3, : min(3, n_genes_to_reconstruct)])
         print("scvi-tools reconstruction (first 3x3):")
-        print(scvi_reconstruction_tensor[:3, :min(3, n_genes_to_reconstruct)])
+        print(scvi_reconstruction_tensor[:3, : min(3, n_genes_to_reconstruct)])
         print("Cellarium reconstruction sums (first 3):", cellarium_reconstruction[:3].sum(dim=1))
         print("scvi-tools reconstruction sums (first 3):", scvi_reconstruction_tensor[:3].sum(dim=1))
 
@@ -2297,17 +2300,17 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
             msg=(
                 f"Cellarium reconstruction sums ({cellarium_reconstruction.sum(dim=1)[:3]} ...) "
                 f"do not match intended library size target {reconstructed_library_size}"
-            )
+            ),
         )
-        
+
         # Calculate differences
         reconstruction_diff = cellarium_reconstruction - scvi_reconstruction_tensor
         max_abs_diff = torch.abs(reconstruction_diff).max().item()
         mean_abs_diff = torch.abs(reconstruction_diff).mean().item()
-        
+
         print(f"Max absolute difference: {max_abs_diff:.6f}")
         print(f"Mean absolute difference: {mean_abs_diff:.6f}")
-        
+
         # Check that reconstructions match within tolerance
         torch.testing.assert_close(
             cellarium_reconstruction.mean(dim=0),
@@ -2317,7 +2320,7 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
             msg=(
                 f"Gene-aggregated reconstructions do not match scvi-tools: "
                 f"max diff {max_abs_diff:.6f}, mean diff {mean_abs_diff:.6f}"
-            )
+            ),
         )
         assert mean_abs_diff < 1, f"Mean absolute difference from scvi-tools ({mean_abs_diff:.6f}) exceeds 1"
         torch.testing.assert_close(
@@ -2325,5 +2328,5 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
             scvi_reconstruction_tensor,
             rtol=2e-2,
             atol=4,
-            msg=f"Reconstructions do not match scvi-tools: max diff {max_abs_diff:.6f}, mean diff {mean_abs_diff:.6f}"
+            msg=f"Reconstructions do not match scvi-tools: max diff {max_abs_diff:.6f}, mean diff {mean_abs_diff:.6f}",
         )
