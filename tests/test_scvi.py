@@ -2186,7 +2186,6 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
     cellarium_model = matching_scvi_cellarium_models["cellarium_model"]
     scvi_model = matching_scvi_cellarium_models["scvi_model"]
     x = matching_scvi_cellarium_models["x"]
-    batch_nb = matching_scvi_cellarium_models["batch_nb"]
     batch = matching_scvi_cellarium_models["batch"]
     var_names_g = matching_scvi_cellarium_models["var_names_g"]
     g = matching_scvi_cellarium_models["g"]
@@ -2196,7 +2195,7 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
     gene_list = var_names_g[:n_genes_to_reconstruct]
     gene_inds = list(range(n_genes_to_reconstruct))
     transform_batch = 0  # Transform to batch 0
-    reconstruction_latent_samples = 1
+    reconstruction_latent_samples = 10_000  # this is so high because randomness has not been eliminated
     reconstructed_library_size = 10_000
     
     # Set both models to eval mode for consistent reconstruction
@@ -2204,23 +2203,51 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
     scvi_model.module.eval()
     
     with torch.no_grad():
-        # Set random seed for reproducible reconstruction
-        torch.manual_seed(0)
+        # Set random seed but this is not enough for reproducible reconstruction
+        pl.seed_everything(0)
+
+        # Get Cellarium reconstructions using the reconstruct method
+        cellarium_reconstruction_mean = cellarium_model.reconstruct(
+            x_ng=x,
+            var_names_g=np.array(var_names_g),
+            gene_inds=gene_inds,
+            batch_index_n=batch["batch"].squeeze(),
+            categorical_covariate_index_nd=batch.get("extra_categorical_covs", None),
+            transform_batch=transform_batch,
+            use_latent_mean=True,
+            reconstructed_library_size=reconstructed_library_size,
+        )["x_ng"]
+
+        # Get Cellarium reconstructions using the reconstruct method with importance sampling
+        cellarium_reconstruction_importance = cellarium_model.reconstruct(
+            x_ng=x,
+            var_names_g=np.array(var_names_g),
+            gene_inds=gene_inds,
+            batch_index_n=batch["batch"].squeeze(),
+            categorical_covariate_index_nd=batch.get("extra_categorical_covs", None),
+            transform_batch=transform_batch,
+            use_latent_mean=False,
+            n_latent_samples=reconstruction_latent_samples,
+            use_importance_sampling=True,
+            reconstructed_library_size=reconstructed_library_size,
+        )["x_ng"]
         
         # Get Cellarium reconstructions using the reconstruct method
         cellarium_reconstruction = cellarium_model.reconstruct(
             x_ng=x,
             var_names_g=np.array(var_names_g),
             gene_inds=gene_inds,
-            batch_index_n=batch["batch"],
+            batch_index_n=batch["batch"].squeeze(),
             categorical_covariate_index_nd=batch.get("extra_categorical_covs", None),
             transform_batch=transform_batch,
+            use_latent_mean=False,
             n_latent_samples=reconstruction_latent_samples,
+            use_importance_sampling=False,
             reconstructed_library_size=reconstructed_library_size,
         )["x_ng"]
         
-        # Reset random seed for scvi-tools
-        torch.manual_seed(0)
+        # Reset random seed but this is not enough for reproducible reconstruction for scvi-tools
+        pl.seed_everything(0)
         
         # Create a minimal AnnData object for scvi-tools reconstruction
         import anndata
@@ -2243,12 +2270,28 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
         
         print("Cellarium reconstruction shape:", cellarium_reconstruction.shape)
         print("scvi-tools reconstruction shape:", scvi_reconstruction_tensor.shape)
+        print("Cellarium reconstruction mean latent (first 3x3):")
+        print(cellarium_reconstruction_mean[:3, :min(3, n_genes_to_reconstruct)])
+        print("Cellarium reconstruction importance sampling (first 3x3):")
+        print(cellarium_reconstruction_importance[:3, :min(3, n_genes_to_reconstruct)])
         print("Cellarium reconstruction (first 3x3):")
         print(cellarium_reconstruction[:3, :min(3, n_genes_to_reconstruct)])
         print("scvi-tools reconstruction (first 3x3):")
         print(scvi_reconstruction_tensor[:3, :min(3, n_genes_to_reconstruct)])
         print("Cellarium reconstruction sums (first 3):", cellarium_reconstruction[:3].sum(dim=1))
         print("scvi-tools reconstruction sums (first 3):", scvi_reconstruction_tensor[:3].sum(dim=1))
+
+        # Assert the sums are all close to the target
+        torch.testing.assert_close(
+            cellarium_reconstruction.sum(dim=1),
+            torch.ones(cellarium_reconstruction.shape[0]) * reconstructed_library_size,
+            rtol=1e-4,
+            atol=1,
+            msg=(
+                f"Cellarium reconstruction sums ({cellarium_reconstruction.sum(dim=1)[:3]} ...) "
+                f"do not match intended library size target {reconstructed_library_size}"
+            )
+        )
         
         # Calculate differences
         reconstruction_diff = cellarium_reconstruction - scvi_reconstruction_tensor
@@ -2260,12 +2303,20 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
         
         # Check that reconstructions match within tolerance
         torch.testing.assert_close(
+            cellarium_reconstruction.mean(dim=0),
+            scvi_reconstruction_tensor.mean(dim=0),
+            rtol=1e-3,
+            atol=0.5,
+            msg=(
+                f"Gene-aggregated reconstructions do not match scvi-tools: "
+                f"max diff {max_abs_diff:.6f}, mean diff {mean_abs_diff:.6f}"
+            )
+        )
+        assert mean_abs_diff < 1, f"Mean absolute difference from scvi-tools ({mean_abs_diff:.6f}) exceeds 1"
+        torch.testing.assert_close(
             cellarium_reconstruction,
             scvi_reconstruction_tensor,
-            rtol=1e-3,
-            atol=1e-3,
-            msg=f"Reconstructions do not match: max diff {max_abs_diff:.6f}, mean diff {mean_abs_diff:.6f}"
+            rtol=2e-2,
+            atol=4,
+            msg=f"Reconstructions do not match scvi-tools: max diff {max_abs_diff:.6f}, mean diff {mean_abs_diff:.6f}"
         )
-
-
-

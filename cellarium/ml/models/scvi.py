@@ -1025,9 +1025,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-        # size_factor_n: torch.Tensor | None = None,
         transform_batch: str | int = None,
-        n_latent_samples: str | int = 30,
+        use_latent_mean: bool = False,
+        n_latent_samples: int = 1000,
+        use_importance_sampling: bool = False,
         reconstructed_library_size: float = 10_000,
     ):
         """
@@ -1043,27 +1044,20 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             - take a (weighted?) mean over the n_latent_samples dimension 
 
         Args:
-            x_ng:
-                Gene counts matrix.
-            var_names_g:
-                The list of the variable names in the input data.
-            gene_inds:
-                The indices of the genes from var_names_g to be reconstructed. Output order preserves this order.
-            batch_index_n:
-                Batch indices of input cells as integers.
-            continuous_covariates_nc:
-                Continuous covariates for each cell (c-dimensional).
-            categorical_covariate_index_nd:
-                Categorical covariates for each cell (d-dimensional where d is the number of categorical variables).
-            size_factor_n:
-                Library size factor for each cell.
-            transform_batch:
-                If not None, transform the batch to this index before reconstruction.
-            n_latent_samples:
-                The number of latent samples to use for reconstruction. If "mean", do not sample the latent
-                but rather use the mean of the latent distribution.
-            reconstructed_library_size:
-                The library size to use for the reconstruction, common to all cells.
+            x_ng: Gene counts matrix.
+            var_names_g: The list of the variable names in the input data.
+            gene_inds: The indices of the genes from var_names_g to be reconstructed. Output order preserves this order.
+            batch_index_n: Batch indices of input cells as integers.
+            continuous_covariates_nc: Continuous covariates for each cell (c-dimensional).
+            categorical_covariate_index_nd: Categorical covariates for each cell (d-dimensional where d is the number
+                of categorical variables).
+            size_factor_n: Library size factor for each cell.
+            transform_batch: If not None, transform the batch to this index before reconstruction.
+            use_latent_mean: If True, use the mean of the latent distribution instead of sampling.
+            n_latent_samples: The number of latent samples to use for reconstruction.
+            use_importance_sampling: True to use importance sampling for the reconstruction, weighting each sample
+                of the latent by its likelihood.
+            reconstructed_library_size: The library size to use for the reconstruction, common to all cells.
 
         Returns:
             A dictionary with the following keys:
@@ -1082,11 +1076,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     "will use the mean of the latent distribution, "
                     "otherwise specify a particular integer value"
                 )
-
-        if n_latent_samples == "mean":
-            n = 1
-        else:
-            n = n_latent_samples
 
         if transform_batch is None:
             # make this a list of size one with the measured values as default: an actual reconstruction
@@ -1118,63 +1107,73 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             categorical_covariate_np=categorical_covariate_np,
         )
 
+        def _run_generative_and_scale_output(z_nk: torch.Tensor, library_size_n1):
+            # use that latent sample and the transform batch to generate data
+            generative_outputs = self.generative(
+                z_nk=z_nk,
+                library_size_n1=library_size_n1,
+                batch_nb=batch_nb,
+                continuous_covariates_nc=continuous_covariates_nc,
+                categorical_covariate_np=categorical_covariate_np,
+            )
+
+            # take the mean of the distribution
+            counts_ng = generative_outputs["px"].mean
+
+            # normalize and re-scale
+            normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True)
+            scaled_counts_ng = reconstructed_library_size * normalized_counts_ng
+
+            # subset to genes of interest
+            scaled_counts_np = scaled_counts_ng[:, gene_inds]
+            return scaled_counts_np
+
         output_counts_sum_np: int | torch.Tensor = 0
 
         # go through each output batch projection (just one unless transform_batch == "mean")
         for transformed_batch_index_n in transformed_batch_index_n_list:
             batch_nb = self.batch_representation_from_batch_index(transformed_batch_index_n)
 
-            if n_latent_samples == "mean":
+            if use_latent_mean:
 
                 # use the mean in the latent space
-                sampled_z_nk = inference_outputs["qz"].mean
+                mean_z_nk = inference_outputs["qz"].mean
 
-                # use that latent sample and the transform batch to generate data
-                generative_outputs = self.generative(
-                    z_nk=sampled_z_nk,
+                # run generative model and scale output
+                scaled_counts_np = _run_generative_and_scale_output(
+                    z_nk=mean_z_nk,
                     library_size_n1=inference_outputs["library_size_n1"],
-                    batch_nb=batch_nb,
-                    continuous_covariates_nc=continuous_covariates_nc,
-                    categorical_covariate_np=categorical_covariate_np,
-                    # size_factor_n1=size_factor_n,
-                    # size_factor_n1=log_reconstructed_library_size,
                 )
-
-                # take the mean of the distribution
-                counts_ng = generative_outputs["px"].mean
-                normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True)
-                scaled_counts_ng = reconstructed_library_size * normalized_counts_ng
-                scaled_counts_np = scaled_counts_ng[:, gene_inds]
                 output_counts_sum_np += scaled_counts_np
 
                 x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list))
 
             else:
 
+                importance_weight_means = []
+
                 for _ in range(n_latent_samples):
 
                     # take a sample from the latent space
                     sampled_z_nk = inference_outputs["qz"].sample()
+                    mean_z_nk = inference_outputs["qz"].mean
 
-                    # use that latent sample and the transform batch to generate data
-                    generative_outputs = self.generative(
+                    # compute weight for importance sampling
+                    if use_importance_sampling:
+                        importance_weight_n1 = (inference_outputs["qz"].log_prob(sampled_z_nk) - inference_outputs["qz"].log_prob(mean_z_nk)).sum(dim=-1).exp().unsqueeze(-1)
+                        importance_weight_means.append(importance_weight_n1.squeeze().mean())
+                    else:
+                        importance_weight_n1 = 1.0
+                        importance_weight_means.append(importance_weight_n1)
+
+                    # run generative model and scale output
+                    scaled_counts_np = _run_generative_and_scale_output(
                         z_nk=sampled_z_nk,
                         library_size_n1=inference_outputs["library_size_n1"],
-                        batch_nb=batch_nb,
-                        continuous_covariates_nc=continuous_covariates_nc,
-                        categorical_covariate_np=categorical_covariate_np,
-                        # size_factor_n1=size_factor_n,
-                        # size_factor_n1=log_reconstructed_library_size,
                     )
+                    output_counts_sum_np += scaled_counts_np * importance_weight_n1
 
-                    # take the mean of the distribution
-                    counts_ng = generative_outputs["px"].mean
-                    normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True)
-                    scaled_counts_ng = reconstructed_library_size * normalized_counts_ng
-                    scaled_counts_np = scaled_counts_ng[:, gene_inds]
-                    output_counts_sum_np += scaled_counts_np
-
-                x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list) * n_latent_samples)
+                x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list) * sum(importance_weight_means))
 
         return {"x_ng": x_tilde_np}
 
