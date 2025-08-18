@@ -1233,7 +1233,7 @@ def matching_scvi_cellarium_models(request):
         n_batch=n_batch,
         n_latent=n_latent,
         gene_likelihood=gene_likelihood,
-        n_cats_per_cov=[n_cat_categories],
+        n_cats_per_cov=[n_cat_categories] if use_categorical_covariates else [],
         kl_annealing_start=1.0,
         kl_warmup_epochs=None,
         kl_warmup_steps=None,
@@ -1993,7 +1993,7 @@ def test_vs_scvi_gradients_match(matching_scvi_cellarium_models):
     [None, 0, 1, "mean"],
     ids=["original_batch", "batch_0", "batch_1", "mean_batch"],
 )
-def test_reconstruction_functionality(
+def test_reconstruction_plumbing(
     reconstruct_counts_on_predict,
     reconstruction_n_latent_samples,
     reconstruction_transform_batch,
@@ -2164,3 +2164,106 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     print(test_reconstruction_cellarium - test_reconstruction_scvi)
     np.testing.assert_allclose(train_reconstruction_cellarium, train_reconstruction_scvi, atol=1e-5)
     np.testing.assert_allclose(test_reconstruction_cellarium, test_reconstruction_scvi, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "matching_scvi_cellarium_models",
+    [
+        {"gene_likelihood": "poisson", "n_latent": 5, "use_batchnorm": False},
+        {"gene_likelihood": "nb", "n_latent": 10, "use_batchnorm": True},
+    ],
+    ids=[
+        "poisson-latent5-no_bn",
+        "nb-latent10-bn",
+    ],
+    indirect=True,
+)
+def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
+    """
+    Test whether or not reconstructed data matches for paired models trained on simulated data.
+    """
+
+    cellarium_model = matching_scvi_cellarium_models["cellarium_model"]
+    scvi_model = matching_scvi_cellarium_models["scvi_model"]
+    x = matching_scvi_cellarium_models["x"]
+    batch_nb = matching_scvi_cellarium_models["batch_nb"]
+    batch = matching_scvi_cellarium_models["batch"]
+    var_names_g = matching_scvi_cellarium_models["var_names_g"]
+    g = matching_scvi_cellarium_models["g"]
+    
+    # Set parameters for reconstruction
+    n_genes_to_reconstruct = min(5, g)  # Reconstruct first 5 genes or all if fewer
+    gene_list = var_names_g[:n_genes_to_reconstruct]
+    gene_inds = list(range(n_genes_to_reconstruct))
+    transform_batch = 0  # Transform to batch 0
+    reconstruction_latent_samples = 10
+    reconstructed_library_size = 10_000
+    
+    # Set both models to eval mode for consistent reconstruction
+    cellarium_model.eval()
+    scvi_model.module.eval()
+    
+    with torch.no_grad():
+        # Set random seed for reproducible reconstruction
+        torch.manual_seed(42)
+        
+        # Get Cellarium reconstructions using the reconstruct method
+        cellarium_reconstruction = cellarium_model.reconstruct(
+            x_ng=x,
+            var_names_g=np.array(var_names_g),
+            gene_inds=gene_inds,
+            batch_index_n=batch["batch"],
+            categorical_covariate_index_nd=batch.get("extra_categorical_covs", None),
+            transform_batch=transform_batch,
+            n_latent_samples=reconstruction_latent_samples,
+            log_reconstructed_library_size=np.log(reconstructed_library_size),
+        )["x_ng"]
+        
+        # Reset random seed for scvi-tools
+        torch.manual_seed(42)
+        
+        # Create a minimal AnnData object for scvi-tools reconstruction
+        import anndata
+        adata_for_reconstruction = anndata.AnnData(x.numpy())
+        adata_for_reconstruction.var_names = var_names_g
+        adata_for_reconstruction.obs["batch"] = batch["batch"].numpy()
+        
+        # Get scvi-tools reconstructions using get_normalized_expression
+        scvi_reconstruction = scvi_model.get_normalized_expression(
+            adata=adata_for_reconstruction,
+            transform_batch=transform_batch,
+            gene_list=gene_list,
+            library_size=reconstructed_library_size,
+            return_mean=True,
+            n_samples=reconstruction_latent_samples,
+        )
+        
+        # Convert scvi reconstruction to tensor for comparison
+        scvi_reconstruction_tensor = torch.tensor(scvi_reconstruction.values, dtype=torch.float32)
+        
+        print("Cellarium reconstruction shape:", cellarium_reconstruction.shape)
+        print("scvi-tools reconstruction shape:", scvi_reconstruction_tensor.shape)
+        print("Cellarium reconstruction (first 3x3):")
+        print(cellarium_reconstruction[:3, :min(3, n_genes_to_reconstruct)])
+        print("scvi-tools reconstruction (first 3x3):")
+        print(scvi_reconstruction_tensor[:3, :min(3, n_genes_to_reconstruct)])
+        
+        # Calculate differences
+        reconstruction_diff = cellarium_reconstruction - scvi_reconstruction_tensor
+        max_abs_diff = torch.abs(reconstruction_diff).max().item()
+        mean_abs_diff = torch.abs(reconstruction_diff).mean().item()
+        
+        print(f"Max absolute difference: {max_abs_diff:.6f}")
+        print(f"Mean absolute difference: {mean_abs_diff:.6f}")
+        
+        # Check that reconstructions match within tolerance
+        torch.testing.assert_close(
+            cellarium_reconstruction,
+            scvi_reconstruction_tensor,
+            rtol=1e-5,
+            atol=1e-5,
+            msg=f"Reconstructions do not match: max diff {max_abs_diff:.6f}, mean diff {mean_abs_diff:.6f}"
+        )
+
+
+
