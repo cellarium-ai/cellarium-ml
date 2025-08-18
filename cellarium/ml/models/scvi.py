@@ -490,6 +490,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         reconstruction_n_latent_samples: Number of latent samples to use for reconstruction. Each latent sample
             will be used to compute the mean of the generative distribution, and the final output will be the
             mean of those.
+        reconstruction_use_latent_mean: True to use the mean of the latent distribution rather than sampling.
+        reconstruction_use_importance_sampling: True to use importance sampling weighted by each latent sample's
+            likelihood.
         reconstructed_library_size: The library size to use for the reconstruction, common to all cells.
     """
 
@@ -523,6 +526,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         reconstruction_var_names_g: list | None = None,
         reconstruction_transform_batch: None | int | str = 0,
         reconstruction_n_latent_samples: int = 30,
+        reconstruction_use_latent_mean: bool = False,
+        reconstruction_use_importance_sampling: bool = False,
         reconstructed_library_size: int = 10_000,
     ):
         super().__init__()
@@ -574,6 +579,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.reconstruct_counts_on_predict = reconstruct_counts_on_predict
         self.reconstruction_transform_batch = reconstruction_transform_batch
         self.reconstruction_n_latent_samples = reconstruction_n_latent_samples
+        self.reconstruction_use_latent_mean = reconstruction_use_latent_mean
+        self.reconstruction_use_importance_sampling = reconstruction_use_importance_sampling
         self.reconstructed_library_size = reconstructed_library_size
 
         if n_continuous_cov > 0:
@@ -997,7 +1004,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 categorical_covariate_index_nd=categorical_covariate_index_nd,
                 transform_batch=self.reconstruction_transform_batch,
                 n_latent_samples=self.reconstruction_n_latent_samples,
-                log_reconstructed_library_size=np.log(self.reconstructed_library_size),
+                use_importance_sampling=self.reconstruction_use_importance_sampling,
+                use_latent_mean=self.reconstruction_use_latent_mean,
+                reconstructed_library_size=self.reconstructed_library_size,
             )
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
