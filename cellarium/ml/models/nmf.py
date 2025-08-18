@@ -1,9 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import warnings
 from collections.abc import Sequence
+import logging
+import sys
 from typing import Literal
+import warnings
 
 import anndata
 import lightning.pytorch as pl
@@ -26,6 +28,17 @@ from cellarium.ml.utilities.testing import (
 )
 
 warnings.filterwarnings("ignore")
+
+logger = logging.getLogger(__name__)
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+handler = logging.StreamHandler(sys.stdout)
+formatter = logging.Formatter(
+    fmt='%(name)s:cNMF - %(levelname)s - %(message)s',
+)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 
 # def calculate_reconstruction_error(
@@ -738,8 +751,8 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
     assert local_neighborhood_size > 0 and local_neighborhood_size < 1, (
         "local_neighborhood_size must be between 0 and 1"
     )
-    assert density_threshold > 0 and density_threshold < 1, (
-        "density_threshold must be between 0 and 1"
+    assert density_threshold > 0 and density_threshold <= 1, (
+        "density_threshold must be > 0 and <= 1"
     )
     r, num_component, g = D_rkg.shape
     d_norm_rkg = F.normalize(D_rkg, dim=-1, p=2)
@@ -771,10 +784,11 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
             import matplotlib.pyplot as plt
 
             plt.figure(figsize=(5, 2))
-            plt.hist(mean_neighbor_distance_m.cpu().numpy())
+            plt.hist(mean_neighbor_distance_m.cpu().numpy(), bins=np.linspace(0, 1, 75))
             plt.title(f"Local Neighborhood Distances: k = {num_component}")
             plt.ylabel("Number of NMF runs\n(total is replicates times k)")
             plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
+            plt.xlim([-0.05, 1.05])
             plt.show()
             return
 
@@ -813,8 +827,12 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
     return {
         "filtered_euclidean_distance_matrix": euclidean_dist_ff,
         "filtered_neighbor_distances": n_nearest_dist_fl,
+        "all_neighbor_distances": n_nearest_dist_ml,
+        "n_neighbors": n_neighbors,
         "consensus_D_kg": norm_median_D_kg,
         "stability": silhouette,
+        "local_neighborhood_size": local_neighborhood_size,
+        "density_threshold": density_threshold,
     }
 
 
@@ -844,7 +862,8 @@ def plot_density_histograms(
 
 def compute_consensus_factors(
     nmf_model: NonNegativeMatrixFactorization,
-    density_threshold: float = 0.2,
+    k_values: list[int] | None = None,
+    density_threshold: float = 0.5,
     local_neighborhood_size: float = 0.3,
 ) -> dict[int, dict[str, torch.Tensor | float]]:
     """
@@ -852,14 +871,16 @@ def compute_consensus_factors(
 
     Args:
         nmf_model: The trained NMF model.
+        k_values: k-values to compute consensus for.
         density_threshold: The threshold for the density of the local neighborhood.
         local_neighborhood_size: The size of the local neighborhood.
 
     Returns:
-        A dictionary of the consensus outputs for each value of k.
+        A dictionary of the consensus outputs for each value in k_values, keyed by k_values.
     """
     torch.manual_seed(0)
-    k_values = nmf_model.k_values
+    if k_values is None:
+        k_values = nmf_model.k_values
 
     consensus_stat = {}
     for k in k_values:
@@ -911,7 +932,6 @@ def k_selection_plot(
 def plot_clustermap(
     consensus_output: dict[int, dict[str, float | torch.Tensor]],
     k: int,
-    density_threshold_for_plot: float,
 ):
     import matplotlib.pyplot as plt
     try:
@@ -925,6 +945,7 @@ def plot_clustermap(
         row_cluster=True,
         col_cluster=True,
         cbar_pos=(0.05, 0.25, 0.03, 0.15),
+        figsize=(5, 5),
         xticklabels=False,
         yticklabels=False,
         rasterized=True,
@@ -936,13 +957,15 @@ def plot_clustermap(
     cg.ax_heatmap.set_title(f"k = {k}")
     plt.show()
 
-    sns.histplot(consensus_output[k]["filtered_neighbor_distances"].mean(dim=-1).cpu().numpy())
-    ymax = plt.gca().get_ylim()[1]
-    plt.vlines(density_threshold_for_plot, ymin=0, ymax=ymax, color="Red")
-    plt.xlabel(f"Mean distance to neighbors")
-    plt.ylabel("Number of factors")
-    plt.title(f"k = {k} local density histogram")
-    plt.ylim(0, ymax)
+    plt.figure(figsize=(5, 2))
+    dists = consensus_output[k]["all_neighbor_distances"].mean(dim=1).cpu().numpy()
+    plt.hist(dists, bins=np.linspace(0, 1, 75))
+    plt.vlines(consensus_output[k]["density_threshold"], 0, plt.gca().get_ylim()[1], colors='r')
+    plt.title(f"Local Neighborhood Distances: k = {k}\ndensity_threshold filters "
+              f"{100 * (dists > consensus_output[k]['density_threshold']).mean():.1f}% of runs")
+    plt.ylabel("Number of NMF runs\n(total is replicates times k)")
+    plt.xlabel(f"Average distance to nearest {consensus_output[k]['n_neighbors']} neighbors")
+    plt.xlim([-0.05, 1.05])
     plt.show()
 
 
@@ -965,9 +988,7 @@ class NMFOutput:
         """
         self.nmf_module = nmf_module
         self.datamodule = datamodule
-        self._consensus: dict | None = None
-        self._density_threshold: float | None = None
-        self._neighborhood_size: float | None = None
+        self._consensus: dict = {}
         self._rec_error: dict | None = None
         self._tpm_D_kg: torch.Tensor | None = None
         self._tpm_A_kk: torch.Tensor | None = None
@@ -986,7 +1007,7 @@ class NMFOutput:
             + f"with consensus {list(self._consensus.keys())}"
         )
 
-    def plot_density_histograms(self, local_neighborhood_size: float, k_values: list[int] | None = None):
+    def plot_density_histograms(self, k_values: int | list[int] | None = None, local_neighborhood_size: float = 0.3):
         """
         Plot density histograms for the given choice of local_neighborhood_size.
 
@@ -994,39 +1015,44 @@ class NMFOutput:
             local_neighborhood_size: The fraction of replicate runs that are considered neighbors.
             k_values: The list of k values to plot. If None, use all available k values.
         """
+        if isinstance(k_values, int):
+            k_values = [k_values]
         plot_density_histograms(
             nmf_model=self.nmf_module.model, 
             local_neighborhood_size=local_neighborhood_size, 
             k_values=k_values,
         )
 
-    def compute_consensus_factors(self, density_threshold: float, local_neighborhood_size: float) -> None:
+    def compute_consensus_factors(self, k_values: int | list[int], density_threshold: float, local_neighborhood_size: float = 0.3) -> None:
         """
         Run the "consensus" step of consensus NMF by filtering outliers and clustering replicates,
         taking the median program in each cluster.
 
         Args:
-            density_threshold: The density threshold to use for filtering.
-            local_neighborhood_size: The local neighborhood size to use for clustering.
+            density_threshold: The density threshold to use for filtering. Kotliar default is 0.5
+            local_neighborhood_size: The local neighborhood size to use for clustering. Kotliar default is 0.3
 
         Returns:
             None, but updates :attr:`_consensus`, accessible via the property :property:`consensus`.
         """
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
+
+        if isinstance(k_values, int):
+            k_values = [k_values]
+
         consensus_output = compute_consensus_factors(
             nmf_model=self.nmf_module.model,
+            k_values=k_values,
             density_threshold=density_threshold,
             local_neighborhood_size=local_neighborhood_size,
         )
-        self._density_threshold = density_threshold
-        self._neighborhood_size = local_neighborhood_size
-        self._consensus = consensus_output
+        self._consensus = self._consensus | consensus_output
         self._rec_error = None  # remove this value, as it wil need updating with new consensus factors
 
     @property
     def consensus(self) -> dict[int, dict[str, torch.Tensor | float]]:
-        if self._consensus is not None:
-            return self._consensus  
+        if len(self._consensus) > 0:
+            return self._consensus
         raise UserWarning("Compute a consensus using compute_consensus_factors() -- entails hyperparameter choices")
 
     def calculate_reconstruction_error(self) -> dict[int, float]:
@@ -1160,6 +1186,29 @@ class NMFOutput:
         # )
         return {"D_kg": updated_factors_rkg, "A_kk": A_rkk.squeeze(0), "B_kg": B_rkg.squeeze(0)}
 
+    def default_k_selection_plot(self):
+        """
+        Make a k-selection plot with stability and reconstruction error curves as a function of k.
+        This uses the Kotliar default hyperparameters to run consensus.
+        """
+        density_threshold_default = 0.5
+        local_neighborhood_size_default = 0.3
+
+        logger.info("Computing consensus factors with default hyperparameters...")
+        self.compute_consensus_factors(
+            k_values=None,
+            density_threshold=density_threshold_default,
+            local_neighborhood_size=local_neighborhood_size_default,
+        )
+
+        logger.info("Calculating reconstruction error (requires an entire pass through the data)...")
+        self.calculate_reconstruction_error()
+
+        k_selection_plot(
+            consensus_output=self.consensus,
+            reconstruction_error=self.reconstruction_error,
+        )
+    
     def k_selection_plot(self):
         """
         Make the k-selection plot with stability and reconstruction error curves as a function of k.
@@ -1169,12 +1218,16 @@ class NMFOutput:
             reconstruction_error=self.reconstruction_error,
         )
 
-    def plot_clustermap(self, k: int | list[int] | None):
+    def plot_clustermap(self, k: int | list[int] | None, density_threshold: float | None = None):
         """
         Make a clustermap plot of replicate factors to see how they cluster.
 
         Args:
             k: The number of components for NMF.
+            density_threshold: The density threshold for filtering factors. If None, it will use
+                the cached computation of consensus for k. If a value is provided, it will
+                recompute consensus with that density_threshold before plotting, and the new
+                consensus results will be cached.
         """
         if k is None:
             k_values = self.nmf_module.model.k_values
@@ -1186,6 +1239,12 @@ class NMFOutput:
             else:
                 raise ValueError("k must be int or None")
             
+        if density_threshold is not None:
+            self.compute_consensus_factors(
+                k_values=k_values,
+                density_threshold=density_threshold,
+            )
+
         for k in k_values:
             if k not in self.nmf_module.model.k_values:
                 raise ValueError(f"Invalid k value for trained model. Choose from {self.nmf_module.model.k_values}")
@@ -1193,5 +1252,4 @@ class NMFOutput:
             plot_clustermap(
                 consensus_output=self.consensus,
                 k=k,
-                density_threshold_for_plot=self._density_threshold,
             )
