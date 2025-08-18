@@ -448,8 +448,7 @@ reconstructed_library_size: int = 10_000
 reconstruction_latent_samples: int = 100
 
 
-# @pytest.fixture(scope="module", params=[1, 10], ids=["kl1", "kl10"])
-@pytest.fixture(scope="module", params=[1], ids=["kl1"])
+@pytest.fixture(scope="module", params=[1, 10], ids=["kl1", "kl10"])
 def max_z_kl_weight(request):
     return request.param
 
