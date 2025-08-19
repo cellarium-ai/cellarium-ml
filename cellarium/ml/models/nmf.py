@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-import tqdm
+from tqdm.auto import tqdm
 from lightning.pytorch.strategies import DDPStrategy
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
@@ -29,16 +29,25 @@ from cellarium.ml.utilities.testing import (
 
 warnings.filterwarnings("ignore")
 
-logger = logging.getLogger(__name__)
-for handler in logger.handlers[:]:
-    logger.removeHandler(handler)
-handler = logging.StreamHandler(sys.stdout)
-formatter = logging.Formatter(
-    fmt='%(name)s:cNMF - %(levelname)s - %(message)s',
-)
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+def _get_logger():
+    """Get a logger that works well in both regular Python and Jupyter notebooks."""
+    logger = logging.getLogger(__name__)
+    
+    # Only configure if not already configured
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter(
+            fmt='%(name)s - %(levelname)s - %(message)s',
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        # Prevent propagation to avoid duplicate messages
+        logger.propagate = False
+    
+    return logger
+
+logger = _get_logger()
 
 
 # def calculate_reconstruction_error(
@@ -220,6 +229,78 @@ def nmf_frobenius_loss(x: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: t
 #     #    Using lstsq for stability.
 #     Beta, residuals, rank, s = np.linalg.lstsq(XtX, XtY, rcond=None)
 #     return Beta, XtX, XtY
+
+
+def find_local_minima(mean_neighbor_distance_m: torch.Tensor, n_bins: int = 100) -> list[float]:
+    """
+    Find local minima in a histogram of distance values.
+    
+    Args:
+        mean_neighbor_distance_m: 1D tensor of distance values
+        n_bins: Number of bins for the histogram (default: 100)
+
+    Returns:
+        List of distance values corresponding to local minima (bin centers)
+    """
+    # Convert to numpy for histogram computation
+    distances = mean_neighbor_distance_m.cpu().numpy()
+    
+    # Create histogram
+    counts, bin_edges = np.histogram(distances, bins=n_bins, range=(0, 1))
+    
+    # Calculate bin centers
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    
+    # Smooth the histogram slightly to reduce noise
+    if len(counts) >= 3:
+        # Simple smoothing: each bin becomes average of itself and neighbors
+        smoothed_counts = counts.copy()
+        for i in range(1, len(counts) - 1):
+            smoothed_counts[i] = (counts[i-1] + counts[i] + counts[i+1]) / 3
+        counts = smoothed_counts
+    
+    # Find local minima in the histogram counts
+    # A local minimum is a point that is smaller than or equal to both neighbors
+    # but at least one neighbor must be strictly larger
+    local_minima_indices = []
+    
+    for i in range(1, len(counts) - 1):
+        left_count = counts[i-1]
+        center_count = counts[i]
+        right_count = counts[i+1]
+        
+        # Check if this is a local minimum
+        if (center_count <= left_count and center_count <= right_count and 
+            (center_count < left_count or center_count < right_count)):
+            local_minima_indices.append(i)
+    
+    # Convert indices to actual distance values (bin centers)
+    candidate_values = [bin_centers[i] for i in local_minima_indices]
+    
+    # Also consider the first and last bins as potential candidates
+    # if they are at the boundaries and could be minima
+    if len(counts) > 1:
+        # Add first bin if it's a potential minimum
+        if counts[0] <= counts[1]:
+            candidate_values.insert(0, bin_centers[0])
+        
+        # Add last bin if it's a potential minimum  
+        if counts[-1] <= counts[-2]:
+            candidate_values.append(bin_centers[-1])
+    
+    # Remove duplicates and sort
+    candidate_values = sorted(list(set(candidate_values)))
+    
+    # Filter out values that are too close to each other (within 5% of range)
+    min_distance = 0.05
+    filtered_candidates = []
+    for val in candidate_values:
+        if not any(abs(val - existing) < min_distance for existing in filtered_candidates):
+            filtered_candidates.append(val)
+    
+    candidate_values = filtered_candidates
+    
+    return candidate_values
 
 
 def euclidean(input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -728,9 +809,7 @@ class NonNegativeMatrixFactorization(CellariumModel):
             # x_ = torch.clamp(x_, min=0.0, max=100.0)
         
         rec_error = {}
-        for k in self.k_values:
-            if k not in consensus_factors:
-                raise KeyError(f"Missing consensus_factors key k={k}")
+        for k in consensus_factors.keys():
             D_kg = consensus_factors[k]["consensus_D_kg"]
             if (D_kg == 0).all():
                 raise ValueError("D_kg is all zeros, please train the model and run compute_consensus_factors() first")
@@ -1055,7 +1134,7 @@ class NMFOutput:
             return self._consensus
         raise UserWarning("Compute a consensus using compute_consensus_factors() -- entails hyperparameter choices")
 
-    def calculate_reconstruction_error(self) -> dict[int, float]:
+    def calculate_reconstruction_error(self, k_values: list[int] | None = None) -> dict[int, float]:
         """
         Calculate the reconstruction error for each k value.
         Stores the output in :property:`reconstruction_error`.
@@ -1066,7 +1145,7 @@ class NMFOutput:
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
         self.datamodule.setup(stage="predict")
         rec_error = {k: 0.0 for k in self.nmf_module.model.k_values}
-        for batch in tqdm.tqdm(self.datamodule.train_dataloader()):
+        for batch in tqdm(self.datamodule.train_dataloader()):
             errors_keyed_by_k = self.nmf_module.model.reconstruction_error(
                 x_ng=batch["x_ng"],
                 var_names_g=batch["var_names_g"],
@@ -1093,7 +1172,7 @@ class NMFOutput:
 
         embedding = []
         index = []
-        for batch in tqdm.tqdm(self.datamodule.train_dataloader()):
+        for batch in tqdm(self.datamodule.train_dataloader()):
             alpha_nk = self.nmf_module.model.infer_loadings(
                 x_ng=batch["x_ng"],
                 var_names_g=batch["var_names_g"],
@@ -1117,7 +1196,7 @@ class NMFOutput:
             raise KeyError(f"Missing consensus_factors key k={k}. Choose from {list(self.consensus.keys())}")
         self.datamodule.setup(stage="predict")
 
-        for batch in tqdm.tqdm(self.datamodule.train_dataloader()):
+        for batch in tqdm(self.datamodule.train_dataloader()):
             refit = self._refit(
                 x_ng=batch["x_ng"],
                 var_names_g=batch["var_names_g"],
@@ -1202,6 +1281,85 @@ class NMFOutput:
         )
 
         logger.info("Calculating reconstruction error (requires an entire pass through the data)...")
+        self.calculate_reconstruction_error()
+
+        k_selection_plot(
+            consensus_output=self.consensus,
+            reconstruction_error=self.reconstruction_error,
+        )
+
+    def maximal_stability_k_selection_plot(
+        self, 
+        fast_or_exhaustive: str = "fast",
+        density_threshold_limits: list = [0.05, 0.3],
+        local_neighborhood_size: float = 0.3,
+        max_tolerable_fraction_eliminated: float = 0.3,
+    ):
+        """
+        Make a k-selection plot with stability and reconstruction error curves as a function of k.
+        This uses the Kotliar default hyperparameter for local_neighborhood_size, but then makes
+        the determination of density_threshold into an optimization problem, which it solves separately
+        for each k. Arguably, this is an even better way to ultimately choose k.
+
+        Args:
+            fast_or_exhaustive: Whether to use fast or exhaustive search for density thresholds.
+            density_threshold_limits: The lower and upper bounds for the density threshold search.
+            local_neighborhood_size: Determines the number of neighboring runs to average distances over.
+            max_tolerable_fraction_eliminated: Do not consider a density_threshold which eliminates more than
+                this fraction of NMF runs.
+        """
+        logger.info("Computing consensus factors, searching for best density thresholds...")
+        for k in tqdm(self.nmf_module.model.k_values):
+            if fast_or_exhaustive == "fast":
+                # try to look for local minima in the density histogram
+                # first compute preliminary consensus to get neighbor distances
+                if k not in self._consensus:
+                    self.compute_consensus_factors(
+                        k_values=[k],
+                        density_threshold=0.5,  # high threshold to include most data points
+                        local_neighborhood_size=local_neighborhood_size,
+                    )
+                n_nearest_dist_ml = self.consensus[k]["all_neighbor_distances"]
+                mean_neighbor_distance_m = n_nearest_dist_ml.mean(dim=1)
+                candidate_values = [
+                    dt for dt in
+                    find_local_minima(mean_neighbor_distance_m)
+                    if ((dt >= density_threshold_limits[0]) 
+                        and (dt <= density_threshold_limits[1])
+                        and (mean_neighbor_distance_m > dt).float().mean() <= max_tolerable_fraction_eliminated)
+                ]
+                if not candidate_values:
+                    logger.warning(
+                        f"Unable to find local minima in k={k} density histogram... 'fast' mode "
+                        "will fall back to 'exhaustive'"
+                    )
+                    candidate_values = np.arange(*density_threshold_limits, 0.01)
+            elif fast_or_exhaustive == "exhaustive":
+                candidate_values = np.arange(*density_threshold_limits, 0.01)
+            else:
+                raise ValueError("fast_or_exhaustive must be 'fast' or 'exhaustive'")
+
+            best_density_threshold = 0.05
+            max_stability = 0.0
+            for density_threshold in candidate_values:
+                self.compute_consensus_factors(
+                    k_values=[k],
+                    density_threshold=density_threshold,
+                    local_neighborhood_size=local_neighborhood_size,
+                )
+                # check for improvement
+                if self.consensus[k]["stability"] > max_stability:
+                    max_stability = self.consensus[k]["stability"]
+                    best_density_threshold = density_threshold
+
+            # recompute best density threshold, storing results
+            self.compute_consensus_factors(
+                k_values=[k],
+                density_threshold=best_density_threshold,
+                local_neighborhood_size=local_neighborhood_size,
+            )
+
+        logger.info("Computing reconstruction errors...")
         self.calculate_reconstruction_error()
 
         k_selection_plot(
