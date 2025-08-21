@@ -1,8 +1,10 @@
+import concurrent.futures
 import requests
 
 import gcsfs
 import h5py
 import numpy as np
+from tqdm import tqdm
 
 
 class SeekableHTTPFile:
@@ -87,8 +89,27 @@ def get_h5ad_file_n_cells(h5ad_path: str) -> int:
 def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
     """
     Get the number of cells in each h5ad file in a list of paths.
+    ThreadPoolExecutor is used (preserves order).
     """
-    return [get_h5ad_file_n_cells(h5ad_path) for h5ad_path in h5ad_paths]
+    # return [get_h5ad_file_n_cells(h5ad_path) for h5ad_path in h5ad_paths]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=None) as executor:
+        return list(
+            tqdm(
+                executor.map(get_h5ad_file_n_cells, h5ad_paths),
+                total=len(h5ad_paths),
+                desc="Reading n_obs from h5ad files",
+                unit="file",
+            )
+        )
+    
+
+def get_h5ad_files_limits(h5ad_paths: list[str]) -> np.ndarray:
+    """
+    Return the `limits` to be used in constructing a :class:`~cellarium.ml.data.DistributedAnnDataCollection`
+    based on sizes of the provided h5ad files.
+    """
+    limits = np.cumsum(get_h5ad_files_n_cells(h5ad_paths))
+    return limits
 
 
 def get_h5ad_file_var_names_g(h5ad_path: str) -> np.ndarray:
