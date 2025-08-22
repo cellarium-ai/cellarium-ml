@@ -569,7 +569,7 @@ class NonNegativeMatrixFactorization(CellariumModel):
             An empty dictionary.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_hvg", self.var_names_hvg)
+        assert_arrays_equal("var_names_g", var_names_g)
 
         if self.log_variational:
             x_ = torch.log1p(x_ng)
