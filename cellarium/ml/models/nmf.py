@@ -448,7 +448,8 @@ class NonNegativeMatrixFactorization(CellariumModel):
     1. `Online learning for matrix factorization and sparse coding. Mairal, Bach, Ponce, Sapiro. JMLR 2009.
 
     Args:
-        var_names_g: The variable names schema for the input data.
+        var_names_g: The variable names schema for the input data: should be highly variable genes.
+        std_g: The standard deviations for the input count data: same genes as `var_names_g`.
         k_values: A list of the number of gene expression programs to infer.
         r: Number of NMF replicates (for consensus).
         log_variational: True to use a log1p preprocessing instead of what Kotliar cNMF does.
@@ -460,9 +461,8 @@ class NonNegativeMatrixFactorization(CellariumModel):
 
     def __init__(
         self,
-        # var_names_g: Sequence[str],
-        # full_g: int,
-        var_names_hvg: Sequence[str],
+        var_names_g: Sequence[str],
+        std_g: Sequence[float],
         k_values: list[int],
         r: int,
         log_variational: bool = False,
@@ -471,10 +471,11 @@ class NonNegativeMatrixFactorization(CellariumModel):
         transformed_data_mean: None | float = None,
     ) -> None:
         super().__init__()
-        # self.var_names_g = np.array(var_names_g)
-        self.var_names_hvg = np.array(var_names_hvg)
-        g = len(self.var_names_hvg)
-        self.transform__filter_to_hvgs = Filter([str(s) for s in self.var_names_hvg])
+        self.var_names_g = np.array(var_names_g)
+        # self.var_names_hvg = np.array(var_names_hvg)
+        self.std_g = np.array(std_g)
+        g = len(self.var_names_g)
+        self.transform__filter_to_hvgs = Filter([str(s) for s in self.var_names_g])
         # full_g = len(var_names_g)
         self.algorithm = algorithm
         self.log_variational = log_variational
@@ -573,7 +574,7 @@ class NonNegativeMatrixFactorization(CellariumModel):
         if self.log_variational:
             x_ = torch.log1p(x_ng)
         else:
-            std_g = torch.std(x_ng, dim=0) + 1e-4  # TODO this on-the-fly std is going to be way higher variance than the true std
+            std_g = self.std_g  # torch.std(x_ng, dim=0) + 1e-4  # TODO this on-the-fly std is going to be way higher variance than the true std
             x_ = x_ng / std_g
             # x_ = torch.clamp(x_, min=0.0, max=100.0)
 
@@ -628,7 +629,7 @@ class NonNegativeMatrixFactorization(CellariumModel):
         if self.log_variational:
             x_ = torch.log1p(x_filtered_ng)
         else:
-            std_g = torch.std(x_filtered_ng, dim=0) + 1e-4
+            std_g = self.std_g  # torch.std(x_filtered_ng, dim=0) + 1e-4
             x_ = x_filtered_ng / std_g
             # x_ = torch.clamp(x_, min=0.0, max=100.0)
 
@@ -671,7 +672,7 @@ class NonNegativeMatrixFactorization(CellariumModel):
         if self.log_variational:
             x_ = torch.log1p(x_filtered_ng)
         else:
-            std_g = torch.std(x_filtered_ng, dim=0) + 1e-4
+            std_g = self.std_g  # torch.std(x_filtered_ng, dim=0) + 1e-4
             x_ = x_filtered_ng / std_g
             # x_ = torch.clamp(x_, min=0.0, max=100.0)
         
@@ -1094,6 +1095,7 @@ class NMFOutput:
         self, 
         x_ng: torch.Tensor, 
         var_names_g: np.ndarray, 
+        std_g: np.ndarray,
         consensus_D_kg: torch.Tensor,
         refit_D_kg: torch.Tensor,
         A_kk: torch.Tensor,
@@ -1108,7 +1110,7 @@ class NMFOutput:
         if self.log_variational:
             x_ = torch.log1p(x_filtered_ng)
         else:
-            std_g = torch.std(x_filtered_ng, dim=0) + 1e-4
+            # std_g = self.std_g  # torch.std(x_filtered_ng, dim=0) + 1e-4
             x_ = x_filtered_ng / std_g
             # x_ = torch.clamp(x_, min=0.0, max=100.0)
 
