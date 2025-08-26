@@ -542,3 +542,55 @@ def test_nmf_against_sklearn_multi_device(
     fixture_alpha_uncorrelated_nk: torch.Tensor,
 ):
     pass
+
+
+def kotliar_get_norm_counts(counts: anndata.AnnData, high_variance_genes_filter: list[str]) -> anndata.AnnData:
+    """
+    Slightly modified, taken from
+    https://github.com/dylkot/cNMF/blob/7833a75484169cf448f8956224447cb110f4ba3d/src/cnmf/cnmf.py#L487
+
+    Args:
+        counts: Scanpy AnnData object (cells x genes) containing raw counts. Filtered such that
+        no genes or cells with 0 counts
+
+    high_variance_genes_filter: A pre-specified list of genes considered to be high-variance.
+        Only these genes will be used during factorization of the counts matrix.
+        Must match the .var index of counts.
+
+    Returns:
+        normcounts: anndata.AnnData, shape (cells, num_highvar_genes)
+            Has a `.X` count matrix containing only the high variance genes with columns (genes)
+            normalized to unit variance
+
+    """
+    ## Subset out high-variance genes
+    norm_counts = counts[:, high_variance_genes_filter].copy()
+    norm_counts.X = norm_counts.X.astype(np.float64)
+
+    ## Scale genes to unit variance
+    norm_counts.X /= norm_counts.X.std(axis=0, ddof=1)
+    if np.isnan(norm_counts.X).sum().sum() > 0:
+        print('Warning NaNs in normalized counts matrix')
+
+    ## Check for any cells that have 0 counts of the overdispersed genes
+    zerocells = np.array(norm_counts.X.sum(axis=1) == 0).reshape(-1)
+    if zerocells.sum() > 0:
+        examples = norm_counts.obs.index[np.ravel(zerocells)]
+        raise Exception(
+            f'Error: {zerocells.sum()} cells have zero counts of overdispersed genes. E.g. {", ".join(examples[:4])}. '
+            'Filter those cells and re-run or adjust the number of overdispersed genes. Quitting!'
+        )
+
+    return norm_counts
+
+
+def test_preprocessing_matches_kotliar():
+    pass
+
+
+def test_consensus_matches_kotliar():
+    pass
+
+
+def test_refit_all_genes_matches_kotliar():
+    pass
