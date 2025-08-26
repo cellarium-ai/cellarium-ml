@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "git+https://github.com/sjfleming/anndata.git@sf-backed-hdf5-fancy-indexing",
+  "anndata @ git+https://github.com/sjfleming/anndata.git@sf-backed-hdf5-fancy-indexing",
   "boltons",
   "braceexpand",
   "crick>=0.0.4",
