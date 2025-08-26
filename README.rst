@@ -1,5 +1,5 @@
 .. image:: https://cellarium.ai/wp-content/uploads/2024/07/cellarium-logo-medium.png
-   :alt: Cellarium Logo
+   :alt: Cellarium Logo!!
    :width: 180
    :align: center
 
