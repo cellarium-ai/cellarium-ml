@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Machine learning library for single-cell data analysis"
 readme = "README.rst"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {file = "LICENSE.md"}
 classifiers = [
   "Intended Audience :: Developers",
@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "anndata",
+  "git+https://github.com/sjfleming/anndata.git@sf-backed-hdf5-fancy-indexing",
   "boltons",
   "braceexpand",
   "crick>=0.0.4",
