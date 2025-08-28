@@ -3,6 +3,7 @@
 
 """Flexible modified version of single-cell variational inference (scVI) re-implemented in Cellarium ML."""
 
+from abc import abstractmethod
 import importlib
 import itertools
 import logging
@@ -44,13 +45,13 @@ def weights_init(m):
     if isinstance(m, torch.nn.BatchNorm1d):
         torch.nn.init.normal_(m.weight, 1.0, 0.02)
         torch.nn.init.zeros_(m.bias)
-    elif isinstance(m, torch.nn.Linear) or isinstance(m, LinearWithBatch):
+    elif isinstance(m, torch.nn.Linear) or isinstance(m, LinearWithStructuredBias):
         torch.nn.init.xavier_normal_(m.weight)
         if m.bias is not None:
             torch.nn.init.zeros_(m.bias)
 
 
-class LinearWithBatch(torch.nn.Linear):
+class LinearWithStructuredBias(torch.nn.Linear):
     """A `torch.nn.Linear` layer where batch indices are given as input to the forward pass.
 
     Args:
@@ -59,9 +60,9 @@ class LinearWithBatch(torch.nn.Linear):
         n_batch: the dimensionality of the batch representation
         categorical_covariate_dimensions: a list of integers containing the number of categories
             for each categorical covariate
-        batch_to_bias_hidden_layers: a list of hidden layer sizes for the batch-to-bias decoder
+        label_to_bias_hidden_layers: a list of hidden layer sizes for the label-to-bias decoder
         bias: passed to `torch.nn.Linear` (True is like the scvi-tools implementation)
-        batch_to_bias_dressing_init_kwargs: a dictionary of keyword arguments to pass to
+        label_to_bias_dressing_init_kwargs: a dictionary of keyword arguments to pass to
             the `DressedLayer` constructor
     """
 
@@ -69,20 +70,23 @@ class LinearWithBatch(torch.nn.Linear):
         self,
         in_features: int,
         out_features: int,
-        n_batch: int,
-        batch_to_bias_hidden_layers: list[int],
+        label_to_bias_hidden_layers: list[int],
+        n_batch: int = 0,
         categorical_covariate_dimensions: list[int] = [],
         bias: bool = True,
-        batch_to_bias_dressing_init_kwargs: dict[str, Any] = {},
+        label_to_bias_dressing_init_kwargs: dict[str, Any] = {},
     ):
         super().__init__(in_features, out_features, bias=bias)
+        if n_batch + sum(categorical_covariate_dimensions) < 1:
+            raise ValueError("in_features=0: at least one batch or categorical covariate dimension must be provided.")
         self.bias_decoder = FullyConnectedLinear(
             in_features=n_batch + sum(categorical_covariate_dimensions),
             out_features=out_features,
-            n_hidden=batch_to_bias_hidden_layers,
-            dressing_init_kwargs=batch_to_bias_dressing_init_kwargs,
+            n_hidden=label_to_bias_hidden_layers,
+            dressing_init_kwargs=label_to_bias_dressing_init_kwargs,
         )
 
+    @abstractmethod
     def compute_bias(
         self,
         batch_nb: torch.Tensor,
@@ -98,10 +102,7 @@ class LinearWithBatch(torch.nn.Linear):
         Returns:
             a tensor of shape (n, out_features)
         """
-        if categorical_covariate_np is None:
-            return self.bias_decoder(batch_nb)
-        else:
-            return self.bias_decoder(torch.cat([batch_nb, categorical_covariate_np], dim=-1))
+        pass
 
     def forward(  # type: ignore[override]
         self,
@@ -124,6 +125,38 @@ class LinearWithBatch(torch.nn.Linear):
         return super().forward(x_ng) + self.compute_bias(
             batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np
         )
+
+class LinearWithBatchAndCovariates(LinearWithStructuredBias):
+    def compute_bias(
+        self,
+        batch_nb: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if categorical_covariate_np is None:
+            raise ValueError("Categorical covariates must be provided to LinearWithBatchAndCovariates")
+        else:
+            return self.bias_decoder(torch.cat([batch_nb, categorical_covariate_np], dim=-1))
+        
+
+class LinearWithBatch(LinearWithStructuredBias):
+    def compute_bias(
+        self,
+        batch_nb: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.bias_decoder(batch_nb)
+    
+
+class LinearWithCovariates(LinearWithStructuredBias):
+    def compute_bias(
+        self,
+        batch_nb: torch.Tensor,
+        categorical_covariate_np: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if categorical_covariate_np is None:
+            raise ValueError("Categorical covariates must be provided to LinearWithCovariates")
+        else:
+            return self.bias_decoder(categorical_covariate_np)
 
 
 class FullyConnectedWithBatchArchitecture(torch.nn.Module):
@@ -190,7 +223,7 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
         for dressed_layer in self.module_list:
             x_ = (
                 dressed_layer(x_, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
-                if (hasattr(dressed_layer, "layer") and isinstance(dressed_layer.layer, LinearWithBatch))
+                if (hasattr(dressed_layer, "layer") and isinstance(dressed_layer.layer, LinearWithStructuredBias))
                 else dressed_layer(x_)
             )
         return x_
@@ -237,7 +270,7 @@ class EncoderSCVI(torch.nn.Module):
             bias=final_layer["init_args"].get("bias", True),
             **final_layer["init_args"],
         )
-        self.mean_encoder_takes_batch = isinstance(self.mean_encoder, LinearWithBatch)
+        self.mean_encoder_injects_covariates = isinstance(self.mean_encoder, LinearWithStructuredBias)
         self.var_eps = var_eps
 
     def forward(
@@ -249,13 +282,13 @@ class EncoderSCVI(torch.nn.Module):
         q_nh = self.fully_connected(x_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
         q_mean_nk = (
             self.mean_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
-            if self.mean_encoder_takes_batch
+            if self.mean_encoder_injects_covariates
             else self.mean_encoder(q_nh)
         )
         q_var_nk = (
             torch.exp(
                 self.var_encoder(q_nh, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
-                if self.mean_encoder_takes_batch
+                if self.mean_encoder_injects_covariates
                 else self.var_encoder(q_nh)
             )
             + self.var_eps
@@ -321,7 +354,7 @@ class DecoderSCVI(torch.nn.Module):
             bias=final_layer["init_args"].pop("bias", True),
             **final_layer["init_args"],
         )
-        self.count_decoder_takes_batch = isinstance(self.normalized_count_decoder, LinearWithBatch)
+        self.count_decoder_takes_batch = isinstance(self.normalized_count_decoder, LinearWithStructuredBias)
         self.normalized_count_activation = (
             torch.nn.Softmax(dim=-1) if (scale_activation == "softmax") else torch.nn.Softplus()
         )
@@ -638,6 +671,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         for layer in encoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
                 layer["init_args"]["n_batch"] = self.n_latent_batch
+                layer["init_args"]["categorical_covariate_dimensions"] = []
+            elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithCovariates":
+                layer["init_args"]["n_batch"] = 0
+                layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+            elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
+                layer["init_args"]["n_batch"] = self.n_latent_batch
                 layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
             if "dressing_init_args" not in layer:
                 layer["dressing_init_args"] = {}
@@ -661,12 +700,24 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         assert isinstance(encoder["final_layer"], dict)
         if encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
             encoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
+            encoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = []
+        elif encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithCovariates":
+            encoder["final_layer"]["init_args"]["n_batch"] = 0
+            encoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+        elif encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
+            encoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
             encoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
 
         # decoder layers
         assert isinstance(decoder["hidden_layers"], list), "decoder hidden_layers must be a list"
         for layer in decoder["hidden_layers"]:
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
+                layer["init_args"]["n_batch"] = self.n_latent_batch
+                layer["init_args"]["categorical_covariate_dimensions"] = []
+            elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithCovariates":
+                layer["init_args"]["n_batch"] = 0
+                layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+            elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
                 layer["init_args"]["n_batch"] = self.n_latent_batch
                 layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
             if "dressing_init_args" not in layer:
@@ -692,6 +743,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
         assert isinstance(decoder["final_layer"], dict)
         if decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
+            decoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
+            decoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = []
+        elif decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithCovariates":
+            decoder["final_layer"]["init_args"]["n_batch"] = 0
+            decoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+        elif decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
             decoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
             decoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
 
