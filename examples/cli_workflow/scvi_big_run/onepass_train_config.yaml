@@ -1,7 +1,7 @@
 # lightning.pytorch==2.2.1
 seed_everything: true
 trainer:
-  accelerator: cpu
+  accelerator: auto
   strategy:
     class_path: lightning.pytorch.strategies.DDPStrategy
     init_args:
@@ -75,11 +75,11 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: gs://cellarium-human-primary-data/curriculum/human_all_primary_20241108/extract_files/extract_{0..4440}.h5ad
+      filenames: /local/path/to/extract_{0..4601}_subset.h5ad
       limits: null
       shard_size: 10_000
-      last_shard_size: 6428
-      max_cache_size: 2
+      last_shard_size: 8326
+      max_cache_size: 3
       cache_size_strictly_enforced: true
       label: null
       keys: null
@@ -97,7 +97,7 @@ data:
     total_mrna_umis_n:
       attr: obs
       key: total_mrna_umis
-  batch_size: 5000
+  batch_size: 4096
   iteration_strategy: cache_efficient
   shuffle: false
   shuffle_seed: 0
@@ -105,7 +105,7 @@ data:
   drop_incomplete_batch: false
   worker_seed: null
   test_mode: false
-  num_workers: 8
-  prefetch_factor: null
+  num_workers: 14
+  prefetch_factor: 3
   persistent_workers: true
 ckpt_path: null
