@@ -58,7 +58,8 @@ model:
       batch_representation_sampled: false
       n_latent_batch: null
       batch_kl_weight_max: 0.0
-      kl_warmup_epochs: 20
+      kl_warmup_epochs: null
+      kl_warmup_steps: 60_000
       kl_annealing_start: 0.0
       z_kl_weight_max: 1.0
       encoder: 
@@ -116,10 +117,10 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: /local/path/to/extract_{0..4440}_subset.h5ad
+      filenames: /local/path/to/extract_{0..4601}_subset.h5ad
       limits: null
       shard_size: 10_000
-      last_shard_size: 6428
+      last_shard_size: 8326
       max_cache_size: 3
       cache_size_strictly_enforced: true
       label: null
@@ -141,12 +142,12 @@ data:
       attr: obs
       key: donor_dataset_concat
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
-    #categorical_covariate_index_nd:
-    #  attr: obs
-    #  key: 
-    #    - suspension_type
-    #    - assay
-    #  convert_fn: cellarium.ml.utilities.data.categories_to_codes
+    categorical_covariate_index_nd:
+     attr: obs
+     key: 
+       - suspension_type
+       - assay
+     convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 1024
   iteration_strategy: cache_efficient
   shuffle: true
