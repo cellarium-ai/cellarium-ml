@@ -667,9 +667,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         use_layer_norm_encoder = use_layer_norm == "encoder" or use_layer_norm == "both"
         use_layer_norm_decoder = use_layer_norm == "decoder" or use_layer_norm == "both"
 
-        # encoder layers
-        assert isinstance(encoder["hidden_layers"], list), "encoder hidden_layers must be a list"
-        for layer in encoder["hidden_layers"]:
+        def _fill_in_layer_input_args(layer: dict):
             if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
                 layer["init_args"]["n_batch"] = self.n_latent_batch
                 layer["init_args"]["categorical_covariate_dimensions"] = []
@@ -679,79 +677,52 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
                 layer["init_args"]["n_batch"] = self.n_latent_batch
                 layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+
+        def _fill_in_layer_defaults(layer: dict, batch_norm: bool, layer_norm: bool, dropout_p: float):
             if "dressing_init_args" not in layer:
                 layer["dressing_init_args"] = {}
             if "use_batch_norm" not in layer["dressing_init_args"]:
-                logger.info(
-                    "use_batch_norm not specified individually in encoder hidden layer, "
-                    f"setting to {use_batch_norm_encoder}"
-                )
-                layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_encoder
+                logger.info(f"use_batch_norm not specified individually in hidden layer, setting to {batch_norm}")
+                layer["dressing_init_args"]["use_batch_norm"] = batch_norm
             if "use_layer_norm" not in layer["dressing_init_args"]:
-                logger.info(
-                    "use_layer_norm not specified individually in encoder hidden layer, "
-                    f"setting to {use_layer_norm_encoder}"
-                )
-                layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_encoder
+                logger.info(f"use_layer_norm not specified individually in hidden layer, setting to {layer_norm}")
+                layer["dressing_init_args"]["use_layer_norm"] = layer_norm
             if "dropout_rate" not in layer["dressing_init_args"]:
-                logger.info(
-                    f"dropout_rate not specified individually in encoder hidden layer, setting to {dropout_rate}"
-                )
-                layer["dressing_init_args"]["dropout_rate"] = dropout_rate
+                logger.info(f"dropout_rate not specified individually in hidden layer, setting to {dropout_p}")
+                layer["dressing_init_args"]["dropout_rate"] = dropout_p
+
+        # encoder layers
+        assert isinstance(encoder["hidden_layers"], list), "encoder hidden_layers must be a list"
+        for layer in encoder["hidden_layers"]:
+            _fill_in_layer_input_args(layer)
+            _fill_in_layer_defaults(
+                layer,
+                batch_norm=use_batch_norm_encoder,
+                layer_norm=use_layer_norm_encoder,
+                dropout_p=dropout_rate,
+            )
         assert isinstance(encoder["final_layer"], dict)
-        if encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
-            encoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
-            encoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = []
-        elif encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithCovariates":
-            encoder["final_layer"]["init_args"]["n_batch"] = 0
-            encoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
-        elif encoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
-            encoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
-            encoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+        _fill_in_layer_input_args(encoder["final_layer"])
 
         # decoder layers
         assert isinstance(decoder["hidden_layers"], list), "decoder hidden_layers must be a list"
         for layer in decoder["hidden_layers"]:
-            if layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
-                layer["init_args"]["n_batch"] = self.n_latent_batch
-                layer["init_args"]["categorical_covariate_dimensions"] = []
-            elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithCovariates":
-                layer["init_args"]["n_batch"] = 0
-                layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
-            elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
-                layer["init_args"]["n_batch"] = self.n_latent_batch
-                layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
-            if "dressing_init_args" not in layer:
-                layer["dressing_init_args"] = {}
-            if "use_batch_norm" not in layer["dressing_init_args"]:
-                logger.info(
-                    "use_batch_norm not specified individually in decoder hidden layer, "
-                    f"setting to {use_batch_norm_decoder}"
-                )
-                layer["dressing_init_args"]["use_batch_norm"] = use_batch_norm_decoder
-            if "use_layer_norm" not in layer["dressing_init_args"]:
-                logger.info(
-                    "use_layer_norm not specified individually in decoder hidden layer, "
-                    f"setting to {use_layer_norm_decoder}"
-                )
-                layer["dressing_init_args"]["use_layer_norm"] = use_layer_norm_decoder
-            if "dropout_rate" in layer["dressing_init_args"]:
+            _fill_in_layer_input_args(layer)
+            if "dressing_init_args" in layer and "dropout_rate" in layer["dressing_init_args"]:
                 if layer["dressing_init_args"]["dropout_rate"] != 0.0:
                     logger.warning(
                         "Dropout is not supported in the decoder of scVI. "
                         "dropout_rate is being set to 0.0 in all decoder hidden layers."
                     )
                     layer["dressing_init_args"]["dropout_rate"] = 0.0  # scvi-tools does not use dropout in the decoder
+            _fill_in_layer_defaults(
+                layer,
+                batch_norm=use_batch_norm_decoder,
+                layer_norm=use_layer_norm_decoder,
+                dropout_p=0,
+            )
         assert isinstance(decoder["final_layer"], dict)
-        if decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatch":
-            decoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
-            decoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = []
-        elif decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithCovariates":
-            decoder["final_layer"]["init_args"]["n_batch"] = 0
-            decoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
-        elif decoder["final_layer"]["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
-            decoder["final_layer"]["init_args"]["n_batch"] = self.n_latent_batch
-            decoder["final_layer"]["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+        _fill_in_layer_input_args(decoder["final_layer"])
 
         self.z_encoder = EncoderSCVI(
             in_features=self.n_input,
