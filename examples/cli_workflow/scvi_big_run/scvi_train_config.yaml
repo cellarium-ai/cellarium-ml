@@ -40,7 +40,7 @@ model:
       init_args:
         filter_list:
           !FileLoader
-          file_path: /home/sfleming/scvi_runs/20250828_onepass_hvg_2000.csv
+          file_path: /home/sfleming/scvi_runs/20250828_hvg_plus_glyco_6358.csv
           loader_fn: pandas.read_csv
           attr: "ensembl_id"
           convert_fn: pandas.Series.to_list
