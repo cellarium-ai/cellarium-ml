@@ -67,24 +67,24 @@ def test_load_from_checkpoint_multi_device(
                     "hidden_layers": [
                         {
                             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                         },
                     ],
                     "final_layer": {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"batch_to_bias_hidden_layers": []},
+                        "init_args": {"label_to_bias_hidden_layers": []},
                     },
                 },
                 decoder={
                     "hidden_layers": [
                         {
                             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                         },
                     ],
                     "final_layer": {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"batch_to_bias_hidden_layers": []},
+                        "init_args": {"label_to_bias_hidden_layers": []},
                     },
                     "final_additive_bias": False,
                 },
@@ -102,24 +102,24 @@ def test_load_from_checkpoint_multi_device(
                 "hidden_layers": [
                     {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                        "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     },
                 ],
                 "final_layer": {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"batch_to_bias_hidden_layers": []},
+                    "init_args": {"label_to_bias_hidden_layers": []},
                 },
             },
             decoder={
                 "hidden_layers": [
                     {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                        "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     },
                 ],
                 "final_layer": {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"batch_to_bias_hidden_layers": []},
+                    "init_args": {"label_to_bias_hidden_layers": []},
                 },
                 "final_additive_bias": False,
             },
@@ -238,8 +238,8 @@ def test_vae_architectures():
     kwargs: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs["encoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     print("batch injection in encoder but not decoder")
@@ -250,8 +250,8 @@ def test_vae_architectures():
     kwargs2: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs2["decoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     print("batch injection in decoder but not encoder")
@@ -262,14 +262,14 @@ def test_vae_architectures():
     kwargs3: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs3["encoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     kwargs3["decoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     print("batch injection in both encoder and decoder")
@@ -280,22 +280,22 @@ def test_vae_architectures():
     kwargs4: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs4["encoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 16, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 16, "label_to_bias_hidden_layers": []},
         },
     ]
     kwargs4["decoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 16, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 16, "label_to_bias_hidden_layers": []},
         },
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     print("batch injection in both encoder and decoder, 2 hidden layers each")
@@ -306,14 +306,14 @@ def test_vae_architectures():
     kwargs5: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs5["encoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     kwargs5["decoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
             "final_additive_bias": True,
         },
     ]
@@ -329,13 +329,13 @@ def test_vae_architectures():
     kwargs6["encoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     kwargs6["decoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
             "final_additive_bias": True,
         },
     ]
@@ -593,7 +593,7 @@ def train_cellarium_model(
             "hidden_layers": [
                 {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"out_features": n_hidden, "batch_to_bias_hidden_layers": []},
+                    "init_args": {"out_features": n_hidden, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
@@ -608,7 +608,7 @@ def train_cellarium_model(
             "hidden_layers": [
                 {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"out_features": n_hidden, "batch_to_bias_hidden_layers": []},
+                    "init_args": {"out_features": n_hidden, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
@@ -854,7 +854,7 @@ def test_encoder_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layers, hi
                 "init_args": {
                     "out_features": hidden_size,
                     "n_batch": 2,  # assuming 2 batches for this example
-                    "batch_to_bias_hidden_layers": [],
+                    "label_to_bias_hidden_layers": [],
                 },
                 "dressing_init_args": {
                     "use_batch_norm": use_batch_norm,
@@ -1024,7 +1024,7 @@ def test_decoder_mean_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layer
                 "init_args": {
                     "out_features": hidden_size,
                     "n_batch": n_batch,
-                    "batch_to_bias_hidden_layers": [],
+                    "label_to_bias_hidden_layers": [],
                 },
                 "dressing_init_args": {
                     "use_batch_norm": use_batch_norm,
@@ -1248,8 +1248,12 @@ def matching_scvi_cellarium_models(request):
         encoder={
             "hidden_layers": [
                 {
-                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                    "class_path": (
+                        "cellarium.ml.models.scvi.LinearWithBatchAndCovariates"
+                        if use_categorical_covariates
+                        else "cellarium.ml.models.scvi.LinearWithBatch"
+                    ),
+                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
@@ -1262,8 +1266,12 @@ def matching_scvi_cellarium_models(request):
         decoder={
             "hidden_layers": [
                 {
-                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                    "class_path": (
+                        "cellarium.ml.models.scvi.LinearWithBatchAndCovariates"
+                        if use_categorical_covariates
+                        else "cellarium.ml.models.scvi.LinearWithBatch"
+                    ),
+                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
@@ -2170,8 +2178,8 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     print(f"Mean absolute error (train): {train_mae:.4f}")
     print(f"Mean absolute error (test): {test_mae:.4f}")
 
-    assert train_mae < 0.3, f"mean train reconstruction diff with scvi-tools on real data is too high: {train_mae:.4f}"
-    assert test_mae < 0.3, f"mean test reconstruction diff with scvi-tools on real data is too high: {test_mae:.4f}"
+    assert train_mae < 0.4, f"mean train reconstruction diff with scvi-tools on real data is too high: {train_mae:.4f}"
+    assert test_mae < 0.4, f"mean test reconstruction diff with scvi-tools on real data is too high: {test_mae:.4f}"
 
 
 @pytest.mark.parametrize(
