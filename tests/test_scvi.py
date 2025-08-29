@@ -1020,7 +1020,7 @@ def test_decoder_mean_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layer
         out_features=g,
         hidden_layers=[
             {
-                "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+                "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
                 "init_args": {
                     "out_features": hidden_size,
                     "n_batch": n_batch,
@@ -1249,8 +1249,9 @@ def matching_scvi_cellarium_models(request):
             "hidden_layers": [
                 {
                     "class_path": (
-                        "cellarium.ml.models.scvi.LinearWithBatchAndCovariates" 
-                        if use_categorical_covariates else "cellarium.ml.models.scvi.LinearWithBatch"
+                        "cellarium.ml.models.scvi.LinearWithBatchAndCovariates"
+                        if use_categorical_covariates
+                        else "cellarium.ml.models.scvi.LinearWithBatch"
                     ),
                     "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
@@ -1266,8 +1267,9 @@ def matching_scvi_cellarium_models(request):
             "hidden_layers": [
                 {
                     "class_path": (
-                        "cellarium.ml.models.scvi.LinearWithBatchAndCovariates" 
-                        if use_categorical_covariates else "cellarium.ml.models.scvi.LinearWithBatch"
+                        "cellarium.ml.models.scvi.LinearWithBatchAndCovariates"
+                        if use_categorical_covariates
+                        else "cellarium.ml.models.scvi.LinearWithBatch"
                     ),
                     "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {

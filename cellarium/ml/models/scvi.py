@@ -3,10 +3,10 @@
 
 """Flexible modified version of single-cell variational inference (scVI) re-implemented in Cellarium ML."""
 
-from abc import abstractmethod
 import importlib
 import itertools
 import logging
+from abc import abstractmethod
 from typing import Any, Literal, Sequence
 
 import lightning.pytorch as pl
@@ -126,6 +126,7 @@ class LinearWithStructuredBias(torch.nn.Linear):
             batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np
         )
 
+
 class LinearWithBatchAndCovariates(LinearWithStructuredBias):
     def compute_bias(
         self,
@@ -136,7 +137,7 @@ class LinearWithBatchAndCovariates(LinearWithStructuredBias):
             raise ValueError("Categorical covariates must be provided to LinearWithBatchAndCovariates")
         else:
             return self.bias_decoder(torch.cat([batch_nb, categorical_covariate_np], dim=-1))
-        
+
 
 class LinearWithBatch(LinearWithStructuredBias):
     def compute_bias(
@@ -145,7 +146,7 @@ class LinearWithBatch(LinearWithStructuredBias):
         categorical_covariate_np: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.bias_decoder(batch_nb)
-    
+
 
 class LinearWithCovariates(LinearWithStructuredBias):
     def compute_bias(
