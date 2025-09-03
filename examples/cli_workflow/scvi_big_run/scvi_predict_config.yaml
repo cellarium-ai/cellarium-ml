@@ -135,6 +135,8 @@ data:
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
       attr: var_names
+    obs_names_n:
+      attr: obs_names
     batch_index_n:
       attr: obs
       key: cellarium_scvi_batch
