@@ -64,16 +64,16 @@ model:
       z_kl_weight_max: 1.0
       encoder: 
         hidden_layers:
-        - class_path: cellarium.ml.models.scvi.LinearWithBatch
-        # - class_path: torch.nn.Linear
+        # - class_path: cellarium.ml.models.scvi.LinearWithBatch
+        - class_path: torch.nn.Linear
           init_args:
             out_features: 128
-            batch_to_bias_hidden_layers: []  # one linear transformation: what scvi-tools does
-        - class_path: cellarium.ml.models.scvi.LinearWithBatch
-        # - class_path: torch.nn.Linear
+            # batch_to_bias_hidden_layers: []  # one linear transformation: what scvi-tools does
+        # - class_path: cellarium.ml.models.scvi.LinearWithBatch
+        - class_path: torch.nn.Linear
           init_args:
             out_features: 128
-            batch_to_bias_hidden_layers: []
+            # batch_to_bias_hidden_layers: []
         final_layer:
           class_path: torch.nn.Linear
           init_args: {}
