@@ -59,7 +59,7 @@ model:
       n_latent_batch: null
       batch_kl_weight_max: 0.0
       kl_warmup_epochs: null
-      kl_warmup_steps: 898_800
+      kl_warmup_steps: 44_940
       kl_annealing_start: 0.0
       z_kl_weight_max: 1.0
       encoder: 
@@ -142,12 +142,12 @@ data:
       attr: obs
       key: cellarium_scvi_batch
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
-    categorical_covariate_index_nd:
-     attr: obs
-     key: 
-       - suspension_type
-       - assay
-     convert_fn: cellarium.ml.utilities.data.categories_to_codes
+    # categorical_covariate_index_nd:
+    #  attr: obs
+    #  key: 
+    #    - suspension_type
+    #    - assay
+    #  convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 1024
   iteration_strategy: cache_efficient
   shuffle: true
