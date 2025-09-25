@@ -9,7 +9,7 @@ from typing import Any
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.core.pipeline import CellariumPipeline
@@ -421,15 +421,9 @@ class CellariumModule(pl.LightningModule):
             if callable(set_epoch):
                 set_epoch(self.current_epoch)
 
-    def on_train_start(self) -> None:
-        """
-        Calls the ``on_train_start`` method on the :attr:`model` attribute.
-        If the :attr:`model` attribute has ``on_train_start`` method defined, then
-        ``on_train_start`` must be called at the beginning of training.
-        """
-        on_train_start = getattr(self.model, "on_train_start", None)
-        if callable(on_train_start):
-            on_train_start(self.trainer)
+        on_train_epoch_start = getattr(self.model, "on_train_epoch_start", None)
+        if callable(on_train_epoch_start):
+            on_train_epoch_start(self.trainer)
 
     def on_train_epoch_end(self) -> None:
         """
@@ -455,14 +449,6 @@ class CellariumModule(pl.LightningModule):
         on_train_epoch_end = getattr(self.model, "on_train_epoch_end", None)
         if callable(on_train_epoch_end):
             on_train_epoch_end(self.trainer)
-
-    def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
-        """
-        Calls the ``on_train_batch_end`` method on the module.
-        """
-        on_train_batch_end = getattr(self.model, "on_train_batch_end", None)
-        if callable(on_train_batch_end):
-            on_train_batch_end(self.trainer)
 
     def move_cpu_transforms_to_dataloader(self) -> None:
         if not self._cpu_transforms_in_module_pipeline:
@@ -508,3 +494,63 @@ class CellariumModule(pl.LightningModule):
                 checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["completed"] += 1
                 checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["completed"] += 1
                 checkpoint["CellariumAnnDataDataModule"]["epoch"] += 1
+
+
+# define a decorator to dynamically add methods
+def add_delegate_method(method_name):
+    def delegate_method(self, *args, **kwargs):
+        method = getattr(self.model, method_name, None)
+        if callable(method):
+            method(self.trainer)
+
+    delegate_method.__name__ = method_name
+    delegate_method.__doc__ = f"Delegates the `{method_name}` hook to the model if defined."
+    setattr(CellariumModule, method_name, delegate_method)
+
+
+# list of all Lightning hook methods to delegate, which comes from:
+# >>> all_methods = dir(pl.LightningModule)
+# >>> all_hooks = [method for method in all_methods if method.startswith("on_") and not ("checkpoint" in method)]
+# >>> explicitly_implemented_hooks = ["on_train_epoch_start", "on_train_epoch_end"]
+# >>> omit_hooks = ["on_after_batch_transfer", "on_before_batch_transfer", "on_gpu"]
+# >>> passthrough_hooks = [hook for hook in all_hooks if hook not in (explicitly_implemented_hooks + omit_hooks)]
+passthrough_hooks = [
+    "on_after_backward",
+    "on_before_backward",
+    "on_before_optimizer_step",
+    "on_before_zero_grad",
+    "on_fit_end",
+    "on_fit_start",
+    "on_predict_batch_end",
+    "on_predict_batch_start",
+    "on_predict_end",
+    "on_predict_epoch_end",
+    "on_predict_epoch_start",
+    "on_predict_model_eval",
+    "on_predict_start",
+    "on_test_batch_end",
+    "on_test_batch_start",
+    "on_test_end",
+    "on_test_epoch_end",
+    "on_test_epoch_start",
+    "on_test_model_eval",
+    "on_test_model_train",
+    "on_test_start",
+    "on_train_batch_end",
+    "on_train_batch_start",
+    "on_train_end",
+    "on_train_start",
+    "on_validation_batch_end",
+    "on_validation_batch_start",
+    "on_validation_end",
+    "on_validation_epoch_end",
+    "on_validation_epoch_start",
+    "on_validation_model_eval",
+    "on_validation_model_train",
+    "on_validation_model_zero_grad",
+    "on_validation_start",
+]
+
+# dynamically add all hooks
+for hook in passthrough_hooks:
+    add_delegate_method(hook)
