@@ -1,7 +1,7 @@
 from collections import defaultdict
 from operator import itemgetter
 
-from single_label_prediction.cell_ontology_cache import CL_CELL_ROOT_NODE, CellOntologyCache
+from cell_ontology_cache import CL_CELL_ROOT_NODE, CellOntologyCache
 
 # AnnData-related constants
 CAS_CL_SCORES_ANNDATA_OBSM_KEY = "socam_cl_scores"
