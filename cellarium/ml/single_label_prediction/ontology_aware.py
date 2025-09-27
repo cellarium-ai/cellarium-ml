@@ -1,12 +1,11 @@
 from collections import defaultdict
 from operator import itemgetter
 
-from cell_ontology_cache import CL_CELL_ROOT_NODE, CellOntologyCache
-
 # AnnData-related constants
 CAS_CL_SCORES_ANNDATA_OBSM_KEY = "socam_cl_scores"
 CAS_METADATA_ANNDATA_UNS_KEY = "socam_metadata"
-
+# the 'cell' node
+CL_CELL_ROOT_NODE = "CL_0000000"
 
 def get_most_granular_top_k_calls(
     aggregated_scores_c,
