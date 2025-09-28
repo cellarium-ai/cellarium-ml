@@ -456,6 +456,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         if self.resume_step is not None:
             num_epochs_that_stepped, num_batches_that_stepped = divmod(self.resume_step, batches_per_replica)
             print(f'self.resume_step: {self.resume_step}, num_epochs_that_stepped: {num_epochs_that_stepped}, num_batches_that_stepped: {num_batches_that_stepped}')
+            print(f'self.epoch: {self.epoch}, rank: {rank}, worker_id: {worker_id}, num_workers: {num_workers}')
 
             # self.epoch can be inconsistent with the global step if checkpointed mid-epoch and not adjusted
             if self.epoch < num_epochs_that_stepped:
