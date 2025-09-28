@@ -132,6 +132,7 @@ data:
         # - donor_dataset_concat
         # - suspension_type
         # - assay
+      resume_step: 1168440
   batch_keys:
     x_ng:
       attr: X
