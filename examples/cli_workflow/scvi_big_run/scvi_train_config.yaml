@@ -132,7 +132,6 @@ data:
         # - donor_dataset_concat
         # - suspension_type
         # - assay
-      resume_step: 1168440
   batch_keys:
     x_ng:
       attr: X
@@ -160,4 +159,5 @@ data:
   num_workers: 14
   prefetch_factor: 3
   persistent_workers: true
+  resume_step: 1168440
 ckpt_path: gs://cellarium-dev/scvi_glyco/scvi_nothing_encoded/lightning_logs/version_1/checkpoints/epoch=25-step=1168440.ckpt
