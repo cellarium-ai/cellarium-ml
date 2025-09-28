@@ -67,12 +67,12 @@ model:
         # - class_path: cellarium.ml.models.scvi.LinearWithBatch
         - class_path: torch.nn.Linear
           init_args:
-            out_features: 512
+            out_features: 128
             # batch_to_bias_hidden_layers: []  # one linear transformation: what scvi-tools does
         # - class_path: cellarium.ml.models.scvi.LinearWithBatch
         - class_path: torch.nn.Linear
           init_args:
-            out_features: 512
+            out_features: 128
             # batch_to_bias_hidden_layers: []
         final_layer:
           class_path: torch.nn.Linear
@@ -81,17 +81,17 @@ model:
         hidden_layers:
         - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
-            out_features: 512
+            out_features: 128
             batch_to_bias_hidden_layers: []
         - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
-            out_features: 512
+            out_features: 128
             batch_to_bias_hidden_layers: []
         final_layer: 
           class_path: torch.nn.Linear
           init_args: {}
         final_additive_bias: false
-      n_latent: 256
+      n_latent: 50
 
       # probably leave these alone
       n_continuous_cov: 0
@@ -159,4 +159,4 @@ data:
   num_workers: 14
   prefetch_factor: 3
   persistent_workers: true
-ckpt_path: null
+ckpt_path: /home/sfleming/scvi_runs/lightning_logs/version_8/checkpoints/epoch=26-step=1213380.ckpt
