@@ -40,7 +40,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 lint = ["ruff"]
-mypy = ["mypy", "types-PyYAML"]
+mypy = ["mypy", "types-PyYAML", "types-requests"]
 test = [
   "pytest-xdist",
   "tenacity",

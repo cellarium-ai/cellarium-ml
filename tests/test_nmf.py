@@ -12,12 +12,11 @@ import pytest
 import torch
 from sklearn.decomposition import NMF
 
-from cellarium.ml import CellariumModule, CellariumAnnDataDataModule
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.models import NonNegativeMatrixFactorization
-from cellarium.ml.models.nmf import compute_consensus_factors, get_embedding
-from cellarium.ml.transforms import Filter
-from cellarium.ml.utilities.data import collate_fn, AnnDataField
-from tests.common import BoringDataset
+from cellarium.ml.models.nmf import NMFOutput
+from cellarium.ml.transforms import DivideByScale, Filter
+from cellarium.ml.utilities.data import AnnDataField
 
 
 @pytest.fixture
@@ -43,9 +42,7 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-def test_nmf_multi_device(
-    small_adata: anndata.AnnData
-):
+def test_nmf_multi_device(small_adata: anndata.AnnData):
     n, g = small_adata.shape
     k_values = [3, 4]
     devices = int(os.environ.get("TEST_DEVICES", "1"))
@@ -63,13 +60,19 @@ def test_nmf_multi_device(
     dm.setup(stage="fit")
     # model
     nmf = NonNegativeMatrixFactorization(
-        full_g=g,
-        var_names_hvg=[f"gene_{i}" for i in range(g)],
+        var_names_g=[f"gene_{i}" for i in range(g)],
         k_values=k_values,
         r=5,
     )
     module = CellariumModule(
-        cpu_transforms=[Filter([f"gene_{i}" for i in range(g)])],
+        cpu_transforms=[
+            DivideByScale(
+                scale_g=torch.from_numpy(small_adata.X.std(axis=0)),
+                var_names_g=np.array([f"gene_{i}" for i in range(g)]),
+                eps=1e-4,
+            ),
+            Filter([f"gene_{i}" for i in range(g)]),
+        ],
         model=nmf,
     )
     # trainer
@@ -190,32 +193,43 @@ def run_cellarium_nmf(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     n, g = x_ng.shape
 
-    # dataloader
+    # Create anndata object and datamodule
+    import anndata
+    import pandas as pd
+
+    adata = anndata.AnnData(
+        X=x_ng.numpy(), var=pd.DataFrame(index=var_names_g), obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)])
+    )
+
+    # datamodule
     batch_size = n // 10
-    dataset = BoringDataset(
-        data=x_ng.numpy(),
-        var_names=var_names_g,
-        obs_names=np.array([f"cell_{i}" for i in range(n)]),
-    )
-    train_loader = torch.utils.data.DataLoader(
-        dataset=dataset,
+    from cellarium.ml.utilities.data import AnnDataField
+
+    datamodule = CellariumAnnDataDataModule(
+        dadc=adata,
         batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-    )
-    predict_loader = torch.utils.data.DataLoader(
-        dataset=dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),
+            "var_names_g": AnnDataField(attr="var_names"),
+            "obs_names_n": AnnDataField(attr="obs_names"),
+        },
     )
 
     # model
     cellarium_nmf = NonNegativeMatrixFactorization(
-        var_names_hvg=var_names_g.tolist(),
+        var_names_g=var_names_g.tolist(),
         k_values=[k],
         r=1,
-        full_g=g,
-        log_variational=False,
     )
     module = CellariumModule(
+        cpu_transforms=[
+            DivideByScale(
+                scale_g=torch.from_numpy(adata.X.std(axis=0)),
+                var_names_g=var_names_g,
+                eps=1e-4,
+            ),
+            Filter(var_names_g.tolist()),
+        ],
         model=cellarium_nmf,
     )
 
@@ -224,25 +238,24 @@ def run_cellarium_nmf(
         barebones=False,
         accelerator="cpu",
         devices=devices,
-        max_epochs=1,
+        max_epochs=10,
         strategy="auto" if devices == 1 else pl.strategies.DDPStrategy(broadcast_buffers=True),
     )
 
     # fit
     torch.manual_seed(seed)
-    trainer.fit(module, train_dataloaders=train_loader)
+    trainer.fit(module, datamodule)
 
-    # get loadings and factors
-    compute_consensus_factors(nmf_model=cellarium_nmf)  # sort of strange to need to do this
-    cellarium_loadings_dataframe = get_embedding(
-        dataset=predict_loader,
-        pipeline=module.pipeline,
-        k=k,
-        if_get_final_gene_loading=False,
-    )
+    # get loadings and factors using NMFOutput
+    nmf_output = NMFOutput(nmf_module=module, datamodule=datamodule)
+    nmf_output.compute_consensus_factors(k_values=k, density_threshold=0.5, local_neighborhood_size=0.3)
+    cellarium_loadings_dataframe = nmf_output.compute_loadings(k=k, normalize=False)
     cellarium_loadings_nk = torch.tensor(cellarium_loadings_dataframe.values).float()
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
-    cellarium_factors_kg = getattr(cellarium_nmf, f"D_{k}_kg").squeeze(0)
+    # Get consensus factors from nmf_output instead of the raw model
+    consensus_factors = nmf_output.consensus[k]["consensus_D_kg"]
+    assert isinstance(consensus_factors, torch.Tensor), "consensus_D_kg must be a tensor"
+    cellarium_factors_kg = consensus_factors
 
     return cellarium_loadings_nk, cellarium_factors_kg
 
@@ -570,15 +583,15 @@ def kotliar_get_norm_counts(counts: anndata.AnnData, high_variance_genes_filter:
     ## Scale genes to unit variance
     norm_counts.X /= norm_counts.X.std(axis=0, ddof=1)
     if np.isnan(norm_counts.X).sum().sum() > 0:
-        print('Warning NaNs in normalized counts matrix')
+        print("Warning NaNs in normalized counts matrix")
 
     ## Check for any cells that have 0 counts of the overdispersed genes
     zerocells = np.array(norm_counts.X.sum(axis=1) == 0).reshape(-1)
     if zerocells.sum() > 0:
         examples = norm_counts.obs.index[np.ravel(zerocells)]
         raise Exception(
-            f'Error: {zerocells.sum()} cells have zero counts of overdispersed genes. E.g. {", ".join(examples[:4])}. '
-            'Filter those cells and re-run or adjust the number of overdispersed genes. Quitting!'
+            f"Error: {zerocells.sum()} cells have zero counts of overdispersed genes. E.g. {', '.join(examples[:4])}. "
+            "Filter those cells and re-run or adjust the number of overdispersed genes. Quitting!"
         )
 
     return norm_counts
