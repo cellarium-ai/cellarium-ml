@@ -40,7 +40,7 @@ model:
       init_args:
         filter_list:
           !FileLoader
-          file_path: /home/sfleming/scvi_runs/20250828_hvg_plus_glyco_6358.csv
+          file_path: /home/sfleming/scvi_runs/20251003_lys_8000HVG_plus_glyco.tsv
           loader_fn: pandas.read_csv
           attr: "ensembl_id"
           convert_fn: pandas.Series.to_list
@@ -58,8 +58,8 @@ model:
       batch_representation_sampled: false
       n_latent_batch: null
       batch_kl_weight_max: 0.0
-      kl_warmup_epochs: null
-      kl_warmup_steps: 44_940
+      kl_warmup_epochs: 20
+      kl_warmup_steps: null
       kl_annealing_start: 0.0
       z_kl_weight_max: 1.0
       encoder: 
@@ -67,12 +67,12 @@ model:
         # - class_path: cellarium.ml.models.scvi.LinearWithBatch
         - class_path: torch.nn.Linear
           init_args:
-            out_features: 128
+            out_features: 512
             # batch_to_bias_hidden_layers: []  # one linear transformation: what scvi-tools does
         # - class_path: cellarium.ml.models.scvi.LinearWithBatch
         - class_path: torch.nn.Linear
           init_args:
-            out_features: 128
+            out_features: 512
             # batch_to_bias_hidden_layers: []
         final_layer:
           class_path: torch.nn.Linear
@@ -81,17 +81,17 @@ model:
         hidden_layers:
         - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
-            out_features: 128
+            out_features: 512
             batch_to_bias_hidden_layers: []
         - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
-            out_features: 128
+            out_features: 512
             batch_to_bias_hidden_layers: []
         final_layer: 
           class_path: torch.nn.Linear
           init_args: {}
         final_additive_bias: false
-      n_latent: 50
+      n_latent: 256
 
       # probably leave these alone
       n_continuous_cov: 0
@@ -117,10 +117,10 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: /home/sfleming/data/extract_{0..4601}.h5ad
+      filenames: /home/sfleming/data/extract_{0..6257}.h5ad
       limits: null
       shard_size: 10_000
-      last_shard_size: 8326
+      last_shard_size: 3136
       max_cache_size: 3
       cache_size_strictly_enforced: true
       label: null
@@ -142,12 +142,12 @@ data:
       attr: obs
       key: cellarium_scvi_batch
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
-    categorical_covariate_index_nd:
-     attr: obs
-     key: 
-       - suspension_type
-       - assay
-     convert_fn: cellarium.ml.utilities.data.categories_to_codes
+    # categorical_covariate_index_nd:
+    #  attr: obs
+    #  key: 
+    #    - suspension_type
+    #    - assay
+    #  convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 1024
   iteration_strategy: cache_efficient
   shuffle: true
@@ -159,4 +159,4 @@ data:
   num_workers: 14
   prefetch_factor: 3
   persistent_workers: true
-ckpt_path: gs://cellarium-dev/scvi_glyco/scvi_nothing_encoded/lightning_logs/version_1/checkpoints/epoch=25-step=1168440.ckpt
+ckpt_path: null
