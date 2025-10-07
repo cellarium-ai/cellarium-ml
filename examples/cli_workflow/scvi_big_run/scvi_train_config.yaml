@@ -117,7 +117,7 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: /home/sfleming/data/extract_{0..6257}.h5ad
+      filenames: /home/sfleming/data/extract_{0..6257}_subset.h5ad
       limits: null
       shard_size: 10_000
       last_shard_size: 3136
