@@ -994,7 +994,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         if self.reconstruct_counts_on_predict:
             assert self.reconstruction_var_names_g is not None
-            gene_inds = [np.where(var_names_g == gid)[0][0] for gid in self.reconstruction_var_names_g]
+            try:
+                gene_inds = [np.where(var_names_g == gid)[0][0] for gid in self.reconstruction_var_names_g]
+            except IndexError:
+                raise ValueError(
+                    f"Some genes to reconstruct ({len(set(self.reconstruction_var_names_g) - set(var_names_g))}) "
+                    f"are missing from the input data: {set(self.reconstruction_var_names_g) - set(var_names_g)}"
+                )
             return self.reconstruct(
                 x_ng=x_ng,
                 var_names_g=var_names_g,
