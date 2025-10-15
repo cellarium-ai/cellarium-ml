@@ -8,8 +8,11 @@ from cellarium.ml.layers.head import MultiHeadReadout
 from cellarium.ml.layers.mu_linear import MuLinear
 from cellarium.ml.layers.normadd import NormAdd
 from cellarium.ml.layers.transformer import Transformer, TransformerBlock
+from cellarium.ml.layers.vae import DressedLayer, FullyConnectedLinear
 
 __all__ = [
+    "DressedLayer",
+    "FullyConnectedLinear",
     "TokenEmbedding",
     "MuLinear",
     "MultiHeadAttention",

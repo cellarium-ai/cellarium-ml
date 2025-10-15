@@ -45,6 +45,7 @@ test = [
   "tenacity",
   "tensorboard",
   "torchvision",
+  "scvi-tools",
 ]
 docs = [
   "nbsphinx",

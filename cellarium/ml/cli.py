@@ -15,6 +15,7 @@ from operator import attrgetter
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
@@ -96,7 +97,7 @@ class CheckpointLoader(FileLoader):
     .. code-block:: yaml
 
         model:
-          transorms:
+          transforms:
             - class_path: cellarium.ml.transforms.DivideByScale
               init_args:
                 scale_g:
@@ -202,6 +203,67 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     field = data.batch_keys["y_categories"]
     assert isinstance(field, AnnDataField)
     return field(adata)
+
+
+def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of categories in batch_index_n.
+
+    .. note::
+
+            If batch_index_n is comprised of multiple keys, the number of categories is computed
+            as the product of the number of categories in each key.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of categories in batch_index_n.
+    """
+    field = data.batch_keys["batch_index_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    x = obs[field.key]
+    if isinstance(x, pd.DataFrame):
+        return int(x.apply(lambda col: len(col.cat.categories)).product())
+    else:
+        return len(x.cat.categories)
+
+
+def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
+    """Extract the number of unique categories in each covariate in the "categorical_covariate_index_nd" batch_key.
+
+    Example:
+
+        .. code-block:: yaml
+            categorical_covariate_index_nd:
+                attr: obs
+                key:
+                    - chemistry
+                    - condition
+                convert_fn: cellarium.ml.utilities.data.categories_to_codes
+
+        The field "categorical_covariate_index_nd" indicates that we are specifying categorical covariates from
+        the columnns ["chemistry", "condition"] from adata.obs.
+        We extract those columns from adata.obs and count the number of categories in each.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        List of length (number of keys) containing the number of categories in each field.
+    """
+    if "categorical_covariate_index_nd" not in data.batch_keys:
+        return []
+    field = data.batch_keys["categorical_covariate_index_nd"]
+    assert isinstance(field, AnnDataField)
+    dataframe = getattr(data.dadc[0], field.attr)
+    n_cats_per_cov = []
+    if field.key is not None:
+        for key in field.key:
+            covariate_series = dataframe[key]
+            n_cats_per_cov.append(len(covariate_series.cat.categories))
+    return n_cats_per_cov
 
 
 def compute_var_names_g(
@@ -321,6 +383,13 @@ def lightning_cli_factory(
                     "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
                 }
             )
+
+        def predict(self, *args, **kwargs):
+            """Not well documented, but defining this here overrides the default predict subcommand.
+            This method injects return_predictions=False into the kwargs to prevent the predictions from
+            being returned, which prevents memory overflow when writing predictions to a file."""
+            kwargs["return_predictions"] = False
+            self.trainer.predict(*args, **kwargs)
 
     return NewLightningCLI
 
@@ -574,6 +643,49 @@ def probabilistic_pca(args: ArgsType = None) -> None:
                 compute_var_names_g,
             ),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
+def scvi(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SingleCellVariationalInference` model.
+
+    This example shows how to fit feature count data to the scVI model [1].
+
+    Example run::
+
+        cellarium-ml scvi fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 5 \
+            --data.num_workers 1 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/scvi \
+            --trainer.max_steps 10
+
+    **References:**
+
+    1. `Deep generative modeling for single-cell transcriptomics (Lopez et al.)
+       <https://www.nature.com/articles/s41592-018-0229-2>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SingleCellVariationalInference",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+            LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
         ],
     )
     cli(args=args)
