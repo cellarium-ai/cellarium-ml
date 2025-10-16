@@ -4,17 +4,32 @@
 import os
 from typing import Literal
 
+import anndata
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 from sklearn.decomposition import NMF
 
-from cellarium.ml import CellariumModule
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.models import NonNegativeMatrixFactorization
-from cellarium.ml.models.nmf import compute_consensus_factors, get_embedding
-from cellarium.ml.utilities.data import collate_fn
-from tests.common import BoringDataset
+from cellarium.ml.models.nmf import NMFOutput
+from cellarium.ml.transforms import DivideByScale, Filter
+from cellarium.ml.utilities.data import AnnDataField
+
+
+@pytest.fixture
+def small_adata():
+    n, g, k = 1000, 10, 3
+    rng = np.random.default_rng(0)
+    z_nk = rng.standard_normal(size=(n, k), dtype=np.float32)
+    w_kg = rng.standard_normal(size=(k, g), dtype=np.float32)
+    sigma = 0.6
+    noise = sigma * rng.standard_normal(size=(n, g), dtype=np.float32)
+    x_ng = z_nk @ w_kg + noise
+    return anndata.AnnData(X=x_ng, var=pd.DataFrame(index=[f"gene_{i}" for i in range(g)]))
+
 
 # set the number of cells, genes, cell types, and factors
 n = 1000
@@ -25,6 +40,50 @@ simulated_k = 3
 # other constants
 cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
+
+
+def test_nmf_multi_device(small_adata: anndata.AnnData):
+    n, g = small_adata.shape
+    k_values = [3, 4]
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
+
+    # dataloader
+    batch_size = n // 2
+    dm = CellariumAnnDataDataModule(
+        dadc=small_adata,
+        batch_size=batch_size,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),
+            "var_names_g": AnnDataField(attr="var_names"),
+        },
+    )
+    dm.setup(stage="fit")
+    # model
+    nmf = NonNegativeMatrixFactorization(
+        var_names_g=[f"gene_{i}" for i in range(g)],
+        k_values=k_values,
+        r=5,
+    )
+    module = CellariumModule(
+        cpu_transforms=[
+            DivideByScale(
+                scale_g=torch.from_numpy(small_adata.X.std(axis=0)),
+                var_names_g=np.array([f"gene_{i}" for i in range(g)]),
+                eps=1e-4,
+            ),
+            Filter([f"gene_{i}" for i in range(g)]),
+        ],
+        model=nmf,
+    )
+    # trainer
+    trainer = pl.Trainer(
+        barebones=True,
+        accelerator="cpu",
+        devices=devices,
+        max_epochs=1,
+    )
+    # fit
+    trainer.fit(module, dm)
 
 
 def d_uncorrelated_kg(k, g, gene_set_sparsity_factor=gene_set_sparsity_factor) -> torch.Tensor:
@@ -130,37 +189,48 @@ def run_cellarium_nmf(
     var_names_g: np.ndarray,
     k: int,
     seed: int,
+    n_batches: int,
     devices,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     n, g = x_ng.shape
 
-    # dataloader
-    batch_size = n // 10
-    dataset = BoringDataset(
-        data=x_ng.numpy(),
-        var_names=var_names_g,
-        obs_names=np.array([f"cell_{i}" for i in range(n)]),
+    # Create anndata object and datamodule
+    import anndata
+    import pandas as pd
+
+    adata = anndata.AnnData(
+        X=x_ng.numpy(), var=pd.DataFrame(index=var_names_g), obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)])
     )
-    train_loader = torch.utils.data.DataLoader(
-        dataset=dataset,
+
+    # datamodule
+    batch_size = n // n_batches
+    from cellarium.ml.utilities.data import AnnDataField
+
+    datamodule = CellariumAnnDataDataModule(
+        dadc=adata,
         batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-    )
-    predict_loader = torch.utils.data.DataLoader(
-        dataset=dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),
+            "var_names_g": AnnDataField(attr="var_names"),
+            "obs_names_n": AnnDataField(attr="obs_names"),
+        },
     )
 
     # model
     cellarium_nmf = NonNegativeMatrixFactorization(
         var_names_g=var_names_g.tolist(),
-        var_names_hvg=var_names_g.tolist(),
         k_values=[k],
         r=1,
-        full_g=g,
-        log_variational=False,
     )
     module = CellariumModule(
+        cpu_transforms=[
+            DivideByScale(
+                scale_g=x_ng.std(dim=0),
+                var_names_g=var_names_g,
+                eps=1e-4,
+            ),
+            # Filter(var_names_g.tolist()),
+        ],
         model=cellarium_nmf,
     )
 
@@ -169,25 +239,24 @@ def run_cellarium_nmf(
         barebones=False,
         accelerator="cpu",
         devices=devices,
-        max_epochs=1,
+        max_epochs=10,
         strategy="auto" if devices == 1 else pl.strategies.DDPStrategy(broadcast_buffers=True),
     )
 
     # fit
     torch.manual_seed(seed)
-    trainer.fit(module, train_dataloaders=train_loader)
+    trainer.fit(module, datamodule)
 
-    # get loadings and factors
-    compute_consensus_factors(nmf_model=cellarium_nmf)  # sort of strange to need to do this
-    cellarium_loadings_dataframe = get_embedding(
-        dataset=predict_loader,
-        pipeline=module.pipeline,
-        k=k,
-        if_get_final_gene_loading=False,
-    )
+    # get loadings and factors using NMFOutput
+    nmf_output = NMFOutput(nmf_module=module, datamodule=datamodule)
+    nmf_output.compute_consensus_factors(k_values=k, density_threshold=1, local_neighborhood_size=0.3)
+    cellarium_loadings_dataframe = nmf_output.compute_loadings(k=k, normalize=False)
     cellarium_loadings_nk = torch.tensor(cellarium_loadings_dataframe.values).float()
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
-    cellarium_factors_kg = getattr(cellarium_nmf, f"D_{k}_kg").squeeze(0)
+    # Get consensus factors from nmf_output instead of the raw model
+    consensus_factors = nmf_output.consensus[k]["consensus_D_kg"]
+    assert isinstance(consensus_factors, torch.Tensor), "consensus_D_kg must be a tensor"
+    cellarium_factors_kg = consensus_factors
 
     return cellarium_loadings_nk, cellarium_factors_kg
 
@@ -208,13 +277,6 @@ def run_sklearn_nmf(x_norm_ng: torch.Tensor, k: int, seed: int) -> tuple[torch.T
     sklearn_loadings_nk = torch.from_numpy(sklearn_nmf.fit_transform(x_norm_ng)).float()
     sklearn_factors_kg = torch.from_numpy(sklearn_nmf.components_).float()
     return sklearn_loadings_nk, sklearn_factors_kg
-
-
-def get_cellarium_normalized_data(x_ng: torch.Tensor) -> torch.Tensor:
-    std_g = torch.std(x_ng, dim=0) + 1e-4
-    x_ng = x_ng / std_g
-    x_ng = torch.clamp(x_ng, min=0.0, max=100.0)
-    return x_ng
 
 
 def pairwise_cosine_similarity_cdist(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
@@ -292,6 +354,7 @@ def run_nmf_and_sklearn_multi_device(
     x_ng: torch.Tensor,
     k: int = simulated_k,
     seed: int = 0,
+    n_cellarium_batches: int = 1,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     devices = int(os.environ.get("TEST_DEVICES", "1"))
     var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
@@ -303,11 +366,18 @@ def run_nmf_and_sklearn_multi_device(
         k=k,
         devices=devices,
         seed=seed,
+        n_batches=n_cellarium_batches,
     )
 
     # sklearn nmf fit
+    transform = DivideByScale(
+        scale_g=x_ng.std(dim=0),
+        var_names_g=var_names_g,
+        eps=1e-4,
+    )
+    x_norm_ng = transform(x_ng=x_ng, var_names_g=var_names_g)["x_ng"]
     sklearn_loadings_nk, sklearn_factors_kg = run_sklearn_nmf(
-        x_norm_ng=get_cellarium_normalized_data(x_ng),
+        x_norm_ng=x_norm_ng,
         k=k,
         seed=seed,
     )
@@ -327,6 +397,7 @@ def run_nmf_and_sklearn_multi_device(
 @pytest.mark.parametrize(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
+@pytest.mark.parametrize("n_cellarium_batches", [1, 2, 10], ids=["fullbatch", "2batches", "10batches"])
 def test_nmf_against_sklearn(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
@@ -334,13 +405,21 @@ def test_nmf_against_sklearn(
     fixture_d_uncorrelated_kg: torch.Tensor,
     fixture_alpha_correlated_nk: torch.Tensor,
     fixture_alpha_uncorrelated_nk: torch.Tensor,
+    n_cellarium_batches: int,
 ):
     # run both methods
     x_ng = x_nmf_ng[data]
+    var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
     loadings, factors = run_nmf_and_sklearn_multi_device(
         x_ng,
+        n_cellarium_batches=n_cellarium_batches,
     )
-    x_norm_ng = get_cellarium_normalized_data(x_ng)
+    transform = DivideByScale(
+        scale_g=x_ng.std(dim=0),
+        var_names_g=var_names_g,
+        eps=1e-4,
+    )
+    x_norm_ng = transform(x_ng=x_ng, var_names_g=var_names_g)["x_ng"]
     cellarium_loadings_nk = loadings["cellarium"]
     cellarium_factors_kg = factors["cellarium"]
     sklearn_loadings_nk = loadings["sklearn"]
@@ -370,6 +449,27 @@ def test_nmf_against_sklearn(
     nmf_loss_cellarium = torch.nn.functional.mse_loss(x_norm_ng, cellarium_reconstruction_ng)
     print(f"nmf_loss_sklearn: {nmf_loss_sklearn}")
     print(f"nmf_loss_cellarium: {nmf_loss_cellarium}")
+
+    # Debugging stuff
+    print(f"Original data shape: {x_norm_ng.shape}")
+    print(f"Cellarium factors shape: {cellarium_factors_kg.shape}")
+    print(f"Cellarium loadings shape: {cellarium_loadings_nk.shape}")
+    print(f"Sklearn factors shape: {sklearn_factors_kg.shape}")
+    print(f"Sklearn loadings shape: {sklearn_loadings_nk.shape}")
+
+    # Check if factors have negative values (they shouldn't for NMF)
+    print(f"Cellarium factors min: {cellarium_factors_kg.min()}")
+    print(f"Cellarium loadings min: {cellarium_loadings_nk.min()}")
+    print(f"Sklearn factors min: {sklearn_factors_kg.min()}")
+    print(f"Sklearn loadings min: {sklearn_loadings_nk.min()}")
+
+    # Check the scales
+    print(f"Original data mean: {x_norm_ng.mean()}, std: {x_norm_ng.std()}")
+    print(
+        f"Cellarium reconstruction mean: {cellarium_reconstruction_ng.mean()}, std: {cellarium_reconstruction_ng.std()}"
+    )
+    print(f"Sklearn reconstruction mean: {sklearn_reconstruction_ng.mean()}, std: {sklearn_reconstruction_ng.std()}")
+
     assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.03, (
         f"cellarium and sklearn loss is not very similar: {torch.abs(nmf_loss_sklearn - nmf_loss_cellarium):.4f}"
     )
@@ -377,9 +477,12 @@ def test_nmf_against_sklearn(
     # assert that the factors are similar
     pairwise_factor_similarity_kk = pairwise_cosine_similarity_cdist(cellarium_factors_kg, sklearn_factors_kg)
     total_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(pairwise_factor_similarity_kk)
-    print(f"pairwise_factor_similarity_kk:\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}")
+    print(
+        f"pairwise_factor_similarity_kk (cellarium and sklearn):"
+        f"\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}"
+    )
     print(f"total mean similarity: {total_similarity}")
-    assert total_similarity > 0.95, f"factors are not very similar: {total_similarity}"
+    assert total_similarity > 0.98, f"factors are not very similar: {total_similarity}"
 
     # assert that the loadings are similar
     pairwise_loading_similarity_nn = pairwise_cosine_similarity_cdist(
@@ -391,7 +494,7 @@ def test_nmf_against_sklearn(
     )
     print(f"pairwise_loading_similarity_nn:\n{pairwise_loading_similarity_nn[row_indices, :][:, col_indices]}")
     print(f"total mean similarity: {total_similarity}")
-    assert total_similarity > 0.95, f"loadings are not very similar: {total_similarity:.4f}"
+    assert total_similarity > 0.98, f"loadings are not very similar: {total_similarity:.4f}"
 
     # truth
     if data.split("_")[-1] == "correlated":
@@ -410,7 +513,7 @@ def test_nmf_against_sklearn(
         f"pairwise_cellarium_factor_similarity_kk:"
         f"\n{pairwise_cellarium_factor_similarity_kk[row_indices, :][:, col_indices]}"
     )
-    print(f"total mean cellarium similarity: {total_cellarium_similarity}")
+    print(f"total mean cellarium factor similarity to truth: {total_cellarium_similarity}")
     pairwise_sklearn_factor_similarity_kk = pairwise_cosine_similarity_cdist(sklearn_factors_kg, truth_factors_kg)
     total_sklearn_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
         pairwise_sklearn_factor_similarity_kk
@@ -419,21 +522,21 @@ def test_nmf_against_sklearn(
         f"pairwise_sklearn_factor_similarity_kk:"
         f"\n{pairwise_sklearn_factor_similarity_kk[row_indices, :][:, col_indices]}"
     )
-    print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert total_sklearn_similarity - total_cellarium_similarity <= 0.042, (
+    print(f"total mean sklearn factor similarity to truth: {total_sklearn_similarity}")
+    assert total_sklearn_similarity - total_cellarium_similarity <= 0.01, (
         f"cellarium factors are substantially less similar to truth than sklearn factors: "
         f"{total_sklearn_similarity - total_cellarium_similarity:.4f}"
     )
 
     # specific threshold for each data type, intended to prevent performance regressions
-    # these can be bumped up when performance is improved
+    # these can be bumped up if performance is improved
     match data:
         case "gaussian_correlated":
-            threshold: float = 0.25
+            threshold: float = 0.2
         case "gaussian_uncorrelated":
             threshold = 0.55
         case "poisson_correlated":
-            threshold = 0.19
+            threshold = 0.15
         case "poisson_uncorrelated":
             threshold = 0.75
         case _:
@@ -486,4 +589,56 @@ def test_nmf_against_sklearn_multi_device(
     fixture_alpha_correlated_nk: torch.Tensor,
     fixture_alpha_uncorrelated_nk: torch.Tensor,
 ):
+    pass
+
+
+def kotliar_get_norm_counts(counts: anndata.AnnData, high_variance_genes_filter: list[str]) -> anndata.AnnData:
+    """
+    Slightly modified, taken from
+    https://github.com/dylkot/cNMF/blob/7833a75484169cf448f8956224447cb110f4ba3d/src/cnmf/cnmf.py#L487
+
+    Args:
+        counts: Scanpy AnnData object (cells x genes) containing raw counts. Filtered such that
+        no genes or cells with 0 counts
+
+    high_variance_genes_filter: A pre-specified list of genes considered to be high-variance.
+        Only these genes will be used during factorization of the counts matrix.
+        Must match the .var index of counts.
+
+    Returns:
+        normcounts: anndata.AnnData, shape (cells, num_highvar_genes)
+            Has a `.X` count matrix containing only the high variance genes with columns (genes)
+            normalized to unit variance
+
+    """
+    ## Subset out high-variance genes
+    norm_counts = counts[:, high_variance_genes_filter].copy()
+    norm_counts.X = norm_counts.X.astype(np.float64)
+
+    ## Scale genes to unit variance
+    norm_counts.X /= norm_counts.X.std(axis=0, ddof=1)
+    if np.isnan(norm_counts.X).sum().sum() > 0:
+        print("Warning NaNs in normalized counts matrix")
+
+    ## Check for any cells that have 0 counts of the overdispersed genes
+    zerocells = np.array(norm_counts.X.sum(axis=1) == 0).reshape(-1)
+    if zerocells.sum() > 0:
+        examples = norm_counts.obs.index[np.ravel(zerocells)]
+        raise Exception(
+            f"Error: {zerocells.sum()} cells have zero counts of overdispersed genes. E.g. {', '.join(examples[:4])}. "
+            "Filter those cells and re-run or adjust the number of overdispersed genes. Quitting!"
+        )
+
+    return norm_counts
+
+
+def test_preprocessing_matches_kotliar():
+    pass
+
+
+def test_consensus_matches_kotliar():
+    pass
+
+
+def test_refit_all_genes_matches_kotliar():
     pass
