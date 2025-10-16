@@ -291,6 +291,27 @@ class CellariumModule(pl.LightningModule):
         batch["batch_idx"] = batch_idx
         self.module_pipeline.validate(batch)
 
+    def test_step(self, batch: dict[str, Any], batch_idx: int) -> None:
+        """
+        Forward pass for test step.
+
+        Args:
+            batch:
+                A dictionary containing the batch data.
+            batch_idx:
+                The index of the batch.
+
+        Returns:
+            None
+        """
+        if self.module_pipeline is None:
+            raise RuntimeError("The model is not configured. Call `configure_model` before accessing the model.")
+
+        batch["pl_module"] = self
+        batch["trainer"] = self.trainer
+        batch["batch_idx"] = batch_idx
+        self.module_pipeline.test(batch)
+
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Configure optimizers for the model."""
         optim_fn = self.hparams["optim_fn"]

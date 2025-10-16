@@ -454,7 +454,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         worker_id, num_workers = get_worker_info()
 
         if self.resume_step is not None:
-            num_epochs_that_stepped, num_batches_that_stepped = divmod(self.resume_step, batches_per_replica)
+            num_epochs_that_stepped, num_batches_that_stepped = divmod(
+                self.resume_step * self.accumulate_grad_batches, batches_per_replica
+            )
 
             # self.epoch can be inconsistent with the global step if checkpointed mid-epoch and not adjusted
             if self.epoch < num_epochs_that_stepped:
@@ -564,3 +566,5 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.epoch = state_dict["epoch"]
         # trainer.fit_loop.epoch_loop.automatic_optimization.optim_progress.optimizer_steps
         self.resume_step = state_dict["resume_step"]
+        # trainer.accumulate_grad_batches
+        self.accumulate_grad_batches = state_dict["accumulate_grad_batches"]

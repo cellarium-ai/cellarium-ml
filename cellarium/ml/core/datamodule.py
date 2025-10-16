@@ -198,6 +198,20 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 test_mode=self.test_mode,
             )
 
+        if stage == "test":
+            self.test_dataset = IterableDistributedAnnDataCollectionDataset(
+                dadc=self.dadc,
+                batch_keys=self.batch_keys,
+                batch_size=self.batch_size,
+                iteration_strategy=self.iteration_strategy,
+                shuffle=self.shuffle,
+                shuffle_seed=self.shuffle_seed,
+                drop_last_indices=self.drop_last_indices,
+                drop_incomplete_batch=self.drop_incomplete_batch,
+                worker_seed=self.worker_seed,
+                test_mode=self.test_mode,
+            )
+
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         """Training dataloader."""
         return torch.utils.data.DataLoader(
@@ -222,6 +236,16 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         """Prediction dataloader."""
         return torch.utils.data.DataLoader(
             self.predict_dataset,
+            num_workers=self.num_workers,
+            collate_fn=self.collate_fn,
+            prefetch_factor=self.prefetch_factor,
+            persistent_workers=self.persistent_workers,
+        )
+
+    def test_dataloader(self) -> torch.utils.data.DataLoader:
+        """Test dataloader."""
+        return torch.utils.data.DataLoader(
+            self.test_dataset,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
@@ -276,8 +300,11 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                     "Cannot resume training with a different batch size. "
                     f"Expected {self.batch_size}, got {state_dict['batch_size']}."
                 )
-            if state_dict["accumulate_grad_batches"] != 1:
-                raise ValueError("Training with gradient accumulation is not supported when resuming training.")
+            if state_dict["accumulate_grad_batches"] != self.trainer.accumulate_grad_batches:
+                raise ValueError(
+                    "Cannot resume training with a different accumulate grad batches. "
+                    f"Expected {self.trainer.accumulate_grad_batches}, got {state_dict['accumulate_grad_batches']}."
+                )
             if state_dict["shuffle"] != self.shuffle:
                 raise ValueError(
                     "Cannot resume training with a different shuffle value. "
