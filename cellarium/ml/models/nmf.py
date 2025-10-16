@@ -4,6 +4,7 @@
 import logging
 import sys
 import warnings
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal, Optional
 
@@ -402,7 +403,81 @@ class NMFInitUniformRandom(NMFInit):
         x.uniform_(0.0, 2.0)
 
 
-class NonNegativeMatrixFactorization(CellariumModel):
+class NonNegativeMatrixFactorization(ABC, CellariumModel):
+    """
+    Abstract base class for non-negative matrix factorization implementations.
+    
+    This class defines the interface that all NMF implementations must provide
+    to work with NMFOutput, which can run consensus and downstream analyses.
+    """
+    
+    def __init__(self, var_names_g: Sequence[str], k_values: list[int], **kwargs):
+        super().__init__()
+        self.var_names_g = np.array(var_names_g)
+        self.k_values = k_values
+        # Create the HVG filter transform that all implementations will need
+        self.transform__filter_to_hvgs = Filter([str(s) for s in self.var_names_g])
+    
+    @property
+    @abstractmethod
+    def factors_dict(self) -> dict[int, torch.Tensor]:
+        """
+        Return the learned factors for each k value.
+        
+        Returns:
+            Dictionary mapping k -> factor tensor of shape (r, k, g) where:
+            - r is number of replicates (could be 1 for some implementations)
+            - k is number of factors
+            - g is number of genes
+        """
+        pass
+    
+    @abstractmethod
+    def infer_loadings(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        consensus_factors: dict[int, dict[str, torch.Tensor | float]],
+        k: int,
+        normalize: bool = True,
+    ) -> torch.Tensor:
+        """
+        Infer the loadings of each program for the input count matrix.
+        
+        Args:
+            x_ng: Gene counts matrix
+            var_names_g: Variable names
+            consensus_factors: Consensus factors from consensus computation
+            k: Number of factors
+            normalize: Whether to normalize loadings
+            
+        Returns:
+            Loadings tensor of shape (n, k)
+        """
+        pass
+    
+    @abstractmethod
+    def reconstruction_error(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        consensus_factors: dict[int, dict[str, torch.Tensor | float]],
+    ) -> dict[int, float]:
+        """
+        Compute reconstruction error for each k value.
+        
+        Args:
+            x_ng: Gene counts matrix
+            var_names_g: Variable names  
+            consensus_factors: Consensus factors from consensus computation
+            
+        Returns:
+            Dictionary mapping k -> reconstruction error
+        """
+        pass
+
+
+class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
     """
     Use the online NMF algorithm of Mairal et al. [1] to factorize the count matrix
     into a dictionary of gene expression programs and a matrix of cell program loadings.
@@ -430,12 +505,9 @@ class NonNegativeMatrixFactorization(CellariumModel):
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
     ) -> None:
-        super().__init__()
-        self.var_names_g = np.array(var_names_g)
+        super().__init__(var_names_g=var_names_g, k_values=k_values)
         g = len(self.var_names_g)
-        self.transform__filter_to_hvgs = Filter([str(s) for s in self.var_names_g])  # we assume var_names_g are HVGs
         self.algorithm = algorithm
-        self.k_values = k_values
         self.r = r
         self.transformed_data_mean = transformed_data_mean
         self.init = init
@@ -467,6 +539,11 @@ class NonNegativeMatrixFactorization(CellariumModel):
             getattr(self, f"B_{i}_rkg").zero_()
             init_fn(getattr(self, f"D_{i}_rkg"), k=i, transformed_data_mean=self.transformed_data_mean)
 
+    @property
+    def factors_dict(self) -> dict[int, torch.Tensor]:
+        """Return the learned factors for each k value."""
+        return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
+    
     def online_dictionary_update(self, x_ng: torch.Tensor, k: int) -> None:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
@@ -521,12 +598,12 @@ class NonNegativeMatrixFactorization(CellariumModel):
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
             assert isinstance(trainer.strategy, DDPStrategy), (
-                "NonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
+                "OnlineNonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
             )
             assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is True, (
-                "NonNegativeMatrixFactorization requires that the `broadcast_buffers` parameter of "
+                "OnlineNonNegativeMatrixFactorization requires that the `broadcast_buffers` parameter of "
+                "lightning.pytorch.strategies.DDPStrategy is set to True"
             )
-            "lightning.pytorch.strategies.DDPStrategy is set to True."
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         # this hard reset to zero is equivalent to forgetting momentum each epoch
@@ -706,7 +783,7 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
 
 
 def plot_density_histograms(
-    nmf_model: NonNegativeMatrixFactorization,
+    nmf_model: OnlineNonNegativeMatrixFactorization,
     local_neighborhood_size: float = 0.3,
     k_values: list[int] | None = None,
 ):
@@ -730,7 +807,7 @@ def plot_density_histograms(
 
 
 def compute_consensus_factors(
-    nmf_model: NonNegativeMatrixFactorization,
+    nmf_model: OnlineNonNegativeMatrixFactorization,
     k_values: list[int] | None = None,
     density_threshold: float = 0.5,
     local_neighborhood_size: float = 0.3,

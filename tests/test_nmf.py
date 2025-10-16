@@ -13,7 +13,7 @@ import torch
 from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
-from cellarium.ml.models import NonNegativeMatrixFactorization
+from cellarium.ml.models import OnlineNonNegativeMatrixFactorization
 from cellarium.ml.models.nmf import NMFOutput
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField
@@ -59,7 +59,7 @@ def test_nmf_multi_device(small_adata: anndata.AnnData):
     )
     dm.setup(stage="fit")
     # model
-    nmf = NonNegativeMatrixFactorization(
+    nmf = OnlineNonNegativeMatrixFactorization(
         var_names_g=[f"gene_{i}" for i in range(g)],
         k_values=k_values,
         r=5,
@@ -184,7 +184,7 @@ def x_nmf_ng(fixture_x_uncorrelated_mean_nmf_ng, fixture_x_correlated_mean_nmf_n
     return out
 
 
-def run_cellarium_nmf(
+def run_cellarium_online_nmf(
     x_ng: torch.Tensor,
     var_names_g: np.ndarray,
     k: int,
@@ -217,7 +217,7 @@ def run_cellarium_nmf(
     )
 
     # model
-    cellarium_nmf = NonNegativeMatrixFactorization(
+    cellarium_nmf = OnlineNonNegativeMatrixFactorization(
         var_names_g=var_names_g.tolist(),
         k_values=[k],
         r=1,
@@ -350,7 +350,7 @@ def similarity_matrix_assign_rows_to_columns(
     return total_similarity, np.asarray(row_indices), np.asarray(col_indices)
 
 
-def run_nmf_and_sklearn_multi_device(
+def run_online_nmf_and_sklearn_multi_device(
     x_ng: torch.Tensor,
     k: int = simulated_k,
     seed: int = 0,
@@ -360,7 +360,7 @@ def run_nmf_and_sklearn_multi_device(
     var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
 
     # cellarium nmf fit
-    cellarium_loadings_nk, cellarium_factors_kg = run_cellarium_nmf(
+    cellarium_loadings_nk, cellarium_factors_kg = run_cellarium_online_nmf(
         x_ng=x_ng,
         var_names_g=var_names_g,
         k=k,
@@ -398,7 +398,7 @@ def run_nmf_and_sklearn_multi_device(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
 @pytest.mark.parametrize("n_cellarium_batches", [1, 2, 10], ids=["fullbatch", "2batches", "10batches"])
-def test_nmf_against_sklearn(
+def test_online_nmf_against_sklearn(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
     fixture_d_correlated_kg: torch.Tensor,
@@ -410,7 +410,7 @@ def test_nmf_against_sklearn(
     # run both methods
     x_ng = x_nmf_ng[data]
     var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
-    loadings, factors = run_nmf_and_sklearn_multi_device(
+    loadings, factors = run_online_nmf_and_sklearn_multi_device(
         x_ng,
         n_cellarium_batches=n_cellarium_batches,
     )
@@ -581,7 +581,7 @@ def test_nmf_against_sklearn(
 @pytest.mark.parametrize(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
-def test_nmf_against_sklearn_multi_device(
+def test_online_nmf_against_sklearn_multi_device(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
     fixture_d_correlated_kg: torch.Tensor,
