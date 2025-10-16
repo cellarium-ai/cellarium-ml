@@ -406,24 +406,24 @@ class NMFInitUniformRandom(NMFInit):
 class NonNegativeMatrixFactorization(ABC, CellariumModel):
     """
     Abstract base class for non-negative matrix factorization implementations.
-    
+
     This class defines the interface that all NMF implementations must provide
     to work with NMFOutput, which can run consensus and downstream analyses.
     """
-    
+
     def __init__(self, var_names_g: Sequence[str], k_values: list[int], **kwargs):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.k_values = k_values
         # Create the HVG filter transform that all implementations will need
         self.transform__filter_to_hvgs = Filter([str(s) for s in self.var_names_g])
-    
+
     @property
     @abstractmethod
     def factors_dict(self) -> dict[int, torch.Tensor]:
         """
         Return the learned factors for each k value.
-        
+
         Returns:
             Dictionary mapping k -> factor tensor of shape (r, k, g) where:
             - r is number of replicates (could be 1 for some implementations)
@@ -431,7 +431,7 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
             - g is number of genes
         """
         pass
-    
+
     @abstractmethod
     def infer_loadings(
         self,
@@ -443,19 +443,19 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
     ) -> torch.Tensor:
         """
         Infer the loadings of each program for the input count matrix.
-        
+
         Args:
             x_ng: Gene counts matrix
             var_names_g: Variable names
             consensus_factors: Consensus factors from consensus computation
             k: Number of factors
             normalize: Whether to normalize loadings
-            
+
         Returns:
             Loadings tensor of shape (n, k)
         """
         pass
-    
+
     @abstractmethod
     def reconstruction_error(
         self,
@@ -465,12 +465,12 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
     ) -> dict[int, float]:
         """
         Compute reconstruction error for each k value.
-        
+
         Args:
             x_ng: Gene counts matrix
-            var_names_g: Variable names  
+            var_names_g: Variable names
             consensus_factors: Consensus factors from consensus computation
-            
+
         Returns:
             Dictionary mapping k -> reconstruction error
         """
@@ -543,7 +543,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
     def factors_dict(self) -> dict[int, torch.Tensor]:
         """Return the learned factors for each k value."""
         return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
-    
+
     def online_dictionary_update(self, x_ng: torch.Tensor, k: int) -> None:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
