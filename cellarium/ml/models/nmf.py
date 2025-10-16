@@ -993,7 +993,6 @@ class NMFOutput:
         embedding = []
         index = []
         for batch in tqdm(datamodule.predict_dataloader()):
-
             # apply transforms to the data before inferring loadings
             for transform in transforms:
                 batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])

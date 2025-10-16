@@ -225,7 +225,7 @@ def run_cellarium_nmf(
     module = CellariumModule(
         cpu_transforms=[
             DivideByScale(
-                scale_g=x_ng.std(axis=0),
+                scale_g=x_ng.std(dim=0),
                 var_names_g=var_names_g,
                 eps=1e-4,
             ),
@@ -371,7 +371,7 @@ def run_nmf_and_sklearn_multi_device(
 
     # sklearn nmf fit
     transform = DivideByScale(
-        scale_g=x_ng.std(axis=0),
+        scale_g=x_ng.std(dim=0),
         var_names_g=var_names_g,
         eps=1e-4,
     )
@@ -397,9 +397,7 @@ def run_nmf_and_sklearn_multi_device(
 @pytest.mark.parametrize(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
-@pytest.mark.parametrize(
-    "n_cellarium_batches", [1, 2, 10], ids=["fullbatch", "2batches", "10batches"]
-)
+@pytest.mark.parametrize("n_cellarium_batches", [1, 2, 10], ids=["fullbatch", "2batches", "10batches"])
 def test_nmf_against_sklearn(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
@@ -417,7 +415,7 @@ def test_nmf_against_sklearn(
         n_cellarium_batches=n_cellarium_batches,
     )
     transform = DivideByScale(
-        scale_g=x_ng.std(axis=0),
+        scale_g=x_ng.std(dim=0),
         var_names_g=var_names_g,
         eps=1e-4,
     )
@@ -467,7 +465,9 @@ def test_nmf_against_sklearn(
 
     # Check the scales
     print(f"Original data mean: {x_norm_ng.mean()}, std: {x_norm_ng.std()}")
-    print(f"Cellarium reconstruction mean: {cellarium_reconstruction_ng.mean()}, std: {cellarium_reconstruction_ng.std()}")
+    print(
+        f"Cellarium reconstruction mean: {cellarium_reconstruction_ng.mean()}, std: {cellarium_reconstruction_ng.std()}"
+    )
     print(f"Sklearn reconstruction mean: {sklearn_reconstruction_ng.mean()}, std: {sklearn_reconstruction_ng.std()}")
 
     assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.03, (
@@ -477,8 +477,10 @@ def test_nmf_against_sklearn(
     # assert that the factors are similar
     pairwise_factor_similarity_kk = pairwise_cosine_similarity_cdist(cellarium_factors_kg, sklearn_factors_kg)
     total_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(pairwise_factor_similarity_kk)
-    print(f"pairwise_factor_similarity_kk (cellarium and sklearn):"
-          f"\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}")
+    print(
+        f"pairwise_factor_similarity_kk (cellarium and sklearn):"
+        f"\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}"
+    )
     print(f"total mean similarity: {total_similarity}")
     assert total_similarity > 0.98, f"factors are not very similar: {total_similarity}"
 
