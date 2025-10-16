@@ -688,7 +688,7 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
         n_nearest_dist_fl = None
         n_nearest_dist_ml = None
         n_neighbors = 0
-        median_D_kg = D_rkg.reshape(r * num_component, g)  # return the factor with r=1
+        median_D_kg = D_rkg.reshape(r * num_component, g)  # just grab the factor without normalization if r=1
         silhouette = 1.0
 
     factors_kg = F.normalize(median_D_kg, dim=-1, p=1)
