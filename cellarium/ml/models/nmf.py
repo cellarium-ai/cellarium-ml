@@ -5,7 +5,7 @@ import logging
 import sys
 import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:
     import cellarium.ml
@@ -210,8 +210,9 @@ def compute_loadings(
     n, _ = x_ng.shape
     r, n_factors, g = factors_rkg.shape
 
-    # hybrid initialization approach
-    alpha_rnk = torch.zeros((r, n, n_factors), device=factors_rkg.device)
+    # initialization
+    alpha_rnk = torch.rand((r, n, n_factors), device=factors_rkg.device).abs()
+    # alpha_rnk = torch.zeros((r, n, n_factors), device=factors_rkg.device)
 
     with torch.no_grad():
         for rep in range(r):
@@ -687,17 +688,17 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
         n_nearest_dist_fl = None
         n_nearest_dist_ml = None
         n_neighbors = 0
-        median_D_kg = d_norm_mg  # if r = 1, then m = r * k = k
+        median_D_kg = D_rkg.reshape(r * num_component, g)  # return the factor with r=1
         silhouette = 1.0
 
-    norm_median_D_kg = F.normalize(median_D_kg, dim=-1, p=1)
+    factors_kg = F.normalize(median_D_kg, dim=-1, p=1)
 
     return {
         "filtered_euclidean_distance_matrix": euclidean_dist_ff,
         "filtered_neighbor_distances": n_nearest_dist_fl,
         "all_neighbor_distances": n_nearest_dist_ml,
         "n_neighbors": n_neighbors,
-        "consensus_D_kg": norm_median_D_kg,
+        "consensus_D_kg": factors_kg,
         "stability": silhouette,
         "local_neighborhood_size": local_neighborhood_size,
         "density_threshold": density_threshold,
@@ -965,7 +966,7 @@ class NMFOutput:
     def compute_loadings(
         self,
         k: int,
-        datamodule: "cellarium.ml.CellariumAnnDataDataModule" | None = None,
+        datamodule: Optional["cellarium.ml.CellariumAnnDataDataModule"] = None,
         normalize: bool = True,
     ) -> pd.DataFrame:
         """
@@ -982,9 +983,21 @@ class NMFOutput:
             datamodule = self.datamodule
         datamodule.setup(stage="predict")
 
+        # grab the transforms
+        transforms = []
+        for transform in self.nmf_module.cpu_transforms:
+            transforms.append(transform)
+        for transform in self.nmf_module.transforms:
+            transforms.append(transform)
+
         embedding = []
         index = []
         for batch in tqdm(datamodule.predict_dataloader()):
+
+            # apply transforms to the data before inferring loadings
+            for transform in transforms:
+                batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
+
             alpha_nk = self.nmf_module.model.infer_loadings(
                 x_ng=batch["x_ng"],
                 var_names_g=batch["var_names_g"],
