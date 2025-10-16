@@ -783,7 +783,7 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
 
 
 def plot_density_histograms(
-    nmf_model: OnlineNonNegativeMatrixFactorization,
+    nmf_model: NonNegativeMatrixFactorization,
     local_neighborhood_size: float = 0.3,
     k_values: list[int] | None = None,
 ):
@@ -807,7 +807,7 @@ def plot_density_histograms(
 
 
 def compute_consensus_factors(
-    nmf_model: OnlineNonNegativeMatrixFactorization,
+    nmf_model: NonNegativeMatrixFactorization,
     k_values: list[int] | None = None,
     density_threshold: float = 0.5,
     local_neighborhood_size: float = 0.3,
