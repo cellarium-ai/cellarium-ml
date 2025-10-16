@@ -144,7 +144,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
 
         with pyro.plate("cells", size=self.n_obs, subsample_size=x_ng.shape[0]):
             V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
-            D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))
+            D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))  # type: ignore[arg-type]
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
     def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
