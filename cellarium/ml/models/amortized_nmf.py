@@ -161,17 +161,15 @@ def initialize_matrix(rows: int, cols: int, alpha: Union[float, torch.Tensor], s
     """
     Initialize a parameter matrix for NMF: [rows, cols]
 
-    Parameters
-    ----------
-    rows: Total number of cells in the entire dataset
-    cols: Maximum number of factors to model
-    alpha: Concentration of gamma distribution used to sample values. Small
-        values < 1 lead to sparsity.
-    simplex: True to initialize values so that matrix.sum(dim=-1) = 1
+    Args:
+        rows: Total number of cells in the entire dataset
+        cols: Maximum number of factors to model
+        alpha: Concentration of gamma distribution used to sample values. Small
+            values < 1 lead to sparsity.
+        simplex: True to initialize values so that matrix.sum(dim=-1) = 1
 
-    Returns
-    -------
-    matrix: [rows, cols] matrix of initial values for NMF
+    Returns:
+        matrix: [rows, cols] matrix of initial values for NMF
     """
 
     # Bayesian NMF, Cemgil 2009... ish
@@ -250,11 +248,14 @@ def gene_graph_regularization(
     concordance_score = tr(F S F^T)
     is a score which we want to maximize
 
-    Parameters
-    ----------
-    similarity_matrix_gg: Gene-gene similarity matrix, symmetric, with max
-        value 1, where large values indicate more similarity
-    factor_matrix_kg: The current inferred factors
+    Args:
+        similarity_matrix_gg: Gene-gene similarity matrix, symmetric, with max
+            value 1, where large values indicate more similarity
+        factor_matrix_kg: The current inferred factors
+
+    Returns:
+        log_prob: The log probability of the concordance score under the
+            null distribution N(gamma_loc, gamma_scale)
     """
     # compute the concordance score
     gamma = gene_graph_concordance_statistic(
