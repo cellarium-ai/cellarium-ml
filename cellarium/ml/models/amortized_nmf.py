@@ -1,15 +1,17 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
+import logging
+from types import EllipsisType
+from typing import Dict, List, Optional, Sequence, Union
+
+import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
 from torch.distributions import constraints
-import numpy as np
-import logging
 
 from cellarium.ml.models.nmf import NonNegativeMatrixFactorization
-
-from typing import Optional, Dict, Union, List, Sequence
-from types import EllipsisType
-
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +59,15 @@ class FullyConnectedLayer(torch.nn.Module):
             linear layer
     """
 
-    def __init__(self,
-                 input_dim: int,
-                 output_dim: int,
-                 activation: torch.nn.Module | None = torch.nn.ReLU(),
-                 use_batch_norm: bool = False,
-                 use_layer_norm: bool = False,
-                 dropout_rate: Optional[float] = None):
-
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        activation: torch.nn.Module | None = torch.nn.ReLU(),
+        use_batch_norm: bool = False,
+        use_layer_norm: bool = False,
+        dropout_rate: Optional[float] = None,
+    ):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -114,37 +117,38 @@ class FullyConnectedNetwork(torch.nn.Module):
         dropout_input: True to apply dropout before first layer (default False)
     """
 
-    def __init__(self,
-                 input_dim: int,
-                 hidden_dims: List[int],
-                 output_dim: int,
-                 hidden_activation: torch.nn.Module = torch.nn.ReLU(),
-                 output_activation: Optional[torch.nn.Module] = None,
-                 use_batch_norm: bool = False,
-                 use_layer_norm: bool = True,
-                 norm_output: bool = False,
-                 dropout_rate: Optional[float] = None,
-                 dropout_input: bool = False):
-
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: List[int],
+        output_dim: int,
+        hidden_activation: torch.nn.Module = torch.nn.ReLU(),
+        output_activation: Optional[torch.nn.Module] = None,
+        use_batch_norm: bool = False,
+        use_layer_norm: bool = True,
+        norm_output: bool = False,
+        dropout_rate: Optional[float] = None,
+        dropout_input: bool = False,
+    ):
         super().__init__()
 
         if use_layer_norm and use_batch_norm:
-            raise UserWarning("You are trying to use both batch norm and layer "
-                              "norm. That's probably too much norm.")
+            raise UserWarning("You are trying to use both batch norm and layer norm. That's probably too much norm.")
 
         # set up layers as a list of Linear modules with appropriate extras
         dim_ins_and_outs = zip([input_dim] + hidden_dims, hidden_dims + [output_dim])
         n_layers = 1 + len(hidden_dims)
-        layers = [FullyConnectedLayer(
-            input_dim=i,
-            output_dim=j,
-            activation=hidden_activation if (layer < n_layers - 1) else output_activation,
-            use_batch_norm=use_batch_norm if ((layer < n_layers - 1)
-                                              or norm_output) else False,
-            use_layer_norm=use_layer_norm if ((layer < n_layers - 1)
-                                              or norm_output) else False,
-            dropout_rate=None if ((layer == 0) and not dropout_input) else dropout_rate,
-        ) for layer, (i, j) in enumerate(dim_ins_and_outs)]
+        layers = [
+            FullyConnectedLayer(
+                input_dim=i,
+                output_dim=j,
+                activation=hidden_activation if (layer < n_layers - 1) else output_activation,
+                use_batch_norm=use_batch_norm if ((layer < n_layers - 1) or norm_output) else False,
+                use_layer_norm=use_layer_norm if ((layer < n_layers - 1) or norm_output) else False,
+                dropout_rate=None if ((layer == 0) and not dropout_input) else dropout_rate,
+            )
+            for layer, (i, j) in enumerate(dim_ins_and_outs)
+        ]
 
         # concatenate Linear layers using Sequential
         self.network = torch.nn.Sequential(*layers)
@@ -152,9 +156,8 @@ class FullyConnectedNetwork(torch.nn.Module):
     def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
         return self.network(x_ng)
 
-def initialize_matrix(
-    rows: int, cols: int, alpha: Union[float, torch.Tensor], simplex: bool = True
-):
+
+def initialize_matrix(rows: int, cols: int, alpha: Union[float, torch.Tensor], simplex: bool = True):
     """
     Initialize a parameter matrix for NMF: [rows, cols]
 
@@ -172,25 +175,18 @@ def initialize_matrix(
     """
 
     # Bayesian NMF, Cemgil 2009... ish
-    if (type(alpha) == torch.Tensor) and (len(alpha) > 1):
-        matrix = (
-            dist.Gamma(concentration=alpha, rate=alpha / cols)
-            .sample(torch.Size([cols]))
-            .t()
-        )
+    if isinstance(alpha, torch.Tensor) and (len(alpha) > 1):
+        matrix = dist.Gamma(concentration=alpha, rate=alpha / cols).sample(torch.Size([cols])).t()
     else:
-        if type(alpha) == torch.Tensor:
+        if isinstance(alpha, torch.Tensor):
             alpha = alpha.item()  # having it in a tensor messes up sample size
-        matrix = dist.Gamma(concentration=alpha, rate=alpha / cols).sample(
-            torch.Size([rows, cols])
-        )
+        matrix = dist.Gamma(concentration=alpha, rate=alpha / cols).sample(torch.Size([rows, cols]))
     if simplex:
         matrix = matrix / matrix.sum(dim=-1, keepdim=True)
     return matrix
 
 
-def ard_regularization(loading_matrix_nk: torch.Tensor,
-                       scale: float = 1.0) -> torch.Tensor:
+def ard_regularization(loading_matrix_nk: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     """
     Automatic relevance determination over factors, which induces some
     factor loadings (over all cells) to go to zero.
@@ -215,16 +211,15 @@ def ard_regularization(loading_matrix_nk: torch.Tensor,
     # TODO: what about using a zero-mean Beta distribution (matches support)?
     # TODO: but that's not exactly ARD then is it?
     with pyro.poutine.scale(scale=scale):
-        log_prob_sum_ard_reg = (
-            dist.Normal(loc=0.0, scale=1.0 / ard_alpha_k).log_prob(loading_matrix_nk).sum()
-        )
+        log_prob_sum_ard_reg = dist.Normal(loc=0.0, scale=1.0 / ard_alpha_k).log_prob(loading_matrix_nk).sum()
         pyro.factor("ard_regularization", log_prob_sum_ard_reg)
     # log_metric("ARD_alpha_k", ard_alpha_k)
     return log_prob_sum_ard_reg
 
 
-def gene_graph_concordance_statistic(similarity_matrix_gg: torch.Tensor,
-                                     factor_matrix_kg: torch.Tensor) -> torch.Tensor:
+def gene_graph_concordance_statistic(
+    similarity_matrix_gg: torch.Tensor, factor_matrix_kg: torch.Tensor
+) -> torch.Tensor:
     """Compute the gene graph concordance statistic (a scalar)
 
     concordance_score = tr(F S F^T)
@@ -239,16 +234,17 @@ def gene_graph_concordance_statistic(similarity_matrix_gg: torch.Tensor,
     """
 
     return torch.trace(
-        torch.matmul(factor_matrix_kg,
-                     torch.matmul(similarity_matrix_gg, factor_matrix_kg.t())),
+        torch.matmul(factor_matrix_kg, torch.matmul(similarity_matrix_gg, factor_matrix_kg.t())),
     )
 
 
-def gene_graph_regularization(similarity_matrix_gg: torch.Tensor,
-                              factor_matrix_kg: torch.Tensor,
-                              gamma_loc: torch.Tensor,
-                              gamma_scale: torch.Tensor,
-                              scale: float = 1.0) -> torch.Tensor:
+def gene_graph_regularization(
+    similarity_matrix_gg: torch.Tensor,
+    factor_matrix_kg: torch.Tensor,
+    gamma_loc: torch.Tensor,
+    gamma_scale: torch.Tensor,
+    scale: float = 1.0,
+) -> torch.Tensor:
     """Apply regularization to the gene expression programs themselves
 
     concordance_score = tr(F S F^T)
@@ -322,9 +318,7 @@ class MaximumLikelihood:
         factor_matrix_kg = pyro.param(
             "factor_matrix_kg",
             (
-                initialize_matrix(
-                    rows=k_max, cols=x_ng.shape[-1], alpha=gene_alpha, simplex=True
-                )
+                initialize_matrix(rows=k_max, cols=x_ng.shape[-1], alpha=gene_alpha, simplex=True)
                 if factor_matrix is None
                 else factor_matrix
             ),
@@ -341,9 +335,7 @@ class MaximumLikelihood:
 
         # apply ARD regularization, if called for
         if use_ard:
-            log_prob_sum_ard_reg = ard_regularization(
-                loading_matrix_nk=loading_matrix_nk
-            )
+            log_prob_sum_ard_reg = ard_regularization(loading_matrix_nk=loading_matrix_nk)
         else:
             log_prob_sum_ard_reg = torch.tensor(-float("inf")).to(x_ng.device)
 
@@ -392,7 +384,7 @@ class AmortizedLoadings:
 
     @classmethod
     def initialize_loading_encoder(cls, n_genes: int, k: int, encoder_type: str):
-        if encoder_type == 'linear':
+        if encoder_type == "linear":
             cls.loading_encoder = FullyConnectedNetwork(
                 input_dim=n_genes,
                 hidden_dims=[],
@@ -400,7 +392,7 @@ class AmortizedLoadings:
                 output_activation=Exp(),
                 dropout_rate=None,
             )
-        elif encoder_type == 'mlp':
+        elif encoder_type == "mlp":
             cls.loading_encoder = FullyConnectedNetwork(
                 input_dim=n_genes,
                 hidden_dims=[512],
@@ -462,18 +454,18 @@ class AmortizedLoadings:
         # factors
         factor_matrix_kg = pyro.param(
             "factor_matrix_kg",
-            initialize_matrix(
-                rows=k_max, cols=x_ng.shape[-1], alpha=gene_alpha, simplex=True
-            ) if (factor_matrix is None) else factor_matrix,
+            initialize_matrix(rows=k_max, cols=x_ng.shape[-1], alpha=gene_alpha, simplex=True)
+            if (factor_matrix is None)
+            else factor_matrix,
             constraint=constraints.simplex,  # in the g dimension
         )
 
         with pyro.plate("obs_plate"):
-
             # prior on loadings is Dirichlet
             prior_alpha_nk = loading_alpha * torch.ones([x_ng.shape[0], k_max]).to(x_ng.device)
             loading_matrix_nk = pyro.sample(
-                "loading_matrix_nk", dist.Dirichlet(prior_alpha_nk).to_event(1),
+                "loading_matrix_nk",
+                dist.Dirichlet(prior_alpha_nk).to_event(1),
             )
 
             # apply ARD regularization, if called for
@@ -487,12 +479,13 @@ class AmortizedLoadings:
 
             # apply gene graph regularization, if called for
             if use_gene_graph_prior:
-                assert isinstance(similarity_matrix_gg, torch.Tensor), \
+                assert isinstance(similarity_matrix_gg, torch.Tensor), (
                     "use_gene_graph_prior is True: you must supply similarity_matrix_gg"
-                assert isinstance(gamma_loc, torch.Tensor), \
-                    "use_gene_graph_prior is True: you must supply gamma_loc"
-                assert isinstance(gamma_scale, torch.Tensor), \
+                )
+                assert isinstance(gamma_loc, torch.Tensor), "use_gene_graph_prior is True: you must supply gamma_loc"
+                assert isinstance(gamma_scale, torch.Tensor), (
                     "use_gene_graph_prior is True: you must supply gamma_scale"
+                )
                 log_prob_sum_gene_graph_reg = gene_graph_regularization(
                     similarity_matrix_gg=similarity_matrix_gg,
                     factor_matrix_kg=factor_matrix_kg,
@@ -539,7 +532,6 @@ class AmortizedLoadings:
         pyro.module("loadings_encoder", cls.loading_encoder)
 
         with pyro.plate("obs_plate"):
-
             # encode the loadings per cell
             loading_matrix_concentration_nk = cls.loading_encoder(x_ng)
 
@@ -609,16 +601,20 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
         # set up the initial factors based on the gene graph prior
         if use_gene_graph_prior:
-            assert similarity_matrix_gg is not None, \
+            assert similarity_matrix_gg is not None, (
                 "use_gene_graph_prior is True: you must supply similarity_matrix_gg"
-            logger.info("Initializing gene expression factors in a manner "
-                        "consistent with the supplied similarity matrix")
+            )
+            logger.info(
+                "Initializing gene expression factors in a manner consistent with the supplied similarity matrix"
+            )
             self._sample_null_graph_concordance_stats_and_initialize_factors()
 
         # choose model
         if encoder_type is not None:
             AmortizedLoadings.initialize_loading_encoder(
-                n_genes=n_genes, k=k_max, encoder_type=encoder_type,
+                n_genes=n_genes,
+                k=k_max,
+                encoder_type=encoder_type,
             )
             self.model_class: type[AmortizedLoadings | MaximumLikelihood] = AmortizedLoadings
             logger.info("Using an amortized encoder to estimate factor loadings")
@@ -677,24 +673,18 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         try:
             return pyro.param("log_ard_alpha_k").detach()
         except KeyError:
-            logger.warning(
-                "Attempted to access log_ard_alpha_k, but it is not "
-                "in the Pyro param store"
-            )
+            logger.warning("Attempted to access log_ard_alpha_k, but it is not in the Pyro param store")
             return None
 
     @torch.no_grad()
     def get_factors(self, log_alpha_ard_cutoff: Optional[float] = None) -> torch.Tensor:
-
         factor_matrix_kg = pyro.param("factor_matrix_kg").detach()
         logic = self._get_ard_cutoff_logic(log_alpha_ard_cutoff=log_alpha_ard_cutoff)
         factor_matrix_kg = factor_matrix_kg[logic, :]
         return factor_matrix_kg
 
     @torch.no_grad()
-    def get_factor_loadings(self,
-                            dataloader=None,
-                            log_alpha_ard_cutoff: Optional[float] = None):
+    def get_factor_loadings(self, dataloader=None, log_alpha_ard_cutoff: Optional[float] = None):
         logic = self._get_ard_cutoff_logic(log_alpha_ard_cutoff=log_alpha_ard_cutoff)
 
         if self.model_class == MaximumLikelihood:
@@ -706,16 +696,16 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 dirichlet_alphas_mk = self._get_loading(tensors)
                 loading_matrix_mk = dist.Dirichlet(dirichlet_alphas_mk).mean
                 loading_matrix_mk = loading_matrix_mk[:, logic]
-                loading_matrix_mk = (loading_matrix_mk
-                                     / loading_matrix_mk.sum(dim=-1, keepdim=True))
+                loading_matrix_mk = loading_matrix_mk / loading_matrix_mk.sum(dim=-1, keepdim=True)
                 loading_matrices_mk.append(loading_matrix_mk)
             loading_matrix_nk = torch.cat(loading_matrices_mk, dim=0)
         return loading_matrix_nk
 
     def _get_loading(self, batch):
         x_ng = batch["x_ng"].to(self.device)
-        assert isinstance(self.model_class.loading_encoder, torch.nn.Module), \
+        assert isinstance(self.model_class.loading_encoder, torch.nn.Module), (
             "You are trying to get amortized loadings, but the model_class has no loading_encoder"
+        )
         dirichlet_alphas_nk = self.model_class.loading_encoder(x_ng)
         return dirichlet_alphas_nk
 
@@ -738,7 +728,6 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         best_init_factors_kg: torch.Tensor | None = None
         alpha_kg = torch.ones([self.g]).unsqueeze(0) * torch.tensor(self.gene_alpha_k).unsqueeze(1)
         for _ in range(n):
-
             # sample a factor matrix
             random_factors_kg = torch.distributions.Dirichlet(alpha_kg).sample()
 
@@ -758,24 +747,27 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         # set these properties
         gamma_vals: torch.Tensor = torch.tensor(gammas)
         self.initial_factors_kg = torch.nn.Parameter(
-            best_init_factors_kg, requires_grad=False,
+            best_init_factors_kg,
+            requires_grad=False,
         )
         self.null_concordance_loc = torch.nn.Parameter(
-            gamma_vals.mean(), requires_grad=False,
+            gamma_vals.mean(),
+            requires_grad=False,
         )
         self.null_concordance_scale = torch.nn.Parameter(
-            gamma_vals.std(dim=-1), requires_grad=False,
+            gamma_vals.std(dim=-1),
+            requires_grad=False,
         )
 
     @property
     def device(self):
         if self._device is None:
             if isinstance(self.model_class.loading_encoder, torch.nn.Module):
-                devices = list({p.device for p in
-                                self.model_class.loading_encoder.parameters()})
+                devices = list({p.device for p in self.model_class.loading_encoder.parameters()})
                 if len(devices) > 1:
-                    raise RuntimeError(f"Encoder {str(self.model_class.loading_encoder)} "
-                                    "has parameters on more than one device")
+                    raise RuntimeError(
+                        f"Encoder {str(self.model_class.loading_encoder)} has parameters on more than one device"
+                    )
                 else:
                     device = devices[0]
                 self._device = device
