@@ -416,10 +416,8 @@ CONFIGS = [
                     "init_args": {
                         "k_values": [10],
                         "r": 10,
-                        "full_g": 36601,
                         "algorithm": "mairal",
-                        "log_variational": False,
-                        "var_names_hvg": [
+                        "var_names_g": [
                             "ENSG00000187642",
                             "ENSG00000078808",
                             "ENSG00000272106",
