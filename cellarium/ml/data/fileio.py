@@ -1,11 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import pickle
 import re
 import shutil
 import tempfile
 import urllib.request
-import pickle
 
 from anndata import AnnData, read_h5ad
 from google.cloud.storage import Client
@@ -92,6 +92,7 @@ def read_h5ad_file(filename: str, **kwargs) -> AnnData:
 
     return read_h5ad(filename)
 
+
 def read_pkl_from_gcs(filename: str, storage_client: Client | None = None):
     r"""
     Read ``.pkl``-formatted pickle file from the Google Cloud Storage.
@@ -119,4 +120,4 @@ def read_pkl_from_gcs(filename: str, storage_client: Client | None = None):
     pickle_data = blob.download_as_bytes()
 
     # Load the pickle data from the byte string directly in memory
-    return(pickle.loads(pickle_data))
+    return pickle.loads(pickle_data)
