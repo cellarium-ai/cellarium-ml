@@ -31,6 +31,7 @@ dependencies = [
   "numpy<=1.26.4",
   "pyro-ppl>=1.9.1",
   "pytest",
+  "scikit-learn",
   "torch>=2.2.0",
   "transformers",
 ]
@@ -39,13 +40,14 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 lint = ["ruff"]
-mypy = ["mypy", "types-PyYAML"]
+mypy = ["mypy", "types-PyYAML", "types-requests"]
 test = [
   "pytest-xdist",
   "tenacity",
   "tensorboard",
   "torchvision",
 ]
+scanpy = ["scanpy[leiden]"]
 docs = [
   "nbsphinx",
   "Pillow",
@@ -54,7 +56,7 @@ docs = [
   "sphinx_rtd_theme",
   "sphinx-copybutton",
 ]
-dev = ["cellarium-ml[docs,lint,mypy,test]"]
+dev = ["cellarium-ml[docs,lint,mypy,test,scanpy]"]
 
 [project.scripts]
 cellarium-ml = "cellarium.ml.cli:main"

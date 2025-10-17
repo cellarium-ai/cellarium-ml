@@ -508,3 +508,23 @@ class CellariumModule(pl.LightningModule):
                 checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["completed"] += 1
                 checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["completed"] += 1
                 checkpoint["CellariumAnnDataDataModule"]["epoch"] += 1
+
+    def on_train_end(self) -> None:
+        """
+        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
+        ``on_epoch_end`` must be called at the end of every epoch.
+        """
+        on_end = getattr(self.model, "on_end", None)
+        if callable(on_end):
+            on_end(self.trainer)
+
+    def on_predict_end(self) -> None:
+        """
+        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
+        ``on_epoch_end`` must be called at the end of every epoch.
+        """
+        on_prediction_end = getattr(self.model, "on_prediction_end", None)
+        if callable(on_prediction_end):
+            on_prediction_end(self.trainer)

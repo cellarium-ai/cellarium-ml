@@ -19,7 +19,7 @@ trainer:
       start_method: popen
     dict_kwargs:
       broadcast_buffers: false
-  devices: 2
+  devices: 1
   num_nodes: 1
   precision: null
   logger: null
@@ -55,7 +55,7 @@ trainer:
   plugins: null
   sync_batchnorm: false
   reload_dataloaders_every_n_epochs: 0
-  default_root_dir: /tmp/test_examples/onepass
+  default_root_dir: ${root_dir}
 model:
   transforms:
     - class_path: cellarium.ml.transforms.NormalizeTotal
@@ -75,10 +75,10 @@ data:
   dadc:
     class_path: cellarium.ml.data.DistributedAnnDataCollection
     init_args:
-      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad
+      filenames: /home/jupyter/cellarium-ml/notebooks/tmp/subset/subset_data_{0..38}.h5ad
       limits: null
-      shard_size: 100
-      last_shard_size: null
+      shard_size: ${shard_size}
+      last_shard_size: ${last_shard_size}
       max_cache_size: 2
       cache_size_strictly_enforced: true
       label: null
@@ -87,17 +87,17 @@ data:
       convert: null
       indices_strict: true
       obs_columns_to_validate:
-        - total_mrna_umis
+        # - total_mrna_umis
   batch_keys:
     x_ng:
       attr: X
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
       attr: var_names
-    total_mrna_umis_n:
-      attr: obs
-      key: total_mrna_umis
-  batch_size: 100
+    # total_mrna_umis_n:
+    #   attr: obs
+    #   key: total_mrna_umis
+  batch_size: ${batch_size}
   iteration_strategy: cache_efficient
   shuffle: false
   shuffle_seed: 0

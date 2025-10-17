@@ -388,6 +388,80 @@ CONFIGS = [
             },
         },
     },
+    {
+        "model_name": "nmf",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "model": {
+                    "class_path": "cellarium.ml.models.NonNegativeMatrixFactorization",
+                    "init_args": {
+                        "k_values": [10],
+                        "r": 10,
+                        "algorithm": "mairal",
+                        "var_names_g": [
+                            "ENSG00000187642",
+                            "ENSG00000078808",
+                            "ENSG00000272106",
+                            "ENSG00000162585",
+                            "ENSG00000272088",
+                            "ENSG00000204624",
+                            "ENSG00000162490",
+                            "ENSG00000177000",
+                            "ENSG00000011021",
+                        ],
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                },
+                "batch_size": "50",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 1,
+                "strategy": {
+                    "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                    "init_args": {"broadcast_buffers": "true"},
+                },
+            },
+        },
+    },
 ]
 
 
