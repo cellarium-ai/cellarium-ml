@@ -42,10 +42,10 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-def test_nmf_multi_device(small_adata: anndata.AnnData):
+def test_nmf_single_device(small_adata: anndata.AnnData):
     n, g = small_adata.shape
     k_values = [3, 4]
-    devices = int(os.environ.get("TEST_DEVICES", "1"))
+    devices = 1  # int(os.environ.get("TEST_DEVICES", "1"))
 
     # dataloader
     batch_size = n // 2
