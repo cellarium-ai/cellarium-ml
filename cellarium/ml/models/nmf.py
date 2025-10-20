@@ -440,6 +440,7 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
         consensus_factors: dict[int, dict[str, torch.Tensor | float]],
         k: int,
         normalize: bool = True,
+        obs_names_n: np.ndarray | None = None,
     ) -> torch.Tensor:
         """
         Infer the loadings of each program for the input count matrix.
@@ -450,6 +451,7 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
             consensus_factors: Consensus factors from consensus computation
             k: Number of factors
             normalize: Whether to normalize loadings
+            obs_names_n: Cell names
 
         Returns:
             Loadings tensor of shape (n, k)
@@ -622,6 +624,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         consensus_factors: dict[int, dict[str, torch.Tensor | float]],
         k: int,
         normalize: bool = True,
+        obs_names_n: np.ndarray | None = None,
     ) -> torch.Tensor:
         """
         Infer the loadings of each program for the input count matrix.
