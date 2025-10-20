@@ -1,0 +1,207 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
+import lightning.pytorch as pl
+import numpy as np
+import pyro
+import pyro.distributions as dist
+import torch
+import torch.nn.functional
+
+from cellarium.ml.data.fileio import read_pkl_from_gcs
+from cellarium.ml.distributions import PyroCategorical
+from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
+
+
+class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
+    """
+    Logistic regression model.
+
+    Args:
+        n_obs:
+            Number of observations.
+        var_names_g:
+            The variable names schema for the input data validation.
+        y_categories:
+            The categories for the target data.
+        W_prior_scale:
+            The scale of the Laplace prior for the weights.
+        W_init_scale:
+            Initialization scale for the ``W_gc`` parameter.
+        seed:
+            Random seed used to initialize parameters.
+        log_metrics:
+            Whether to log the histogram of the ``W_gc`` parameter.
+    """
+
+    def __init__(
+        self,
+        n_obs: int,
+        var_names_g: np.ndarray,
+        actual_categories=670,
+        W_prior_scale: float = 1.0,
+        W_init_scale: float = 1.0,
+        seed: int = 0,
+        probability_propagation_flag: bool = False,
+        target_row_descendent_col_torch_tensor_path: str = "",
+        y_categories_path: str = "",
+        valid_mask_path: str = "",
+        log_metrics: bool = True,
+    ) -> None:
+        super().__init__()
+
+        # data
+        self.actual_categories = actual_categories
+        self.n_obs = n_obs
+        self.var_names_g = var_names_g
+        self.n_vars = len(var_names_g)
+        self.y_categories = read_pkl_from_gcs(y_categories_path)
+        self.target_row_descendent_col_torch_tensor = read_pkl_from_gcs(target_row_descendent_col_torch_tensor_path)
+        self.n_categories = len(self.y_categories)
+        self.probability_propagation_flag = probability_propagation_flag
+        self.out_distribution = PyroCategorical
+
+        self.seed = seed
+        # parameters
+        self._W_prior_scale = W_prior_scale
+        self.W_init_scale = W_init_scale
+        self.W_prior_scale: torch.Tensor
+        self.register_buffer("W_prior_scale", torch.empty(()))
+        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_categories))
+        self.b_c = torch.nn.Parameter(torch.empty(self.n_categories))
+        self.reset_parameters()
+
+        # loss
+        self.elbo = pyro.infer.Trace_ELBO()
+
+        self.log_metrics = log_metrics
+        self.valid_mask = read_pkl_from_gcs(valid_mask_path)
+
+    def reset_parameters(self) -> None:
+        rng_device = self.W_gc.device.type if self.W_gc.device.type != "meta" else "cpu"
+        rng = torch.Generator(device=rng_device)
+        rng.manual_seed(self.seed)
+        self.W_prior_scale.fill_(self._W_prior_scale)
+        self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
+        self.b_c.data.zero_()
+
+    def forward(
+        self, x_ng: torch.Tensor, var_names_g: np.ndarray, y_n: torch.Tensor, **kwargs
+    ) -> dict[str, torch.Tensor | None]:
+        """
+        Args:
+            x_ng:
+                The input data.
+            var_names_g:
+                The variable names for the input data.
+            y_n:
+                The target data.
+            y_categories:
+                The categories for the input target data.
+
+        Returns:
+            A dictionary with the loss value.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
+        return {"loss": loss}
+
+    def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
+        W_gc = pyro.sample(
+            "W",
+            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
+        )
+        with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0], dim=-2):
+            logits_nc = x_ng @ W_gc + self.b_c
+            if not self.probability_propagation_flag:  # only used for base model
+                pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
+            else:
+                compiled_propagated_logits = torch.compile(self.log_probs)
+                propagated_logits = compiled_propagated_logits(logits=logits_nc)
+                pyro.sample("y", self.out_distribution(logits=propagated_logits), obs=y_n)
+
+    def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
+        pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
+
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+        """
+        Predict the target logits.
+
+        Args:
+            x_ng:
+                The input data.
+            var_names_g:
+                The variable names for the input data.
+
+        Returns:
+            A dictionary with the target logits.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+        logits_nc = x_ng @ self.W_gc + self.b_c
+        if self.actual_categories == self.W_gc.shape[1]:
+            activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
+        else:  # when trained model has fewer classes than expected during validation
+            activation_out_filtered = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
+            activation_out = torch.zeros(x_ng.shape[0], self.actual_categories, device=x_ng.device)
+            activation_out[:, self.valid_mask] = activation_out_filtered
+        if self.probability_propagation_flag:
+            activation_out = self.probability_propagation(activation_out_gpu=activation_out)
+        return {"y_logits_nc": logits_nc, "cell_type_probs_nc": activation_out}
+
+    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
+        if trainer.global_rank != 0:
+            return
+
+        if not self.log_metrics:
+            return
+
+        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
+            return
+
+        for logger in trainer.loggers:
+            if isinstance(logger, pl.loggers.TensorBoardLogger):
+                logger.experiment.add_histogram(
+                    "W_gc",
+                    self.W_gc,
+                    global_step=trainer.global_step,
+                )
+
+    def probability_propagation(self, activation_out_gpu: torch.tensor) -> torch.tensor:
+        """
+        for each column in activation_out_gpu_clone, col, we get a tensor of
+        activation_out_gpu[:,[children_indices[col]]],
+        then we take the rowwise sume of these columns.
+        then we add those values with all rows in 'col' column in activation_out_gpu_clone
+        TRIAL CODE AVAILABLE IN TRIAL.IPYNB - PROBABILITY PROPAGATION CODE TRIAL
+        """
+        propagated_p = torch.einsum(
+            "nc,kc->nk",
+            activation_out_gpu,
+            self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device),
+        )
+        return torch.clamp(propagated_p, max=1.0)
+
+    def log_probs(self, logits: torch.Tensor):
+        """
+        logits = torch Tensor of shape nxc
+        step 1: propagated_logits: LSE (L_i) where i belongs to the
+        set of descendents of each column in c and column c
+        step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the
+        2613 classes c in each row (sum of all logits in each row of n before propagation)
+        log(1-p_k') = log{(sum(p_i) i belongs to set(descendents(k)) + p_k)/sum(p_m), m = total cell types}
+        step 3: LSE(L_i) - LSE(L_m)
+        """
+        log_probs = self.logsumexp_propagated(logits) - torch.logsumexp(logits, dim=1, keepdim=True)
+        return log_probs
+
+    def logsumexp_propagated(self, logits_nc):
+        # matrix multiplication for torch with replacement/optimization
+        desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype=torch.float)
+        temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
+        return temp.logsumexp(dim=1)
