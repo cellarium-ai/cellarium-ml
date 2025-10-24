@@ -11,6 +11,7 @@ import numpy as np
 import pyro
 import pyro.distributions as dist
 import torch
+from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import constraints
 
 from cellarium.ml.models.nmf import NonNegativeMatrixFactorization
@@ -160,31 +161,42 @@ class FullyConnectedNetwork(torch.nn.Module):
         return self.network(x_ng)
 
 
-def initialize_matrix(rows: int, cols: int, alpha: Union[float, torch.Tensor], simplex: bool = True):
+@torch.no_grad()
+def initialize_matrix(
+    rows: int,
+    cols: int,
+    alpha_cols: torch.Tensor,
+    simplex: bool = True,
+    seed: torch.Tensor | int | None = None,
+):
     """
     Initialize a parameter matrix for NMF: [rows, cols]
 
     Args:
-        rows: Total number of cells in the entire dataset
-        cols: Maximum number of factors to model
-        alpha: Concentration of gamma distribution used to sample values. Small
-            values < 1 lead to sparsity.
+        rows: Rows for matrix
+        cols: Cols for matrix
+        alpha_cols: Concentration of gamma distribution associated with cols.
+            Small values < 1 lead to sparsity.
         simplex: True to initialize values so that matrix.sum(dim=-1) = 1
+        seed: Random seed
 
     Returns:
         matrix: [rows, cols] matrix of initial values for NMF
     """
 
     # Bayesian NMF, Cemgil 2009... ish
-    if isinstance(alpha, torch.Tensor) and (len(alpha) > 1):
-        matrix = dist.Gamma(concentration=alpha, rate=alpha / cols).sample(torch.Size([cols])).t()
-    else:
-        if isinstance(alpha, torch.Tensor):
-            alpha = alpha.item()  # having it in a tensor messes up sample size
-        matrix = dist.Gamma(concentration=alpha, rate=alpha / cols).sample(torch.Size([rows, cols]))
+    alpha = alpha_cols.expand((cols,))
+    gamma_dist = torch.distributions.Gamma(concentration=alpha, rate=alpha / cols)
+
+    if seed:
+        torch.manual_seed(seed)
+
+    matrix = gamma_dist.sample([rows])
+
     if simplex:
         matrix = matrix / matrix.sum(dim=-1, keepdim=True)
-    return matrix
+
+    return matrix.detach()
 
 
 def ard_regularization(loading_matrix_nk: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
@@ -201,12 +213,13 @@ def ard_regularization(loading_matrix_nk: torch.Tensor, scale: float = 1.0) -> t
     guide is Delta(loadings). This implementation is just a bit easier since it
     only requires one if-statement in the model and nothing in the guide.
     """
-    k_max = loading_matrix_nk.shape[-1]
-    log_ard_alpha_k = pyro.param(
-        "log_ard_alpha_k",
-        np.log(k_max) * torch.ones(k_max).to(loading_matrix_nk.device),
-        constraint=constraints.less_than(upper_bound=6.0),
-    )
+    # k_max = loading_matrix_nk.shape[-1]
+    # log_ard_alpha_k = pyro.param(
+    #     "log_ard_alpha_k",
+    #     np.log(k_max) * torch.ones(k_max).to(loading_matrix_nk.device),
+    #     constraint=constraints.less_than(upper_bound=6.0),
+    # )
+    log_ard_alpha_k = pyro.param("log_ard_alpha_k")
     ard_alpha_k = log_ard_alpha_k.exp()
 
     # TODO: what about using a zero-mean Beta distribution (matches support)?
@@ -307,8 +320,18 @@ class AmortizedLoadingsConfig(InferenceConfig):
 class InferenceStrategy(ABC):
     """Abstract base class for inference strategies"""
 
-    def __init__(self, config: InferenceConfig, **strategy_specific_params):
+    def __init__(
+        self,
+        config: InferenceConfig,
+        parent_model: "BayesianNonNegativeMatrixFactorization",
+        **strategy_specific_params,
+    ):
         self.config = config
+        # Store reference to parent model to access PyroParam objects
+        # storing direct references to PyroParams does not work because
+        # it creates non-leaf tensors (which then cannot be deepcopied)
+        assert self.parent_model is not None, "parent_model must be provided"
+        self.parent_model = parent_model
         self.setup(**strategy_specific_params)
 
     @abstractmethod
@@ -331,7 +354,7 @@ class InferenceStrategy(ABC):
         """Get factor loadings for given data"""
         pass
 
-    def _get_likelihood_distribution(self, lam_ng: torch.Tensor, x_ng: torch.Tensor):
+    def _get_likelihood_distribution(self, lam_ng: torch.Tensor):
         """Create the appropriate likelihood distribution based on config"""
         if self.config.likelihood_dist == dist.Poisson:
             return dist.Poisson(rate=lam_ng + 1e-5).to_event(1)
@@ -344,9 +367,8 @@ class InferenceStrategy(ABC):
 class MaximumLikelihoodStrategy(InferenceStrategy):
     """Maximum likelihood inference strategy"""
 
-    def setup(self, **kwargs):
+    def setup(self, **params):
         """Initialize strategy-specific components"""
-        # No special setup needed for maximum likelihood
         pass
 
     def model(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -360,23 +382,15 @@ class MaximumLikelihoodStrategy(InferenceStrategy):
         Returns:
             out: Dictionary of tensors relevant for the generative model
         """
-        # Get n_cells from config
-        n_cells = getattr(self.config, "n_cells", 1000)  # Fallback for compatibility
-
-        # factors and loadings
-        factor_matrix_kg = pyro.param(
-            "factor_matrix_kg",
-            initialize_matrix(rows=self.config.k_max, cols=x_ng.shape[-1], alpha=self.config.gene_alpha, simplex=True),
-            constraint=constraints.simplex,  # in the g dimension
-        )
-        loading_matrix_mk = pyro.param(
-            "loading_matrix_mk",
-            initialize_matrix(rows=n_cells, cols=self.config.k_max, alpha=self.config.loading_alpha, simplex=True),
-            constraint=constraints.simplex,  # in the k dimension
-        )
+        # Access PyroParam objects from the parent model
+        # Note: we can't store these as instance variables due to deepcopy issues
+        loading_matrix_mk = self.parent_model.loading_matrix_mk
+        factor_matrix_kg = self.parent_model.factor_matrix_kg
 
         # subset the loading matrix to the cells in this minibatch
         loading_matrix_nk = loading_matrix_mk[minibatch_indices_n, :]
+
+        # print("training sums: ", loading_matrix_nk.sum(dim=-1)[:5])
 
         # apply ARD regularization, if called for
         if self.config.use_ard:
@@ -389,30 +403,33 @@ class MaximumLikelihoodStrategy(InferenceStrategy):
         # print(f"loading_matrix_nk: {loading_matrix_nk}")
         # print(f"factor_matrix_kg: {factor_matrix_kg}")
         chi_ng = torch.matmul(loading_matrix_nk, factor_matrix_kg)
-        # print(f"chi_ng: {chi_ng}")
-        # print(f"min chi_ng: {chi_ng.min()}")
+        # # print(f"chi_ng: {chi_ng}")
+        # # print(f"min chi_ng: {chi_ng.min()}")
 
-        # the poisson rate
+        # # the poisson rate
         cell_size_factors_n1 = x_ng.sum(dim=-1, keepdim=True)
-        # print(f"x_ng: {x_ng}")
-        # print(f"x_ng.min: {x_ng.min()}")
-        # print(f"cell_size_factors_n1: {cell_size_factors_n1}")
-        # print(f"cell_size_factors_n1.min: {cell_size_factors_n1.min()}")
+        # # print(f"x_ng: {x_ng}")
+        # # print(f"x_ng.min: {x_ng.min()}")
+        # # print(f"cell_size_factors_n1: {cell_size_factors_n1}")
+        # # print(f"cell_size_factors_n1.min: {cell_size_factors_n1.min()}")
         lam_ng = chi_ng * cell_size_factors_n1
+
+        # trying not normalizing the loadings as a constraint
+        # lam_ng = torch.matmul(loading_matrix_nk, factor_matrix_kg)
 
         # print(f"lam_ng: {lam_ng}")
         # assert 0
 
         # compare to observed count data
         with pyro.plate("obs_plate", size=x_ng.shape[0]):
-            likelihood_dist = self._get_likelihood_distribution(lam_ng, x_ng)
-            c_ng = pyro.sample("obs", likelihood_dist, obs=x_ng)
+            likelihood_dist = self._get_likelihood_distribution(lam_ng)
+            pyro.sample("obs", likelihood_dist, obs=x_ng)
 
         return {
-            "counts_ng": c_ng,
-            "chi_ng": chi_ng,
-            "loadings_nk": loading_matrix_nk,
-            "factors_kg": factor_matrix_kg,
+            #     "counts_ng": c_ng,
+            #     "lam_ng": lam_ng,
+            #     "loadings_nk": loading_matrix_nk,
+            #     "factors_kg": self.factor_matrix_kg,
             "ard_regularization": log_prob_sum_ard_reg,
         }
 
@@ -422,40 +439,33 @@ class MaximumLikelihoodStrategy(InferenceStrategy):
 
     def get_loadings(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> torch.Tensor:
         """Get factor loadings for given data"""
-        loading_matrix_mk = pyro.param("loading_matrix_mk")
-        return loading_matrix_mk[minibatch_indices_n, :]
-
-
-class MaximumLikelihood:
-    """Legacy class for backward compatibility - delegates to strategy"""
-
-    loading_encoder = None
-
-    @staticmethod
-    def model(*args, **kwargs):
-        """Legacy method - use MaximumLikelihoodStrategy instead"""
-        raise NotImplementedError("Use MaximumLikelihoodStrategy instead")
-
-    @staticmethod
-    def guide(*args, **kwargs):
-        """Legacy method - use MaximumLikelihoodStrategy instead"""
-        pass
+        loading_matrix_mk = self.parent_model.loading_matrix_mk
+        total_mrna_umis_n1 = x_ng.sum(dim=-1, keepdim=True)
+        return loading_matrix_mk[minibatch_indices_n, :] * total_mrna_umis_n1
 
 
 class AmortizedLoadingsStrategy(InferenceStrategy):
     """Amortized inference strategy using neural network encoder"""
 
-    def __init__(self, config: AmortizedLoadingsConfig):
-        super().__init__(config)
+    def __init__(
+        self,
+        config: AmortizedLoadingsConfig,
+        **params,
+    ):
+        super().__init__(config, **params)
         self.config: AmortizedLoadingsConfig = config
-        self.loading_encoder: Optional[torch.nn.Module] = None
 
     def setup(self, **params):
         """Initialize the encoder network"""
-        n_genes = params.get("n_genes")
+        n_genes: int | None = params.get("n_genes", None)
+        # Store reference to parent model to access PyroParam objects
+        self.parent_model = params.get("parent_model")
+        assert self.parent_model is not None, "parent_model must be provided"
         if n_genes is None:
             n_genes = self.config.n_genes
         self.loading_encoder = self._build_encoder(n_genes)
+        # register PyTorch modules with Pyro
+        pyro.module("loadings_encoder", self.loading_encoder)
 
     def _build_encoder(self, n_genes: int) -> torch.nn.Module:
         """Build the encoder network for loading inference."""
@@ -484,18 +494,13 @@ class AmortizedLoadingsStrategy(InferenceStrategy):
 
     def model(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> dict[str, torch.Tensor]:
         """Generative model for amortized inference"""
-        # Get factors (same as maximum likelihood)
-        factor_matrix_kg = pyro.param(
-            "factor_matrix_kg",
-            initialize_matrix(rows=self.config.k_max, cols=x_ng.shape[-1], alpha=self.config.gene_alpha, simplex=True),
-            constraint=constraints.simplex,
-        )
 
         with pyro.plate("obs_plate"):
+            # TODO reconsider prior (not simplex)
             # prior on loadings is Dirichlet
             prior_alpha_nk = self.config.loading_alpha * torch.ones([x_ng.shape[0], self.config.k_max]).to(x_ng.device)
             loading_matrix_nk = pyro.sample(
-                "loading_matrix_nk",
+                "amortized_loading_prior_nk",
                 dist.Dirichlet(prior_alpha_nk).to_event(1),
             )
 
@@ -516,23 +521,20 @@ class AmortizedLoadingsStrategy(InferenceStrategy):
                 log_prob_sum_gene_graph_reg = torch.tensor(-float("inf")).to(x_ng.device)
 
             # Compute Poisson rate
+            factor_matrix_kg = self.parent_model.factor_matrix_kg
             chi_ng = torch.matmul(loading_matrix_nk, factor_matrix_kg)
             cell_size_factors_m = x_ng.sum(dim=-1, keepdim=True)
             lam_ng = chi_ng * cell_size_factors_m
 
             # Observe data
-            likelihood_dist = self._get_likelihood_distribution(lam_ng, x_ng)
-            c_ng = pyro.sample(
-                "obs",
-                likelihood_dist,
-                obs=x_ng,
-            )
+            likelihood_dist = self._get_likelihood_distribution(lam_ng)
+            pyro.sample("obs", likelihood_dist, obs=x_ng)
 
         return {
-            "counts_ng": c_ng,
-            "chi_ng": chi_ng,
-            "loadings_nk": loading_matrix_nk,
-            "factors_kg": factor_matrix_kg,
+            # "counts_ng": c_ng,
+            # "chi_ng": chi_ng,
+            # "loadings_nk": loading_matrix_nk,
+            # "factors_kg": factor_matrix_kg,
             "ard_regularization": log_prob_sum_ard_reg,
             "gene_graph_regularization": log_prob_sum_gene_graph_reg,
         }
@@ -542,16 +544,13 @@ class AmortizedLoadingsStrategy(InferenceStrategy):
         if self.loading_encoder is None:
             raise RuntimeError("Encoder not initialized. Call setup() first.")
 
-        # register PyTorch modules with Pyro
-        pyro.module("loadings_encoder", self.loading_encoder)
-
         with pyro.plate("obs_plate"):
             # encode the loadings per cell
             loading_matrix_concentration_nk = self.loading_encoder(x_ng)
 
             # sample from approximate posterior
             loading_matrix_nk = pyro.sample(
-                "loading_matrix_nk",
+                "amortized_loading_prior_nk",
                 dist.Dirichlet(loading_matrix_concentration_nk).to_event(1),
             )
 
@@ -609,7 +608,8 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         encoder_type: Optional[str] = None,
         encoder_hidden_dims: List[int] = [512],
         encoder_dropout_rate: float = 0.1,
-        likelihood_dist: Type[Union[dist.Poisson, dist.Normal]] = dist.Poisson,
+        likelihood_dist: str = "normal",
+        seed: int = 0,
     ):
         super().__init__(var_names_g=var_names_g, k_values=[k_max])
         self.total_n_cells = total_n_cells
@@ -619,31 +619,36 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         self.k_max = k_max
         if isinstance(gene_alpha_k, float):
             gene_alpha_k = [gene_alpha_k] * k_max  # list with k_max elements
-        self.gene_alpha_k = gene_alpha_k
+        self.gene_alpha_k = torch.tensor(gene_alpha_k).expand([k_max]).detach()
         self.loading_alpha = loading_alpha
         self.similarity_matrix_gg = similarity_matrix_gg
         self.use_gene_graph_prior = use_gene_graph_prior
         self.use_ard = use_ard
+        self.seed = seed
         self.elbo = pyro.infer.Trace_ELBO()
+
+        match likelihood_dist:
+            case "poisson":
+                likelihood_distribution: Type[Union[dist.Poisson, dist.Normal]] = dist.Poisson
+            case "normal":
+                likelihood_distribution = dist.Normal
+            case _:
+                raise ValueError("likelihood_dist must be 'poisson' or 'normal'")
 
         # Initialize the filter transform for HVGs
         self.transform__filter_to_hvgs = Filter([str(s) for s in var_names_g])
 
         # properties
-        self._device: torch.device | None = None
-        self.initial_factors_kg: torch.nn.Parameter | None = None
-        self.null_concordance_loc: torch.nn.Parameter | None = None
-        self.null_concordance_scale: torch.nn.Parameter | None = None
+        self.initial_factors_kg: torch.Tensor
+        self.null_concordance_loc: torch.Tensor
+        self.null_concordance_scale: torch.Tensor
 
-        # set up the initial factors based on the gene graph prior
-        if use_gene_graph_prior:
-            assert similarity_matrix_gg is not None, (
-                "use_gene_graph_prior is True: you must supply similarity_matrix_gg"
-            )
-            logger.info(
-                "Initializing gene expression factors in a manner consistent with the supplied similarity matrix"
-            )
-            self._sample_null_graph_concordance_stats_and_initialize_factors()
+        # set up pyro params
+        self.factor_matrix_kg = PyroParam(torch.empty(self.k_max, self.g), constraint=constraints.simplex)
+        self.loading_matrix_mk = PyroParam(
+            torch.empty(self.total_n_cells, self.k_max), constraint=constraints.nonnegative
+        )
+        self.log_ard_alpha_k = PyroParam(torch.empty(self.k_max), constraint=constraints.less_than(upper_bound=6.0))
 
         # Create inference strategy
         if encoder_type is not None:
@@ -652,7 +657,7 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 gene_alpha=torch.tensor(gene_alpha_k),
                 loading_alpha=loading_alpha,
                 use_ard=use_ard,
-                likelihood_dist=likelihood_dist,
+                likelihood_dist=likelihood_distribution,
                 n_genes=n_genes,
                 encoder_type=encoder_type,
                 encoder_hidden_dims=encoder_hidden_dims,
@@ -662,23 +667,119 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 gamma_loc=None,
                 gamma_scale=None,
             )
-            self.strategy = AmortizedLoadingsStrategy(amortized_config)
-            self.strategy.setup(n_genes=n_genes)
+            self.strategy = AmortizedLoadingsStrategy(
+                config=amortized_config,
+                n_genes=n_genes,
+                parent_model=self,
+            )
             logger.info("Using an amortized encoder to estimate factor loadings")
         else:
             ml_config = MaximumLikelihoodConfig(
                 k_max=k_max,
-                gene_alpha=torch.tensor(gene_alpha_k),
+                gene_alpha=self.gene_alpha_k,
                 loading_alpha=loading_alpha,
                 use_ard=use_ard,
-                likelihood_dist=likelihood_dist,
+                likelihood_dist=likelihood_distribution,
                 n_cells=total_n_cells,
             )
-            self.strategy = MaximumLikelihoodStrategy(ml_config)
-            self.strategy.setup()
+            self.strategy = MaximumLikelihoodStrategy(
+                config=ml_config,
+                parent_model=self,
+            )
             logger.info("Using local latent variables factor loadings")
 
         self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """
+        Reset model parameters.
+        """
+        torch.manual_seed(self.seed)
+
+        # Initialize factors
+        initial_factors = initialize_matrix(
+            cols=self.k_max,
+            rows=self.g,
+            alpha_cols=self.gene_alpha_k,
+            simplex=True,
+            seed=torch.randint(0, 1_000_000, (1,)),
+        ).t()
+
+        self.factor_matrix_kg_unconstrained.data.copy_(
+            _unconstrain(
+                initial_factors,
+                constraint=constraints.simplex,
+            )
+        )
+
+        # Initialize loadings
+        if isinstance(self.strategy, MaximumLikelihoodStrategy):
+            initial_loadings = initialize_matrix(
+                rows=self.total_n_cells,
+                cols=self.k_max,
+                alpha_cols=torch.tensor(self.loading_alpha),
+                simplex=True,
+                seed=torch.randint(0, 1_000_000, (1,)),
+            )
+            self.loading_matrix_mk_unconstrained.data.copy_(
+                _unconstrain(initial_loadings, constraint=constraints.nonnegative)
+            )
+
+        # Initialize ARD alphas
+        if self.use_ard:
+            self.log_ard_alpha_k_unconstrained.data.copy_(
+                _unconstrain(
+                    (np.log(self.k_max) * torch.ones(self.k_max)).detach(),
+                    constraint=constraints.less_than(upper_bound=6.0),
+                ).detach()
+            )
+
+        # set up the initial factors based on the gene graph prior
+        if self.use_gene_graph_prior:
+            assert self.similarity_matrix_gg is not None, (
+                "use_gene_graph_prior is True: you must supply similarity_matrix_gg"
+            )
+            logger.info(
+                "Initializing gene expression factors in a manner consistent with the supplied similarity matrix"
+            )
+            assert isinstance(self.similarity_matrix_gg, torch.Tensor)
+            gammas = []
+            best_init_factors_kg: torch.Tensor | None = None
+            alpha_kg = torch.ones([self.g]).unsqueeze(0) * torch.tensor(self.gene_alpha_k).unsqueeze(1)
+            for _ in range(1000):
+                # sample a factor matrix
+                random_factors_kg = torch.distributions.Dirichlet(alpha_kg).sample()
+
+                # compute the graph prior concordance statistic gamma
+                gamma = gene_graph_concordance_statistic(
+                    similarity_matrix_gg=self.similarity_matrix_gg,
+                    factor_matrix_kg=random_factors_kg,
+                ).item()
+                gammas.append(gamma)
+
+                # keep track of highest-scoring random factor matrix
+                if gamma == max(gammas):
+                    best_init_factors_kg = random_factors_kg
+
+            assert isinstance(best_init_factors_kg, torch.Tensor)
+
+            # set these properties
+            gamma_vals: torch.Tensor = torch.tensor(gammas)
+            self.initial_factors_kg = best_init_factors_kg
+            self.null_concordance_loc = gamma_vals.mean().detach()
+            self.null_concordance_scale = gamma_vals.std(dim=-1).detach()
+            # self.initial_factors_kg = torch.nn.Parameter(
+            #     best_init_factors_kg,
+            #     requires_grad=False,
+            # )
+            # self.null_concordance_loc = torch.nn.Parameter(
+            #     gamma_vals.mean(),
+            #     requires_grad=False,
+            # )
+            # self.null_concordance_scale = torch.nn.Parameter(
+            #     gamma_vals.std(dim=-1),
+            #     requires_grad=False,
+            # )
 
     def forward(
         self,
@@ -763,15 +864,14 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             If ARD was used, the k_max-length vector of learned coefficients,
             where large values indicate that a given k is not relevant.
         """
-        try:
-            return pyro.param("log_ard_alpha_k").detach()
-        except KeyError:
-            logger.warning("Attempted to access log_ard_alpha_k, but it is not in the Pyro param store")
+        if self.use_ard:
+            return self.log_ard_alpha_k.detach()
+        else:
             return None
 
     @torch.no_grad()
     def get_factors(self, log_alpha_ard_cutoff: Optional[float] = None) -> torch.Tensor:
-        factor_matrix_kg = pyro.param("factor_matrix_kg").detach()
+        factor_matrix_kg = self.factor_matrix_kg.detach()
         logic = self._get_ard_cutoff_logic(log_alpha_ard_cutoff=log_alpha_ard_cutoff)
         factor_matrix_kg = factor_matrix_kg[logic, :]
         return factor_matrix_kg
@@ -781,7 +881,7 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         logic = self._get_ard_cutoff_logic(log_alpha_ard_cutoff=log_alpha_ard_cutoff)
 
         if isinstance(self.strategy, MaximumLikelihoodStrategy):
-            loading_matrix_nk = pyro.param("loading_matrix_mk").detach()
+            loading_matrix_nk = self.loading_matrix_mk.detach()
             loading_matrix_nk = loading_matrix_nk[:, logic]
         else:
             loading_matrices_mk = []
@@ -790,7 +890,7 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 minibatch_indices_n = torch.arange(x_ng.shape[0], dtype=torch.long)
                 loading_matrix_mk = self.strategy.get_loadings(x_ng, minibatch_indices_n)
                 loading_matrix_mk = loading_matrix_mk[:, logic]
-                loading_matrix_mk = loading_matrix_mk / loading_matrix_mk.sum(dim=-1, keepdim=True)
+                # loading_matrix_mk = loading_matrix_mk / loading_matrix_mk.sum(dim=-1, keepdim=True)
                 loading_matrices_mk.append(loading_matrix_mk)
             loading_matrix_nk = torch.cat(loading_matrices_mk, dim=0)
         return loading_matrix_nk
@@ -804,69 +904,19 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         dirichlet_alphas_nk = self.strategy.loading_encoder(x_ng)
         return dirichlet_alphas_nk
 
-    def _sample_null_graph_concordance_stats_and_initialize_factors(
-        self,
-        n: int = 1000,
-    ):
-        """Sample from the null distribution of the graph prior concordance
-        statistic gamma (once and for all).
-
-        Args:
-            n: Number of random samples to draw
-
-        Returns:
-            None
-            (Sets null_concordance_loc, null_concordance_scale, initial_factors_kg)
-        """
-        assert isinstance(self.similarity_matrix_gg, torch.Tensor)
-        gammas = []
-        best_init_factors_kg: torch.Tensor | None = None
-        alpha_kg = torch.ones([self.g]).unsqueeze(0) * torch.tensor(self.gene_alpha_k).unsqueeze(1)
-        for _ in range(n):
-            # sample a factor matrix
-            random_factors_kg = torch.distributions.Dirichlet(alpha_kg).sample()
-
-            # compute the graph prior concordance statistic gamma
-            gamma = gene_graph_concordance_statistic(
-                similarity_matrix_gg=self.similarity_matrix_gg,
-                factor_matrix_kg=random_factors_kg,
-            ).item()
-            gammas.append(gamma)
-
-            # keep track of highest-scoring random factor matrix
-            if gamma == max(gammas):
-                best_init_factors_kg = random_factors_kg
-
-        assert isinstance(best_init_factors_kg, torch.Tensor)
-
-        # set these properties
-        gamma_vals: torch.Tensor = torch.tensor(gammas)
-        self.initial_factors_kg = torch.nn.Parameter(
-            best_init_factors_kg,
-            requires_grad=False,
-        )
-        self.null_concordance_loc = torch.nn.Parameter(
-            gamma_vals.mean(),
-            requires_grad=False,
-        )
-        self.null_concordance_scale = torch.nn.Parameter(
-            gamma_vals.std(dim=-1),
-            requires_grad=False,
-        )
-
-    @property
-    def device(self):
-        if self._device is None:
-            if isinstance(self.strategy, AmortizedLoadingsStrategy) and self.strategy.loading_encoder is not None:
-                devices = list({p.device for p in self.strategy.loading_encoder.parameters()})
-                if len(devices) > 1:
-                    raise RuntimeError(
-                        f"Encoder {str(self.strategy.loading_encoder)} has parameters on more than one device"
-                    )
-                else:
-                    device = devices[0]
-                self._device = device
-        return self._device
+    # @property
+    # def device(self):
+    #     if self._device is None:
+    #         if isinstance(self.strategy, AmortizedLoadingsStrategy) and self.strategy.loading_encoder is not None:
+    #             devices = list({p.device for p in self.strategy.loading_encoder.parameters()})
+    #             if len(devices) > 1:
+    #                 raise RuntimeError(
+    #                     f"Encoder {str(self.strategy.loading_encoder)} has parameters on more than one device"
+    #                 )
+    #             else:
+    #                 device = devices[0]
+    #             self._device = device
+    #     return self._device
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
@@ -970,37 +1020,3 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             rec_error[k] = error.item()
 
         return rec_error
-
-    def reset_parameters(self) -> None:
-        """
-        Reset model parameters.
-        """
-        # Clear the pyro parameter store
-        pyro.clear_param_store()
-
-        # Initialize factors
-        initial_factors = initialize_matrix(
-            rows=self.k_max,
-            cols=self.g,
-            alpha=torch.tensor(self.gene_alpha_k),
-            simplex=True,
-        )
-        pyro.param(
-            "factor_matrix_kg",
-            initial_factors,
-            constraint=torch.distributions.constraints.simplex,
-        )
-
-        # Initialize loadings
-        if isinstance(self.strategy, MaximumLikelihoodStrategy):
-            initial_loadings = initialize_matrix(
-                rows=self.total_n_cells,
-                cols=self.k_max,
-                alpha=self.loading_alpha,
-                simplex=True,
-            )
-            pyro.param(
-                "loading_matrix_mk",
-                initial_loadings,
-                constraint=torch.distributions.constraints.simplex,
-            )

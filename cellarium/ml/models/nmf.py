@@ -833,7 +833,7 @@ def compute_consensus_factors(
 
     consensus_stat = {}
     for k in k_values:
-        D_rkg = getattr(nmf_model, f"D_{k}_rkg")
+        D_rkg = nmf_model.factors_dict[k]
         consensus_output = consensus(
             D_rkg=D_rkg,
             density_threshold=density_threshold,
@@ -1043,6 +1043,7 @@ class NMFOutput:
             return self._rec_error
         raise UserWarning("Compute reconstruction error using calculate_reconstruction_error()")
 
+    @torch.no_grad()
     def compute_loadings(
         self,
         k: int,
@@ -1063,6 +1064,7 @@ class NMFOutput:
             datamodule = self.datamodule
         datamodule.setup(stage="predict")
 
+        # TODO fix this hacky manual stuff
         # grab the transforms
         transforms = []
         for transform in self.nmf_module.cpu_transforms:
@@ -1080,6 +1082,7 @@ class NMFOutput:
             alpha_nk = self.nmf_module.model.infer_loadings(
                 x_ng=batch["x_ng"],
                 var_names_g=batch["var_names_g"],
+                obs_names_n=batch.get("obs_names_n", None),
                 consensus_factors=self.consensus,
                 k=k,
                 normalize=normalize,

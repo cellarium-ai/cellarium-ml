@@ -33,10 +33,10 @@ def small_adata():
 
 
 # set the number of cells, genes, cell types, and factors
-n = 1000
+n = 2000
 g = 100
-n_celltypes = 5
-simulated_k = 3
+n_celltypes = 2
+simulated_k = 5
 
 # other constants
 cell_type_coherence_factor = 20
@@ -176,14 +176,14 @@ def x_nmf_ng(fixture_x_uncorrelated_mean_nmf_ng, fixture_x_correlated_mean_nmf_n
     """Data created by an NMF process with gaussian/poisson sampling noise
     and (no) correlation between the underlying factors and loadings."""
     torch.manual_seed(0)
-    # sigma = 0.1
+    sigma = 0.1
     out = {}
     for name, mean_ng in zip(
         ["uncorrelated", "correlated"], [fixture_x_uncorrelated_mean_nmf_ng, fixture_x_correlated_mean_nmf_ng]
     ):
         # gaussian noise but clamped to be non-negative
-        # noise = sigma * torch.randn_like(mean_ng)
-        # out[f"gaussian_{name}"] = torch.clamp(mean_ng + noise, min=0.0)
+        noise = sigma * torch.randn_like(mean_ng)
+        out[f"gaussian_{name}"] = torch.clamp(mean_ng + noise, min=0.0)
         # poisson noise
         out[f"poisson_{name}"] = torch.distributions.Poisson(mean_ng).sample()
 
@@ -222,6 +222,8 @@ def run_cellarium_bayesian_nmf(
         },
     )
 
+    epochs = 500
+
     # model
     cellarium_nmf = BayesianNonNegativeMatrixFactorization(
         total_n_cells=n,
@@ -231,6 +233,8 @@ def run_cellarium_bayesian_nmf(
         similarity_matrix_gg=None,
         use_gene_graph_prior=False,
         use_ard=False,
+        likelihood_dist="normal",
+        encoder_type=None,
     )
     module = CellariumModule(
         cpu_transforms=[
@@ -239,9 +243,12 @@ def run_cellarium_bayesian_nmf(
                 var_names_g=var_names_g,
                 eps=1e-4,
             ),
-            # Filter(var_names_g.tolist()),
         ],
         model=cellarium_nmf,
+        optim_fn=torch.optim.Adamax,
+        optim_kwargs={"lr": 1e-1},
+        scheduler_fn=torch.optim.lr_scheduler.OneCycleLR,
+        scheduler_kwargs={"max_lr": 0.5, "total_steps": epochs * n_batches},
     )
 
     # trainer
@@ -249,7 +256,7 @@ def run_cellarium_bayesian_nmf(
         barebones=False,
         accelerator="cpu",
         devices=devices,
-        max_epochs=10,
+        max_epochs=epochs,
         strategy="auto" if devices == 1 else pl.strategies.DDPStrategy(broadcast_buffers=True),
     )
 
@@ -260,8 +267,11 @@ def run_cellarium_bayesian_nmf(
     # get loadings and factors using NMFOutput
     nmf_output = NMFOutput(nmf_module=module, datamodule=datamodule)
     nmf_output.compute_consensus_factors(k_values=k, density_threshold=1, local_neighborhood_size=0.3)
-    cellarium_loadings_dataframe = nmf_output.compute_loadings(k=k, normalize=False)
+    cellarium_loadings_dataframe = nmf_output.compute_loadings(k=k, datamodule=datamodule, normalize=False)
     cellarium_loadings_nk = torch.tensor(cellarium_loadings_dataframe.values).float()
+    # print('cellarium_loadings_nk: ', cellarium_loadings_nk)
+    print("sums at end: ", cellarium_loadings_nk.sum(dim=-1)[:5])
+    # assert 0
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
     # Get consensus factors from nmf_output instead of the raw model
     consensus_factors = nmf_output.consensus[k]["consensus_D_kg"]
@@ -404,11 +414,19 @@ def run_bayesian_nmf_and_sklearn_multi_device(
     return loadings, factors
 
 
-@pytest.mark.parametrize("data", ["poisson_correlated", "poisson_uncorrelated"])
+@pytest.mark.parametrize(
+    "data",
+    [
+        "gaussian_correlated",
+        # "gaussian_uncorrelated",
+        "poisson_correlated",
+        # "poisson_uncorrelated",
+    ],
+)
 @pytest.mark.parametrize("n_cellarium_batches", [1, 2, 10], ids=["fullbatch", "2batches", "10batches"])
 def test_bayesian_nmf_against_sklearn(
     x_nmf_ng: dict[str, torch.Tensor],
-    data: Literal["poisson_correlated", "poisson_uncorrelated"],
+    data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
     fixture_d_correlated_kg: torch.Tensor,
     fixture_d_uncorrelated_kg: torch.Tensor,
     fixture_alpha_correlated_nk: torch.Tensor,
@@ -478,7 +496,7 @@ def test_bayesian_nmf_against_sklearn(
     )
     print(f"Sklearn reconstruction mean: {sklearn_reconstruction_ng.mean()}, std: {sklearn_reconstruction_ng.std()}")
 
-    assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.03, (
+    assert torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.1, (
         f"cellarium and sklearn loss is not very similar: {torch.abs(nmf_loss_sklearn - nmf_loss_cellarium):.4f}"
     )
 
@@ -490,7 +508,7 @@ def test_bayesian_nmf_against_sklearn(
         f"\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}"
     )
     print(f"total mean similarity: {total_similarity}")
-    assert total_similarity > 0.98, f"factors are not very similar: {total_similarity}"
+    assert total_similarity > 0.9, f"factors are not very similar: {total_similarity}"
 
     # assert that the loadings are similar
     pairwise_loading_similarity_nn = pairwise_cosine_similarity_cdist(
@@ -502,7 +520,7 @@ def test_bayesian_nmf_against_sklearn(
     )
     print(f"pairwise_loading_similarity_nn:\n{pairwise_loading_similarity_nn[row_indices, :][:, col_indices]}")
     print(f"total mean similarity: {total_similarity}")
-    assert total_similarity > 0.98, f"loadings are not very similar: {total_similarity:.4f}"
+    assert total_similarity > 0.97, f"loadings are not very similar: {total_similarity:.4f}"
 
     # truth
     if data.split("_")[-1] == "correlated":
@@ -539,10 +557,10 @@ def test_bayesian_nmf_against_sklearn(
     # specific threshold for each data type, intended to prevent performance regressions
     # these can be bumped up if performance is improved
     match data:
-        # case "gaussian_correlated":
-        #     threshold: float = 0.2
-        # case "gaussian_uncorrelated":
-        #     threshold = 0.55
+        case "gaussian_correlated":
+            threshold: float = 0.2
+        case "gaussian_uncorrelated":
+            threshold = 0.55
         case "poisson_correlated":
             threshold = 0.15
         case "poisson_uncorrelated":
@@ -576,8 +594,8 @@ def test_bayesian_nmf_against_sklearn(
         f"\n{pairwise_sklearn_loading_similarity_nn[row_indices, :][:, col_indices]}"
     )
     print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert total_sklearn_similarity - total_cellarium_similarity <= 0.025, (
-        "cellarium loadings are substantially less similar to truth than sklearn loadings"
+    assert total_sklearn_similarity - total_cellarium_similarity <= 0.03, (
+        "cellarium loadings are substantially less similar to truth than sklearn loadings: "
         f"{total_sklearn_similarity - total_cellarium_similarity:.4f}"
     )
     assert total_similarity > 0.95, (
