@@ -2,10 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import logging
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from types import EllipsisType
-from typing import List, Optional, Sequence, Type, Union
+from typing import Callable, List, Optional, Sequence, Type, Union
 
 import numpy as np
 import pyro
@@ -285,227 +283,95 @@ def gene_graph_regularization(
     return log_prob
 
 
-@dataclass
-class InferenceConfig:
-    """Base configuration for inference strategies"""
+class InferenceStrategies:
+    """Static methods for different inference strategies"""
 
-    k_max: int
-    gene_alpha: torch.Tensor
-    loading_alpha: float
-    use_ard: bool
-    likelihood_dist: Type[Union[dist.Poisson, dist.Normal]]
-
-
-@dataclass
-class MaximumLikelihoodConfig(InferenceConfig):
-    """Configuration specific to Maximum Likelihood inference"""
-
-    n_cells: int
-
-
-@dataclass
-class AmortizedLoadingsConfig(InferenceConfig):
-    """Configuration specific to Amortized Loadings inference"""
-
-    n_genes: int
-    encoder_type: str
-    encoder_hidden_dims: List[int]
-    encoder_dropout_rate: float
-    similarity_matrix_gg: Optional[torch.Tensor]
-    use_gene_graph_prior: bool
-    gamma_loc: Optional[torch.Tensor]
-    gamma_scale: Optional[torch.Tensor]
-
-
-class InferenceStrategy(ABC):
-    """Abstract base class for inference strategies"""
-
-    def __init__(
-        self,
-        config: InferenceConfig,
-        parent_model: "BayesianNonNegativeMatrixFactorization",
-        **strategy_specific_params,
-    ):
-        self.config = config
-        # Store reference to parent model to access PyroParam objects
-        # storing direct references to PyroParams does not work because
-        # it creates non-leaf tensors (which then cannot be deepcopied)
-        assert self.parent_model is not None, "parent_model must be provided"
-        self.parent_model = parent_model
-        self.setup(**strategy_specific_params)
-
-    @abstractmethod
-    def setup(self, **params):
-        """Initialize strategy-specific components"""
-        pass
-
-    @abstractmethod
-    def model(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Pyro model implementation"""
-        pass
-
-    @abstractmethod
-    def guide(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor):
-        """Pyro guide implementation"""
-        pass
-
-    @abstractmethod
-    def get_loadings(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> torch.Tensor:
-        """Get factor loadings for given data"""
-        pass
-
-    def _get_likelihood_distribution(self, lam_ng: torch.Tensor):
-        """Create the appropriate likelihood distribution based on config"""
-        if self.config.likelihood_dist == dist.Poisson:
+    @staticmethod
+    def _get_likelihood_distribution(lam_ng: torch.Tensor, likelihood_dist: Type) -> dist.Distribution:
+        """Create the appropriate likelihood distribution"""
+        if likelihood_dist == dist.Poisson:
             return dist.Poisson(rate=lam_ng + 1e-5).to_event(1)
-        elif self.config.likelihood_dist == dist.Normal:
+        elif likelihood_dist == dist.Normal:
             return dist.Normal(loc=lam_ng, scale=1.0).to_event(1)
         else:
-            raise ValueError(f"Unsupported likelihood distribution: {self.config.likelihood_dist}")
+            raise ValueError(f"Unsupported likelihood distribution: {likelihood_dist}")
 
-
-class MaximumLikelihoodStrategy(InferenceStrategy):
-    """Maximum likelihood inference strategy"""
-
-    def setup(self, **params):
-        """Initialize strategy-specific components"""
-        pass
-
-    def model(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> dict[str, torch.Tensor]:
+    @staticmethod
+    def maximum_likelihood_model(
+        x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor, model: "BayesianNonNegativeMatrixFactorization"
+    ) -> dict[str, torch.Tensor]:
         """
-        Generative model p(x|z)p(z) for non-negative matrix factorization
+        Maximum likelihood model implementation
 
         Args:
             x_ng: Count data minibatch, rows are cells and columns are genes
             minibatch_indices_n: Indices of each cell in this minibatch (used to index full dataset)
+            model: The main model instance
 
         Returns:
-            out: Dictionary of tensors relevant for the generative model
+            Dictionary of tensors relevant for the generative model
         """
-        # Access PyroParam objects from the parent model
-        # Note: we can't store these as instance variables due to deepcopy issues
-        loading_matrix_mk = self.parent_model.loading_matrix_mk
-        factor_matrix_kg = self.parent_model.factor_matrix_kg
+        # Access PyroParam objects from the model
+        loading_matrix_mk: torch.Tensor = model.loading_matrix_mk  # type: ignore[assignment]
+        factor_matrix_kg: torch.Tensor = model.factor_matrix_kg  # type: ignore[assignment]
+        assert isinstance(loading_matrix_mk, torch.Tensor)
+        assert isinstance(factor_matrix_kg, torch.Tensor)
 
         # subset the loading matrix to the cells in this minibatch
         loading_matrix_nk = loading_matrix_mk[minibatch_indices_n, :]
 
-        # print("training sums: ", loading_matrix_nk.sum(dim=-1)[:5])
-
         # apply ARD regularization, if called for
-        if self.config.use_ard:
+        if model.use_ard:
             log_prob_sum_ard_reg = ard_regularization(loading_matrix_nk=loading_matrix_nk)
         else:
             log_prob_sum_ard_reg = torch.tensor(-float("inf")).to(x_ng.device)
 
         # the normalized poisson rate, where chi.sum(dim=-1) = 1
-        # print(f"x_ng.shape is {x_ng.shape}")
-        # print(f"loading_matrix_nk: {loading_matrix_nk}")
-        # print(f"factor_matrix_kg: {factor_matrix_kg}")
         chi_ng = torch.matmul(loading_matrix_nk, factor_matrix_kg)
-        # # print(f"chi_ng: {chi_ng}")
-        # # print(f"min chi_ng: {chi_ng.min()}")
 
-        # # the poisson rate
+        # the poisson rate
         cell_size_factors_n1 = x_ng.sum(dim=-1, keepdim=True)
-        # # print(f"x_ng: {x_ng}")
-        # # print(f"x_ng.min: {x_ng.min()}")
-        # # print(f"cell_size_factors_n1: {cell_size_factors_n1}")
-        # # print(f"cell_size_factors_n1.min: {cell_size_factors_n1.min()}")
         lam_ng = chi_ng * cell_size_factors_n1
-
-        # trying not normalizing the loadings as a constraint
-        # lam_ng = torch.matmul(loading_matrix_nk, factor_matrix_kg)
-
-        # print(f"lam_ng: {lam_ng}")
-        # assert 0
 
         # compare to observed count data
         with pyro.plate("obs_plate", size=x_ng.shape[0]):
-            likelihood_dist = self._get_likelihood_distribution(lam_ng)
-            pyro.sample("obs", likelihood_dist, obs=x_ng)
+            likelihood_dist = InferenceStrategies._get_likelihood_distribution(lam_ng, model.likelihood_dist)
+            pyro.sample("obs", likelihood_dist, obs=x_ng)  # type: ignore[arg-type]
 
-        return {
-            #     "counts_ng": c_ng,
-            #     "lam_ng": lam_ng,
-            #     "loadings_nk": loading_matrix_nk,
-            #     "factors_kg": self.factor_matrix_kg,
-            "ard_regularization": log_prob_sum_ard_reg,
-        }
+        return {"ard_regularization": log_prob_sum_ard_reg}
 
-    def guide(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor):
+    @staticmethod
+    def maximum_likelihood_guide(
+        x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor, model: "BayesianNonNegativeMatrixFactorization"
+    ):
         """Maximum likelihood inference has empty guide - not Bayesian"""
         pass
 
-    def get_loadings(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> torch.Tensor:
-        """Get factor loadings for given data"""
-        loading_matrix_mk = self.parent_model.loading_matrix_mk
+    @staticmethod
+    def maximum_likelihood_get_loadings(
+        x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor, model: "BayesianNonNegativeMatrixFactorization"
+    ) -> torch.Tensor:
+        """Get factor loadings for maximum likelihood strategy"""
+        loading_matrix_mk: torch.Tensor = model.loading_matrix_mk  # type: ignore[assignment]
         total_mrna_umis_n1 = x_ng.sum(dim=-1, keepdim=True)
         return loading_matrix_mk[minibatch_indices_n, :] * total_mrna_umis_n1
 
-
-class AmortizedLoadingsStrategy(InferenceStrategy):
-    """Amortized inference strategy using neural network encoder"""
-
-    def __init__(
-        self,
-        config: AmortizedLoadingsConfig,
-        **params,
-    ):
-        super().__init__(config, **params)
-        self.config: AmortizedLoadingsConfig = config
-
-    def setup(self, **params):
-        """Initialize the encoder network"""
-        n_genes: int | None = params.get("n_genes", None)
-        # Store reference to parent model to access PyroParam objects
-        self.parent_model = params.get("parent_model")
-        assert self.parent_model is not None, "parent_model must be provided"
-        if n_genes is None:
-            n_genes = self.config.n_genes
-        self.loading_encoder = self._build_encoder(n_genes)
-        # register PyTorch modules with Pyro
-        pyro.module("loadings_encoder", self.loading_encoder)
-
-    def _build_encoder(self, n_genes: int) -> torch.nn.Module:
-        """Build the encoder network for loading inference."""
-
-        if self.config.encoder_type == "linear":
-            return FullyConnectedNetwork(
-                input_dim=n_genes,
-                hidden_dims=[],
-                output_dim=self.config.k_max,
-                output_activation=Exp(),
-                dropout_rate=None,
-            )
-        elif self.config.encoder_type == "mlp":
-            return FullyConnectedNetwork(
-                input_dim=n_genes,
-                hidden_dims=self.config.encoder_hidden_dims,
-                output_dim=self.config.k_max,
-                hidden_activation=torch.nn.ReLU(),
-                output_activation=Exp(),
-                use_layer_norm=False,
-                use_batch_norm=True,
-                dropout_rate=self.config.encoder_dropout_rate,
-            )
-        else:
-            raise ValueError(f"encoder_type must be in ['linear', 'mlp'], got {self.config.encoder_type}")
-
-    def model(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> dict[str, torch.Tensor]:
+    @staticmethod
+    def amortized_loadings_model(
+        x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor, model: "BayesianNonNegativeMatrixFactorization"
+    ) -> dict[str, torch.Tensor]:
         """Generative model for amortized inference"""
 
         with pyro.plate("obs_plate"):
-            # TODO reconsider prior (not simplex)
             # prior on loadings is Dirichlet
-            prior_alpha_nk = self.config.loading_alpha * torch.ones([x_ng.shape[0], self.config.k_max]).to(x_ng.device)
+            prior_alpha_nk = model.loading_alpha * torch.ones([x_ng.shape[0], model.k_max]).to(x_ng.device)
             loading_matrix_nk = pyro.sample(
                 "amortized_loading_prior_nk",
                 dist.Dirichlet(prior_alpha_nk).to_event(1),
             )
 
             # apply ARD regularization, if called for
-            if self.config.use_ard:
+            if model.use_ard:
                 log_prob_sum_ard_reg = ard_regularization(
                     loading_matrix_nk=loading_matrix_nk,
                     scale=1.0,
@@ -513,40 +379,46 @@ class AmortizedLoadingsStrategy(InferenceStrategy):
             else:
                 log_prob_sum_ard_reg = torch.tensor(-float("inf")).to(x_ng.device)
 
+            factor_matrix_kg: torch.Tensor = model.factor_matrix_kg  # type: ignore[assignment]
+
             # apply gene graph regularization, if called for
-            if hasattr(self.config, "use_gene_graph_prior") and self.config.use_gene_graph_prior:
-                # Gene graph regularization would go here
-                log_prob_sum_gene_graph_reg = torch.tensor(-float("inf")).to(x_ng.device)
+            if model.use_gene_graph_prior:
+                assert isinstance(model.similarity_matrix_gg, torch.Tensor)
+                log_prob_sum_gene_graph_reg = gene_graph_regularization(
+                    similarity_matrix_gg=model.similarity_matrix_gg,
+                    factor_matrix_kg=factor_matrix_kg,
+                    gamma_loc=model.null_concordance_loc,
+                    gamma_scale=model.null_concordance_scale,
+                    scale=1.0,
+                )
             else:
                 log_prob_sum_gene_graph_reg = torch.tensor(-float("inf")).to(x_ng.device)
 
             # Compute Poisson rate
-            factor_matrix_kg = self.parent_model.factor_matrix_kg
             chi_ng = torch.matmul(loading_matrix_nk, factor_matrix_kg)
             cell_size_factors_m = x_ng.sum(dim=-1, keepdim=True)
             lam_ng = chi_ng * cell_size_factors_m
 
             # Observe data
-            likelihood_dist = self._get_likelihood_distribution(lam_ng)
-            pyro.sample("obs", likelihood_dist, obs=x_ng)
+            likelihood_dist = InferenceStrategies._get_likelihood_distribution(lam_ng, model.likelihood_dist)
+            pyro.sample("obs", likelihood_dist, obs=x_ng)  # type: ignore[arg-type]
 
         return {
-            # "counts_ng": c_ng,
-            # "chi_ng": chi_ng,
-            # "loadings_nk": loading_matrix_nk,
-            # "factors_kg": factor_matrix_kg,
             "ard_regularization": log_prob_sum_ard_reg,
             "gene_graph_regularization": log_prob_sum_gene_graph_reg,
         }
 
-    def guide(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor):
+    @staticmethod
+    def amortized_loadings_guide(
+        x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor, model: "BayesianNonNegativeMatrixFactorization"
+    ):
         """Variational guide using neural network encoder"""
-        if self.loading_encoder is None:
-            raise RuntimeError("Encoder not initialized. Call setup() first.")
+        if model.loading_encoder is None:
+            raise RuntimeError("Encoder not initialized.")
 
         with pyro.plate("obs_plate"):
             # encode the loadings per cell
-            loading_matrix_concentration_nk = self.loading_encoder(x_ng)
+            loading_matrix_concentration_nk = model.loading_encoder(x_ng)
 
             # sample from approximate posterior
             loading_matrix_nk = pyro.sample(
@@ -556,13 +428,16 @@ class AmortizedLoadingsStrategy(InferenceStrategy):
 
         return loading_matrix_nk
 
-    def get_loadings(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def amortized_loadings_get_loadings(
+        x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor, model: "BayesianNonNegativeMatrixFactorization"
+    ) -> torch.Tensor:
         """Get factor loadings using encoder"""
-        if self.loading_encoder is None:
-            raise RuntimeError("Encoder not initialized. Call setup() first.")
+        if model.loading_encoder is None:
+            raise RuntimeError("Encoder not initialized.")
 
         with torch.no_grad():
-            concentration = self.loading_encoder(x_ng)
+            concentration = model.loading_encoder(x_ng)
             return concentration / concentration.sum(dim=-1, keepdim=True)
 
 
@@ -615,7 +490,6 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         self.total_n_cells = total_n_cells
         self.cell_ind_lookup: dict[str, int] = {}
         self.g = n_genes
-        self.strategy: Union[AmortizedLoadingsStrategy, MaximumLikelihoodStrategy]
         self.k_max = k_max
         if isinstance(gene_alpha_k, float):
             gene_alpha_k = [gene_alpha_k] * k_max  # list with k_max elements
@@ -629,9 +503,9 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
         match likelihood_dist:
             case "poisson":
-                likelihood_distribution: Type[Union[dist.Poisson, dist.Normal]] = dist.Poisson
+                self.likelihood_dist: Type[Union[dist.Poisson, dist.Normal]] = dist.Poisson
             case "normal":
-                likelihood_distribution = dist.Normal
+                self.likelihood_dist = dist.Normal
             case _:
                 raise ValueError("likelihood_dist must be 'poisson' or 'normal'")
 
@@ -650,45 +524,53 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         )
         self.log_ard_alpha_k = PyroParam(torch.empty(self.k_max), constraint=constraints.less_than(upper_bound=6.0))
 
-        # Create inference strategy
+        # Only create encoder for amortized strategy
+        self.loading_encoder: torch.nn.Module | None = None
         if encoder_type is not None:
-            amortized_config = AmortizedLoadingsConfig(
-                k_max=k_max,
-                gene_alpha=torch.tensor(gene_alpha_k),
-                loading_alpha=loading_alpha,
-                use_ard=use_ard,
-                likelihood_dist=likelihood_distribution,
-                n_genes=n_genes,
-                encoder_type=encoder_type,
-                encoder_hidden_dims=encoder_hidden_dims,
-                encoder_dropout_rate=encoder_dropout_rate,
-                similarity_matrix_gg=similarity_matrix_gg,
-                use_gene_graph_prior=use_gene_graph_prior,
-                gamma_loc=None,
-                gamma_scale=None,
-            )
-            self.strategy = AmortizedLoadingsStrategy(
-                config=amortized_config,
-                n_genes=n_genes,
-                parent_model=self,
-            )
+            self.loading_encoder = self._build_encoder(n_genes, encoder_type, encoder_hidden_dims, encoder_dropout_rate)
+            pyro.module("loadings_encoder", self.loading_encoder)
+
+        # Set up strategy functions
+        if encoder_type is not None:
+            self.strategy: str = "amortized"
+            self.model_fn: Callable = InferenceStrategies.amortized_loadings_model
+            self.guide_fn: Callable = InferenceStrategies.amortized_loadings_guide
+            self.get_loadings_fn: Callable = InferenceStrategies.amortized_loadings_get_loadings
             logger.info("Using an amortized encoder to estimate factor loadings")
         else:
-            ml_config = MaximumLikelihoodConfig(
-                k_max=k_max,
-                gene_alpha=self.gene_alpha_k,
-                loading_alpha=loading_alpha,
-                use_ard=use_ard,
-                likelihood_dist=likelihood_distribution,
-                n_cells=total_n_cells,
-            )
-            self.strategy = MaximumLikelihoodStrategy(
-                config=ml_config,
-                parent_model=self,
-            )
+            self.strategy = "mle"
+            self.model_fn = InferenceStrategies.maximum_likelihood_model
+            self.guide_fn = InferenceStrategies.maximum_likelihood_guide
+            self.get_loadings_fn = InferenceStrategies.maximum_likelihood_get_loadings
             logger.info("Using local latent variables factor loadings")
 
         self.reset_parameters()
+
+    def _build_encoder(
+        self, n_genes: int, encoder_type: str, encoder_hidden_dims: List[int], encoder_dropout_rate: float
+    ) -> torch.nn.Module:
+        """Build the encoder network for loading inference."""
+        if encoder_type == "linear":
+            return FullyConnectedNetwork(
+                input_dim=n_genes,
+                hidden_dims=[],
+                output_dim=self.k_max,
+                output_activation=Exp(),
+                dropout_rate=None,
+            )
+        elif encoder_type == "mlp":
+            return FullyConnectedNetwork(
+                input_dim=n_genes,
+                hidden_dims=encoder_hidden_dims,
+                output_dim=self.k_max,
+                hidden_activation=torch.nn.ReLU(),
+                output_activation=Exp(),
+                use_layer_norm=False,
+                use_batch_norm=True,
+                dropout_rate=encoder_dropout_rate,
+            )
+        else:
+            raise ValueError(f"encoder_type must be in ['linear', 'mlp'], got {encoder_type}")
 
     def reset_parameters(self) -> None:
         """
@@ -712,8 +594,8 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             )
         )
 
-        # Initialize loadings
-        if isinstance(self.strategy, MaximumLikelihoodStrategy):
+        # Initialize loadings for ML strategy only
+        if self.loading_matrix_mk is not None:
             initial_loadings = initialize_matrix(
                 rows=self.total_n_cells,
                 cols=self.k_max,
@@ -826,10 +708,10 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         return {"loss": loss}
 
     def model(self, x: torch.FloatTensor, minibatch_indices_n: torch.Tensor):
-        return self.strategy.model(x_ng=x, minibatch_indices_n=minibatch_indices_n)
+        return self.model_fn(x_ng=x, minibatch_indices_n=minibatch_indices_n, model=self)
 
     def guide(self, x: torch.FloatTensor, minibatch_indices_n: torch.Tensor):
-        return self.strategy.guide(x_ng=x, minibatch_indices_n=minibatch_indices_n)
+        return self.guide_fn(x_ng=x, minibatch_indices_n=minibatch_indices_n, model=self)
 
     def _get_ard_cutoff_logic(
         self,
@@ -865,13 +747,14 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             where large values indicate that a given k is not relevant.
         """
         if self.use_ard:
-            return self.log_ard_alpha_k.detach()
+            log_ard_alpha_k: torch.Tensor = self.log_ard_alpha_k  # type: ignore[assignment]
+            return log_ard_alpha_k.detach()
         else:
             return None
 
     @torch.no_grad()
     def get_factors(self, log_alpha_ard_cutoff: Optional[float] = None) -> torch.Tensor:
-        factor_matrix_kg = self.factor_matrix_kg.detach()
+        factor_matrix_kg: torch.Tensor = self.factor_matrix_kg  # type: ignore[assignment]
         logic = self._get_ard_cutoff_logic(log_alpha_ard_cutoff=log_alpha_ard_cutoff)
         factor_matrix_kg = factor_matrix_kg[logic, :]
         return factor_matrix_kg
@@ -880,28 +763,31 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
     def get_factor_loadings(self, dataloader=None, log_alpha_ard_cutoff: Optional[float] = None):
         logic = self._get_ard_cutoff_logic(log_alpha_ard_cutoff=log_alpha_ard_cutoff)
 
-        if isinstance(self.strategy, MaximumLikelihoodStrategy):
-            loading_matrix_nk = self.loading_matrix_mk.detach()
+        if self.strategy == "mle":
+            # Maximum likelihood strategy
+            loading_matrix_nk: torch.Tensor = self.loading_matrix_nk  # type: ignore[assignment]
             loading_matrix_nk = loading_matrix_nk[:, logic]
-        else:
+        elif self.strategy == "amortized":
+            # Amortized strategy
             loading_matrices_mk = []
             for tensors in dataloader:
                 x_ng = tensors["x_ng"]
                 minibatch_indices_n = torch.arange(x_ng.shape[0], dtype=torch.long)
-                loading_matrix_mk = self.strategy.get_loadings(x_ng, minibatch_indices_n)
+                loading_matrix_mk = self.get_loadings_fn(x_ng, minibatch_indices_n, self)
                 loading_matrix_mk = loading_matrix_mk[:, logic]
                 # loading_matrix_mk = loading_matrix_mk / loading_matrix_mk.sum(dim=-1, keepdim=True)
                 loading_matrices_mk.append(loading_matrix_mk)
             loading_matrix_nk = torch.cat(loading_matrices_mk, dim=0)
+        else:
+            raise ValueError("only allowed strategies are 'mle' and 'amortized': ", self.strategy)
         return loading_matrix_nk
 
     def _get_loading(self, batch):
         x_ng = batch["x_ng"].to(self.device)
-        assert isinstance(self.strategy, AmortizedLoadingsStrategy), (
-            "You are trying to get amortized loadings, but strategy is not AmortizedLoadingsStrategy"
+        assert self.loading_encoder is not None, (
+            "You are trying to get amortized loadings, but loading encoder is not initialized"
         )
-        assert self.strategy.loading_encoder is not None, "Loading encoder not initialized"
-        dirichlet_alphas_nk = self.strategy.loading_encoder(x_ng)
+        dirichlet_alphas_nk = self.loading_encoder(x_ng)
         return dirichlet_alphas_nk
 
     # @property
@@ -974,7 +860,7 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         # # Create a batch with the filtered data
         # batch = {"x_ng": x_filtered_ng}
 
-        loading_matrix_nk = self.strategy.get_loadings(x_filtered_ng, minibatch_indices_n)
+        loading_matrix_nk = self.get_loadings_fn(x_filtered_ng, minibatch_indices_n, self)
 
         if normalize:
             loading_matrix_nk = loading_matrix_nk / loading_matrix_nk.sum(dim=-1, keepdim=True)
