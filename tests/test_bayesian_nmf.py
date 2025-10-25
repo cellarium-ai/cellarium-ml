@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from sklearn.decomposition import NMF
 from scipy.optimize import linear_sum_assignment
+from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.models import BayesianNonNegativeMatrixFactorization
@@ -493,7 +493,9 @@ def test_bayesian_nmf_against_sklearn(
 
     # assert that the factors are similar
     pairwise_factor_similarity_kk = pairwise_cosine_similarity_cdist(cellarium_factors_kg, sklearn_factors_kg)
-    total_cs_factor_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(pairwise_factor_similarity_kk)
+    total_cs_factor_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_factor_similarity_kk
+    )
     print(
         f"pairwise_factor_similarity_kk (cellarium and sklearn):"
         f"\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}"
@@ -605,7 +607,7 @@ def test_bayesian_nmf_against_sklearn(
         )
 
     if len(messages) > 0:
-        raise ValueError('; '.join(messages))
+        raise ValueError("; ".join(messages))
 
 
 @pytest.mark.skip(reason="NMF does not yet work with multiple devices")

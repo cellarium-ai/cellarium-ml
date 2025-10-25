@@ -58,6 +58,59 @@ def nmf_frobenius_loss(x_ng: torch.Tensor, loadings_nk: torch.Tensor, factors_kg
     return F.mse_loss(torch.matmul(loadings_nk, factors_kg), x_ng, reduction="sum")
 
 
+def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
+    """
+    FISTA algorithm for NNLS solving Ax = B for x >= 0
+
+    Args:
+        A: Coefficient matrix of shape (..., m, n)
+        B: Right-hand side of shape (..., m, k)
+        max_iter: Maximum number of iterations
+        tol: Convergence tolerance
+
+    Returns:
+        x: Solution of shape (..., n, k) with x >= 0
+    """
+    # Handle batch dimensions
+    *batch_dims, m, n = A.shape
+    *batch_dims_B, m_B, k = B.shape
+
+    assert m == m_B, f"Incompatible dimensions: A has {m} rows, B has {m_B} rows"
+
+    # Precompute AtA and AtB for efficiency
+    AtA = A.transpose(-2, -1) @ A  # (..., n, n)
+    AtB = A.transpose(-2, -1) @ B  # (..., n, k)
+
+    # Compute Lipschitz constant (largest eigenvalue of AtA)
+    eigenvals = torch.linalg.eigvals(AtA).real  # (..., n)
+    L = eigenvals.max(dim=-1, keepdim=True)[0].unsqueeze(-1)  # (..., 1, 1)
+
+    # Initialize variables
+    x = torch.zeros(*batch_dims, n, k, device=A.device, dtype=A.dtype)
+    y = x.clone()
+    t = torch.ones(*batch_dims, 1, 1, device=A.device, dtype=A.dtype)
+
+    for i in range(max_iter):
+        x_old = x.clone()
+
+        # Gradient step: grad = AtA @ y - AtB
+        grad = AtA @ y - AtB
+        x_new = torch.clamp(y - grad / L, min=0)
+
+        # Momentum update
+        t_new = (1 + torch.sqrt(1 + 4 * t**2)) / 2
+        y = x_new + ((t - 1) / t_new) * (x_new - x)
+
+        x = x_new
+        t = t_new
+
+        # Check convergence
+        if torch.norm(x - x_old) < tol:
+            break
+
+    return x
+
+
 # def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
 #     """
 #     https://github.com/dylkot/cNMF/blob/7833a75484169cf448f8956224447cb110f4ba3d/src/cnmf/cnmf.py#L55
@@ -310,6 +363,27 @@ def compute_factors(
     return updated_factors_rkg
 
 
+def compute_factors_nmf_torch_online_mu(
+    A_rkk: torch.Tensor,
+    B_rkg: torch.Tensor,
+    factors_rkg: torch.Tensor,
+    n_iterations: int,
+    D_tol: float = 2e-5,
+) -> torch.Tensor:
+    updated_factors_rkg = factors_rkg
+
+    for _ in range(n_iterations):
+        denom_rkg = torch.bmm(A_rkk, factors_rkg)
+        rates_rkg = B_rkg / torch.clamp(denom_rkg, min=1e-10)
+        rates_rkg[denom_rkg < 1e-10] = 0.0
+        cur_max = (torch.abs(1.0 - rates_rkg) * updated_factors_rkg).max()
+        updated_factors_rkg = factors_rkg * rates_rkg
+        if cur_max <= D_tol:
+            break
+
+    return updated_factors_rkg
+
+
 def online_dictionary_update(
     x_ng: torch.Tensor,
     factors_rkg: torch.Tensor,
@@ -341,12 +415,16 @@ def online_dictionary_update(
     n, g = x_ng.shape
     r, _, _ = factors_rkg.shape
 
+    # TODO benchmark compute_loadings vs solve_nnls_fista
     # update alpha, Mairal Algorithm 1 step 4
-    alpha_rnk = compute_loadings(
-        x_ng=x_ng,
-        factors_rkg=factors_rkg,
-        n_iterations=n_iterations,
-        alpha_tol=alpha_tol,
+    # alpha_rnk = compute_loadings(
+    #     x_ng=x_ng,
+    #     factors_rkg=factors_rkg,
+    #     n_iterations=n_iterations,
+    #     alpha_tol=alpha_tol,
+    # )
+    alpha_rnk = solve_nnls_fista(factors_rkg.transpose(1, 2), x_ng.t(), tol=alpha_tol, max_iter=n_iterations).transpose(
+        1, 2
     )
 
     with torch.no_grad():
@@ -354,6 +432,7 @@ def online_dictionary_update(
         A_rkk = A_rkk + torch.bmm(alpha_rnk.transpose(1, 2), alpha_rnk) / n
         B_rkg = B_rkg + torch.bmm(alpha_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
 
+        # TODO benchmark compute_factors vs compute_factors_nmf_torch_online_mu
         # update D, Mairal Algorithm 1 step 7
         updated_factors_rkg = compute_factors(
             factors_rkg=factors_rkg,
@@ -362,6 +441,13 @@ def online_dictionary_update(
             n_iterations=n_iterations,
             D_tol=D_tol,
         )
+        # updated_factors_rkg = compute_factors_nmf_torch_online_mu(
+        #     factors_rkg=factors_rkg,
+        #     A_rkk=A_rkk,
+        #     B_rkg=B_rkg,
+        #     n_iterations=n_iterations,
+        #     D_tol=D_tol,
+        # )
 
     return {"factors_rkg": updated_factors_rkg, "A_rkk": A_rkk, "B_rkg": B_rkg}
 

@@ -286,102 +286,102 @@ def gene_graph_regularization(
 def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
     """
     FISTA algorithm for NNLS solving Ax = B for x >= 0
-    
+
     Args:
         A: Coefficient matrix of shape (..., m, n)
-        B: Right-hand side of shape (..., m, k) 
+        B: Right-hand side of shape (..., m, k)
         max_iter: Maximum number of iterations
         tol: Convergence tolerance
-    
+
     Returns:
         x: Solution of shape (..., n, k) with x >= 0
     """
     # Handle batch dimensions
     *batch_dims, m, n = A.shape
     *batch_dims_B, m_B, k = B.shape
-    
+
     assert m == m_B, f"Incompatible dimensions: A has {m} rows, B has {m_B} rows"
-    
+
     # Precompute AtA and AtB for efficiency
     AtA = A.transpose(-2, -1) @ A  # (..., n, n)
     AtB = A.transpose(-2, -1) @ B  # (..., n, k)
-    
+
     # Compute Lipschitz constant (largest eigenvalue of AtA)
     eigenvals = torch.linalg.eigvals(AtA).real  # (..., n)
     L = eigenvals.max(dim=-1, keepdim=True)[0].unsqueeze(-1)  # (..., 1, 1)
-    
+
     # Initialize variables
     x = torch.zeros(*batch_dims, n, k, device=A.device, dtype=A.dtype)
     y = x.clone()
     t = torch.ones(*batch_dims, 1, 1, device=A.device, dtype=A.dtype)
-    
+
     for i in range(max_iter):
         x_old = x.clone()
-        
+
         # Gradient step: grad = AtA @ y - AtB
         grad = AtA @ y - AtB
         x_new = torch.clamp(y - grad / L, min=0)
-        
+
         # Momentum update
         t_new = (1 + torch.sqrt(1 + 4 * t**2)) / 2
         y = x_new + ((t - 1) / t_new) * (x_new - x)
-        
+
         x = x_new
         t = t_new
-        
+
         # Check convergence
         if torch.norm(x - x_old) < tol:
             break
-            
+
     return x
 
 
 def solve_nnls_coordinate_descent(A, B, max_iter=1000, tol=1e-6):
     """
     Coordinate descent for NNLS solving Ax = B for x >= 0
-    
+
     Args:
         A: Coefficient matrix of shape (..., m, n)
         B: Right-hand side of shape (..., m, k)
         max_iter: Maximum number of iterations
         tol: Convergence tolerance
-    
+
     Returns:
         x: Solution of shape (..., n, k) with x >= 0
     """
     # Handle batch dimensions
     *batch_dims, m, n = A.shape
     *batch_dims_B, m_B, k = B.shape
-    
+
     assert m == m_B, f"Incompatible dimensions: A has {m} rows, B has {m_B} rows"
-    
+
     # Precompute AtA and AtB for efficiency
     AtA = A.transpose(-2, -1) @ A  # (..., n, n)
     AtB = A.transpose(-2, -1) @ B  # (..., n, k)
-    
+
     # Extract diagonal elements of AtA for coordinate updates
     AtA_diag = torch.diagonal(AtA, dim1=-2, dim2=-1)  # (..., n)
-    
+
     # Initialize solution
     x = torch.zeros(*batch_dims, n, k, device=A.device, dtype=A.dtype)
-    
+
     for iteration in range(max_iter):
         x_old = x.clone()
-        
+
         # Update each coordinate
         for j in range(n):
             # Compute residual for coordinate j
             # residual = AtB[j] - AtA[j, :] @ x + AtA[j, j] * x[j]
-            AtA_j = AtA[..., j:j+1, :]  # (..., 1, n)
-            residual = AtB[..., j:j+1, :] - AtA_j @ x + AtA_diag[..., j:j+1, None] * x[..., j:j+1, :]
-            
+            AtA_j = AtA[..., j : j + 1, :]  # (..., 1, n)
+            residual = AtB[..., j : j + 1, :] - AtA_j @ x + AtA_diag[..., j : j + 1, None] * x[..., j : j + 1, :]
+
             # Update x[j] with non-negativity constraint
-            x[..., j:j+1, :] = torch.clamp(residual / AtA_diag[..., j:j+1, None], min=0)
-        
+            x[..., j : j + 1, :] = torch.clamp(residual / AtA_diag[..., j : j + 1, None], min=0)
+
         # Check convergence
         if torch.norm(x - x_old) < tol:
             break
-            
+
     return x
 
 
@@ -468,14 +468,13 @@ class InferenceStrategies:
 
         # option 3: coordinate descent
         # loading_matrix_nk = solve_nnls_coordinate_descent(factor_matrix_kg.t(), x_ng.t()).t()
-        
+
         return loading_matrix_nk
-    
+
         # believe the fit loading param
         # loading_matrix_mk: torch.Tensor = model.loading_matrix_mk  # type: ignore[assignment]
         # total_mrna_umis_n1 = x_ng.sum(dim=-1, keepdim=True)
         # return loading_matrix_mk[minibatch_indices_n, :] * total_mrna_umis_n1
-
 
     @staticmethod
     def amortized_loadings_model(
