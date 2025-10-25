@@ -423,9 +423,12 @@ def online_dictionary_update(
     #     n_iterations=n_iterations,
     #     alpha_tol=alpha_tol,
     # )
-    alpha_rnk = solve_nnls_fista(factors_rkg.transpose(1, 2), x_ng.t(), tol=alpha_tol, max_iter=n_iterations).transpose(
-        1, 2
-    )
+    alpha_rnk = solve_nnls_fista(
+        factors_rkg.transpose(1, 2), 
+        x_ng.t(), 
+        tol=alpha_tol, 
+        max_iter=n_iterations
+    ).transpose(1, 2)
 
     with torch.no_grad():
         # update A and B, Mairal Algorithm 1 step 5 and 6
@@ -709,7 +712,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         var_names_g: np.ndarray,
         consensus_factors: dict[int, dict[str, torch.Tensor | float]],
         k: int,
-        normalize: bool = True,
+        normalize: bool = False,
         obs_names_n: np.ndarray | None = None,
     ) -> torch.Tensor:
         """
@@ -722,12 +725,18 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
 
         # compute loadings, Mairal Algorithm 1 step 4
-        alpha_nk = compute_loadings(
-            x_ng=x_filtered_ng,
-            factors_rkg=D_kg.to(x_filtered_ng.device).unsqueeze(0),
-            n_iterations=1000,
-            alpha_tol=self._alpha_tol,
-        ).squeeze(0)
+        # alpha_nk = compute_loadings(
+        #     x_ng=x_filtered_ng,
+        #     factors_rkg=D_kg.to(x_filtered_ng.device).unsqueeze(0),
+        #     n_iterations=1000,
+        #     alpha_tol=self._alpha_tol,
+        # ).squeeze(0)
+        alpha_nk = solve_nnls_fista(
+            D_kg.to(x_filtered_ng.device).unsqueeze(0).transpose(1, 2), 
+            x_ng.t(), 
+            tol=self._alpha_tol * 0.1, 
+            max_iter=1000,
+        ).transpose(1, 2).squeeze(0)
 
         if normalize:
             alpha_nk = F.normalize(alpha_nk, p=1, dim=-1)
@@ -762,11 +771,12 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             if (D_kg == 0).all():
                 raise ValueError("D_kg is all zeros, please train the model and run compute_consensus_factors() first")
 
-            alpha_nk = compute_loadings(
+            alpha_nk = self.infer_loadings(
                 x_ng=x_filtered_ng,
-                factors_rkg=D_kg.to(x_filtered_ng.device).unsqueeze(0),
-                n_iterations=1000,
-                alpha_tol=self._alpha_tol,
+                var_names_g=var_names_g,
+                consensus_factors=consensus_factors,
+                k=k,
+                normalize=False,
             ).squeeze(0)
 
             rec_error[k] = (
@@ -1247,11 +1257,13 @@ class NMFOutput:
         x_ = x_filtered_ng / torch.from_numpy(std_g).to(x_filtered_ng.device)
 
         # compute loadings, called "norm_usages" in Kotliar, based on consensus factors
-        alpha_rnk = compute_loadings(
+        k = consensus_D_kg.shape[0]
+        alpha_rnk = self.nmf_module.model.infer_loadings(
             x_ng=x_,
-            factors_rkg=consensus_D_kg.to(x_.device).unsqueeze(0),
-            n_iterations=1000,
-            alpha_tol=self.nmf_module.model._alpha_tol,
+            var_names_g=var_names_g,
+            consensus_factors={k: {"consensus_D_kg": consensus_D_kg}},
+            k=k,
+            normalize=False,
         )
 
         # normalize counts to TPM

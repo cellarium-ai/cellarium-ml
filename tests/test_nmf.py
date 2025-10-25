@@ -568,7 +568,7 @@ def test_online_nmf_against_sklearn(
         f"\n{pairwise_sklearn_loading_similarity_nn[row_indices, :][:, col_indices]}"
     )
     print(f"total mean sklearn similarity: {total_sklearn_similarity}")
-    assert total_sklearn_similarity - total_cellarium_similarity <= 0.025, (
+    assert total_sklearn_similarity - total_cellarium_similarity <= 0.01, (
         "cellarium loadings are substantially less similar to truth than sklearn loadings"
         f"{total_sklearn_similarity - total_cellarium_similarity:.4f}"
     )
