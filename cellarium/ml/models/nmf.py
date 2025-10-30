@@ -1163,8 +1163,8 @@ class NMFOutput:
         # TODO fix this hacky manual stuff
         # grab the transforms
         transforms = []
-        for transform in self.nmf_module.cpu_transforms:
-            transforms.append(transform)
+        # for transform in self.nmf_module.cpu_transforms:
+        #     transforms.append(transform)
         for transform in self.nmf_module.transforms:
             transforms.append(transform)
 
