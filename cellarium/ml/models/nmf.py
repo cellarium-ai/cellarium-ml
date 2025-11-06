@@ -129,9 +129,9 @@ def nmf_torch_update_loadings_hals(
     assert w_rkg.shape[-2] == h_rnk.shape[-1]
 
     # wwT_rkk = torch.bmm(w_rkg, w_rkg.transpose(1, 2))
-    wwT_rkk = torch.einsum('rkg,rhg->rkh', w_rkg, w_rkg)
+    wwT_rkk = torch.einsum("rkg,rhg->rkh", w_rkg, w_rkg)
     # xwT_rnk = torch.bmm(x_ng.unsqueeze(0), w_rkg.transpose(1, 2))
-    xwT_rnk = torch.einsum('ng,rkg->rnk', x_ng, w_rkg)
+    xwT_rnk = torch.einsum("ng,rkg->rnk", x_ng, w_rkg)
 
     nonconverged_logic_r = torch.ones(h_rnk.shape[0], device=h_rnk.device).bool()
 
@@ -143,7 +143,7 @@ def nmf_torch_update_loadings_hals(
         # alternatively could do the compute only on non-converged reps by indexing
         for k in range(h_rnk.shape[-1]):
             # numer_rn1 = xwT_rnk[..., k] - torch.bmm(h_rnk, wwT_rkk[..., k])
-            numer_rn = xwT_rnk[..., k] - torch.einsum('rnk,rk->rn', h_rnk, wwT_rkk[..., k])
+            numer_rn = xwT_rnk[..., k] - torch.einsum("rnk,rk->rn", h_rnk, wwT_rkk[..., k])
             # if l1_reg_H > 0.0:
             #     numer -= l1_reg_H
             # if l2_reg_H > 0.0:
@@ -193,7 +193,7 @@ def nmf_torch_update_factors_hals(
         # alternatively could do the compute only on non-converged reps by indexing
         for k in range(A_rkk.shape[-1]):
             # numer_r1g = B_rkg[:, k, :] - torch.bmm(A_rkk[:, k, :], w_rkg)
-            numer_rg = B_rkg[:, k, :] - torch.einsum('rk,rkg->rg', A_rkk[:, k, :], w_rkg)
+            numer_rg = B_rkg[:, k, :] - torch.einsum("rk,rkg->rg", A_rkk[:, k, :], w_rkg)
             # if l1_reg_W > 0.0:
             #     numer -= l1_reg_W
             # if l2_reg_W > 0.0:
@@ -594,10 +594,7 @@ def online_dictionary_update_mairal(
     #     alpha_tol=alpha_tol,
     # )
     loadings_rnk = solve_nnls_fista(
-        factors_rkg.transpose(1, 2),
-        x_ng.t(),
-        tol=alpha_tol,
-        max_iter=n_iterations
+        factors_rkg.transpose(1, 2), x_ng.t(), tol=alpha_tol, max_iter=n_iterations
     ).transpose(1, 2)
 
     with torch.no_grad():
@@ -786,6 +783,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
             if self.algorithm == "nmf_torch_hals":
+                assert isinstance(n_cells_total, int)
                 self.register_buffer(f"loadings_{i}_rnk", torch.empty(r, n_cells_total, i))  # initialized later
 
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
@@ -814,7 +812,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         """Return the learned factors for each k value."""
         return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
 
-    def online_dictionary_update(self, x_ng: torch.Tensor, k: int, minibatch_indices_n: torch.Tensor) -> None:
+    def online_dictionary_update(self, x_ng: torch.Tensor, k: int, minibatch_indices_n: torch.Tensor | None) -> None:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
@@ -864,9 +862,9 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         setattr(self, f"D_{k}_rkg", updated_values["factors_rkg"])
 
     def forward(
-        self, 
-        x_ng: torch.Tensor, 
-        var_names_g: np.ndarray, 
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
         obs_names_n: np.ndarray | None = None,
     ) -> dict[str, torch.Tensor | None]:
         """
@@ -943,12 +941,16 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         #     n_iterations=1000,
         #     alpha_tol=self._alpha_tol,
         # ).squeeze(0)
-        alpha_nk = solve_nnls_fista(
-            D_kg.to(x_filtered_ng.device).unsqueeze(0).transpose(1, 2), 
-            x_ng.t(), 
-            tol=self._alpha_tol * 0.1, 
-            max_iter=1000,
-        ).transpose(1, 2).squeeze(0)
+        alpha_nk = (
+            solve_nnls_fista(
+                D_kg.to(x_filtered_ng.device).unsqueeze(0).transpose(1, 2),
+                x_ng.t(),
+                tol=self._alpha_tol * 0.1,
+                max_iter=1000,
+            )
+            .transpose(1, 2)
+            .squeeze(0)
+        )
 
         if normalize:
             alpha_nk = F.normalize(alpha_nk, p=1, dim=-1)
@@ -1251,9 +1253,9 @@ class NMFOutput:
             datamodule: The data module to use.
         """
         self.datamodule = datamodule
-        self.datamodule.setup(stage='predict')  # can remove cpu transforms from datamodule
+        self.datamodule.setup(stage="predict")  # can remove cpu transforms from datamodule
         self.nmf_module = nmf_module
-        self.nmf_module.setup(stage='predict')  # send cpu transforms to datamodule, but only if these share a Trainer
+        self.nmf_module.setup(stage="predict")  # send cpu transforms to datamodule, but only if these share a Trainer
         self._consensus: dict = {}
         self._rec_error: dict | None = None
         self._tpm_D_kg: torch.Tensor | None = None

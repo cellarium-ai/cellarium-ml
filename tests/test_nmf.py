@@ -42,9 +42,7 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-@pytest.mark.parametrize(
-    "algorithm", ["mairal", "nmf_torch_hals"]
-)
+@pytest.mark.parametrize("algorithm", ["mairal", "nmf_torch_hals"])
 def test_nmf_single_device(small_adata: anndata.AnnData, algorithm: Literal["mairal", "nmf_torch_hals"]):
     n, g = small_adata.shape
     k_values = [3, 4]
@@ -405,9 +403,7 @@ def run_online_nmf_and_sklearn_multi_device(
     return loadings, factors
 
 
-@pytest.mark.parametrize(
-    "algorithm", ["mairal", "nmf_torch_hals"]
-)
+@pytest.mark.parametrize("algorithm", ["mairal", "nmf_torch_hals"])
 @pytest.mark.parametrize(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
