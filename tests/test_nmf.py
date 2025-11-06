@@ -42,7 +42,10 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-def test_nmf_single_device(small_adata: anndata.AnnData):
+@pytest.mark.parametrize(
+    "algorithm", ["mairal", "nmf_torch_hals"]
+)
+def test_nmf_single_device(small_adata: anndata.AnnData, algorithm: Literal["mairal", "nmf_torch_hals"]):
     n, g = small_adata.shape
     k_values = [3, 4]
     devices = 1  # int(os.environ.get("TEST_DEVICES", "1"))
@@ -55,6 +58,7 @@ def test_nmf_single_device(small_adata: anndata.AnnData):
         batch_keys={
             "x_ng": AnnDataField(attr="X", convert_fn=None),
             "var_names_g": AnnDataField(attr="var_names"),
+            "obs_names_n": AnnDataField(attr="obs_names"),
         },
     )
     dm.setup(stage="fit")
@@ -63,6 +67,8 @@ def test_nmf_single_device(small_adata: anndata.AnnData):
         var_names_g=[f"gene_{i}" for i in range(g)],
         k_values=k_values,
         r=5,
+        algorithm=algorithm,
+        n_cells_total=n,
     )
     module = CellariumModule(
         cpu_transforms=[
@@ -188,6 +194,7 @@ def run_cellarium_online_nmf(
     x_ng: torch.Tensor,
     var_names_g: np.ndarray,
     k: int,
+    algorithm: Literal["mairal", "nmf_torch_hals"],
     seed: int,
     n_batches: int,
     devices,
@@ -220,7 +227,9 @@ def run_cellarium_online_nmf(
     cellarium_nmf = OnlineNonNegativeMatrixFactorization(
         var_names_g=var_names_g.tolist(),
         k_values=[k],
+        algorithm=algorithm,
         r=1,
+        n_cells_total=n,
     )
     module = CellariumModule(
         cpu_transforms=[
@@ -352,6 +361,7 @@ def similarity_matrix_assign_rows_to_columns(
 
 def run_online_nmf_and_sklearn_multi_device(
     x_ng: torch.Tensor,
+    algorithm: Literal["mairal", "nmf_torch_hals"],
     k: int = simulated_k,
     seed: int = 0,
     n_cellarium_batches: int = 1,
@@ -363,6 +373,7 @@ def run_online_nmf_and_sklearn_multi_device(
     cellarium_loadings_nk, cellarium_factors_kg = run_cellarium_online_nmf(
         x_ng=x_ng,
         var_names_g=var_names_g,
+        algorithm=algorithm,
         k=k,
         devices=devices,
         seed=seed,
@@ -395,12 +406,16 @@ def run_online_nmf_and_sklearn_multi_device(
 
 
 @pytest.mark.parametrize(
+    "algorithm", ["mairal", "nmf_torch_hals"]
+)
+@pytest.mark.parametrize(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
 @pytest.mark.parametrize("n_cellarium_batches", [1, 2, 10], ids=["fullbatch", "2batches", "10batches"])
 def test_online_nmf_against_sklearn(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
+    algorithm: Literal["mairal", "nmf_torch_hals"],
     fixture_d_correlated_kg: torch.Tensor,
     fixture_d_uncorrelated_kg: torch.Tensor,
     fixture_alpha_correlated_nk: torch.Tensor,
@@ -413,6 +428,7 @@ def test_online_nmf_against_sklearn(
     loadings, factors = run_online_nmf_and_sklearn_multi_device(
         x_ng,
         n_cellarium_batches=n_cellarium_batches,
+        algorithm=algorithm,
     )
     transform = DivideByScale(
         scale_g=x_ng.std(dim=0),

@@ -111,6 +111,115 @@ def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
     return x
 
 
+@torch.no_grad()
+def nmf_torch_update_loadings_hals(
+    x_ng: torch.Tensor,
+    w_rkg: torch.Tensor,
+    h_rnk: torch.Tensor,
+    max_iter: int = 200,
+    h_tol: float = 0.05,
+    # l1_reg_H: float = 0.0,
+    # l2_reg_H: float = 0.0,
+) -> None:
+    # https://github.com/lilab-bcb/nmf-torch/blob/188747777c30e72626a14fe9b9d57c0ffda3efbb/
+    # nmf/nmf_models/_nmf_online_hals.py#L64C13-L88C34
+    # Online update H.
+    assert x_ng.shape[0] == h_rnk.shape[-2]
+    assert x_ng.shape[1] == w_rkg.shape[-1]
+    assert w_rkg.shape[-2] == h_rnk.shape[-1]
+
+    # wwT_rkk = torch.bmm(w_rkg, w_rkg.transpose(1, 2))
+    wwT_rkk = torch.einsum('rkg,rhg->rkh', w_rkg, w_rkg)
+    # xwT_rnk = torch.bmm(x_ng.unsqueeze(0), w_rkg.transpose(1, 2))
+    xwT_rnk = torch.einsum('ng,rkg->rnk', x_ng, w_rkg)
+
+    nonconverged_logic_r = torch.ones(h_rnk.shape[0], device=h_rnk.device).bool()
+
+    for _ in range(max_iter):
+        cur_max_r = torch.zeros(h_rnk.shape[0], device=h_rnk.device)
+
+        # TODO this does unnecessary compute on reps that have already converged
+        # but would it be faster this way if compiled with torch.compile()?
+        # alternatively could do the compute only on non-converged reps by indexing
+        for k in range(h_rnk.shape[-1]):
+            # numer_rn1 = xwT_rnk[..., k] - torch.bmm(h_rnk, wwT_rkk[..., k])
+            numer_rn = xwT_rnk[..., k] - torch.einsum('rnk,rk->rn', h_rnk, wwT_rkk[..., k])
+            # if l1_reg_H > 0.0:
+            #     numer -= l1_reg_H
+            # if l2_reg_H > 0.0:
+            #     denom = WWT[k, k] + l2_reg_H
+            #     hvec = h[:, k] * (WWT[k, k] / denom) + numer / denom
+            # else:
+            h_rn = h_rnk[..., k]
+            hvec_rn = h_rn + numer_rn / wwT_rkk[:, k, k].unsqueeze(-1)
+            if torch.isnan(hvec_rn).sum() > 0:
+                # hvec_rn1[:] = 0.0  # divide zero error: set hvec to 0
+                hvec_rn.fill_(0.0)
+            else:
+                hvec_rn = torch.clamp(hvec_rn, min=0.0)
+            cur_max_r = torch.max(cur_max_r, (h_rn - hvec_rn).abs().max())
+            h_rnk[nonconverged_logic_r, :, k] = hvec_rn[nonconverged_logic_r, ...]
+
+        # remove replicates meeting stop criteria from further updates
+        nonconverged_logic_r = (
+            nonconverged_logic_r  # once converged, always converged
+            & ((cur_max_r / h_rnk.mean(dim=(-2, -1))) >= h_tol)
+        )
+
+        # if j + 1 < max_iter and cur_max / h_rnk.mean() < h_tol:
+        if nonconverged_logic_r.sum() == 0:
+            break
+
+
+@torch.no_grad()
+def nmf_torch_update_factors_hals(
+    w_rkg: torch.Tensor,
+    A_rkk: torch.Tensor,
+    B_rkg: torch.Tensor,
+    max_iter: int = 200,
+    w_tol: float = 0.05,
+) -> None:
+    # https://github.com/lilab-bcb/nmf-torch/blob/188747777c30e72626a14fe9b9d57c0ffda3efbb/
+    # nmf/nmf_models/_nmf_online_hals.py#L106C13-L127C26
+
+    nonconverged_logic_r = torch.ones(A_rkk.shape[0], device=A_rkk.device).bool()
+
+    # Online update W.
+    for j in range(max_iter):
+        cur_max_r = torch.zeros(A_rkk.shape[0], device=A_rkk.device)
+
+        # TODO this does unnecessary compute on reps that have already converged
+        # but would it be faster this way if compiled with torch.compile()?
+        # alternatively could do the compute only on non-converged reps by indexing
+        for k in range(A_rkk.shape[-1]):
+            # numer_r1g = B_rkg[:, k, :] - torch.bmm(A_rkk[:, k, :], w_rkg)
+            numer_rg = B_rkg[:, k, :] - torch.einsum('rk,rkg->rg', A_rkk[:, k, :], w_rkg)
+            # if l1_reg_W > 0.0:
+            #     numer -= l1_reg_W
+            # if l2_reg_W > 0.0:
+            #     denom = A[k, k] + l2_reg_W
+            #     w_new = self.W[k, :] * (A[k, k] / denom) + numer / denom
+            # else:
+            w_new_rg = w_rkg[:, k, :] + numer_rg / A_rkk[:, k, k].unsqueeze(-1)
+            if torch.isnan(w_new_rg).sum() > 0:
+                # w_new_r1g[:] = 0.0 # divide zero error: set w_new to 0
+                w_new_rg.fill_(0.0)
+            else:
+                w_new_rg = torch.clamp(w_new_rg, min=0.0)
+            cur_max_r = torch.max(cur_max_r, (w_rkg[:, k, :] - w_new_rg).abs().max())
+            w_rkg[nonconverged_logic_r, k, :] = w_new_rg[nonconverged_logic_r, ...]
+
+        # remove replicates meeting stop criteria from further updates
+        nonconverged_logic_r = (
+            nonconverged_logic_r  # once converged, always converged
+            & ((cur_max_r / w_rkg.mean(dim=(-2, -1))) >= w_tol)
+        )
+
+        # if j + 1 < max_iter and cur_max_r / w_rkg.mean() < w_tol:
+        if nonconverged_logic_r.sum() == 0:
+            break
+
+
 # def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
 #     """
 #     https://github.com/dylkot/cNMF/blob/7833a75484169cf448f8956224447cb110f4ba3d/src/cnmf/cnmf.py#L55
@@ -363,28 +472,89 @@ def compute_factors(
     return updated_factors_rkg
 
 
-def compute_factors_nmf_torch_online_mu(
+# def compute_factors_nmf_torch_online_mu(
+#     A_rkk: torch.Tensor,
+#     B_rkg: torch.Tensor,
+#     factors_rkg: torch.Tensor,
+#     n_iterations: int,
+#     D_tol: float = 2e-5,
+# ) -> torch.Tensor:
+#     updated_factors_rkg = factors_rkg
+
+#     for _ in range(n_iterations):
+#         denom_rkg = torch.bmm(A_rkk, factors_rkg)
+#         rates_rkg = B_rkg / torch.clamp(denom_rkg, min=1e-10)
+#         rates_rkg[denom_rkg < 1e-10] = 0.0
+#         cur_max = (torch.abs(1.0 - rates_rkg) * updated_factors_rkg).max()
+#         updated_factors_rkg = factors_rkg * rates_rkg
+#         if cur_max <= D_tol:
+#             break
+
+#     return updated_factors_rkg
+
+
+def online_dictionary_update_nmf_torch_hals(
+    x_ng: torch.Tensor,
+    factors_rkg: torch.Tensor,
+    loadings_rnk: torch.Tensor,
     A_rkk: torch.Tensor,
     B_rkg: torch.Tensor,
-    factors_rkg: torch.Tensor,
-    n_iterations: int,
-    D_tol: float = 2e-5,
-) -> torch.Tensor:
-    updated_factors_rkg = factors_rkg
+    n_iterations: int = 200,
+    alpha_tol: float = 0.05,
+    D_tol: float = 0.05,
+) -> dict[str, torch.Tensor]:
+    """
+    Algorithm adapted from the nmf-torch github library.
 
-    for _ in range(n_iterations):
-        denom_rkg = torch.bmm(A_rkk, factors_rkg)
-        rates_rkg = B_rkg / torch.clamp(denom_rkg, min=1e-10)
-        rates_rkg[denom_rkg < 1e-10] = 0.0
-        cur_max = (torch.abs(1.0 - rates_rkg) * updated_factors_rkg).max()
-        updated_factors_rkg = factors_rkg * rates_rkg
-        if cur_max <= D_tol:
-            break
+    Args:
+        x_ng: The data.
+        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+        loadings_rnk: The matrix of cell loadings (Mairal's coefficients alpha).
+        A_rkk: Mairal's matrix A.
+        B_rkg: Mairal's matrix B.
+        n_iterations: The number of iterations to perform.
+        alpha_tol: The tolerance for the change in alpha for stopping.
+        D_tol: The tolerance for the change in D for stopping.
 
-    return updated_factors_rkg
+    Returns:
+        dict with keys:
+            "factors_rkg": The updated dictionary factors_rkg.
+            "A_rkk": The updated matrix A.
+            "B_rkg": The updated matrix B.
+    """
+
+    n, g = x_ng.shape
+    r, _, _ = factors_rkg.shape
+
+    # TODO: need access to local latent loadings_rnk for nmf-torch hals update
+
+    # inplace update loadings_rnk
+    nmf_torch_update_loadings_hals(
+        x_ng=x_ng,
+        w_rkg=factors_rkg,
+        h_rnk=loadings_rnk,
+        max_iter=n_iterations,
+        h_tol=alpha_tol,
+    )
+
+    with torch.no_grad():
+        # update A and B, Mairal Algorithm 1 step 5 and 6
+        A_rkk = A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
+        B_rkg = B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+
+    # inplace update factors_rkg
+    nmf_torch_update_factors_hals(
+        w_rkg=factors_rkg,
+        A_rkk=A_rkk,
+        B_rkg=B_rkg,
+        max_iter=n_iterations,
+        w_tol=D_tol,
+    )
+
+    return {"factors_rkg": factors_rkg, "A_rkk": A_rkk, "B_rkg": B_rkg}
 
 
-def online_dictionary_update(
+def online_dictionary_update_mairal(
     x_ng: torch.Tensor,
     factors_rkg: torch.Tensor,
     A_rkk: torch.Tensor,
@@ -416,24 +586,24 @@ def online_dictionary_update(
     r, _, _ = factors_rkg.shape
 
     # TODO benchmark compute_loadings vs solve_nnls_fista
-    # update alpha, Mairal Algorithm 1 step 4
-    # alpha_rnk = compute_loadings(
+    # update loadings, Mairal Algorithm 1 step 4
+    # loadings_rnk = compute_loadings(
     #     x_ng=x_ng,
     #     factors_rkg=factors_rkg,
     #     n_iterations=n_iterations,
     #     alpha_tol=alpha_tol,
     # )
-    alpha_rnk = solve_nnls_fista(
-        factors_rkg.transpose(1, 2), 
-        x_ng.t(), 
-        tol=alpha_tol, 
+    loadings_rnk = solve_nnls_fista(
+        factors_rkg.transpose(1, 2),
+        x_ng.t(),
+        tol=alpha_tol,
         max_iter=n_iterations
     ).transpose(1, 2)
 
     with torch.no_grad():
         # update A and B, Mairal Algorithm 1 step 5 and 6
-        A_rkk = A_rkk + torch.bmm(alpha_rnk.transpose(1, 2), alpha_rnk) / n
-        B_rkg = B_rkg + torch.bmm(alpha_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+        A_rkk = A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
+        B_rkg = B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
 
         # TODO benchmark compute_factors vs compute_factors_nmf_torch_online_mu
         # update D, Mairal Algorithm 1 step 7
@@ -592,13 +762,18 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         var_names_g: Sequence[str],
         k_values: list[int],
         r: int,
-        algorithm: Literal["mairal"] = "mairal",
+        algorithm: Literal["mairal", "nmf_torch_hals"] = "mairal",
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
+        n_cells_total: int | None = None,
     ) -> None:
         super().__init__(var_names_g=var_names_g, k_values=k_values)
         g = len(self.var_names_g)
         self.algorithm = algorithm
+        self.obs_names_to_index_map: dict[str, int] = {}  # used for local latents
+        if algorithm == "nmf_torch_hals":
+            if n_cells_total is None:
+                raise ValueError("n_cells_total must be provided for nmf_torch_hals algorithm")
         self.r = r
         self.transformed_data_mean = transformed_data_mean
         self.init = init
@@ -610,6 +785,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
+            if self.algorithm == "nmf_torch_hals":
+                self.register_buffer(f"loadings_{i}_rnk", torch.empty(r, n_cells_total, i))  # initialized later
 
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self._D_tol = 1e-5
@@ -629,48 +806,74 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             getattr(self, f"A_{i}_rkk").zero_()
             getattr(self, f"B_{i}_rkg").zero_()
             init_fn(getattr(self, f"D_{i}_rkg"), k=i, transformed_data_mean=self.transformed_data_mean)
+            if self.algorithm == "nmf_torch_hals":
+                init_fn(getattr(self, f"loadings_{i}_rnk"), k=i, transformed_data_mean=self.transformed_data_mean)
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
         """Return the learned factors for each k value."""
         return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
 
-    def online_dictionary_update(self, x_ng: torch.Tensor, k: int) -> None:
+    def online_dictionary_update(self, x_ng: torch.Tensor, k: int, minibatch_indices_n: torch.Tensor) -> None:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
         Args:
             x_ng: The data.
             k: The value of k to run.
+            minibatch_indices_n: The indices of the cells in the current minibatch.
         """
         # get running values
         A_rkk = getattr(self, f"A_{k}_rkk")
         B_rkg = getattr(self, f"B_{k}_rkg")
         factors_rkg = getattr(self, f"D_{k}_rkg")
 
-        # run algorithm 1
-        updated_values = online_dictionary_update(
-            x_ng=x_ng,
-            factors_rkg=factors_rkg,
-            A_rkk=A_rkk,
-            B_rkg=B_rkg,
-            n_iterations=100,
-            alpha_tol=self._alpha_tol,
-            D_tol=self._D_tol,
-        )
+        if self.algorithm == "mairal":
+            # run algorithm 1
+            updated_values = online_dictionary_update_mairal(
+                x_ng=x_ng,
+                factors_rkg=factors_rkg,
+                A_rkk=A_rkk,
+                B_rkg=B_rkg,
+                n_iterations=100,
+                alpha_tol=self._alpha_tol,
+                D_tol=self._D_tol,
+            )
+        elif self.algorithm == "nmf_torch_hals":
+            assert isinstance(minibatch_indices_n, torch.Tensor), (
+                "minibatch_indices_n must be provided for nmf_torch_hals algorithm"
+            )
+            loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]
+            # run nmf-torch hals online update
+            updated_values = online_dictionary_update_nmf_torch_hals(
+                x_ng=x_ng,
+                factors_rkg=factors_rkg,
+                loadings_rnk=loadings_rnk,
+                A_rkk=A_rkk,
+                B_rkg=B_rkg,
+                n_iterations=100,
+                alpha_tol=self._alpha_tol,
+                D_tol=self._D_tol,
+            )
+        else:
+            raise ValueError(f"Unknown algorithm: {self.algorithm}")
 
         # update running values
         setattr(self, f"A_{k}_rkk", updated_values["A_rkk"])
         setattr(self, f"B_{k}_rkg", updated_values["B_rkg"])
         setattr(self, f"D_{k}_rkg", updated_values["factors_rkg"])
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+    def forward(
+        self, 
+        x_ng: torch.Tensor, 
+        var_names_g: np.ndarray, 
+        obs_names_n: np.ndarray | None = None,
+    ) -> dict[str, torch.Tensor | None]:
         """
         Args:
-            x_ng:
-                Gene counts matrix.
-            var_names_g:
-                The list of the variable names in the input data.
+            x_ng: Gene counts matrix.
+            var_names_g: The list of the variable names in the input data.
+            obs_names_n: The names of the cells in the current minibatch (used when there are local latents).
 
         Returns:
             An empty dictionary.
@@ -678,11 +881,20 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
-        if self.algorithm == "mairal":
-            for k in self.k_values:
-                self.online_dictionary_update(x_ng=x_ng, k=k)
-        else:
-            raise ValueError(f"Unknown algorithm: {self.algorithm}")
+        # handle the mapping of obs_names to indices for local latents
+        minibatch_indices_n: torch.Tensor | None = None
+        if self.algorithm == "nmf_torch_hals":
+            assert obs_names_n is not None, "obs_names_n must be provided for nmf_torch_hals algorithm"
+            new_obs_names = set(obs_names_n.tolist()) - set(self.obs_names_to_index_map.keys())
+            if len(new_obs_names) > 0:
+                self.obs_names_to_index_map |= {
+                    name: i for i, name in enumerate(new_obs_names, start=len(self.obs_names_to_index_map))
+                }
+            vectorized_lookup = np.vectorize(lambda x: self.obs_names_to_index_map[x])
+            minibatch_indices_n = torch.from_numpy(vectorized_lookup(obs_names_n)).to(x_ng.device)
+
+        for k in self.k_values:
+            self.online_dictionary_update(x_ng=x_ng, k=k, minibatch_indices_n=minibatch_indices_n)
 
         return {}
 
@@ -1038,8 +1250,10 @@ class NMFOutput:
             nmf_module: The trained NMF module to use.
             datamodule: The data module to use.
         """
-        self.nmf_module = nmf_module
         self.datamodule = datamodule
+        self.datamodule.setup(stage='predict')  # can remove cpu transforms from datamodule
+        self.nmf_module = nmf_module
+        self.nmf_module.setup(stage='predict')  # send cpu transforms to datamodule, but only if these share a Trainer
         self._consensus: dict = {}
         self._rec_error: dict | None = None
         self._tpm_D_kg: torch.Tensor | None = None
@@ -1119,7 +1333,6 @@ class NMFOutput:
             dict[int, float]: The reconstruction error for each k value.
         """
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
-        self.datamodule.setup(stage="predict")
         rec_error = {k: 0.0 for k in self.nmf_module.model.k_values}
         for batch in tqdm(self.datamodule.train_dataloader()):
             errors_keyed_by_k = self.nmf_module.model.reconstruction_error(
@@ -1158,7 +1371,8 @@ class NMFOutput:
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
         if datamodule is None:
             datamodule = self.datamodule
-        datamodule.setup(stage="predict")
+        else:
+            datamodule.setup(stage="predict")  # as this may not have been called... cpu_transforms are tricky here
 
         # TODO fix this hacky manual stuff
         # grab the transforms
@@ -1197,7 +1411,7 @@ class NMFOutput:
         print("WARNING: at this point, the cellarium implmentation may differ from Kotliar cNMF")
         if k not in self.consensus:
             raise KeyError(f"Missing consensus_factors key k={k}. Choose from {list(self.consensus.keys())}")
-        self.datamodule.setup(stage="predict")
+        # self.datamodule.setup(stage="predict")
 
         # Initialize tensors if needed
         if self._tpm_D_kg is None:
