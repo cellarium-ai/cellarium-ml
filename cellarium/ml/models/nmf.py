@@ -849,9 +849,9 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 loadings_rnk=loadings_rnk,
                 A_rkk=A_rkk,
                 B_rkg=B_rkg,
-                n_iterations=100,
-                alpha_tol=self._alpha_tol,
-                D_tol=self._D_tol,
+                # n_iterations=100,
+                # alpha_tol=self._alpha_tol,
+                # D_tol=self._D_tol,
             )
         else:
             raise ValueError(f"Unknown algorithm: {self.algorithm}")
