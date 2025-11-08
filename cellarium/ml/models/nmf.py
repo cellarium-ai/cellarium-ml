@@ -789,6 +789,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self._D_tol = 1e-5
         self._alpha_tol = 1e-5
+        self._hals_tol = 1e-4
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -806,6 +807,11 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             init_fn(getattr(self, f"D_{i}_rkg"), k=i, transformed_data_mean=self.transformed_data_mean)
             if self.algorithm == "nmf_torch_hals":
                 init_fn(getattr(self, f"loadings_{i}_rnk"), k=i, transformed_data_mean=self.transformed_data_mean)
+
+        if self.algorithm == "nmf_torch_hals":
+            self._prev_err_rk: torch.Tensor | None = None
+            self._init_err_rk: torch.Tensor | None = None
+            self._err_running_sum_rk = torch.zeros((self.r, len(self.k_values)), device=self._dummy_param.device)
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
@@ -891,10 +897,37 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             vectorized_lookup = np.vectorize(lambda x: self.obs_names_to_index_map[x])
             minibatch_indices_n = torch.from_numpy(vectorized_lookup(obs_names_n)).to(x_ng.device)
 
+        if self.algorithm == "nmf_torch_hals":
+            # for error computation to assess convergence
+            if self._init_err_rk is None:
+                assert isinstance(minibatch_indices_n, torch.Tensor)
+                self._loss(x_ng=x_ng, minibatch_indices_n=minibatch_indices_n)
+                self._init_err_rk = self._err_running_sum_rk.clone()
+                assert isinstance(self._init_err_rk, torch.Tensor)
+                self._prev_err_rk = self._init_err_rk.clone()
+
         for k in self.k_values:
             self.online_dictionary_update(x_ng=x_ng, k=k, minibatch_indices_n=minibatch_indices_n)
 
+        if self.algorithm == "nmf_torch_hals":
+            # for error computation to assess convergence
+            assert isinstance(minibatch_indices_n, torch.Tensor)
+            self._loss(x_ng=x_ng, minibatch_indices_n=minibatch_indices_n)
+
         return {}
+
+    def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
+        with torch.no_grad():
+            for i, k in enumerate(self.k_values):
+                factors_rkg = getattr(self, f"D_{k}_rkg")
+                loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]
+                xWT_rnk = torch.einsum("ng,rkg->rnk", x_ng, factors_rkg)
+                h_rnk = loadings_rnk
+                hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
+                WWT_rkk = torch.einsum("rkg,rjg->rkj", factors_rkg, factors_rkg)
+                X_SS_half = (x_ng.norm(p=2) ** 2 / 2).double()
+                sum_h_err_r = self._trace(WWT_rkk, hth_rkk) / 2.0 - self._trace(h_rnk, xWT_rnk)
+                self._err_running_sum_rk[:, i] += torch.sqrt(2.0 * (sum_h_err_r + X_SS_half))
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -906,7 +939,27 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 "lightning.pytorch.strategies.DDPStrategy is set to True"
             )
 
+    def _trace(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        # batched frobenius inner product
+        return torch.einsum("rij,rij->r", a, b)
+
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
+        # convergence criterion check
+        if self.algorithm == "nmf_torch_hals":
+            cur_err_rk = self._err_running_sum_rk
+            assert isinstance(self._prev_err_rk, torch.Tensor)
+            assert isinstance(self._init_err_rk, torch.Tensor)
+
+            if (
+                # (self._prev_err_rk <= cur_err_rk).all() or
+                torch.abs((self._prev_err_rk - cur_err_rk) / self._init_err_rk).max() < self._hals_tol
+            ):
+                trainer.should_stop = True
+                print(f"Stopping early: converged, loss={cur_err_rk}")
+
+            self._prev_err_rk = cur_err_rk.clone()
+            self._err_running_sum_rk.zero_()
+
         # this hard reset to zero is equivalent to forgetting momentum each epoch
         for i in self.k_values:
             getattr(self, f"A_{i}_rkk").zero_()
