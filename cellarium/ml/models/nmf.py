@@ -247,10 +247,10 @@ def nmf_torch_update_loadings_hals_with_compile(
         relative_change = (max_change / torch.clamp(mean_h.max(), min=1e-12))
         
         if relative_change < h_tol:
-            print(f"NMF HALS loadings update converged in {total_iterations} iterations.")
+            # print(f"NMF HALS loadings update converged in {total_iterations} iterations.")
             break
-    else:
-        print("NMF HALS loadings update reached max iterations without convergence.")
+    # else:
+    #     print("NMF HALS loadings update reached max iterations without convergence.")
 
 
 @torch.no_grad()
@@ -370,10 +370,10 @@ def nmf_torch_update_factors_hals_with_compile(
         relative_change = (max_change / torch.clamp(mean_w.max(), min=1e-12))
         
         if relative_change < w_tol:
-            print(f"NMF HALS factors update converged in {total_iterations} iterations.")
+            # print(f"NMF HALS factors update converged in {total_iterations} iterations.")
             break
-    else:
-        print("NMF HALS factors update reached max iterations without convergence.")
+    # else:
+    #     print("NMF HALS factors update reached max iterations without convergence.")
 
 
 # def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
