@@ -135,7 +135,7 @@ def nmf_torch_update_loadings_hals(
 
     nonconverged_logic_r = torch.ones(h_rnk.shape[0], device=h_rnk.device).bool()
 
-    for _ in range(max_iter):
+    for i in range(max_iter):
         cur_max_r = torch.zeros(h_rnk.shape[0], device=h_rnk.device)
 
         # TODO this does unnecessary compute on reps that have already converged
@@ -168,7 +168,11 @@ def nmf_torch_update_loadings_hals(
 
         # if j + 1 < max_iter and cur_max / h_rnk.mean() < h_tol:
         if nonconverged_logic_r.sum() == 0:
+            print(f"NMF HALS loadings update converged in {i + 1} iterations.")
             break
+
+    if i == max_iter - 1:
+        print("NMF HALS loadings update reached max iterations without convergence.")
 
 
 @torch.no_grad()
@@ -217,7 +221,11 @@ def nmf_torch_update_factors_hals(
 
         # if j + 1 < max_iter and cur_max_r / w_rkg.mean() < w_tol:
         if nonconverged_logic_r.sum() == 0:
+            print(f"NMF HALS factors update converged in {j + 1} iterations.")
             break
+
+    if j == max_iter - 1:
+        print("NMF HALS factors update reached max iterations without convergence.")
 
 
 # def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
