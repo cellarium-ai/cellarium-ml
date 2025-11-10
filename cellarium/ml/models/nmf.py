@@ -1058,9 +1058,11 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             if self._init_err_rk is None:
                 assert isinstance(minibatch_indices_n, torch.Tensor)
                 self._loss(x_ng=x_ng, minibatch_indices_n=minibatch_indices_n)
-                self._init_err_rk = self._err_running_sum_rk.clone()
+                # Take sqrt of accumulated squared errors for initialization
+                self._init_err_rk = torch.sqrt(self._err_running_sum_rk.clone())
                 assert isinstance(self._init_err_rk, torch.Tensor)
                 self._prev_err_rk = self._init_err_rk.clone()
+                # self._err_running_sum_rk.zero_()  # Reset after initialization
 
         for k in self.k_values:
             self.online_dictionary_update(x_ng=x_ng, k=k, minibatch_indices_n=minibatch_indices_n)
@@ -1083,7 +1085,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 WWT_rkk = torch.einsum("rkg,rjg->rkj", factors_rkg, factors_rkg)
                 X_SS_half = (x_ng.norm(p=2) ** 2 / 2).double()
                 sum_h_err_r = self._trace(WWT_rkk, hth_rkk) / 2.0 - self._trace(h_rnk, xWT_rnk)
-                self._err_running_sum_rk[:, i] += torch.sqrt(2.0 * (sum_h_err_r + X_SS_half))
+                # Accumulate squared error, don't take sqrt yet
+                self._err_running_sum_rk[:, i] += 2.0 * (sum_h_err_r + X_SS_half)
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -1102,7 +1105,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         # convergence criterion check
         if self.algorithm == "nmf_torch_hals":
-            cur_err_rk = self._err_running_sum_rk
+            # Take sqrt of accumulated squared errors to get final loss
+            cur_err_rk = torch.sqrt(self._err_running_sum_rk)
             assert isinstance(self._prev_err_rk, torch.Tensor)
             assert isinstance(self._init_err_rk, torch.Tensor)
 
@@ -1114,7 +1118,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 print(f"Stopping early: converged, loss={cur_err_rk}")
 
             print(f"Epoch {trainer.current_epoch} reconstruction error: {current_overall_err_rk.max()}")
-            print(f"{current_overall_err_rk[:10]}")
+            print(f"{current_overall_err_rk[:5]}")
+            print(f"{cur_err_rk[:5]}")
             self._prev_err_rk = cur_err_rk.clone()
             self._err_running_sum_rk.zero_()
 
