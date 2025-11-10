@@ -175,6 +175,84 @@ def nmf_torch_update_loadings_hals(
         print("NMF HALS loadings update reached max iterations without convergence.")
 
 
+@torch.compile
+@torch.no_grad()
+def nmf_torch_update_loadings_hals_compiled(
+    x_ng: torch.Tensor,
+    w_rkg: torch.Tensor,
+    h_rnk: torch.Tensor,
+    max_iter: int = 200,
+    h_tol: float = 0.05,
+) -> tuple[torch.Tensor, int]:
+    """
+    Compiled version of HALS loadings update.
+    Returns updated h_rnk and number of iterations to convergence.
+    """
+    assert x_ng.shape[0] == h_rnk.shape[-2]
+    assert x_ng.shape[1] == w_rkg.shape[-1]
+    assert w_rkg.shape[-2] == h_rnk.shape[-1]
+
+    wwT_rkk = torch.einsum("rkg,rhg->rkh", w_rkg, w_rkg)
+    xwT_rnk = torch.einsum("ng,rkg->rnk", x_ng, w_rkg)
+
+    # Use a fixed number of iterations instead of dynamic convergence
+    # This makes the function more amenable to compilation
+    for i in range(max_iter):
+        for k in range(h_rnk.shape[-1]):
+            numer_rn = xwT_rnk[..., k] - torch.einsum("rnk,rk->rn", h_rnk, wwT_rkk[..., k])
+            h_rn = h_rnk[..., k]
+            
+            # Avoid division by zero using torch.where instead of manual checks
+            denom = wwT_rkk[:, k, k].unsqueeze(-1)
+            hvec_rn = torch.where(
+                denom > 1e-12,
+                torch.clamp(h_rn + numer_rn / denom, min=0.0),
+                torch.zeros_like(h_rn)
+            )
+            h_rnk[..., k] = hvec_rn
+
+    return h_rnk, max_iter
+
+
+@torch.no_grad()
+def nmf_torch_update_loadings_hals_with_compile(
+    x_ng: torch.Tensor,
+    w_rkg: torch.Tensor,
+    h_rnk: torch.Tensor,
+    max_iter: int = 200,
+    h_tol: float = 0.05,
+) -> None:
+    """
+    Wrapper that uses compiled function with convergence checking.
+    """
+    # Use smaller chunks of iterations with convergence checks
+    chunk_size = 10
+    total_iterations = 0
+    
+    while total_iterations < max_iter:
+        h_old = h_rnk.clone()
+        current_chunk = min(chunk_size, max_iter - total_iterations)
+        
+        # Run compiled function for a chunk of iterations
+        h_rnk_new, _ = nmf_torch_update_loadings_hals_compiled(
+            x_ng, w_rkg, h_rnk, current_chunk, h_tol
+        )
+        h_rnk.copy_(h_rnk_new)
+        
+        total_iterations += current_chunk
+        
+        # Check convergence
+        max_change = (h_rnk - h_old).abs().max()
+        mean_h = h_rnk.mean(dim=(-2, -1))
+        relative_change = (max_change / torch.clamp(mean_h.max(), min=1e-12))
+        
+        if relative_change < h_tol:
+            print(f"NMF HALS loadings update converged in {total_iterations} iterations.")
+            break
+    else:
+        print("NMF HALS loadings update reached max iterations without convergence.")
+
+
 @torch.no_grad()
 def nmf_torch_update_factors_hals(
     w_rkg: torch.Tensor,
@@ -225,6 +303,76 @@ def nmf_torch_update_factors_hals(
             break
 
     if j == max_iter - 1:
+        print("NMF HALS factors update reached max iterations without convergence.")
+
+
+@torch.compile
+@torch.no_grad()
+def nmf_torch_update_factors_hals_compiled(
+    w_rkg: torch.Tensor,
+    A_rkk: torch.Tensor,
+    B_rkg: torch.Tensor,
+    max_iter: int = 200,
+    w_tol: float = 0.05,
+) -> tuple[torch.Tensor, int]:
+    """
+    Compiled version of HALS factors update.
+    Returns updated w_rkg and number of iterations to convergence.
+    """
+    # Use a fixed number of iterations instead of dynamic convergence
+    # This makes the function more amenable to compilation
+    for j in range(max_iter):
+        for k in range(A_rkk.shape[-1]):
+            numer_rg = B_rkg[:, k, :] - torch.einsum("rk,rkg->rg", A_rkk[:, k, :], w_rkg)
+            w_new_rg = w_rkg[:, k, :] + numer_rg / A_rkk[:, k, k].unsqueeze(-1)
+            
+            # Avoid division by zero using torch.where instead of manual checks
+            w_new_rg = torch.where(
+                torch.isnan(w_new_rg),
+                torch.zeros_like(w_new_rg),
+                torch.clamp(w_new_rg, min=0.0)
+            )
+            w_rkg[:, k, :] = w_new_rg
+
+    return w_rkg, max_iter
+
+
+@torch.no_grad()
+def nmf_torch_update_factors_hals_with_compile(
+    w_rkg: torch.Tensor,
+    A_rkk: torch.Tensor,
+    B_rkg: torch.Tensor,
+    max_iter: int = 200,
+    w_tol: float = 0.05,
+) -> None:
+    """
+    Wrapper that uses compiled function with convergence checking.
+    """
+    # Use smaller chunks of iterations with convergence checks
+    chunk_size = 10
+    total_iterations = 0
+    
+    while total_iterations < max_iter:
+        w_old = w_rkg.clone()
+        current_chunk = min(chunk_size, max_iter - total_iterations)
+        
+        # Run compiled function for a chunk of iterations
+        w_rkg_new, _ = nmf_torch_update_factors_hals_compiled(
+            w_rkg, A_rkk, B_rkg, current_chunk, w_tol
+        )
+        w_rkg.copy_(w_rkg_new)
+        
+        total_iterations += current_chunk
+        
+        # Check convergence
+        max_change = (w_rkg - w_old).abs().max()
+        mean_w = w_rkg.mean(dim=(-2, -1))
+        relative_change = (max_change / torch.clamp(mean_w.max(), min=1e-12))
+        
+        if relative_change < w_tol:
+            print(f"NMF HALS factors update converged in {total_iterations} iterations.")
+            break
+    else:
         print("NMF HALS factors update reached max iterations without convergence.")
 
 
@@ -537,7 +685,7 @@ def online_dictionary_update_nmf_torch_hals(
     # TODO: need access to local latent loadings_rnk for nmf-torch hals update
 
     # inplace update loadings_rnk
-    nmf_torch_update_loadings_hals(
+    nmf_torch_update_loadings_hals_with_compile(
         x_ng=x_ng,
         w_rkg=factors_rkg,
         h_rnk=loadings_rnk,
@@ -551,7 +699,7 @@ def online_dictionary_update_nmf_torch_hals(
         B_rkg = B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
 
     # inplace update factors_rkg
-    nmf_torch_update_factors_hals(
+    nmf_torch_update_factors_hals_with_compile(
         w_rkg=factors_rkg,
         A_rkk=A_rkk,
         B_rkg=B_rkg,
