@@ -950,14 +950,15 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             assert isinstance(self._prev_err_rk, torch.Tensor)
             assert isinstance(self._init_err_rk, torch.Tensor)
 
+            current_overall_err_rk = torch.abs((self._prev_err_rk - cur_err_rk) / self._init_err_rk)
             if (
-                # (self._prev_err_rk <= cur_err_rk).all() or
-                torch.abs((self._prev_err_rk - cur_err_rk) / self._init_err_rk).max() < self._hals_tol
+                current_overall_err_rk.max() < self._hals_tol
             ):
                 trainer.should_stop = True
                 print(f"Stopping early: converged, loss={cur_err_rk}")
 
-            print(f"Epoch {trainer.current_epoch} reconstruction error: {cur_err_rk}")
+            print(f"Epoch {trainer.current_epoch} reconstruction error: {current_overall_err_rk.max()}")
+            print(f"{current_overall_err_rk[:10]}")
             self._prev_err_rk = cur_err_rk.clone()
             self._err_running_sum_rk.zero_()
 
