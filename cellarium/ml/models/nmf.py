@@ -957,6 +957,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 trainer.should_stop = True
                 print(f"Stopping early: converged, loss={cur_err_rk}")
 
+            print(f"Epoch {trainer.current_epoch} reconstruction error: {cur_err_rk}")
             self._prev_err_rk = cur_err_rk.clone()
             self._err_running_sum_rk.zero_()
 
