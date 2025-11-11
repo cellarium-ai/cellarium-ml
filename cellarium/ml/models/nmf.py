@@ -1075,18 +1075,30 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         return {}
 
     def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
+        """
+        Simple and efficient NMF reconstruction loss computation.
+        Computes ||X - WH||_F^2 for the current batch using einsum.
+        """
         with torch.no_grad():
             for i, k in enumerate(self.k_values):
-                factors_rkg = getattr(self, f"D_{k}_rkg")
-                loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]
-                xWT_rnk = torch.einsum("ng,rkg->rnk", x_ng, factors_rkg)
-                h_rnk = loadings_rnk
-                hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
-                WWT_rkk = torch.einsum("rkg,rjg->rkj", factors_rkg, factors_rkg)
-                X_SS_half = (x_ng.norm(p=2) ** 2 / 2).double()
-                sum_h_err_r = self._trace(WWT_rkk, hth_rkk) / 2.0 - self._trace(h_rnk, xWT_rnk)
-                # Accumulate squared error, don't take sqrt yet
-                self._err_running_sum_rk[:, i] += 2.0 * (sum_h_err_r + X_SS_half)
+                factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
+                loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
+                
+                # Compute reconstruction: WH for current batch using einsum
+                # loadings_rnk: (r, batch_size, k), factors_rkg: (r, k, g)
+                # -> reconstruction_rng: (r, batch_size, g)
+                reconstruction_rng = torch.einsum("rnk,rkg->rng", loadings_rnk, factors_rkg)
+                
+                # Compute squared reconstruction error using einsum
+                # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
+                x_expanded_rng = x_ng.unsqueeze(0).expand(self.r, -1, -1)  # (r, batch_size, g)
+                diff_rng = x_expanded_rng - reconstruction_rng  # (r, batch_size, g)
+                
+                # Compute squared Frobenius norm for each replicate using einsum
+                squared_error_r = torch.einsum("rng,rng->r", diff_rng, diff_rng)  # (r,)
+                
+                # Accumulate the squared error
+                self._err_running_sum_rk[:, i] += squared_error_r
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
