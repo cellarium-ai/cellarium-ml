@@ -1076,10 +1076,12 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
         return {}
 
+    @torch.compile
+    @torch.no_grad()
     def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
         """
         Simple and efficient NMF reconstruction loss computation.
-        Computes ||X - WH||_F^2 for the current batch using einsum.
+        Computes ||X - WH||_F^2 for the current batch.
         """
         with torch.no_grad():
             for i, k in enumerate(self.k_values):
@@ -1095,15 +1097,14 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
                 x_expanded_rng = x_ng.unsqueeze(0).expand(self.r, -1, -1)  # (r, batch_size, g)
                 
-                # Compute squared Frobenius norm for each replicate using einsum
+                # Compute squared Frobenius norm for each replicate
                 squared_error_r = F.mse_loss(x_expanded_rng, reconstruction_rng, reduction='none').sum(dim=(1, 2))
                 
                 # Accumulate the squared error
                 self._err_running_sum_rk[:, i] += squared_error_r
             
             # Track cells seen in this epoch
-            if self.algorithm == "nmf_torch_hals":
-                self._cells_seen_in_epoch += x_ng.shape[0]
+            self._cells_seen_in_epoch += x_ng.shape[0]
 
     # def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
     #     with torch.no_grad():
