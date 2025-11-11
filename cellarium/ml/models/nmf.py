@@ -1141,7 +1141,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         # convergence criterion check
         if self.algorithm == "nmf_torch_hals":
             # Take sqrt of accumulated squared errors and normalize by number of cells seen
-            cur_err_rk = torch.sqrt(self._err_running_sum_rk / self._cells_seen_in_epoch)
+            # cur_err_rk = torch.sqrt(self._err_running_sum_rk / self._cells_seen_in_epoch)
+            cur_err_rk = self._err_running_sum_rk / self._cells_seen_in_epoch
             assert isinstance(self._prev_err_rk, torch.Tensor)
             assert isinstance(self._init_err_rk, torch.Tensor)
 
