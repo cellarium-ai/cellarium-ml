@@ -1101,8 +1101,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 squared_error_r = F.mse_loss(
                     x_expanded_rng, 
                     reconstruction_rng, 
-                    reduction='sum'
-                )
+                    reduction='none'
+                ).sum(dim=[1, 2])
                 print(f"squared_error_r: {squared_error_r[:5]}")
                 
                 # Accumulate the squared error
