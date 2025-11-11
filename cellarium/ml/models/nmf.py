@@ -1094,10 +1094,9 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 # Compute squared reconstruction error using einsum
                 # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
                 x_expanded_rng = x_ng.unsqueeze(0).expand(self.r, -1, -1)  # (r, batch_size, g)
-                diff_rng = x_expanded_rng - reconstruction_rng  # (r, batch_size, g)
                 
                 # Compute squared Frobenius norm for each replicate using einsum
-                squared_error_r = torch.einsum("rng,rng->r", diff_rng, diff_rng)  # (r,)
+                squared_error_r = F.mse_loss(x_expanded_rng, reconstruction_rng, reduction='none').sum(dim=(1, 2))
                 
                 # Accumulate the squared error
                 self._err_running_sum_rk[:, i] += squared_error_r
