@@ -968,6 +968,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             self._prev_err_rk: torch.Tensor | None = None
             self._init_err_rk: torch.Tensor | None = None
             self._err_running_sum_rk = torch.zeros((self.r, len(self.k_values)), device=self._dummy_param.device)
+            self._cells_seen_in_epoch = 0  # Track cells seen in current epoch
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
@@ -1058,11 +1059,12 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             if self._init_err_rk is None:
                 assert isinstance(minibatch_indices_n, torch.Tensor)
                 self._loss(x_ng=x_ng, minibatch_indices_n=minibatch_indices_n)
-                # Take sqrt of accumulated squared errors for initialization
-                self._init_err_rk = torch.sqrt(self._err_running_sum_rk.clone())
+                # Take sqrt and normalize by number of cells in this batch
+                self._init_err_rk = torch.sqrt(self._err_running_sum_rk.clone() / x_ng.shape[0])
                 assert isinstance(self._init_err_rk, torch.Tensor)
                 self._prev_err_rk = self._init_err_rk.clone()
                 # self._err_running_sum_rk.zero_()  # Reset after initialization
+                # self._cells_seen_in_epoch = 0  # Reset counter
 
         for k in self.k_values:
             self.online_dictionary_update(x_ng=x_ng, k=k, minibatch_indices_n=minibatch_indices_n)
@@ -1080,6 +1082,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         Computes ||X - WH||_F^2 for the current batch using einsum.
         """
         with torch.no_grad():
+            batch_size = x_ng.shape[0]
+            
             for i, k in enumerate(self.k_values):
                 factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
                 loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
@@ -1099,6 +1103,10 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 
                 # Accumulate the squared error
                 self._err_running_sum_rk[:, i] += squared_error_r
+            
+            # Track cells seen in this epoch
+            if self.algorithm == "nmf_torch_hals":
+                self._cells_seen_in_epoch += batch_size
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -1117,8 +1125,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         # convergence criterion check
         if self.algorithm == "nmf_torch_hals":
-            # Take sqrt of accumulated squared errors to get final loss
-            cur_err_rk = torch.sqrt(self._err_running_sum_rk)
+            # Take sqrt of accumulated squared errors and normalize by number of cells seen
+            cur_err_rk = torch.sqrt(self._err_running_sum_rk / self._cells_seen_in_epoch)
             assert isinstance(self._prev_err_rk, torch.Tensor)
             assert isinstance(self._init_err_rk, torch.Tensor)
 
@@ -1130,10 +1138,11 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 print(f"Stopping early: converged, loss={cur_err_rk}")
 
             print(f"Epoch {trainer.current_epoch} reconstruction error: {current_overall_err_rk.max()}")
-            print(f"{current_overall_err_rk[:5]}")
-            print(f"{cur_err_rk[:5]}")
+            print(f"Per-cell loss - Current: {cur_err_rk.max():.6f}, Previous: {self._prev_err_rk.max():.6f}")
+            print(f"Cells seen this epoch: {self._cells_seen_in_epoch}")
             self._prev_err_rk = cur_err_rk.clone()
             self._err_running_sum_rk.zero_()
+            self._cells_seen_in_epoch = 0  # Reset for next epoch
 
         # this hard reset to zero is equivalent to forgetting momentum each epoch
         for i in self.k_values:
