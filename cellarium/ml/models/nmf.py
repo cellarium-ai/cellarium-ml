@@ -1103,7 +1103,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                     reconstruction_rng, 
                     reduction='none'
                 ).sum(dim=[1, 2])
-                print(f"squared_error_r: {squared_error_r[:5]}")
+                # print(f"squared_error_r: {squared_error_r[:5]}")
                 
                 # Accumulate the squared error
                 self._err_running_sum_rk[:, i] += squared_error_r
@@ -1156,9 +1156,9 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 trainer.should_stop = True
                 print(f"Stopping early: converged, loss={cur_err_rk}")
 
-            print(f"Epoch {trainer.current_epoch} convergence stat: {current_overall_err_rk.max()}")
-            print(f"Per-cell loss - Current max: {cur_err_rk.max():.6f}, Previous: {self._prev_err_rk.max():.6f}")
-            print(f"Per-cell loss - Current mean: {cur_err_rk.mean():.6f}, Previous: {self._prev_err_rk.mean():.6f}")
+            # print(f"Epoch {trainer.current_epoch} convergence stat: {current_overall_err_rk.max()}")
+            # print(f"Per-cell loss - Current max: {cur_err_rk.max():.6f}, Previous: {self._prev_err_rk.max():.6f}")
+            # print(f"Per-cell loss - Current mean: {cur_err_rk.mean():.6f}, Previous: {self._prev_err_rk.mean():.6f}")
             self._prev_err_rk = cur_err_rk.clone()
             self._err_running_sum_rk.zero_()
             self._cells_seen_in_epoch = 0  # Reset for next epoch
