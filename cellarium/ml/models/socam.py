@@ -172,7 +172,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                     global_step=trainer.global_step,
                 )
 
-    def probability_propagation(self, activation_out_gpu: torch.tensor) -> torch.tensor:
+    def probability_propagation(self, activation_out_gpu: torch.Tensor) -> torch.Tensor:
         """
         for each column in activation_out_gpu_clone, col, we get a tensor of
         activation_out_gpu[:,[children_indices[col]]],
