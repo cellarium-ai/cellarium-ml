@@ -30,8 +30,10 @@ class ImputationModel(SingleCellVariationalInference):
 
         if "masking_probability" in kwargs:
             self.masking_probability = kwargs.pop("masking_probability")
+            self.noise2self_ratio = kwargs.pop("noise2self_ratio", 0.5)
         else:
             self.masking_probability = 0.5  # default masking probability
+            self.noise2self_ratio = 0.5  # default noise2self ratio
 
         super().__init__(*args, **kwargs)
 
@@ -150,8 +152,13 @@ class ImputationModel(SingleCellVariationalInference):
             min_kl_weight=self.kl_annealing_start,
         )
 
-        # apply the noise2self mask when computing the reconstruction loss
+        # compute the regular scvi reconstruction loss
         rec_loss_n = -generative_outputs["px"].log_prob(x_ng)[
+            :, ~logical_mask_g
+        ].sum(-1) / max(1, (~logical_mask_g).sum())
+
+        # apply the noise2self mask when computing the reconstruction loss
+        noise2self_rec_loss_n = -generative_outputs["px"].log_prob(x_ng)[
             :, logical_mask_g
         ].sum(-1) / max(1, logical_mask_g.sum())
 
@@ -160,7 +167,8 @@ class ImputationModel(SingleCellVariationalInference):
             f"Invalid KL annealing weight: {kl_annealing_weight}"
         )
         loss = torch.mean(
-            rec_loss_n
+            (1.0 - self.noise2self_ratio) * rec_loss_n
+            + self.noise2self_ratio * noise2self_rec_loss_n
             + kl_annealing_weight
             * (self.z_kl_weight_max * kl_divergence_z + self.batch_kl_weight_max * kl_divergence_batch),
             dim=0,
