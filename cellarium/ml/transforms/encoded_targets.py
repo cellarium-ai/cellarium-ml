@@ -5,8 +5,6 @@ import numpy as np
 import torch
 from torch import nn
 
-from cellarium.ml.data.fileio import read_pkl_from_gcs
-
 
 class EncodedTargets(nn.Module):
     """
@@ -15,10 +13,10 @@ class EncodedTargets(nn.Module):
 
     def __init__(
         self,
-        unique_cell_types_nparray_path: str = "",
+        unique_cell_types_nparray: np.ndarray,
     ) -> None:
         super().__init__()
-        self.unique_cell_types_nparray = read_pkl_from_gcs(unique_cell_types_nparray_path)
+        self.unique_cell_types_nparray = unique_cell_types_nparray
 
     def forward(self, y_n: np.ndarray) -> dict[str, torch.Tensor | np.ndarray]:
         """ """

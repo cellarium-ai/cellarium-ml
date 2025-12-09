@@ -8,7 +8,6 @@ import pyro.distributions as dist
 import torch
 import torch.nn.functional
 
-from cellarium.ml.data.fileio import read_pkl_from_gcs
 from cellarium.ml.distributions import PyroCategorical
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
@@ -17,55 +16,72 @@ from cellarium.ml.utilities.testing import (
 )
 
 
+def compute_valid_mask(input_categories: list[str], output_categories: list[str]) -> list[int]:
+    # Return indices of output_categories in the same order as input_categories
+    index_map = {cat: i for i, cat in enumerate(output_categories)}
+    return [index_map[cat] for cat in input_categories]
+
+
 class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
     """
     Logistic regression model.
 
     Args:
         n_obs:
-            Number of observations.
+            Number of observations in the dataset (used to size the Pyro plate).
         var_names_g:
-            The variable names schema for the input data validation.
-        y_categories:
-            The categories for the target data.
+            The variable-name schema for the input data; used for validation.
+        output_categories:
+            Total number of target categories expected at prediction/validation time.
+            Used when the trained model has fewer categories than the final output space.
+        output_row_descendent_col_torch_tensor:
+            A binary (0/1) tensor of shape (n_categories, n_categories) defining
+            the descendant relationships between categories. Row i contains ones
+            for all categories considered descendants of category i. Used for
+            probability-propagation.
+        input_categories:
+            Array of unique category identifiers for the training labels.
+            Boolean or integer mask mapping the model’s category indices to the
+        probability_propagation_flag:
+            If True, applies hierarchical probability propagation before sampling
+            or predicting the output distribution.
         W_prior_scale:
-            The scale of the Laplace prior for the weights.
+            Scale (b) parameter of the Laplace prior on the weight matrix `W_gc`.
         W_init_scale:
-            Initialization scale for the ``W_gc`` parameter.
+            Standard deviation for initializing `W_gc`.
         seed:
             Random seed used to initialize parameters.
         log_metrics:
-            Whether to log the histogram of the ``W_gc`` parameter.
+            If True, logs weight histograms (TensorBoard) during training.
     """
 
     def __init__(
         self,
         n_obs: int,
         var_names_g: np.ndarray,
-        actual_categories=670,
+        output_row_descendent_col_torch_tensor: torch.Tensor,
+        output_categories: list[str],
+        input_categories: list[str],
+        probability_propagation_flag: bool = True,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
         seed: int = 0,
-        probability_propagation_flag: bool = False,
-        target_row_descendent_col_torch_tensor_path: str = "",
-        y_categories_path: str = "",
-        valid_mask_path: str = "",
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
 
         # data
-        self.actual_categories = actual_categories
         self.n_obs = n_obs
         self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
-        self.y_categories = read_pkl_from_gcs(y_categories_path)
-        self.target_row_descendent_col_torch_tensor = read_pkl_from_gcs(target_row_descendent_col_torch_tensor_path)
-        self.n_categories = len(self.y_categories)
+        self.input_categories = input_categories
+        self.target_row_descendent_col_torch_tensor = output_row_descendent_col_torch_tensor
+        self.n_output_categories = output_row_descendent_col_torch_tensor.shape[0]
+        self.n_categories = len(self.input_categories)
         self.probability_propagation_flag = probability_propagation_flag
         self.out_distribution = PyroCategorical
-
         self.seed = seed
+        self.output_categories = output_categories
         # parameters
         self._W_prior_scale = W_prior_scale
         self.W_init_scale = W_init_scale
@@ -79,7 +95,16 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.elbo = pyro.infer.Trace_ELBO()
 
         self.log_metrics = log_metrics
-        self.valid_mask = read_pkl_from_gcs(valid_mask_path)
+
+        self.valid_mask = compute_valid_mask(
+            input_categories=self.input_categories, output_categories=self.output_categories
+        )
+
+        if self.n_categories > self.n_output_categories:
+            raise ValueError("`n_categories` can't be greater than `output_categories`.")
+
+        if self.n_output_categories != len(self.output_categories):
+            raise ValueError("`n_output_categories` and `output_categories` should be equal.")
 
     def reset_parameters(self) -> None:
         rng_device = self.W_gc.device.type if self.W_gc.device.type != "meta" else "cpu"
@@ -144,11 +169,11 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         logits_nc = x_ng @ self.W_gc + self.b_c
-        if self.actual_categories == self.W_gc.shape[1]:
+        if self.n_output_categories == self.W_gc.shape[1]:
             activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
         else:  # when trained model has fewer classes than expected during validation
             activation_out_filtered = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-            activation_out = torch.zeros(x_ng.shape[0], self.actual_categories, device=x_ng.device)
+            activation_out = torch.zeros(x_ng.shape[0], self.n_output_categories, device=x_ng.device)
             activation_out[:, self.valid_mask] = activation_out_filtered
         if self.probability_propagation_flag:
             activation_out = self.probability_propagation(activation_out_gpu=activation_out)
