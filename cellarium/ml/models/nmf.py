@@ -486,7 +486,7 @@ def update_beta_structure(
     beta_rdk: torch.Tensor,
     lambda_select: float,
     lr: float = 0.25,
-    n_iter: int = 500,
+    n_iter: int = 50,
 ) -> torch.Tensor:
     """
     Updates Beta using Proximal Gradient Descent.
@@ -505,11 +505,11 @@ def update_beta_structure(
     residual_rng = x_rng - pred_raw_rng
     
     # Optimization loop
-    beta_curr = beta_rdk.clone()
+    beta_curr_rdk = beta_rdk.clone()
     
     for _ in range(n_iter):
         # Forward: M Beta H
-        m_beta_rnk = torch.einsum("nd,rdk->rnk", metadata_nd, beta_curr)
+        m_beta_rnk = torch.einsum("nd,rdk->rnk", metadata_nd, beta_curr_rdk)
         pred_struct_rng = torch.einsum("rnk,rkg->rng", m_beta_rnk, factors_rkg)
         
         # Error
@@ -527,17 +527,17 @@ def update_beta_structure(
             grad_rdk = grad_rdk * (10.0 / grad_norm)
         
         # Step
-        beta_next = beta_curr - lr * grad_rdk
+        beta_next_rdk = beta_curr_rdk - lr * grad_rdk
         
         # Proximal Operator (Soft Thresholding)
-        beta_curr = torch.sign(beta_next) * torch.clamp(torch.abs(beta_next) - lr * lambda_select, min=0.0)
+        beta_curr_rdk = torch.sign(beta_next_rdk) * torch.clamp(torch.abs(beta_next_rdk) - lr * lambda_select, min=0.0)
         
         # Check for NaN
-        if torch.isnan(beta_curr).any():
-            print("Warning: NaN detected in beta_curr, returning previous value")
+        if torch.isnan(beta_curr_rdk).any():
+            print("Warning: NaN detected in beta_curr_rdk, returning previous value")
             return beta_rdk.clone()
         
-    return beta_curr
+    return beta_curr_rdk
 
 
 # def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
