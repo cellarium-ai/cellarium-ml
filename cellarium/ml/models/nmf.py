@@ -376,6 +376,165 @@ def nmf_torch_update_factors_hals_with_compile(
     #     print("NMF HALS factors update reached max iterations without convergence.")
 
 
+def compute_covariance_gradient(
+    w_rnk: torch.Tensor,
+    m_nd: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Computes gradient of ||Cov(W, M)||^2 with respect to W.
+    Cov(W, M) is approximated by centered dot product M_c^T W_c.
+    
+    Gradient of || M_c^T W ||_F^2 w.r.t W is 2 * M_c * (M_c^T W).
+    Normalized by batch size squared to make lambda_align scale-invariant.
+    """
+    # Center M (metadata) within the batch
+    m_mean = m_nd.mean(dim=0, keepdim=True)
+    m_centered = m_nd - m_mean
+    
+    # Compute M^T W. w_rnk is (r, n, k)
+    # m_centered is (n, d)
+    # We want product over n.
+    # mt_w: (r, d, k)
+    mt_w = torch.einsum("nd,rnk->rdk", m_centered, w_rnk)
+    
+    # Gradient is 2 * M * (M^T W) -> (r, n, k)
+    grad = 2.0 * torch.einsum("nd,rdk->rnk", m_centered, mt_w)
+    
+    # Normalize by batch size squared to prevent gradient explosion
+    # This makes lambda_align invariant to batch size
+    n_batch = m_nd.shape[0]
+    if n_batch > 0:
+        grad = grad / (n_batch * n_batch)
+    
+    return grad
+
+
+@torch.no_grad()
+def nmf_torch_update_loadings_structure_aware(
+    x_ng: torch.Tensor,
+    factors_rkg: torch.Tensor,     # Dictionary (H)
+    loadings_raw_rnk: torch.Tensor, # Loadings (W_raw) to update
+    loadings_struct_rnk: torch.Tensor, # M * Beta
+    metadata_nd: torch.Tensor,
+    lambda_align: float,
+    max_iter: int = 200,
+    h_tol: float = 0.05,
+) -> None:
+    """
+    Updates W_raw in the structure-aware NMF model.
+    Objective: ||X - (W_raw + W_struct)H||^2 + lambda_align * ||Cov(W_raw, M)||^2
+    """
+    assert x_ng.shape[0] == loadings_raw_rnk.shape[-2]
+    assert x_ng.shape[1] == factors_rkg.shape[-1]
+    
+    # Precomputes for HALS
+    # H H^T
+    hht_rkk = torch.einsum("rkg,rhg->rkh", factors_rkg, factors_rkg)
+    # X H^T
+    xht_rnk = torch.einsum("ng,rkg->rnk", x_ng, factors_rkg)
+    
+    # Struct correction term: H_struct H H^T
+    # This acts as a negative drive component (it explains away some X)
+    struct_correction_rnk = torch.einsum("rnk,rkh->rnh", loadings_struct_rnk, hht_rkk)
+    
+    for i in range(max_iter):
+        # Compute Covariance Gradient based on current W_raw
+        # We compute this once per outer iteration to save compute
+        grad_cov_rnk = compute_covariance_gradient(loadings_raw_rnk, metadata_nd)
+        
+        # Coordinate Descent Loop
+        for k in range(loadings_raw_rnk.shape[-1]):
+            # 1. Standard HALS numerator term: [X H^T] - [W_raw H H^T]
+            # Note: The standard formulation subtracts the FULL influence of W_raw, 
+            # then adds back the k-th component.
+            # Residual w.r.t W_raw only = X H^T - W_raw (H H^T)
+            # We also subtract Structural influence: - Struct (H H^T)
+            # And Covariance Gradient: - lambda * Grad_Cov
+            
+            numer_rn = xht_rnk[..., k] - torch.einsum("rnk,rk->rn", loadings_raw_rnk, hht_rkk[..., k])
+            
+            # 2. Subtract Structural Correction
+            numer_rn = numer_rn - struct_correction_rnk[..., k]
+            
+            # 3. Subtract Covariance Gradient
+            # Note: Grad_cov is dL/dW. In Newton step/Coordinate step, we want -Gradient.
+            # So we subtract (lambda * grad).
+            numer_rn = numer_rn - lambda_align * grad_cov_rnk[..., k]
+            
+            denom = hht_rkk[:, k, k].unsqueeze(-1)
+            w_rn = loadings_raw_rnk[..., k]
+            
+            # Update
+            wvec_rn = torch.where(
+                denom > 1e-12,
+                torch.clamp(w_rn + numer_rn / denom, min=0.0),
+                torch.zeros_like(w_rn)
+            )
+            loadings_raw_rnk[..., k] = wvec_rn
+
+
+def update_beta_structure(
+    loadings_raw_rnk: torch.Tensor,
+    factors_rkg: torch.Tensor,
+    x_ng: torch.Tensor,
+    metadata_nd: torch.Tensor,
+    beta_rdk: torch.Tensor,
+    lambda_select: float,
+    lr: float = 0.25,
+    n_iter: int = 500,
+) -> torch.Tensor:
+    """
+    Updates Beta using Proximal Gradient Descent.
+    Objective: || (X - W_raw H) - M Beta H ||^2 + lambda_select ||Beta||_1
+    """
+    # Check for invalid inputs
+    if torch.isnan(loadings_raw_rnk).any() or torch.isnan(factors_rkg).any() or torch.isnan(beta_rdk).any():
+        print("Warning: NaN detected in inputs to update_beta_structure")
+        return beta_rdk.clone()
+    
+    # Compute Residual X - W_raw H
+    # W_raw H -> (r, n, g)
+    pred_raw_rng = torch.einsum("rnk,rkg->rng", loadings_raw_rnk, factors_rkg)
+    # Expand X
+    x_rng = x_ng.unsqueeze(0).expand_as(pred_raw_rng)
+    residual_rng = x_rng - pred_raw_rng
+    
+    # Optimization loop
+    beta_curr = beta_rdk.clone()
+    
+    for _ in range(n_iter):
+        # Forward: M Beta H
+        m_beta_rnk = torch.einsum("nd,rdk->rnk", metadata_nd, beta_curr)
+        pred_struct_rng = torch.einsum("rnk,rkg->rng", m_beta_rnk, factors_rkg)
+        
+        # Error
+        error_rng = pred_struct_rng - residual_rng
+        
+        # Gradient: M^T Error H^T
+        # Error H^T -> (r, n, k)
+        err_ht_rnk = torch.einsum("rng,rkg->rnk", error_rng, factors_rkg)
+        # M^T (Error H^T) -> (r, d, k)
+        grad_rdk = torch.einsum("nd,rnk->rdk", metadata_nd, err_ht_rnk)
+        
+        # Gradient clipping for numerical stability
+        grad_norm = torch.norm(grad_rdk)
+        if grad_norm > 10.0:
+            grad_rdk = grad_rdk * (10.0 / grad_norm)
+        
+        # Step
+        beta_next = beta_curr - lr * grad_rdk
+        
+        # Proximal Operator (Soft Thresholding)
+        beta_curr = torch.sign(beta_next) * torch.clamp(torch.abs(beta_next) - lr * lambda_select, min=0.0)
+        
+        # Check for NaN
+        if torch.isnan(beta_curr).any():
+            print("Warning: NaN detected in beta_curr, returning previous value")
+            return beta_rdk.clone()
+        
+    return beta_curr
+
+
 # def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
 #     """
 #     https://github.com/dylkot/cNMF/blob/7833a75484169cf448f8956224447cb110f4ba3d/src/cnmf/cnmf.py#L55
@@ -908,6 +1067,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         init: The initialization method to use for the NMF factors, in ["sklearn_random", "uniform_random"].
         transformed_data_mean: The mean of the transformed data, used for initialization if an only if
             `init` is "sklearn_random".
+        n_cells_total: The total number of cells in the dataset. Required if algorithm is "nmf_torch_hals".
+        early_stopping: Whether to use early stopping based on reconstruction error.
     """
 
     def __init__(
@@ -919,6 +1080,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
         n_cells_total: int | None = None,
+        early_stopping: bool = True,
     ) -> None:
         super().__init__(var_names_g=var_names_g, k_values=k_values)
         g = len(self.var_names_g)
@@ -946,6 +1108,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         self._D_tol = 1e-5
         self._alpha_tol = 1e-5
         self._hals_tol = 1e-4
+        self.early_stopping = early_stopping
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -1151,7 +1314,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
             current_overall_err_rk = torch.abs((self._prev_err_rk - cur_err_rk) / self._init_err_rk)
             if (
-                current_overall_err_rk.max() < self._hals_tol
+                self.early_stopping and (current_overall_err_rk.max() < self._hals_tol)
             ):
                 trainer.should_stop = True
                 print(f"Stopping early: converged, loss={cur_err_rk}")
@@ -1261,6 +1424,212 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
         return rec_error
 
+
+class OnlineStructureAwareNMF(OnlineNonNegativeMatrixFactorization):
+    """
+    Online NMF with Structure Awareness (Guided/Semi-Supervised).
+    
+    This model decomposes the total cell loadings into an idiosyncratic component (W_raw)
+    and a structured component (M * Beta) driven by metadata (M).
+    
+    Objective:
+    L = ||X - (W_raw + M Beta)H||_F^2 
+      + lambda_align * ||Cov(W_raw, M)||_F^2
+      + lambda_select * ||Beta||_1
+      
+    Args:
+        n_metadata: Number of metadata columns.
+        lambda_align: Penalty strength for covariance between W_raw and M.
+        lambda_select: L1 penalty strength for structure weights Beta.
+        beta_lr: Learning rate for beta updates (default: 0.05).
+    """
+    
+    def __init__(
+        self,
+        var_names_g: Sequence[str],
+        k_values: list[int],
+        r: int,
+        n_metadata: int,
+        lambda_align: float = 0.1,
+        lambda_select: float = 0.1,
+        beta_lr: float = 0.05,
+        **kwargs,
+    ) -> None:
+        super().__init__(var_names_g, k_values, r, **kwargs)
+        self.n_metadata = n_metadata
+        self.lambda_align = lambda_align
+        self.lambda_select = lambda_select
+        self.beta_lr = beta_lr
+        
+        # Initialize Beta for each k
+        for k in k_values:
+            # Beta: (Replicates, Metadata_Dim, K)
+            # Initialize with small positive values or zeros?
+            # Small random to break symmetry, but close to zero so it starts "off"
+            beta_rdk = torch.randn(r, n_metadata, k).abs() * 0.01
+            self.register_buffer(f"beta_{k}_rdk", beta_rdk)
+    
+    def reset_parameters(self) -> None:
+        """Override reset_parameters to also reinitialize beta parameters."""
+        super().reset_parameters()
+        # Reinitialize Beta for each k (only if n_metadata has been set)
+        if hasattr(self, 'n_metadata'):
+            for k in self.k_values:
+                beta_rdk = torch.randn(self.r, self.n_metadata, k, device=self._dummy_param.device).abs() * 0.01
+                setattr(self, f"beta_{k}_rdk", beta_rdk)
+            
+    def online_dictionary_update(
+        self, 
+        x_ng: torch.Tensor, 
+        k: int, 
+        minibatch_indices_n: torch.Tensor | None,
+        metadata_m_nd: torch.Tensor | None = None
+    ) -> None:
+        """
+        Structure-aware update step.
+        """
+        if metadata_m_nd is None:
+            # Fallback to standard NMF if no metadata provided
+            return super().online_dictionary_update(x_ng, k, minibatch_indices_n)
+
+        # 1. Setup
+        factors_rkg = getattr(self, f"D_{k}_rkg")
+        beta_rdk = getattr(self, f"beta_{k}_rdk")
+        
+        # Check for NaN in current state
+        if torch.isnan(beta_rdk).any():
+            print(f"Warning: NaN detected in beta_{k}_rdk before update, reinitializing...")
+            beta_rdk = torch.randn(self.r, self.n_metadata, k, device=self._dummy_param.device).abs() * 0.01
+            setattr(self, f"beta_{k}_rdk", beta_rdk)
+        
+        # Loadings for this batch (W_raw)
+        # Assuming full batch update or handling indices correctly. 
+        # In OnlineNMF, loadings are usually transient for the batch in `forward`, 
+        # but here we might need persistent loadings if we want to track them?
+        # Actually, Online NMF usually solves for W_new for the *new batch* from scratch (or warm start).
+        # In `OnlineNonNegativeMatrixFactorization.online_dictionary_update`:
+        # it calls `nmf_torch_update_loadings_hals` on `loadings_rnk` which is stored in `self`.
+        # BUT `self.loadings_{k}_rnk` has shape (r, n_total, k).
+        # We need to slice it for the minibatch.
+        
+        if minibatch_indices_n is None:
+             # Full batch usage
+             indices = slice(None)
+             loadings_raw_rnk = getattr(self, f"loadings_{k}_rnk")
+             m_batch_nd = metadata_m_nd
+        else:
+             indices = minibatch_indices_n
+             loadings_raw_rnk = getattr(self, f"loadings_{k}_rnk")[:, indices, :]
+             m_batch_nd = metadata_m_nd
+        
+        # 2. Update W_raw (Structure Aware)
+        # Compute Structural Component
+        m_beta_rnk = torch.einsum("nd,rdk->rnk", m_batch_nd, beta_rdk)
+        
+        nmf_torch_update_loadings_structure_aware(
+            x_ng=x_ng,
+            factors_rkg=factors_rkg,
+            loadings_raw_rnk=loadings_raw_rnk,
+            loadings_struct_rnk=m_beta_rnk,
+            metadata_nd=m_batch_nd,
+            lambda_align=self.lambda_align,
+        )
+        
+        # Write back updated raw loadings
+        if minibatch_indices_n is not None:
+             getattr(self, f"loadings_{k}_rnk")[:, indices, :] = loadings_raw_rnk
+        
+        # 3. Update Beta (Structure Weights)
+        beta_rdk = update_beta_structure(
+            loadings_raw_rnk=loadings_raw_rnk,
+            factors_rkg=factors_rkg,
+            x_ng=x_ng,
+            metadata_nd=m_batch_nd,
+            beta_rdk=beta_rdk,
+            lambda_select=self.lambda_select,
+            lr=self.beta_lr,
+        )
+        # Update stored beta
+        setattr(self, f"beta_{k}_rdk", beta_rdk)
+        
+        # 4. Update Factors (H)
+        # Effective loadings = W_raw + M Beta
+        # Recompute structure structure with updated beta
+        m_beta_rnk = torch.einsum("nd,rdk->rnk", m_batch_nd, beta_rdk)
+        loadings_total_rnk = loadings_raw_rnk + m_beta_rnk
+        
+        # NOTE: careful here. We cannot use `online_dictionary_update_nmf_torch_hals` directly
+        # because that function performs a standard NMF update on the loadings first, which 
+        # would overwrite our structure-aware loadings with a standard factorization solution.
+        # instead, we manually accumulate the sufficient statistics (A and B) using our 
+        # structure-aware loadings, and then update the dictionary factors.
+        
+        # 4a. Accumulate Sufficient Statistics (A, B) using Total Loadings
+        with torch.no_grad():
+             # loadings_total_rnk is (r, n, k)
+             # x_ng is (n, g)
+             
+             # Update B = B + loadings^T X
+             # w_rnk^T x_ng -> (r, k, n) @ (n, g) -> (r, k, g)
+             b_batch_rkg = torch.einsum("rnk,ng->rkg", loadings_total_rnk, x_ng)
+             getattr(self, f"B_{k}_rkg").add_(b_batch_rkg)
+             
+             # Update A = A + loadings^T loadings
+             # w_rnk^T w_rnk -> (r, k, n) @ (r, n, k) -> (r, k, k)
+             a_batch_rkk = torch.einsum("rnk,rnj->rkj", loadings_total_rnk, loadings_total_rnk)
+             getattr(self, f"A_{k}_rkk").add_(a_batch_rkk)
+        
+        # 4b. Update Factors (Dictionary H) using standard HALS
+        nmf_torch_update_factors_hals_with_compile(
+            w_rkg=factors_rkg,
+            A_rkk=getattr(self, f"A_{k}_rkk"),
+            B_rkg=getattr(self, f"B_{k}_rkg")
+        )
+
+    def forward(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        obs_names_n: np.ndarray | None = None,
+        metadata_m_nd: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor | None]:
+        """Forward method that handles both standard NMF logic and structure-aware extensions."""
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+
+        # Handle the mapping of obs_names to indices for local latents
+        minibatch_indices_n: torch.Tensor | None = None
+        if self.algorithm == "nmf_torch_hals":
+            assert obs_names_n is not None, "obs_names_n must be provided for nmf_torch_hals algorithm"
+            new_obs_names = set(obs_names_n.tolist()) - set(self.obs_names_to_index_map.keys())
+            if len(new_obs_names) > 0:
+                self.obs_names_to_index_map |= {
+                    name: i for i, name in enumerate(new_obs_names, start=len(self.obs_names_to_index_map))
+                }
+            vectorized_lookup = np.vectorize(lambda x: self.obs_names_to_index_map[x])
+            minibatch_indices_n = torch.from_numpy(vectorized_lookup(obs_names_n)).to(x_ng.device)
+
+        if self.algorithm == "nmf_torch_hals":
+            # for error computation to assess convergence
+            if self._init_err_rk is None:
+                assert isinstance(minibatch_indices_n, torch.Tensor)
+                self._loss(x_ng=x_ng, minibatch_indices_n=minibatch_indices_n)
+                # Take sqrt and normalize by number of cells in this batch
+                self._init_err_rk = self._err_running_sum_rk.clone() / x_ng.shape[0]
+                assert isinstance(self._init_err_rk, torch.Tensor)
+                self._prev_err_rk = self._init_err_rk.clone()
+                self._err_running_sum_rk.zero_()  # Reset after initialization
+                self._cells_seen_in_epoch = 0  # Reset counter
+
+        for k in self.k_values:
+            self.online_dictionary_update(x_ng=x_ng, k=k, minibatch_indices_n=minibatch_indices_n, metadata_m_nd=metadata_m_nd)
+
+        if self.algorithm == "nmf_torch_hals":
+            # for error computation to assess convergence
+            assert isinstance(minibatch_indices_n, torch.Tensor)
+            self._loss(x_ng=x_ng, minibatch_indices_n=minibatch_indices_n)
+
+        return {}
 
 def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_size: float, plot_only=False):
     assert local_neighborhood_size > 0 and local_neighborhood_size < 1, (
