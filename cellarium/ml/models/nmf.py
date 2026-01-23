@@ -376,6 +376,8 @@ def nmf_torch_update_factors_hals_with_compile(
     #     print("NMF HALS factors update reached max iterations without convergence.")
 
 
+@torch.compile
+@torch.no_grad()
 def compute_covariance_gradient(
     w_rnk: torch.Tensor,
     m_nd: torch.Tensor,
@@ -409,6 +411,7 @@ def compute_covariance_gradient(
     return grad
 
 
+@torch.compile
 @torch.no_grad()
 def nmf_torch_update_loadings_structure_aware(
     x_ng: torch.Tensor,
@@ -473,6 +476,8 @@ def nmf_torch_update_loadings_structure_aware(
             loadings_raw_rnk[..., k] = wvec_rn
 
 
+@torch.compile
+@torch.no_grad()
 def update_beta_structure(
     loadings_raw_rnk: torch.Tensor,
     factors_rkg: torch.Tensor,
@@ -1482,15 +1487,13 @@ class OnlineStructureAwareNMF(OnlineNonNegativeMatrixFactorization):
         self, 
         x_ng: torch.Tensor, 
         k: int, 
+        metadata_m_nd: torch.Tensor,
         minibatch_indices_n: torch.Tensor | None,
-        metadata_m_nd: torch.Tensor | None = None
     ) -> None:
         """
         Structure-aware update step.
         """
-        if metadata_m_nd is None:
-            # Fallback to standard NMF if no metadata provided
-            return super().online_dictionary_update(x_ng, k, minibatch_indices_n)
+        assert isinstance(metadata_m_nd, torch.Tensor), "metadata_m_nd must be provided for structure-aware NMF"
 
         # 1. Setup
         factors_rkg = getattr(self, f"D_{k}_rkg")
