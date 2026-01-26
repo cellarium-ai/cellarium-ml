@@ -376,7 +376,7 @@ def nmf_torch_update_factors_hals_with_compile(
     #     print("NMF HALS factors update reached max iterations without convergence.")
 
 
-@torch.compile
+# @torch.compile
 @torch.no_grad()
 def compute_covariance_gradient(
     w_rnk: torch.Tensor,
@@ -411,7 +411,7 @@ def compute_covariance_gradient(
     return grad
 
 
-@torch.compile
+# @torch.compile
 @torch.no_grad()
 def nmf_torch_update_loadings_structure_aware(
     x_ng: torch.Tensor,
@@ -476,7 +476,7 @@ def nmf_torch_update_loadings_structure_aware(
             loadings_raw_rnk[..., k] = wvec_rn
 
 
-@torch.compile
+# @torch.compile
 @torch.no_grad()
 def update_beta_structure(
     loadings_raw_rnk: torch.Tensor,
@@ -494,7 +494,7 @@ def update_beta_structure(
     """
     # Check for invalid inputs
     if torch.isnan(loadings_raw_rnk).any() or torch.isnan(factors_rkg).any() or torch.isnan(beta_rdk).any():
-        print("Warning: NaN detected in inputs to update_beta_structure")
+        # print("Warning: NaN detected in inputs to update_beta_structure")
         return beta_rdk.clone()
     
     # Compute Residual X - W_raw H
@@ -534,7 +534,7 @@ def update_beta_structure(
         
         # Check for NaN
         if torch.isnan(beta_curr_rdk).any():
-            print("Warning: NaN detected in beta_curr_rdk, returning previous value")
+            # print("Warning: NaN detected in beta_curr_rdk, returning previous value")
             return beta_rdk.clone()
         
     return beta_curr_rdk
@@ -1482,7 +1482,9 @@ class OnlineStructureAwareNMF(OnlineNonNegativeMatrixFactorization):
             for k in self.k_values:
                 beta_rdk = torch.randn(self.r, self.n_metadata, k, device=self._dummy_param.device).abs() * 0.01
                 setattr(self, f"beta_{k}_rdk", beta_rdk)
-            
+    
+    @torch.compile(dynamic=True)
+    @torch.no_grad()
     def online_dictionary_update(
         self, 
         x_ng: torch.Tensor, 
@@ -1501,7 +1503,7 @@ class OnlineStructureAwareNMF(OnlineNonNegativeMatrixFactorization):
         
         # Check for NaN in current state
         if torch.isnan(beta_rdk).any():
-            print(f"Warning: NaN detected in beta_{k}_rdk before update, reinitializing...")
+            # print(f"Warning: NaN detected in beta_{k}_rdk before update, reinitializing...")
             beta_rdk = torch.randn(self.r, self.n_metadata, k, device=self._dummy_param.device).abs() * 0.01
             setattr(self, f"beta_{k}_rdk", beta_rdk)
         
