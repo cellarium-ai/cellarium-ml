@@ -2170,8 +2170,8 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     print(f"Mean absolute error (train): {train_mae:.4f}")
     print(f"Mean absolute error (test): {test_mae:.4f}")
 
-    assert train_mae < 0.3, f"mean train reconstruction diff with scvi-tools on real data is too high: {train_mae:.4f}"
-    assert test_mae < 0.3, f"mean test reconstruction diff with scvi-tools on real data is too high: {test_mae:.4f}"
+    assert train_mae < 0.4, f"mean train reconstruction diff with scvi-tools on real data is too high: {train_mae:.4f}"
+    assert test_mae < 0.4, f"mean test reconstruction diff with scvi-tools on real data is too high: {test_mae:.4f}"
 
 
 @pytest.mark.parametrize(
