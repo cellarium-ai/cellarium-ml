@@ -2174,6 +2174,7 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     assert test_mae < 0.4, f"mean test reconstruction diff with scvi-tools on real data is too high: {test_mae:.4f}"
 
 
+@pytest.mark.parametrize("transform_batch", [0, None], ids=["batch0", "originalbatch"])
 @pytest.mark.parametrize(
     "matching_scvi_cellarium_models",
     [
@@ -2186,7 +2187,7 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     ],
     indirect=True,
 )
-def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
+def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models, transform_batch):
     """
     Test whether or not reconstructed data matches for paired models trained on simulated data.
     """
@@ -2202,7 +2203,6 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
     n_genes_to_reconstruct = g  # min(5, g)  # Reconstruct first 5 genes or all if fewer
     gene_list = var_names_g[:n_genes_to_reconstruct]
     gene_inds = list(range(n_genes_to_reconstruct))
-    transform_batch = 0  # Transform to batch 0
     reconstruction_latent_samples = 10_000  # this is so high because randomness has not been eliminated
     reconstructed_library_size = 10_000
 
