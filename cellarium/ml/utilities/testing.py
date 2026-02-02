@@ -95,7 +95,9 @@ def assert_arrays_equal(
     Raises:
         ValueError: If the arrays are not equal.
     """
+
     if not np.array_equal(a1, a2):
+
         raise ValueError(f"`{a1_name}` must match `{a2_name}`. Got {a1} != {a2}")
 
 

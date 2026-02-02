@@ -705,7 +705,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             n_cats_per_cov=self.n_cats_per_cov,  # for the (optional) sizing of the final additive bias layer
         )
 
-        print(self)
+        #print(self)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -982,8 +982,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         """
 
         if self.reconstruct_counts_on_predict:
-            assert self.reconstruction_var_names_g is not None
-            gene_inds = [np.where(var_names_g == gid)[0][0] for gid in self.reconstruction_var_names_g]
+            assert self.reconstruction_var_names_g is not None, "None was given, expected a list of genes"
+            gene_inds = [np.where(var_names_g == gid)[0][0] for gid in self.reconstruction_var_names_g if np.where(var_names_g == gid)[0].size > 0] #this does not work if the reconstruction gene is not in the dataset
+
             return self.reconstruct(
                 x_ng=x_ng,
                 var_names_g=var_names_g,

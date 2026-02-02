@@ -143,9 +143,15 @@ def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
     Returns:
         Numpy array.
     """
+
+
     if isinstance(x, pd.DataFrame):
         return x.apply(lambda col: col.cat.codes).to_numpy(dtype=np.int32)
     else:
+        # print("batch keys...")
+        # print(x.unique(),"-----------",np.asarray(x.cat.codes, dtype=np.int32))
+        #
+        # exit()
         return np.asarray(x.cat.codes, dtype=np.int32)
 
 

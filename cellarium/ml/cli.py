@@ -27,7 +27,7 @@ from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
-
+from cellarium.ml.transforms.filter import Filter
 cached_loaders = {}
 
 
@@ -664,6 +664,8 @@ def scvi(args: ArgsType = None) -> None:
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
+    torch.serialization.safe_globals([Filter])
+    torch.serialization.add_safe_globals([Filter])
     cli = lightning_cli_factory(
         "cellarium.ml.models.SingleCellVariationalInference",
         link_arguments=[
