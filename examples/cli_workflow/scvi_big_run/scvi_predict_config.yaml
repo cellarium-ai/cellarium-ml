@@ -149,7 +149,7 @@ data:
      convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 1024
   iteration_strategy: cache_efficient
-  shuffle: true
+  shuffle: false
   shuffle_seed: 0
   drop_last_indices: false
   drop_incomplete_batch: false
