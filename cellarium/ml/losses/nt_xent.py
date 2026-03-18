@@ -75,9 +75,9 @@ class NT_Xent(nn.Module):
             z_i_full = z_i
             z_j_full = z_j
 
-        assert (
-            len(z_i_full) % world_size == 0
-        ), "Expected batch to evenly divide across devices (set drop_last to True)."
+        assert len(z_i_full) % world_size == 0, (
+            "Expected batch to evenly divide across devices (set drop_last to True)."
+        )
 
         batch_size = len(z_i_full) // world_size
         rank, _ = get_rank_and_num_replicas()
