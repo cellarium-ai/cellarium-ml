@@ -230,7 +230,6 @@ def compute_var_names_g(
         fake_batch = collate_fn([batch])
         with FakeCopyMode(fake_mode):
             fake_pipeline = copy.deepcopy(pipeline)
-        fake_pipeline.to("cpu")
         output = fake_pipeline(fake_batch)
     return output["var_names_g"]
 
