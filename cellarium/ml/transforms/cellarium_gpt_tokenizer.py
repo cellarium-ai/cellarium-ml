@@ -4,6 +4,7 @@
 import numpy as np
 import pandas as pd
 import torch
+
 from cellarium.ml.data import read_h5ad_file
 
 
@@ -450,12 +451,15 @@ class CellariumGPTTestTokenizer(torch.nn.Module):
 
         ## gene id ##
         if gene_id_g is not None:
-            gene_token_ng_dict["gene_id"] = torch.tensor(pd.Categorical(gene_id_g, categories=self.gene_ids).codes, dtype=torch.long).expand(n, g)
+            gene_token_ng_dict["gene_id"] = torch.tensor(
+                pd.Categorical(gene_id_g, categories=self.gene_ids).codes, dtype=torch.long
+            ).expand(n, g)
         else:
             gene_token_ng_dict["gene_id"] = torch.arange(g, device=device).expand(n, g)
 
         if self.shuffle_genes:
             if self.obs_names_rng:
+                assert obs_names_n is not None
                 rng_n = [torch.Generator(device=device) for _ in range(n)]
                 [rng.manual_seed(int(obs_name)) for rng, obs_name in zip(rng_n, obs_names_n)]
                 shuffle_idx_ng = torch.stack([torch.randperm(g, generator=rng, device=device) for rng in rng_n])
@@ -705,7 +709,7 @@ class CellariumGPTGenerateTokenizer(torch.nn.Module):
         gene_token_ng_dict: dict[str, torch.Tensor],
         obs_names_n: np.ndarray | None = None,
         gene_id_g: np.ndarray | None = None,
-    ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
+    ) -> dict[str, dict[str, torch.Tensor] | torch.Tensor | None]:
         ### GENE TOKENS ###
         n, g = gene_token_ng_dict["gene_value"].shape
         # m = len(metadata_token_n_dict)
@@ -721,7 +725,9 @@ class CellariumGPTGenerateTokenizer(torch.nn.Module):
         )
 
         ## gene id ##
-        gene_token_ng_dict["gene_id"] = torch.tensor(pd.Categorical(gene_id_g, categories=self.gene_ids).codes, dtype=torch.long).expand(n, g)
+        gene_token_ng_dict["gene_id"] = torch.tensor(
+            pd.Categorical(gene_id_g, categories=self.gene_ids).codes, dtype=torch.long
+        ).expand(n, g)
 
         for key, gene_token_ng in gene_token_ng_dict.items():
             gene_token_nj_dict[key] = torch.cat([gene_token_ng, gene_token_ng], dim=-1)
@@ -758,7 +764,7 @@ class CellariumGPTGenerateTokenizer(torch.nn.Module):
         gene_token_mask_nc_dict = {key: gene_token_mask_nc for key in gene_token_nj_dict}
 
         # gene label
-        gene_value_vocab_size = self.gene_vocab_sizes["gene_value"]
+        # gene_value_vocab_size = self.gene_vocab_sizes["gene_value"]
         # gene_label_nj = gene_value_nj.clamp(0, gene_value_vocab_size - 1).int()
 
         ### METADATA TOKENS ###

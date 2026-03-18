@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
@@ -15,7 +16,7 @@ from torch.utils._pytree import tree_map
 
 
 def write_prediction(
-    prediction: torch.Tensor,
+    prediction: dict[str, torch.Tensor] | torch.Tensor,
     obs_names_n: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
@@ -142,7 +143,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         pl_module: pl.LightningModule,
         prediction: dict[str, torch.Tensor],
         batch_indices: Sequence[int] | None,
-        batch: dict[str, np.ndarray | torch.Tensor],
+        batch: dict[str, Any],
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:

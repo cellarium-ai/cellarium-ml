@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
@@ -15,7 +16,7 @@ from torch.utils._pytree import tree_map
 
 
 def write_prediction(
-    prediction: torch.Tensor,
+    prediction: dict[str, torch.Tensor] | torch.Tensor,
     obs_names_n: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
@@ -142,7 +143,7 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         pl_module: pl.LightningModule,
         prediction: dict[str, torch.Tensor],
         batch_indices: Sequence[int] | None,
-        batch: dict[str, np.ndarray | torch.Tensor],
+        batch: dict[str, Any],
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
@@ -166,8 +167,12 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         assert isinstance(logits_nck, torch.Tensor)
         label_weight_nc = label_weight_nc_dict[key]
         assert isinstance(label_weight_nc, torch.Tensor)
-        cross_entropy_loss_nc = cross_entropy_loss_fn(logits_nck.view(label_nc.numel(), -1), label_nc.view(-1).long()).reshape(label_nc.shape)
-        loss_n_dict["cross_entropy"] = torch.sum(cross_entropy_loss_nc * label_weight_nc, dim=-1) / label_weight_nc.sum(dim=-1)
+        cross_entropy_loss_nc = cross_entropy_loss_fn(
+            logits_nck.view(label_nc.numel(), -1), label_nc.view(-1).long()
+        ).reshape(label_nc.shape)
+        loss_n_dict["cross_entropy"] = torch.sum(cross_entropy_loss_nc * label_weight_nc, dim=-1) / label_weight_nc.sum(
+            dim=-1
+        )
 
         # compute the mean gene_value from logits_nck expression in order to compute the mse and mae loss
         probs_nck = torch.softmax(logits_nck, dim=-1)
