@@ -77,7 +77,7 @@ dev_template = "{tag}.post{ccount}"
 
 [tool.ruff]
 line-length = 120
-extend-include = ["*.ipynb"]
+extend-exclude = ["*.ipynb"]
 target-version = "py310"
 
 [tool.ruff.lint]
