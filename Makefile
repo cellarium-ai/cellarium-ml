@@ -25,15 +25,28 @@ typecheck: FORCE
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)
-	pytest -v -k multi_device
+	pytest -v -k multi_device --ignore=tests/dataloader
+else ifeq (${TEST_DEVICES}, 3)
+	pytest -v -k multi_device --ignore=tests/dataloader
 else
 	# default
-	pytest -v
+	pytest -v --ignore=tests/dataloader
+endif
+
+test-dataloader: FORCE
+ifeq (${TEST_DEVICES}, 2)
+	pytest -v -k multi_device tests/dataloader
+else ifeq (${TEST_DEVICES}, 3)
+	pytest -v -k multi_device tests/dataloader
+else
+	# default
+	pytest -v tests/dataloader
 endif
 
 test-examples: FORCE
 	cellarium-ml onepass_mean_var_std fit --config examples/cli_workflow/onepass_train_config.yaml
 	cellarium-ml incremental_pca fit --config examples/cli_workflow/ipca_train_config.yaml
 	cellarium-ml logistic_regression fit --config examples/cli_workflow/lr_train_config.yaml
+	cellarium-ml logistic_regression fit --config examples/cli_workflow/lr_resume_train_config.yaml
 
 FORCE:

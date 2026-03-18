@@ -110,7 +110,7 @@ def test_init_dat(dat: DistributedAnnDataCollection):
 @pytest.mark.parametrize("last_shard_size", [1, 2, 3, None])
 def test_init_shard_size(adatas_path: Path, num_shards: int, last_shard_size: int | None):
     shard_size = 2
-    filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards-1:03}}}.h5ad"))
+    filenames = str(os.path.join(adatas_path, f"adata.{{000..{num_shards - 1:03}}}.h5ad"))
     dadc = DistributedAnnDataCollection(
         filenames,
         shard_size=shard_size,
@@ -204,10 +204,12 @@ def test_indexing_dataset(
     else:
         adt_X = adt[oidx].X
         dataset_X = dataset[oidx]["x_ng"]
+        assert isinstance(dataset_X, np.ndarray)
         np.testing.assert_array_equal(adt_X, dataset_X)
 
         adt_obs_names = adt[oidx].obs_names
         dataset_obs_names = dataset[oidx]["obs_names"]
+        assert isinstance(dataset_obs_names, np.ndarray)
         np.testing.assert_array_equal(adt_obs_names, dataset_obs_names)
 
 
@@ -223,5 +225,5 @@ def test_pickle_dataset(dat: DistributedAnnDataCollection):
 
     assert len(new_dataset.dadc.cache) == 1
 
-    np.testing.assert_array_equal(new_dataset[:2]["x_ng"], dataset[:2]["x_ng"])
-    np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])
+    np.testing.assert_array_equal(new_dataset[:2]["x_ng"], dataset[:2]["x_ng"])  # type: ignore[arg-type]
+    np.testing.assert_array_equal(new_dataset[:2]["obs_names"], dataset[:2]["obs_names"])  # type: ignore[arg-type]

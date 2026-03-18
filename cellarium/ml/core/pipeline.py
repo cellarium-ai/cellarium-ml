@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from typing_extensions import Self
 
-from cellarium.ml.models import PredictMixin, ValidateMixin
+from cellarium.ml.models import PredictMixin, TestMixin, ValidateMixin
 from cellarium.ml.utilities.core import call_func_with_batch
 
 
@@ -41,13 +41,17 @@ class CellariumPipeline(torch.nn.ModuleList):
     def __add__(self, other: Iterable[torch.nn.Module]) -> Self:
         return self.__class__(chain(self, other))
 
-    def forward(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, torch.Tensor | np.ndarray]:
+    def forward(
+        self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
+    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | torch.Tensor | np.ndarray]:
         for module in self:
             batch |= call_func_with_batch(module.forward, batch)
 
         return batch
 
-    def predict(self, batch: dict[str, np.ndarray | torch.Tensor]) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(
+        self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
+    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
         for module in self[:-1]:
             batch |= call_func_with_batch(module.forward, batch)
 
@@ -58,7 +62,7 @@ class CellariumPipeline(torch.nn.ModuleList):
 
         return batch
 
-    def validate(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+    def validate(self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]) -> None:
         for module in self[:-1]:
             batch |= call_func_with_batch(module.forward, batch)
 
@@ -66,3 +70,12 @@ class CellariumPipeline(torch.nn.ModuleList):
         if not isinstance(model, ValidateMixin):
             raise TypeError(f"The last module in the pipeline must be an instance of {ValidateMixin}. Got {model}")
         call_func_with_batch(model.validate, batch)
+
+    def test(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
+        for module in self[:-1]:
+            batch |= call_func_with_batch(module.forward, batch)
+
+        model = self[-1]
+        if not isinstance(model, TestMixin):
+            raise TypeError(f"The last module in the pipeline must be an instance of {TestMixin}. Got {model}")
+        call_func_with_batch(model.test, batch)

@@ -8,14 +8,14 @@ import pyro
 import pyro.distributions as dist
 import torch
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 
-class LogisticRegression(CellariumModel, PredictMixin):
+class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     """
     Logistic regression model.
 
@@ -132,7 +132,7 @@ class LogisticRegression(CellariumModel, PredictMixin):
         logits_nc = x_ng @ self.W_gc + self.b_c
         return {"y_logits_nc": logits_nc}
 
-    def on_batch_end(self, trainer: pl.Trainer) -> None:
+    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:
             return
 

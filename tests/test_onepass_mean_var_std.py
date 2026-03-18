@@ -23,7 +23,7 @@ from tests.common import BoringDataset
 
 @pytest.fixture
 def adata():
-    n_cell, g_gene = 10, 5
+    n_cell, g_gene = 12, 5
     rng = np.random.default_rng(1465)
     X = rng.integers(10, size=(n_cell, g_gene))
     return AnnData(X, dtype=X.dtype)
@@ -32,7 +32,7 @@ def adata():
 @pytest.fixture
 def dadc(adata: AnnData, tmp_path: Path):
     # save anndata files
-    limits = [2, 5, 10]
+    limits = [2, 5, 12]
     for i, limit in enumerate(zip([0] + limits, limits)):
         sliced_adata = adata[slice(*limit)]
         sliced_adata.write(os.path.join(tmp_path, f"adata.00{i}.h5ad"))
