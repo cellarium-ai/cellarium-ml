@@ -2,16 +2,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
-import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributions as dist
+from anndata import AnnData
+from torch.utils._pytree import tree_map
 
 
 def write_prediction(
@@ -19,7 +22,6 @@ def write_prediction(
     obs_names_n: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
-    fields: Mapping[str, np.ndarray | torch.Tensor] | None = None,
     gzip: bool = True,
     executor: ThreadPoolExecutor | None = None,
 ) -> None:
@@ -35,10 +37,6 @@ def write_prediction(
             The directory to write the prediction to.
         postfix:
             A postfix to add to the CSV file name.
-        fields:
-            Additional fields to write to the CSV file. The keys of the mapping will be used as
-            column names, and the values will be written as columns in the CSV file. The values
-            must have the same number of rows as the prediction. If ``None``, no additional fields will be written.
         gzip:
             Whether to compress the CSV file using gzip.
         executor:
@@ -46,10 +44,9 @@ def write_prediction(
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    df = pd.DataFrame(prediction.cpu())
-    if fields is not None:
-        for field_name, field_data in fields.items():
-            df.insert(0, field_name, field_data)
+    # move to cpu using tree_map
+    prediction = tree_map(lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, prediction)
+    df = pd.DataFrame(prediction)
     df.insert(0, "obs_names_n", obs_names_n)
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv" + (".gz" if gzip else ""))
     to_csv_kwargs: dict[str, str | bool] = {"header": False, "index": False}
@@ -127,48 +124,20 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
     def __init__(
         self,
         output_dir: Path | str,
-        prediction_size: int | None = None,
-        key: str = "x_ng",
         gzip: bool = True,
         max_threadpool_workers: int = 8,
-        field_names: Sequence[str] | None = None,
     ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
-        self.prediction_size = prediction_size
-        self.field_names = field_names
-        self.key = key
         self.executor = BoundedThreadPoolExecutor(
             max_workers=max_threadpool_workers,
             max_queue_size=max_threadpool_workers * 2,
         )
         self.gzip = gzip
-        self.sufficient_disk_space_exists: bool | None = None
 
     def __del__(self):
         """Ensure the executor shuts down on object deletion."""
         self.executor.shutdown(wait=True)
-
-    def check_disk_space(self, num_files: int | float) -> bool | None:
-        """Check if there is enough disk space to write all predictions.
-
-        Args:
-            num_files:
-                The total number of files to be written (num_predict_batches).
-
-        Returns:
-            bool | None:
-                True if there is enough disk space to write all predictions, False otherwise.
-                None if the first output file does not exist yet.
-        """
-        first_file_path = os.path.join(self.output_dir, "batch_0.csv" + (".gz" if self.gzip else ""))
-        if not os.path.isfile(first_file_path):
-            return None
-        first_file_size = os.path.getsize(first_file_path)  # single file in bytes
-        total_required_space = first_file_size * num_files  # total required space in bytes
-        usage = shutil.disk_usage(self.output_dir)
-        available_space = usage.free  # free space in bytes
-        return total_required_space <= available_space
 
     def write_on_batch_end(
         self,
@@ -176,41 +145,56 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         pl_module: pl.LightningModule,
         prediction: dict[str, torch.Tensor],
         batch_indices: Sequence[int] | None,
-        batch: dict[str, np.ndarray | torch.Tensor],
+        batch: dict[str, Any],
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        if self.key not in batch.keys():
-            raise ValueError(
-                f"PredictionWriter callback specified the key '{self.key}' as the relevant output of `predict()`,"
-                " but the key is not present. Specify a different key as an input argument to the callback, or"
-                " modify the output keys of `predict()`."
-            )
-        prediction_np = prediction[self.key]
-        if self.prediction_size is not None:
-            prediction_np = prediction_np[:, : self.prediction_size]
+        gene_prompt_size_n = batch["gene_prompt_size_n"]
+        gene_query_size_n = batch["gene_query_size_n"]
+        total_mrna_umis_downsampled_n = batch["total_mrna_umis_downsampled_n"]
 
-        if "obs_names_n" not in batch.keys():
-            raise ValueError(
-                "PredictionWriter callback requires the batch_key 'obs_names_n'. Add this to the YAML config."
-            )
-        assert isinstance(batch["obs_names_n"], np.ndarray)
-        if self.field_names is None:
-            fields = None
-        else:
-            fields = {field_name: batch[field_name] for field_name in self.field_names}
-        write_prediction(
-            prediction=prediction_np,
-            obs_names_n=batch["obs_names_n"],
-            output_dir=self.output_dir,
-            postfix=batch_idx * trainer.world_size + trainer.global_rank,
-            fields=fields,
-            gzip=self.gzip,
-            executor=self.executor,
-        )
+        logits_nck_dict = prediction
 
-        # check output directory for sufficient disk space once
-        if self.sufficient_disk_space_exists is None:
-            self.sufficient_disk_space_exists = self.check_disk_space(num_files=trainer.num_predict_batches[0])
-            if self.sufficient_disk_space_exists is False:
-                raise RuntimeError(f"Insufficient disk space at {self.output_dir} to write all predictions")
+        # in the same order as the embeddings.
+        key = "gene_value"
+        logits_nck = logits_nck_dict[key]
+        assert isinstance(logits_nck, torch.Tensor)
+        # sample gene_value from the logits
+        g = len(batch["gene_id_g"])
+        sampled_X_ng = dist.Categorical(logits=logits_nck[:, :g]).sample()
+        # compute the probabilities
+        probs_ngk = torch.softmax(logits_nck[:, :g], dim=-1)
+        # compute the mean
+        k_range = torch.arange(logits_nck.shape[2], device=logits_nck.device, dtype=torch.float32)
+        mean_X_ng = probs_ngk @ k_range
+        # save as an anndata file
+        adata = AnnData(mean_X_ng.cpu().numpy())
+        adata.layers["sampled_X_ng"] = sampled_X_ng.cpu().numpy()
+        adata.obs_names = batch["obs_names_n"]
+        adata.var_names = batch["gene_id_g"]
+        adata.obs["prompt_size"] = gene_prompt_size_n.cpu().int()
+        adata.obs["query_size"] = gene_query_size_n.cpu().int()
+        adata.obs["total_mrna_umis_downsampled"] = total_mrna_umis_downsampled_n.cpu()
+        # write the anndata file
+        postfix = batch_idx * trainer.world_size + trainer.global_rank
+        output_path = os.path.join(self.output_dir, f"batch_{postfix}.h5ad")
+        adata.write_h5ad(output_path)
+
+        # loss_n_dict["prompt_size"] = gene_prompt_size_n.cpu().int()
+        # loss_n_dict["query_size"] = gene_query_size_n.cpu().int()
+        # loss_n_dict["total_mrna_umis_downsampled"] = total_mrna_umis_downsampled_n.cpu()
+
+        # if "obs_names_n" not in batch.keys():
+        #     raise ValueError(
+        #         "PredictionWriter callback requires the batch_key 'obs_names_n'. Add this to the YAML config."
+        #     )
+        # assert isinstance(batch["obs_names_n"], np.ndarray)
+
+        # write_prediction(
+        #     prediction=loss_n_dict,
+        #     obs_names_n=batch["obs_names_n"],
+        #     output_dir=self.output_dir,
+        #     postfix=batch_idx * trainer.world_size + trainer.global_rank,
+        #     gzip=self.gzip,
+        #     executor=self.executor,
+        # )

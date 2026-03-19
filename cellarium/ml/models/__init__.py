@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from cellarium.ml.models.cellarium_gpt import CellariumGPT
+from cellarium.ml.models.contrastive_mlp import ContrastiveMLP
 from cellarium.ml.models.geneformer import Geneformer
 from cellarium.ml.models.incremental_pca import IncrementalPCA
 from cellarium.ml.models.logistic_regression import LogisticRegression
@@ -14,6 +15,7 @@ from cellarium.ml.models.tdigest import TDigest
 __all__ = [
     "CellariumGPT",
     "CellariumModel",
+    "ContrastiveMLP",
     "Geneformer",
     "IncrementalPCA",
     "LogisticRegression",
