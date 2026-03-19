@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
@@ -18,6 +18,7 @@ def write_prediction(
     obs_names_n: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
+    fields: Mapping[str, np.ndarray | torch.Tensor] | None = None,
     gzip: bool = True,
     executor: ThreadPoolExecutor | None = None,
 ) -> None:
@@ -33,6 +34,10 @@ def write_prediction(
             The directory to write the prediction to.
         postfix:
             A postfix to add to the CSV file name.
+        fields:
+            Additional fields to write to the CSV file. The keys of the mapping will be used as
+            column names, and the values will be written as columns in the CSV file. The values
+            must have the same number of rows as the prediction. If ``None``, no additional fields will be written.
         gzip:
             Whether to compress the CSV file using gzip.
         executor:
@@ -41,6 +46,9 @@ def write_prediction(
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(prediction.cpu())
+    if fields is not None:
+        for field_name, field_data in fields.items():
+            df.insert(0, field_name, field_data)
     df.insert(0, "obs_names_n", obs_names_n)
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv" + (".gz" if gzip else ""))
     to_csv_kwargs: dict[str, str | bool] = {"header": False, "index": False}
@@ -122,10 +130,12 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         key: str = "x_ng",
         gzip: bool = True,
         max_threadpool_workers: int = 8,
+        field_names: Sequence[str] | None = None,
     ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
         self.prediction_size = prediction_size
+        self.field_names = field_names
         self.key = key
         self.executor = BoundedThreadPoolExecutor(
             max_workers=max_threadpool_workers,
@@ -162,11 +172,16 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
                 "PredictionWriter callback requires the batch_key 'obs_names_n'. Add this to the YAML config."
             )
         assert isinstance(batch["obs_names_n"], np.ndarray)
+        if self.field_names is None:
+            fields = None
+        else:
+            fields = {field_name: batch[field_name] for field_name in self.field_names}
         write_prediction(
             prediction=prediction_np,
             obs_names_n=batch["obs_names_n"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,
+            fields=fields,
             gzip=self.gzip,
             executor=self.executor,
         )
