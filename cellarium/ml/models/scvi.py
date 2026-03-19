@@ -747,11 +747,18 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             n_cats_per_cov=self.n_cats_per_cov,  # for the (optional) sizing of the final additive bias layer
         )
 
-        self.flow: zuko.flows.NSF | None = (
-            zuko.flows.NSF(features=self.n_latent, context=0, hidden_features=flow_hidden_features)
-            if use_flow
-            else None
-        )
+        if use_flow:
+            # NSF.__init__ calls torch.unique(..., dim=0) which is not supported on Meta tensors.
+            # Lightning/jsonargparse instantiates models under a torch.device("meta") context to
+            # avoid allocating real memory during CLI parsing. Wrapping with torch.device("cpu")
+            # forces all intermediate tensors in the NSF constructor to be concrete CPU tensors.
+            # The Trainer will move the module to the correct device via .to() before training.
+            with torch.device("cpu"):
+                self.flow: zuko.flows.NSF | None = zuko.flows.NSF(
+                    features=self.n_latent, context=0, hidden_features=flow_hidden_features
+                )
+        else:
+            self.flow = None
 
         self.reset_parameters()
 
@@ -764,6 +771,18 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             with torch.no_grad():
                 self.batch_representation_mean_bd.data.copy_(torch.eye(self.n_batch, self.n_latent_batch))
                 self.batch_representation_std_unconstrained_bd.data.fill_(0.0)
+        if self.flow is not None:
+            # Reinitialize the NSF with fresh random weights on CPU, then copy to the target device.
+            # This is necessary because configure_model() moves the whole model with to_empty() when
+            # any parameter is on meta device (encoder/decoder params), which leaves NSF parameters
+            # as uninitialized memory even though the NSF was constructed on CPU. weights_init()
+            # doesn't cover NSF's spline parameters, so they would stay uninitialized without this.
+            target_device = next(self.flow.parameters()).device
+            with torch.device("cpu"):
+                fresh_flow = zuko.flows.NSF(
+                    features=self.n_latent, context=0, hidden_features=self.flow_hidden_features
+                )
+            self.flow.load_state_dict({k: v.to(target_device) for k, v in fresh_flow.state_dict().items()})
 
     def batch_embedding_distribution(self, batch_index_n: torch.Tensor) -> Distribution:
         assert self.batch_representation_mean_bd is not None
@@ -939,15 +958,35 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             categorical_covariate_np=categorical_covariate_np,
         )
 
+        # compute the annealed KL weight early so it can gate the flow log_prob below.
+        # This avoids the 0.0 * NaN = NaN (IEEE 754) footgun: if flow().log_prob(z) returns NaN
+        # (e.g. spline instability after a gradient update), multiplying by a zero KL weight
+        # still yields NaN, which then corrupts the loss, gradients, and encoder parameters.
+        kl_annealing_weight = compute_annealed_kl_weight(
+            epoch=self.epoch,
+            step=self.step,
+            n_epochs_kl_warmup=self.kl_warmup_epochs,
+            n_steps_kl_warmup=self.kl_warmup_steps,
+            max_kl_weight=1.0,
+            min_kl_weight=self.kl_annealing_start,
+        )
+
         # KL divergence for z
         if self.use_flow:
             # MC estimate: KL(q(z|x) || p_flow(z)) = E_q[log q(z) - log p_flow(z)]
             # qz is Normal with per-dim log_probs; sum over latent dim to get per-cell scalar.
             # self.flow() (NormalizingFlow) already reduces the event dimension, giving shape (n,).
-            z_nk = inference_outputs["z"]
-            log_qz_n = inference_outputs["qz"].log_prob(z_nk).sum(dim=-1)
-            log_pz_n = inference_outputs["pz"].log_prob(z_nk)
-            kl_divergence_z_n = log_qz_n - log_pz_n
+            #
+            # Guard: only evaluate flow().log_prob when the KL term contributes to the loss.
+            # During KL warmup (effective weight = 0) the flow prior is unused, so skip it.
+            if kl_annealing_weight * self.z_kl_weight_max > 0.0:
+                z_nk = inference_outputs["z"]
+                log_qz_n = inference_outputs["qz"].log_prob(z_nk).sum(dim=-1)
+                # nan_to_num guards against spline instability producing NaN / ±inf in log_pz.
+                log_pz_n = torch.nan_to_num(inference_outputs["pz"].log_prob(z_nk), nan=0.0, posinf=0.0, neginf=-1e4)
+                kl_divergence_z_n = log_qz_n - log_pz_n
+            else:
+                kl_divergence_z_n = torch.zeros(x_ng.shape[0], device=x_ng.device)
         else:
             kl_divergence_z_n = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
@@ -960,16 +999,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             ).sum(dim=1)
         else:
             kl_divergence_batch_n = 0
-
-        # compute the annealed KL weight
-        kl_annealing_weight = compute_annealed_kl_weight(
-            epoch=self.epoch,
-            step=self.step,
-            n_epochs_kl_warmup=self.kl_warmup_epochs,
-            n_steps_kl_warmup=self.kl_warmup_steps,
-            max_kl_weight=1.0,
-            min_kl_weight=self.kl_annealing_start,
-        )
 
         # reconstruction loss
         rec_loss_n = -generative_outputs["px"].log_prob(x_ng).sum(-1)
