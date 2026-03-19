@@ -495,7 +495,7 @@ CONFIGS = [
                             "hidden_layers": [
                                 {
                                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                                    "init_args": {"out_features": 128, "batch_to_bias_hidden_layers": []},
+                                    "init_args": {"out_features": 128, "label_to_bias_hidden_layers": []},
                                 }
                             ],
                             "final_layer": {
