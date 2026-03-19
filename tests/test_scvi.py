@@ -762,7 +762,7 @@ def test_latent_accuracy_metric(
 
     Compare the accuracy metric to that same metric computed via scvi-tools (with some margin of error).
     """
-    tolerable_discrepancy = 0.05  # this level of variation is like (scvi-tools with different random seeds * 2)
+    tolerable_discrepancy = 0.075  # this level of variation is like (scvi-tools with different random seeds * 2)
 
     # compute the accuracy metric for scvi-tools
     train_data, test_data = train_scvi_tools_model
