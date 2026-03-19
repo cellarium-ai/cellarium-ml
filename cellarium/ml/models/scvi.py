@@ -13,6 +13,7 @@ import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import torch
+import zuko.flows
 from anndata import AnnData
 from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
@@ -526,6 +527,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         reconstruction_use_importance_sampling: True to use importance sampling weighted by each latent sample's
             likelihood.
         reconstructed_library_size: The library size to use for the reconstruction, common to all cells.
+        use_flow: If True, use a Neural Spline Flow (NSF) as the prior on the latent space instead of the
+            standard normal N(0, I). The flow is unconditional (batch-blind) and is jointly trained with the
+            encoder/decoder via an MC-KL estimate: E_q[log q(z|x) - log p_flow(z)].
+        flow_hidden_features: Hidden layer widths for the NSF. Only used when ``use_flow=True``.
     """
 
     def __init__(
@@ -560,6 +565,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         reconstruction_use_latent_mean: bool = False,
         reconstruction_use_importance_sampling: bool = False,
         reconstructed_library_size: int = 10_000,
+        use_flow: bool = False,
+        flow_hidden_features: list[int] = [64, 64],
     ):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -612,6 +619,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.reconstruction_use_latent_mean = reconstruction_use_latent_mean
         self.reconstruction_use_importance_sampling = reconstruction_use_importance_sampling
         self.reconstructed_library_size = reconstructed_library_size
+        self.use_flow = use_flow
+        self.flow_hidden_features = flow_hidden_features
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")
@@ -738,6 +747,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             n_cats_per_cov=self.n_cats_per_cov,  # for the (optional) sizing of the final additive bias layer
         )
 
+        self.flow: zuko.flows.NSF | None = (
+            zuko.flows.NSF(features=self.n_latent, context=0, hidden_features=flow_hidden_features)
+            if use_flow
+            else None
+        )
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -819,6 +834,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         qz = self.z_encoder(x_ng=encoder_input_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
         z = qz.rsample()
 
+        if self.use_flow:
+            assert self.flow is not None  # for mypy
+            # Build the flow prior distribution for this forward pass.
+            # self.flow() returns a NormalizingFlow with event_shape=(n_latent,) and no context.
+            pz = self.flow()
+            return dict(z=z, qz=qz, pz=pz)
         return dict(z=z, qz=qz)
 
     def generative(
@@ -919,17 +940,26 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
 
         # KL divergence for z
-        kl_divergence_z = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
+        if self.use_flow:
+            # MC estimate: KL(q(z|x) || p_flow(z)) = E_q[log q(z) - log p_flow(z)]
+            # qz is Normal with per-dim log_probs; sum over latent dim to get per-cell scalar.
+            # self.flow() (NormalizingFlow) already reduces the event dimension, giving shape (n,).
+            z_nk = inference_outputs["z"]
+            log_qz_n = inference_outputs["qz"].log_prob(z_nk).sum(dim=-1)
+            log_pz_n = inference_outputs["pz"].log_prob(z_nk)
+            kl_divergence_z_n = log_qz_n - log_pz_n
+        else:
+            kl_divergence_z_n = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
         # optional KL divergence for batch representation
-        kl_divergence_batch: torch.Tensor | int
+        kl_divergence_batch_n: torch.Tensor | int
         if self.batch_representation_sampled and (self.batch_kl_weight_max > 0):
-            kl_divergence_batch = kl(
+            kl_divergence_batch_n = kl(
                 self.batch_embedding_distribution(batch_index_n=batch_index_n),
                 Normal(torch.zeros_like(batch_nb), torch.ones_like(batch_nb)),
             ).sum(dim=1)
         else:
-            kl_divergence_batch = 0
+            kl_divergence_batch_n = 0
 
         # compute the annealed KL weight
         kl_annealing_weight = compute_annealed_kl_weight(
@@ -942,23 +972,24 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
 
         # reconstruction loss
-        rec_loss = -generative_outputs["px"].log_prob(x_ng).sum(-1)
+        rec_loss_n = -generative_outputs["px"].log_prob(x_ng).sum(-1)
 
         # full loss
         assert kl_annealing_weight >= 0.0 and kl_annealing_weight <= 1.0, (
             f"Invalid KL annealing weight: {kl_annealing_weight}"
         )
         loss = torch.mean(
-            rec_loss
+            rec_loss_n
             + kl_annealing_weight
-            * (self.z_kl_weight_max * kl_divergence_z + self.batch_kl_weight_max * kl_divergence_batch),
+            * (self.z_kl_weight_max * kl_divergence_z_n + self.batch_kl_weight_max * kl_divergence_batch_n),
             dim=0,
         )
 
         return {
             "loss": loss,
-            "reconstruction_loss": rec_loss,
-            "kl_divergence_z": kl_divergence_z,
+            "reconstruction_loss": rec_loss_n,
+            "kl_divergence_z": kl_divergence_z_n,
+            "kl_divergence_batch": kl_divergence_batch_n,
             "z_nk": inference_outputs["z"],
         }
 

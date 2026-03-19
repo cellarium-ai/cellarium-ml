@@ -2133,6 +2133,51 @@ def test_reconstruction_transform_batch_validation():
             )
 
 
+def test_use_flow():
+    """Test that use_flow=True enables NSF prior and produces valid training outputs."""
+    import zuko.flows
+
+    n, g = 16, len(var_names_g)
+    x_ng = torch.poisson(torch.exp(torch.randn(n, g)))
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    # use_flow=False: self.flow is None, forward pass unchanged
+    model_no_flow = SingleCellVariationalInference(**standard_kwargs)
+    assert model_no_flow.flow is None
+
+    out_no_flow = model_no_flow(x_ng, var_names_n, batch_index_n)
+    assert out_no_flow["loss"] is not None  # mypy
+    assert out_no_flow["kl_divergence_z"] is not None  # mypy
+    assert out_no_flow["loss"].ndim == 0, "loss should be a scalar"
+    assert out_no_flow["kl_divergence_z"].shape == (n,), "per-cell KL should have shape (n,)"
+
+    # use_flow=True: self.flow is an NSF module
+    model_flow = SingleCellVariationalInference(**standard_kwargs, use_flow=True, flow_hidden_features=[32])
+    assert isinstance(model_flow.flow, zuko.flows.NSF)
+
+    out_flow = model_flow(x_ng, var_names_n, batch_index_n)
+    loss = out_flow["loss"]
+    assert loss is not None  # mypy
+    assert loss.ndim == 0, "loss should be a scalar"
+    assert torch.isfinite(loss), "loss must be finite"
+    assert out_flow["kl_divergence_z"] is not None  # mypy
+    assert out_flow["kl_divergence_z"].shape == (n,), "per-cell KL should have shape (n,)"
+
+    # NSF parameters receive gradients after backward
+    loss.backward()
+    flow_params = list(model_flow.flow.parameters())
+    assert len(flow_params) > 0, "NSF should have trainable parameters"
+    assert all(p.grad is not None for p in flow_params), "all NSF params should have gradients"
+
+    # predict still works (returns latent representation by default)
+    model_flow.eval()
+    with torch.no_grad():
+        pred = model_flow.predict(x_ng, var_names_n, batch_index_n)
+    assert "x_ng" in pred
+    assert pred["x_ng"].shape == (n, standard_kwargs["n_latent"])
+
+
 def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi_tools_model):
     """
     Test that the reconstructed counts match between Cellarium and scvi-tools on real data.
