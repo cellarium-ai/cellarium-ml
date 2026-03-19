@@ -745,7 +745,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             n_cats_per_cov=self.n_cats_per_cov,  # for the (optional) sizing of the final additive bias layer
         )
 
-        print(self)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -826,9 +825,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         if self.log_variational:
             encoder_input_ng = torch.log1p(encoder_input_ng)
 
-        # if continuous_covariates_nc is not None and self.encode_covariates:
-        #     encoder_input_ng = torch.cat((encoder_input_ng, continuous_covariates_nc), dim=-1)
-
         qz = self.z_encoder(x_ng=encoder_input_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
         z = qz.rsample()
 
@@ -868,9 +864,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             case "gene-label":
                 inverse_overdispersion = None
                 raise NotImplementedError
-                # px_r = linear(
-                #     torch.nn.functional.one_hot(y.squeeze().long(), self.n_labels).float(), self.px_r
-                # )  # px_r gets transposed - last dimension is nb genes
         assert isinstance(inverse_overdispersion, torch.Tensor)
 
         count_distribution = self.decoder(
@@ -1250,7 +1243,7 @@ def batch_index_to_batch_label(adata: AnnData, batch_keys: list[str]) -> pd.Data
         DataFrame with columns as batch covariates and an extra column "scvi_batch_code" with the
         code used in the model.
     """
-    print("WARNING: The batch_index_to_batch_label lookup for multiple batch_keys is still experimental.")
+    logger.warning("The batch_index_to_batch_label lookup for multiple batch_keys is still experimental.")
     df = _enumerate_categorical_combinations(adata.obs[batch_keys])
     df["scvi_batch_code"] = categories_to_product_codes(df)
     return df
