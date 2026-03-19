@@ -483,6 +483,7 @@ CONFIGS = [
                     "class_path": "cellarium.ml.models.SingleCellVariationalInference",
                     "init_args": {
                         "n_batch": None,
+                        "use_size_factor_key": False,
                         "encoder": {
                             "hidden_layers": [],
                             "final_layer": {

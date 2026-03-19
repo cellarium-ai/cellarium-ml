@@ -511,10 +511,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             :class:`~torch.nn.BatchNorm1d`, then :class:`~torch.nn.LayerNorm`).
         use_size_factor_key: If ``True``, use the :attr:`~anndata.AnnData.obs` column as defined by the
             ``size_factor_key`` parameter in the model's ``setup_anndata`` method as the scaling
-            factor in the mean of the conditional distribution. Takes priority over
-            ``use_observed_lib_size``.
-        use_observed_lib_size: If ``True``, use the observed library size for RNA as the scaling factor in the
-            mean of the conditional distribution. (currently must be ``True``)
+            factor in the mean of the conditional distribution. If ``False``, the observed library
+            size (log of the sum of counts per cell) is used. Should be ``False``.
         reconstruct_counts_on_predict: Changes the behavior of :meth:`predict`. True will reconstruct gene
             expression count data, False will return the latent representations
         reconstruction_var_names_g: List of var_names to be reconstructed (outputs are dense matrices)
@@ -555,7 +553,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         kl_warmup_steps: int | None = None,
         kl_annealing_start: float = 0.0,
         use_size_factor_key: bool = False,
-        use_observed_lib_size: bool = True,
         reconstruct_counts_on_predict: bool = False,
         reconstruction_var_names_g: list | None = None,
         reconstruction_transform_batch: None | int | str = 0,
@@ -575,7 +572,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.latent_distribution = latent_distribution
         self.n_cats_per_cov = n_cats_per_cov
         self.use_size_factor_key = use_size_factor_key
-        self.use_observed_lib_size = use_size_factor_key or use_observed_lib_size
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
@@ -622,9 +618,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
 
         if gene_likelihood == "zinb":
             raise NotImplementedError("Zero-inflated negative binomial not yet implemented")
-
-        if not use_observed_lib_size:
-            raise NotImplementedError("use_observed_lib_size=False is not yet implemented")
 
         if latent_distribution == "ln":
             raise NotImplementedError("Logistic normal latent distribution is not yet implemented")
@@ -820,21 +813,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         """
 
         encoder_input_ng = x_ng
-        if self.use_observed_lib_size:
-            library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
         if self.log_variational:
             encoder_input_ng = torch.log1p(encoder_input_ng)
 
         qz = self.z_encoder(x_ng=encoder_input_ng, batch_nb=batch_nb, categorical_covariate_np=categorical_covariate_np)
         z = qz.rsample()
 
-        outputs = dict(
-            z=z,
-            qz=qz,
-            library_size_n1=library_size_n1,
-        )
-
-        return outputs
+        return dict(z=z, qz=qz)
 
     def generative(
         self,
@@ -843,12 +828,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_nb: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_np: torch.Tensor | None = None,
-        size_factor_n1: torch.Tensor | None = None,
     ) -> dict[str, Distribution]:
         """Runs the generative model."""
-
-        if not self.use_size_factor_key:
-            size_factor_n1 = library_size_n1
 
         inverse_overdispersion: torch.Tensor | None
         match self.dispersion:
@@ -871,7 +852,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             batch_nb=batch_nb,
             categorical_covariate_np=categorical_covariate_np,
             inverse_overdispersion=inverse_overdispersion,
-            library_size_n1=size_factor_n1,
+            library_size_n1=library_size_n1,
         )
 
         # prior on latent z
@@ -886,7 +867,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-        size_factor_n1: torch.Tensor | None = None,
+        total_mrna_umis_n: torch.Tensor | None = None,
     ):
         """
         Args:
@@ -900,8 +881,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 Continuous covariates for each cell (c-dimensional).
             categorical_covariate_index_nd:
                 Categorical covariates for each cell (d-dimensional). Integer membership categorical codes.
-            size_factor_n1:
-                Library size factor for each cell.
+            total_mrna_umis_n:
+                Total mRNA UMIs for each cell (not log scaled) if this should be used.
 
         Returns:
             A dictionary with keys:
@@ -917,6 +898,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
+        if self.use_size_factor_key:
+            assert total_mrna_umis_n is not None, "total_mrna_umis_n must be provided when use_size_factor_key=True"
+            library_size_n1 = torch.log(total_mrna_umis_n).unsqueeze(-1)
+        else:
+            library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
+
         inference_outputs = self.inference(
             x_ng=x_ng,
             batch_nb=batch_nb,
@@ -925,11 +912,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         )
         generative_outputs = self.generative(
             z_nk=inference_outputs["z"],
-            library_size_n1=inference_outputs["library_size_n1"],
+            library_size_n1=library_size_n1,
             batch_nb=batch_nb,
             continuous_covariates_nc=continuous_covariates_nc,
             categorical_covariate_np=categorical_covariate_np,
-            size_factor_n1=size_factor_n1,
         )
 
         # KL divergence for z
@@ -1128,6 +1114,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
+        library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
+
         # generate the latent distribution
         inference_outputs = self.inference(
             x_ng=x_ng,
@@ -1136,7 +1124,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             categorical_covariate_np=categorical_covariate_np,
         )
 
-        def _run_generative_and_scale_output(z_nk: torch.Tensor, library_size_n1):
+        def _run_generative_and_scale_output(z_nk: torch.Tensor):
             # use that latent sample and the transform batch to generate data
             generative_outputs = self.generative(
                 z_nk=z_nk,
@@ -1170,7 +1158,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 # run generative model and scale output
                 scaled_counts_np = _run_generative_and_scale_output(
                     z_nk=mean_z_nk,
-                    library_size_n1=inference_outputs["library_size_n1"],
                 )
                 output_counts_sum_np += scaled_counts_np
 
@@ -1203,7 +1190,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     # run generative model and scale output
                     scaled_counts_np = _run_generative_and_scale_output(
                         z_nk=sampled_z_nk,
-                        library_size_n1=inference_outputs["library_size_n1"],
                     )
                     output_counts_sum_np += scaled_counts_np * importance_weight_n1
 

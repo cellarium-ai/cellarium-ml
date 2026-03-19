@@ -63,6 +63,7 @@ def test_load_from_checkpoint_multi_device(
                 batch_representation_sampled=batch_representation_sampled,
                 n_latent_batch=n_latent_batch,
                 batch_kl_weight_max=batch_kl_weight,
+                use_size_factor_key=False,
                 encoder={
                     "hidden_layers": [
                         {
@@ -98,6 +99,7 @@ def test_load_from_checkpoint_multi_device(
             batch_representation_sampled=batch_representation_sampled,
             n_latent_batch=n_latent_batch,
             batch_kl_weight_max=0,
+            use_size_factor_key=False,
             encoder={
                 "hidden_layers": [
                     {
@@ -191,7 +193,6 @@ class SCVIKwargs(TypedDict, total=False):
     use_batch_norm: Literal["encoder", "decoder", "none", "both"]
     use_layer_norm: Literal["encoder", "decoder", "none", "both"]
     use_size_factor_key: bool
-    use_observed_lib_size: bool
 
 
 linear_encoder_kwargs: dict = {
@@ -225,6 +226,7 @@ standard_kwargs: SCVIKwargs = dict(
     batch_kl_weight_max=0.0,
     use_batch_norm="both",
     use_layer_norm="none",
+    use_size_factor_key=False,
 )
 
 
@@ -421,13 +423,6 @@ def testing_anndatas() -> tuple[anndata.AnnData, anndata.AnnData]:
     return train_data, test_data
 
 
-# # Lys test case
-# n_latent: int = 50
-# n_hidden: int = 512
-# n_layers: int = 2
-# batch_size: int = 1024
-# max_epochs: int = 5  # 5 is not converged, 10 is
-
 # small dataset test case
 n_latent: int = 10
 n_hidden: int = 128
@@ -589,6 +584,7 @@ def train_cellarium_model(
         batch_representation_sampled=False,
         gene_likelihood="nb",
         dispersion="gene",
+        use_size_factor_key=False,
         encoder={
             "hidden_layers": [
                 {
@@ -1245,6 +1241,7 @@ def matching_scvi_cellarium_models(request):
         batch_embedded=False,
         batch_representation_sampled=False,
         dispersion=dispersion,
+        use_size_factor_key=False,
         encoder={
             "hidden_layers": [
                 {
@@ -2032,6 +2029,7 @@ def test_reconstruction_plumbing(
         reconstruction_n_latent_samples=reconstruction_n_latent_samples,
         encoder=linear_encoder_kwargs,
         decoder=linear_decoder_kwargs,
+        use_size_factor_key=False,  # Disable size factor key for simplicity in testing
     )
 
     # Test that reconstruction parameters are set correctly
