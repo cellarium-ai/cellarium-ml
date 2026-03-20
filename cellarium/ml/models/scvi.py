@@ -985,10 +985,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             categorical_covariate_np=categorical_covariate_np,
         )
 
-        # compute the annealed KL weight early so it can gate the flow log_prob below.
-        # This avoids the 0.0 * NaN = NaN (IEEE 754) footgun: if flow().log_prob(z) returns NaN
-        # (e.g. spline instability after a gradient update), multiplying by a zero KL weight
-        # still yields NaN, which then corrupts the loss, gradients, and encoder parameters.
         kl_annealing_weight = compute_annealed_kl_weight(
             epoch=self.epoch,
             step=self.step,
@@ -1003,17 +999,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             # MC estimate: KL(q(z|x) || p_flow(z)) = E_q[log q(z) - log p_flow(z)]
             # qz is Normal with per-dim log_probs; sum over latent dim to get per-cell scalar.
             # self.flow() (NormalizingFlow) already reduces the event dimension, giving shape (n,).
-            #
-            # Guard: only evaluate flow().log_prob when the KL term contributes to the loss.
-            # During KL warmup (effective weight = 0) the flow prior is unused, so skip it.
-            if kl_annealing_weight * self.z_kl_weight_max > 0.0:
-                z_nk = inference_outputs["z"]
-                log_qz_n = inference_outputs["qz"].log_prob(z_nk).sum(dim=-1)
-                # nan_to_num guards against spline instability producing NaN / ±inf in log_pz.
-                log_pz_n = torch.nan_to_num(inference_outputs["pz"].log_prob(z_nk), nan=0.0, posinf=0.0, neginf=-1e4)
-                kl_divergence_z_n = log_qz_n - log_pz_n
-            else:
-                kl_divergence_z_n = torch.zeros(x_ng.shape[0], device=x_ng.device)
+            z_nk = inference_outputs["z"]
+            log_qz_n = inference_outputs["qz"].log_prob(z_nk).sum(dim=-1)
+            # nan_to_num guards against spline instability producing NaN / ±inf in log_pz.
+            log_pz_n = torch.nan_to_num(inference_outputs["pz"].log_prob(z_nk), nan=0.0, posinf=0.0, neginf=-1e4)
+            kl_divergence_z_n = log_qz_n - log_pz_n
         else:
             kl_divergence_z_n = kl(inference_outputs["qz"], generative_outputs["pz"]).sum(dim=1)
 
