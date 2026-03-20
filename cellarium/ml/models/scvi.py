@@ -559,12 +559,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         kl_annealing_start: float = 0.0,
         use_size_factor_key: bool = False,
         reconstruct_counts_on_predict: bool = False,
-        reconstruction_var_names_g: list | None = None,
+        reconstruction_var_names_g: np.ndarray | list | None = None,
         reconstruction_transform_batch: None | int | str = 0,
         reconstruction_n_latent_samples: int = 30,
         reconstruction_use_latent_mean: bool = False,
         reconstruction_use_importance_sampling: bool = False,
         reconstructed_library_size: int = 10_000,
+        reconstruction_transform_categorical_covariates: list[int] | None = None,
         use_flow: bool = False,
         flow_hidden_features: list[int] = [64, 64],
     ):
@@ -613,12 +614,22 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 else:
                     allowed_var_names_g.append(var_name)
             self.reconstruction_var_names_g = allowed_var_names_g
+        else:
+            if reconstruct_counts_on_predict:
+                import warnings
+
+                warnings.warn(
+                    "reconstruction_var_names_g not specified, so all var_names_g will be reconstructed on predict.",
+                    UserWarning,
+                )
+                self.reconstruction_var_names_g = self.var_names_g
         self.reconstruct_counts_on_predict = reconstruct_counts_on_predict
         self.reconstruction_transform_batch = reconstruction_transform_batch
         self.reconstruction_n_latent_samples = reconstruction_n_latent_samples
         self.reconstruction_use_latent_mean = reconstruction_use_latent_mean
         self.reconstruction_use_importance_sampling = reconstruction_use_importance_sampling
         self.reconstructed_library_size = reconstructed_library_size
+        self.reconstruction_transform_categorical_covariates = reconstruction_transform_categorical_covariates
         self.use_flow = use_flow
         self.flow_hidden_features = flow_hidden_features
 
@@ -760,6 +771,15 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         else:
             self.flow = None
 
+        # detect whether the decoder injects categorical covariates at any point
+        self._decoder_uses_categorical_covariates: bool = any(
+            isinstance(m, (LinearWithCovariates, LinearWithBatchAndCovariates)) for m in self.decoder.modules()
+        ) or (
+            self.decoder.final_additive_bias_layer is not None
+            and len(self.n_cats_per_cov) > 0
+            and sum(self.n_cats_per_cov) > 0
+        )
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -792,7 +812,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             self.batch_representation_std_unconstrained_bd[batch_index_n.long(), :].exp() + 1e-5,
         )
 
-    def batch_representation_from_batch_index(self, batch_index_n: torch.Tensor) -> torch.Tensor:
+    def batch_representation_from_batch_index(
+        self,
+        batch_index_n: torch.Tensor,
+        use_mean_though_sampling: bool = False,
+    ) -> torch.Tensor:
         """Compute a batch representation from batch indices.
 
         If self.batch_embedded is False, the batch representation will be one-hot (like scvi-tools)
@@ -805,7 +829,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             batch_nb = torch.nn.functional.one_hot(batch_index_n.squeeze().long(), num_classes=self.n_batch).float()
         else:
             if self.batch_representation_sampled:
-                batch_nb = self.batch_embedding_distribution(batch_index_n=batch_index_n).rsample()
+                if use_mean_though_sampling:
+                    batch_nb = self.batch_embedding_distribution(batch_index_n=batch_index_n).mean
+                else:
+                    batch_nb = self.batch_embedding_distribution(batch_index_n=batch_index_n).rsample()
             else:
                 assert self.batch_representation_mean_bd is not None
                 batch_nb = self.batch_representation_mean_bd[batch_index_n.long(), :]
@@ -1077,6 +1104,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 continuous_covariates_nc=continuous_covariates_nc,
                 categorical_covariate_index_nd=categorical_covariate_index_nd,
                 transform_batch=self.reconstruction_transform_batch,
+                transform_categorical_covariates=self.reconstruction_transform_categorical_covariates,
                 n_latent_samples=self.reconstruction_n_latent_samples,
                 use_importance_sampling=self.reconstruction_use_importance_sampling,
                 use_latent_mean=self.reconstruction_use_latent_mean,
@@ -1109,6 +1137,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
         transform_batch: str | int | None = None,
+        transform_categorical_covariates: list[int] | None = None,
         use_latent_mean: bool = False,
         n_latent_samples: int = 1000,
         use_importance_sampling: bool = False,
@@ -1133,9 +1162,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             batch_index_n: Batch indices of input cells as integers.
             continuous_covariates_nc: Continuous covariates for each cell (c-dimensional).
             categorical_covariate_index_nd: Categorical covariates for each cell (d-dimensional where d is the number
-                of categorical variables).
-            size_factor_n: Library size factor for each cell.
+                of categorical variables). Used for the encoder; also used for the decoder when
+                transform_categorical_covariates is None.
             transform_batch: If not None, transform the batch to this index before reconstruction.
+            transform_categorical_covariates: A list of integer category indices, one per categorical covariate
+                (in the same order as n_cats_per_cov), to fix for all cells during decoding. Must be supplied when
+                transform_batch is not None and the decoder uses categorical covariates — use
+                enumerate_observed_batch_covariate_combinations() to identify valid combinations present in the
+                training data. If None, the per-cell observed categorical covariates are passed to the decoder.
             use_latent_mean: If True, use the mean of the latent distribution instead of sampling.
             n_latent_samples: The number of latent samples to use for reconstruction.
             use_importance_sampling: True to use importance sampling for the reconstruction, weighting each sample
@@ -1171,6 +1205,23 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     raise ValueError(f"transform_batch must be less than self.n_batch: {self.n_batch}")
                 transformed_batch_index_n_list = [torch.ones_like(batch_index_n) * transform_batch]
 
+        # enforce that transform_categorical_covariates is supplied when the decoder uses categorical covariates
+        # and transform_batch is set — otherwise the decoder sees per-cell observed covariates, not the target
+        # condition, and the reconstruction will still reflect per-cell batch identity.
+        if (
+            (transform_batch is not None)
+            and self._decoder_uses_categorical_covariates
+            and (transform_categorical_covariates is None)
+        ):
+            raise ValueError(
+                "This model's decoder uses categorical covariates, but transform_categorical_covariates was not "
+                "supplied. When transform_batch is not None, transform_categorical_covariates must also be provided "
+                "so that all cells are decoded under the same (real-world) batch+categoricals condition. "
+                "Use enumerate_observed_batch_covariate_combinations() to identify valid (batch, covariate) "
+                "combinations that were present in the training data, then supply the desired covariate indices "
+                "as reconstruction_transform_categorical_covariates in the model config."
+            )
+
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
@@ -1184,14 +1235,18 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             categorical_covariate_np=categorical_covariate_np,
         )
 
-        def _run_generative_and_scale_output(z_nk: torch.Tensor):
+        def _run_generative_and_scale_output(
+            z_nk: torch.Tensor,
+            local_batch_nb: torch.Tensor,
+            local_categorical_covariate_np: torch.Tensor | None,
+        ) -> torch.Tensor:
             # use that latent sample and the transform batch to generate data
             generative_outputs = self.generative(
                 z_nk=z_nk,
                 library_size_n1=library_size_n1,
-                batch_nb=batch_nb,
+                batch_nb=local_batch_nb,
                 continuous_covariates_nc=continuous_covariates_nc,
-                categorical_covariate_np=categorical_covariate_np,
+                categorical_covariate_np=local_categorical_covariate_np,
             )
 
             # take the mean of the distribution
@@ -1206,10 +1261,25 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             return scaled_counts_np
 
         output_counts_sum_np: int | torch.Tensor = 0
+        importance_weight_means: list = []
 
         # go through each output batch projection (just one unless transform_batch == "mean")
         for transformed_batch_index_n in transformed_batch_index_n_list:
-            batch_nb = self.batch_representation_from_batch_index(transformed_batch_index_n)
+            local_batch_nb = self.batch_representation_from_batch_index(
+                transformed_batch_index_n,
+                use_mean_though_sampling=True,  # don't sample during reconstruction
+            )
+
+            # build the categorical covariate tensor for this reconstruction condition
+            if transform_categorical_covariates is not None:
+                fixed_idx_nd = (
+                    torch.tensor(transform_categorical_covariates, dtype=torch.long, device=x_ng.device)
+                    .unsqueeze(0)
+                    .expand(x_ng.shape[0], -1)
+                )
+                local_categorical_covariate_np = self.categorical_onehot_from_categorical_index(fixed_idx_nd)
+            else:
+                local_categorical_covariate_np = categorical_covariate_np
 
             if use_latent_mean:
                 # use the mean in the latent space
@@ -1218,14 +1288,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 # run generative model and scale output
                 scaled_counts_np = _run_generative_and_scale_output(
                     z_nk=mean_z_nk,
+                    local_batch_nb=local_batch_nb,
+                    local_categorical_covariate_np=local_categorical_covariate_np,
                 )
                 output_counts_sum_np += scaled_counts_np
 
                 x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list))
 
             else:
-                importance_weight_means = []
-
                 for _ in range(n_latent_samples):
                     # take a sample from the latent space
                     sampled_z_nk = inference_outputs["qz"].sample()
@@ -1250,6 +1320,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     # run generative model and scale output
                     scaled_counts_np = _run_generative_and_scale_output(
                         z_nk=sampled_z_nk,
+                        local_batch_nb=local_batch_nb,
+                        local_categorical_covariate_np=local_categorical_covariate_np,
                     )
                     output_counts_sum_np += scaled_counts_np * importance_weight_n1
 
@@ -1293,6 +1365,85 @@ def batch_index_to_batch_label(adata: AnnData, batch_keys: list[str]) -> pd.Data
     df = _enumerate_categorical_combinations(adata.obs[batch_keys])
     df["scvi_batch_code"] = categories_to_product_codes(df)
     return df
+
+
+def enumerate_observed_batch_covariate_combinations(
+    obs: pd.DataFrame,
+    batch_keys: list[str],
+    categorical_covariate_keys: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Tabulate every observed combination of (batch, categorical covariates) in an AnnData obs DataFrame,
+    along with the integer indices that the model uses internally for each field.
+
+    This is intended to help users choose valid values for ``reconstruction_transform_batch`` and
+    ``reconstruction_transform_categorical_covariates`` when running scVI's reconstruct method.
+    The model requires that the specified (batch, covariate) combination was actually present in the
+    training data; this function makes it easy to inspect which combinations exist and how many cells
+    belong to each.
+
+    Args:
+        obs: The ``adata.obs`` DataFrame. All columns listed in ``batch_keys`` and
+            ``categorical_covariate_keys`` must be pandas Categoricals.
+        batch_keys: The obs column name(s) used as the batch key during training (matching the
+            ``batch_index_n`` field in the datamodule config). The integer ``batch_index`` reported
+            here is the value passed to the model as ``batch_index_n``, computed as
+            ``categories_to_product_codes`` over these columns.
+        categorical_covariate_keys: The obs column name(s) used as categorical covariates during
+            training (matching the ``categorical_covariate_index_nd`` field in the datamodule config),
+            in the same order. For each key, the reported ``{key}_index`` is the 0-based integer code
+            within that covariate's categories — i.e., the value to put in position ``i`` of
+            ``reconstruction_transform_categorical_covariates``. If None, no covariate columns are
+            included.
+
+    Returns:
+        A DataFrame with one row per observed (batch, covariate) combination, sorted by ``cell_count``
+        descending. Columns are:
+
+        - One label column per batch key (human-readable category label).
+        - ``batch_index``: the integer passed to the model as ``batch_index_n``.
+        - One label column per categorical covariate key (human-readable category label).
+        - One ``{key}_index`` column per categorical covariate key (0-based integer code within
+          that covariate's categories, for use as ``reconstruction_transform_categorical_covariates[i]``).
+        - ``cell_count``: number of cells with that combination.
+    """
+    work = obs[batch_keys].copy()
+    for k in batch_keys:
+        if not hasattr(work[k], "cat"):
+            raise ValueError(f"batch_keys column '{k}' must be a pandas Categorical.")
+
+    # compute batch_index using the same logic as the training pipeline
+    batch_index_series = pd.Series(
+        categories_to_product_codes(work[batch_keys] if len(batch_keys) > 1 else work[batch_keys[0]]),
+        index=obs.index,
+        name="batch_index",
+    )
+    work["batch_index"] = batch_index_series
+
+    cov_index_cols: list[str] = []
+    if categorical_covariate_keys is not None:
+        for k in categorical_covariate_keys:
+            if not hasattr(obs[k], "cat"):
+                raise ValueError(f"categorical_covariate_keys column '{k}' must be a pandas Categorical.")
+            idx_col = f"{k}_index"
+            work[k] = obs[k]
+            work[idx_col] = obs[k].cat.codes.values
+            cov_index_cols.append(idx_col)
+
+    # group by label columns + index columns; cell_count is the group size
+    group_cols = batch_keys + ["batch_index"]
+    if categorical_covariate_keys is not None:
+        for k, idx_col in zip(categorical_covariate_keys, cov_index_cols):
+            group_cols += [k, idx_col]
+
+    result = (
+        work.groupby(group_cols, observed=True, sort=False)
+        .size()
+        .reset_index(name="cell_count")
+        .sort_values("cell_count", ascending=False)
+        .reset_index(drop=True)
+    )
+    return result
 
 
 def _n_cats_per_column(df: pd.DataFrame) -> list[int]:
