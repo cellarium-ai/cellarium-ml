@@ -68,6 +68,7 @@ model:
       n_batch: null
 
       # these can be changed
+      use_flow: true
       batch_embedded: true
       batch_representation_sampled: true
       n_latent_batch: null
