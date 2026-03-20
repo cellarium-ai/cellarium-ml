@@ -2133,6 +2133,237 @@ def test_reconstruction_transform_batch_validation():
             )
 
 
+def test_use_flow():
+    """Test that use_flow=True enables NSF prior and produces valid training outputs."""
+    import zuko.flows
+
+    n, g = 16, len(var_names_g)
+    x_ng = torch.poisson(torch.exp(torch.randn(n, g)))
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    # use_flow=False: self.flow is None, forward pass unchanged
+    model_no_flow = SingleCellVariationalInference(**standard_kwargs)
+    assert model_no_flow.flow is None
+
+    out_no_flow = model_no_flow(x_ng, var_names_n, batch_index_n)
+    assert out_no_flow["loss"] is not None  # mypy
+    assert out_no_flow["kl_divergence_z"] is not None  # mypy
+    assert out_no_flow["loss"].ndim == 0, "loss should be a scalar"
+    assert out_no_flow["kl_divergence_z"].shape == (n,), "per-cell KL should have shape (n,)"
+
+    # use_flow=True: self.flow is an NSF module
+    model_flow = SingleCellVariationalInference(**standard_kwargs, use_flow=True, flow_hidden_features=[32])
+    assert isinstance(model_flow.flow, zuko.flows.NSF)
+
+    out_flow = model_flow(x_ng, var_names_n, batch_index_n)
+    loss = out_flow["loss"]
+    assert loss is not None  # mypy
+    assert loss.ndim == 0, "loss should be a scalar"
+    assert torch.isfinite(loss), "loss must be finite"
+    assert out_flow["kl_divergence_z"] is not None  # mypy
+    assert out_flow["kl_divergence_z"].shape == (n,), "per-cell KL should have shape (n,)"
+
+    # With kl_warmup_epochs=400 (default from standard_kwargs) the KL weight is 0 at epoch 0,
+    # so the flow prior is gated out and flow parameters correctly receive no gradient.
+    loss.backward()
+    flow_params = list(model_flow.flow.parameters())
+    assert len(flow_params) > 0, "NSF should have trainable parameters"
+    assert all(p.grad is None for p in flow_params), (
+        "flow params should have no gradient when KL weight is 0 (during warmup)"
+    )
+
+    # When KL warmup is disabled the flow contributes to the loss and its params must be updated.
+    model_flow_no_warmup = SingleCellVariationalInference(
+        **standard_kwargs, use_flow=True, flow_hidden_features=[32], kl_warmup_epochs=None
+    )
+    out_no_warmup = model_flow_no_warmup(x_ng, var_names_n, batch_index_n)
+    assert out_no_warmup["loss"] is not None  # mypy
+    out_no_warmup["loss"].backward()
+    assert isinstance(model_flow_no_warmup.flow, zuko.flows.NSF)  # mypy
+    flow_params_no_warmup = list(model_flow_no_warmup.flow.parameters())
+    assert all(p.grad is not None for p in flow_params_no_warmup), (
+        "flow params should have gradients when KL weight > 0"
+    )
+
+    # predict still works (returns latent representation by default)
+    model_flow.eval()
+    with torch.no_grad():
+        pred = model_flow.predict(x_ng, var_names_n, batch_index_n)
+    assert "x_ng" in pred
+    assert pred["x_ng"].shape == (n, standard_kwargs["n_latent"])
+
+
+def test_use_flow_no_nan_during_training():
+    """
+    Regression test: latents must remain finite across multiple training steps when use_flow=True.
+
+    Root cause of the bug:
+        flow().log_prob(z_nk) can return NaN for z values outside the NSF spline's numerically
+        stable region. Before the fix, this NaN was always computed regardless of the KL annealing
+        weight. Because 0.0 * NaN = NaN (IEEE 754), even a zero KL weight still propagated NaN
+        into the loss, corrupting encoder gradients and parameters on the very next optimizer step.
+
+    The fix moves compute_annealed_kl_weight() before the KL block and skips the flow log_prob
+    entirely when the effective KL weight is zero, eliminating the NaN propagation path.
+    """
+    torch.manual_seed(42)
+    n, g = 32, len(var_names_g)
+    x_ng = torch.poisson(torch.exp(torch.randn(n, g)))
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    # kl_warmup_epochs=None: KL weight is 1.0 from step 0, so the flow receives gradients
+    # immediately.  This is the fastest path to trigger NaN flow parameters / log_prob.
+    model = SingleCellVariationalInference(
+        **standard_kwargs,
+        use_flow=True,
+        flow_hidden_features=[8],
+        kl_warmup_epochs=None,
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+
+    for step in range(5):
+        model.train()
+        optimizer.zero_grad()
+        out = model(x_ng, var_names_n, batch_index_n)
+        loss = out["loss"]
+        assert loss is not None  # mypy
+        assert torch.isfinite(loss), f"loss is not finite at step {step}: {loss.item()}"
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            pred = model.predict(x_ng, var_names_n, batch_index_n)
+        latents = pred["x_ng"]
+        assert not torch.isnan(latents).any(), f"latents contain NaN at step {step}"
+        assert torch.isfinite(latents).all(), f"latents are not finite at step {step}"
+
+
+def test_use_flow_trainer_no_nan(tmp_path):
+    """
+    Regression test: a full pl.Trainer run with use_flow=True must stay NaN-free for all
+    5 epochs, even with gradient norm clipping=10 (the reported failure condition).
+
+    Failure mode: after epoch-0 the KL annealing weight transitions from 0 to 1/kl_warmup_epochs,
+    so the flow prior starts contributing to the loss. If flow().log_prob(z) produces extreme or
+    NaN values the loss/gradients corrupt encoder parameters and latents become NaN.
+
+    This test uses kl_warmup_epochs=5 so the KL weight ramps up quickly (0.2 per epoch),
+    making the failure reproduce within 5 epochs if the fix is insufficient.
+    """
+    torch.manual_seed(0)
+    np.random.seed(0)
+
+    n, g, n_batch = 128, 20, 4
+    batch_size = 16
+    var_names = [f"gene_{i}" for i in range(g)]
+
+    dataset = BoringDatasetSCVI(
+        data=np.random.poisson(lam=2.0, size=(n, g)).astype(np.float32),
+        batch_index_n=np.random.randint(0, n_batch, size=n),
+        var_names=np.array(var_names),
+    )
+    train_loader = torch.utils.data.DataLoader(
+        dataset,
+        collate_fn=collate_fn,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    model = SingleCellVariationalInference(
+        var_names_g=var_names,
+        n_batch=n_batch,
+        n_latent=8,
+        use_flow=True,
+        flow_hidden_features=[16, 16],
+        kl_warmup_epochs=5,
+        gene_likelihood="nb",
+        encoder={
+            "hidden_layers": [
+                {
+                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
+                },
+            ],
+            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+        },
+        decoder={
+            "hidden_layers": [
+                {
+                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
+                },
+            ],
+            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+            "final_additive_bias": False,
+        },
+    )
+
+    nan_events: list[str] = []
+
+    class NaNCheckCallback(pl.Callback):
+        """Catches NaN loss or NaN latents mid-training and records diagnostic info."""
+
+        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs
+            if loss is not None and not torch.isfinite(loss):
+                m = pl_module.model
+                assert isinstance(m, SingleCellVariationalInference)
+                nan_events.append(
+                    f"NaN/inf loss at epoch={trainer.current_epoch} "
+                    f"step={trainer.global_step} kl_epoch={m.epoch}: {loss.item()}"
+                )
+
+        def on_train_epoch_end(self, trainer, pl_module):
+            """After each epoch, check that the model can still produce finite latents."""
+            m = pl_module.model
+            assert isinstance(m, SingleCellVariationalInference)
+            m.eval()
+            x = torch.FloatTensor(dataset.data[:batch_size])
+            b = torch.zeros(batch_size, dtype=torch.long)
+            with torch.no_grad():
+                pred = m.predict(x, np.array(var_names), b)
+            latents = pred["x_ng"]
+            if torch.isnan(latents).any():
+                nan_events.append(
+                    f"NaN latents at end of epoch={trainer.current_epoch} "
+                    f"kl_epoch={m.epoch} kl_weight~={m.epoch / max(m.kl_warmup_epochs or 1, 1):.3f}"
+                )
+            m.train()
+
+    module = CellariumModule(
+        model=model,
+        optim_fn=torch.optim.Adam,
+        optim_kwargs={"lr": 1e-3},
+    )
+    trainer = pl.Trainer(
+        accelerator="cpu",
+        max_epochs=5,
+        default_root_dir=tmp_path,
+        gradient_clip_algorithm="norm",
+        gradient_clip_val=10.0,
+        callbacks=[NaNCheckCallback()],
+        enable_progress_bar=False,
+        enable_checkpointing=False,
+        logger=False,
+    )
+    trainer.fit(module, train_dataloaders=train_loader)
+
+    assert not nan_events, "NaN detected during training:\n" + "\n".join(nan_events)
+
+    # Final check: latents from the trained model must be finite
+    model.eval()
+    x = torch.FloatTensor(dataset.data[:batch_size])
+    b = torch.zeros(batch_size, dtype=torch.long)
+    with torch.no_grad():
+        pred = model.predict(x, np.array(var_names), b)
+    latents = pred["x_ng"]
+    assert not torch.isnan(latents).any(), "latents contain NaN after training"
+    assert torch.isfinite(latents).all(), "latents are not finite after training"
+
+
 def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi_tools_model):
     """
     Test that the reconstructed counts match between Cellarium and scvi-tools on real data.
