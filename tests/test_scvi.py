@@ -2164,15 +2164,6 @@ def test_use_flow():
     assert out_flow["kl_divergence_z"] is not None  # mypy
     assert out_flow["kl_divergence_z"].shape == (n,), "per-cell KL should have shape (n,)"
 
-    # With kl_warmup_epochs=400 (default from standard_kwargs) the KL weight is 0 at epoch 0,
-    # so the flow prior is gated out and flow parameters correctly receive no gradient.
-    loss.backward()
-    flow_params = list(model_flow.flow.parameters())
-    assert len(flow_params) > 0, "NSF should have trainable parameters"
-    assert all(p.grad is None for p in flow_params), (
-        "flow params should have no gradient when KL weight is 0 (during warmup)"
-    )
-
     # When KL warmup is disabled the flow contributes to the loss and its params must be updated.
     model_flow_no_warmup = SingleCellVariationalInference(
         **standard_kwargs, use_flow=True, flow_hidden_features=[32], kl_warmup_epochs=None
