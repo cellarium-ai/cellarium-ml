@@ -52,13 +52,9 @@ class _HVGDataset(torch.utils.data.Dataset):
         return len(self.x)
 
     def __getitem__(self, idx: int) -> dict:
-        batch_index = (
-            self.batch_idx[idx : idx + 1]
-            if self.batch_idx is not None
-            else np.zeros(1, dtype=np.int64)
-        )
+        batch_index = self.batch_idx[idx : idx + 1] if self.batch_idx is not None else np.zeros(1, dtype=np.int64)
         return {
-            "x_ng": self.x[idx : idx + 1],   # shape (1, n_genes)
+            "x_ng": self.x[idx : idx + 1],  # shape (1, n_genes)
             "var_names_g": self.var_names,
             "batch_index_n": batch_index,
         }
@@ -106,8 +102,10 @@ def _run_model(
 # Tests
 # ---------------------------------------------------------------------------
 
+
 def _load_adata():
     import scanpy as sc
+
     adata, batch_column = sc.datasets.ebi_expression_atlas("E-MTAB-10137"), "Sample Characteristic[individual]"
     adata.obs[batch_column] = adata.obs[batch_column].astype("category")
     return adata, batch_column
@@ -138,9 +136,7 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
         batch_cats = list(adata.obs[batch_col].cat.categories)
         n_batch = len(batch_cats)
         cat_to_idx = {c: i for i, c in enumerate(batch_cats)}
-        batch_idx = np.array(
-            [cat_to_idx[c] for c in adata.obs[batch_col]], dtype=np.int64
-        )
+        batch_idx = np.array([cat_to_idx[c] for c in adata.obs[batch_col]], dtype=np.int64)
         sc_batch_key = batch_col
         model_batch_key = "batch_idx_n"
     else:
@@ -175,7 +171,6 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
     assert os.path.exists(output_file), "on_train_epoch_end did not write the output CSV"
 
     # The saved file should round-trip cleanly
-    import pandas as pd
     saved_df = pd.read_csv(output_file, index_col=0)
     assert set(saved_df.columns).issuperset({"highly_variable"}), (
         f"Saved CSV is missing expected columns; got {list(saved_df.columns)}"
@@ -298,9 +293,7 @@ def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path):
     assert hvg_df["highly_variable"].sum() == N_TOP_GENES, (
         f"Expected {N_TOP_GENES} HVGs in CSV, got {hvg_df['highly_variable'].sum()}"
     )
-    assert "highly_variable_nbatches" in hvg_df.columns, (
-        "highly_variable_nbatches column missing from batch-mode CSV"
-    )
+    assert "highly_variable_nbatches" in hvg_df.columns, "highly_variable_nbatches column missing from batch-mode CSV"
     assert hvg_df["highly_variable_nbatches"].between(0, n_batch).all()
 
     # ---- Scanpy reference (seurat_v3 uses raw counts) --------------------
@@ -315,6 +308,4 @@ def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path):
     our_hvg = set(hvg_df[hvg_df["highly_variable"]].index)
     sc_hvg = set(sc_df[sc_df["highly_variable"]].index)
     jaccard = len(our_hvg & sc_hvg) / len(our_hvg | sc_hvg)
-    assert jaccard >= 0.98, (
-        f"CLI Jaccard similarity {jaccard:.4f} is below 0.98 for seurat_v3 with batch_key"
-    )
+    assert jaccard >= 0.98, f"CLI Jaccard similarity {jaccard:.4f} is below 0.98 for seurat_v3 with batch_key"

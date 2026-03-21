@@ -11,7 +11,6 @@ import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.preprocessing.highly_variable_genes import _hvg_seurat_single_batch
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -116,9 +115,9 @@ class HVGSeuratV3(CellariumModel):
     # ------------------------------------------------------------------
 
     def forward(
-        self, 
-        x_ng: torch.Tensor, 
-        var_names_g: np.ndarray, 
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
         batch_index_n: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor | None]:
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
@@ -126,7 +125,7 @@ class HVGSeuratV3(CellariumModel):
 
         if batch_index_n is None:
             batch_index_n = torch.zeros(x_ng.shape[0], dtype=torch.long, device=x_ng.device)
-            
+
         if self._current_epoch == 0:
             self._accumulate_epoch0(x_ng, batch_index_n)
         elif self._current_epoch == 1:
@@ -139,9 +138,7 @@ class HVGSeuratV3(CellariumModel):
     def _get_batch_indices(self, x_ng: torch.Tensor, kwargs: dict) -> torch.Tensor:
         if self.batch_key is not None:
             if self.batch_key not in kwargs:
-                raise ValueError(
-                    f"batch_key '{self.batch_key}' not found in batch. Available: {list(kwargs.keys())}"
-                )
+                raise ValueError(f"batch_key '{self.batch_key}' not found in batch. Available: {list(kwargs.keys())}")
             return kwargs[self.batch_key].long()
         else:
             return torch.zeros(x_ng.shape[0], dtype=torch.long, device=x_ng.device)
@@ -160,7 +157,7 @@ class HVGSeuratV3(CellariumModel):
         x_clipped = torch.minimum(x_ng.float(), per_cell_clip)
         idx_exp = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
         self.counts_sum_bg.scatter_add_(0, idx_exp, x_clipped)
-        self.sq_counts_sum_bg.scatter_add_(0, idx_exp, x_clipped ** 2)
+        self.sq_counts_sum_bg.scatter_add_(0, idx_exp, x_clipped**2)
 
     # ------------------------------------------------------------------
     # on_train_start: validate DDP config
@@ -168,9 +165,7 @@ class HVGSeuratV3(CellariumModel):
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
-            assert isinstance(trainer.strategy, DDPStrategy), (
-                "HVGSeuratV3 requires the DDP strategy."
-            )
+            assert isinstance(trainer.strategy, DDPStrategy), "HVGSeuratV3 requires the DDP strategy."
             assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is False, (
                 "HVGSeuratV3 requires broadcast_buffers=False."
             )
@@ -205,7 +200,11 @@ class HVGSeuratV3(CellariumModel):
         try:
             import skmisc.loess
         except ImportError as e:
-            e.add_note("Install scikit-misc: pip install scikit-misc")
+            if hasattr(e, "add_note"):  # Check if add_note is available
+                e.add_note("Install scikit-misc: pip install scikit-misc")
+            else:
+                # Add a fallback for older Python versions
+                e.args = (*e.args, "Install scikit-misc: pip install scikit-misc")
             raise
 
         n_vars = self.n_vars
@@ -236,7 +235,7 @@ class HVGSeuratV3(CellariumModel):
                         if jitter > max_jitter:
                             raise
 
-            reg_std = np.sqrt(10 ** estimated_var)  # shape (n_vars,)
+            reg_std = np.sqrt(10**estimated_var)  # shape (n_vars,)
             clip_val = reg_std * np.sqrt(N) + mean_g
 
             self.reg_std_bg[b] = torch.tensor(reg_std, dtype=torch.float32)
@@ -267,9 +266,9 @@ class HVGSeuratV3(CellariumModel):
             sum_bg = self.counts_sum_bg[b].cpu().numpy().astype(np.float64)
             sq_sum_bg = self.sq_counts_sum_bg[b].cpu().numpy().astype(np.float64)
 
-            denom = (N - 1) * reg_std ** 2
+            denom = (N - 1) * reg_std**2
             with np.errstate(divide="ignore", invalid="ignore"):
-                nv = (N * mean_bg ** 2 + sq_sum_bg - 2 * mean_bg * sum_bg) / denom
+                nv = (N * mean_bg**2 + sq_sum_bg - 2 * mean_bg * sum_bg) / denom
             nv[np.isnan(nv)] = 0.0
             norm_gene_vars[b] = nv
 

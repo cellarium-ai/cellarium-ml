@@ -49,9 +49,9 @@ def _hvg_seurat_single_batch(
     disp_std_bin[one_gene_per_bin.values] = disp_mean_bin[one_gene_per_bin.values].values
     disp_mean_bin[one_gene_per_bin.values] = 0
 
-    df["dispersions_norm"] = (
-        df["dispersions"].values - disp_mean_bin[df["mean_bin"].values].values
-    ) / disp_std_bin[df["mean_bin"].values].values
+    df["dispersions_norm"] = (df["dispersions"].values - disp_mean_bin[df["mean_bin"].values].values) / disp_std_bin[
+        df["mean_bin"].values
+    ].values
 
     return df
 
