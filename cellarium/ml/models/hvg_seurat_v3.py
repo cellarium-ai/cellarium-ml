@@ -132,6 +132,8 @@ class HVGSeuratV3(CellariumModel):
 
         if batch_index_n is None:
             batch_index_n = torch.zeros(x_ng.shape[0], dtype=torch.long, device=x_ng.device)
+        else:
+            batch_index_n = batch_index_n.long()  # needed for scatter_add_
 
         if self._current_epoch == 0:
             self._accumulate_epoch0(x_ng, batch_index_n)

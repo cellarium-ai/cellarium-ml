@@ -97,6 +97,8 @@ class OnePassMeanVarStd(CellariumModel):
 
         if batch_index_n is None:
             batch_index_n = torch.zeros(x_ng.shape[0], dtype=torch.long, device=x_ng.device)
+        else:
+            batch_index_n = batch_index_n.long()  # needed for scatter_add_
 
         if self.algorithm == "naive":
             x_for_sum = x_ng
