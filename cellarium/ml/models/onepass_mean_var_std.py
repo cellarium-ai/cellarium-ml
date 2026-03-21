@@ -22,9 +22,9 @@ class OnePassMeanVarStd(CellariumModel):
     Calculate the mean, variance, and standard deviation of the data in one pass (epoch)
     using running sums and running squared sums.
 
-    Optionally tracks per-batch statistics when ``batch_key`` and ``n_batch`` are set.
-    After training, ``batch_mean_bg`` and ``batch_var_bg`` give per-batch per-gene
-    statistics suitable for passing to ``get_highly_variable_genes``.
+    Tracks per-batch statistics. Use ``n_batch=1`` when there is no meaningful batch
+    structure. After training, ``batch_mean_bg`` and ``batch_var_bg`` give per-batch
+    per-gene statistics suitable for passing to ``get_highly_variable_genes``.
 
     **References:**
 
@@ -36,82 +36,58 @@ class OnePassMeanVarStd(CellariumModel):
             The variable names schema for the input data validation.
         algorithm:
             ``"naive"`` (default) or ``"shifted_data"`` (numerically stable).
-        batch_key:
-            Name of the batch-index field in the batch dict. The field must contain
-            integer tensors of shape ``(n_cells,)`` with values in ``[0, n_batch)``.
-            ``None`` disables per-batch tracking.
         n_batch:
-            Number of batches. Required when ``batch_key`` is not ``None``.
+            Number of batches. Use 1 to reproduce ``batch_key``=None behavior.
     """
 
     def __init__(
         self,
         var_names_g: np.ndarray,
         algorithm: Literal["naive", "shifted_data"] = "naive",
-        batch_key: str | None = None,
-        n_batch: int | None = None,
+        n_batch: int = 1,
     ) -> None:
         super().__init__()
         self.var_names_g = var_names_g
         n_vars = len(self.var_names_g)
         self.n_vars = n_vars
         self.algorithm = algorithm
-        self.batch_key = batch_key
+        self.n_batch = n_batch
 
-        if batch_key is not None and n_batch is None:
-            raise ValueError("`n_batch` must be provided when `batch_key` is set.")
-        self._n_batch = n_batch if batch_key is not None else 0
-
-        self.x_sums: torch.Tensor
-        self.x_squared_sums: torch.Tensor
-        self.x_size: torch.Tensor
         self.x_shift: torch.Tensor | None
-        self.register_buffer("x_sums", torch.empty(n_vars))
-        self.register_buffer("x_squared_sums", torch.empty(n_vars))
-        self.register_buffer("x_size", torch.empty(()))
         if self.algorithm == "shifted_data":
             self.register_buffer("x_shift", torch.empty(n_vars))
         else:
             self.register_buffer("x_shift", None)
 
-        # Per-batch accumulators (only allocated when batch_key is set)
-        self.x_sums_bg: torch.Tensor | None
-        self.x_squared_sums_bg: torch.Tensor | None
-        self.x_size_b: torch.Tensor | None
-        if self._n_batch > 0:
-            self.register_buffer("x_sums_bg", torch.empty(self._n_batch, n_vars))
-            self.register_buffer("x_squared_sums_bg", torch.empty(self._n_batch, n_vars))
-            self.register_buffer("x_size_b", torch.empty(self._n_batch))
-        else:
-            self.register_buffer("x_sums_bg", None)
-            self.register_buffer("x_squared_sums_bg", None)
-            self.register_buffer("x_size_b", None)
+        self.x_sums_bg: torch.Tensor
+        self.x_squared_sums_bg: torch.Tensor
+        self.x_size_b: torch.Tensor
+        self.register_buffer("x_sums_bg", torch.empty(self.n_batch, n_vars))
+        self.register_buffer("x_squared_sums_bg", torch.empty(self.n_batch, n_vars))
+        self.register_buffer("x_size_b", torch.empty(self.n_batch))
 
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        self.x_sums.zero_()
-        self.x_squared_sums.zero_()
-        self.x_size.zero_()
         if self.x_shift is not None:
             self.x_shift.zero_()
-        if self._n_batch > 0:
-            assert self.x_sums_bg is not None
-            assert self.x_squared_sums_bg is not None
-            assert self.x_size_b is not None
-            self.x_sums_bg.zero_()
-            self.x_squared_sums_bg.zero_()
-            self.x_size_b.zero_()
+        self.x_sums_bg.zero_()
+        self.x_squared_sums_bg.zero_()
+        self.x_size_b.zero_()
         self._dummy_param.data.zero_()
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray, **kwargs) -> dict[str, torch.Tensor | None]:
+    def forward(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        batch_index_n: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor | None]:
         """
         Args:
             x_ng: Gene counts matrix.
             var_names_g: Variable names in the input data.
-            **kwargs: Additional batch fields. Must include ``batch_key`` field
-                containing int tensor ``(n_cells,)`` when ``batch_key`` is set.
+            batch_index_n: Optional batch indices for each cell, required if ``n_batch`` > 1.
 
         Returns:
             An empty dictionary.
@@ -119,10 +95,11 @@ class OnePassMeanVarStd(CellariumModel):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
+        if batch_index_n is None:
+            batch_index_n = torch.zeros(x_ng.shape[0], dtype=torch.long, device=x_ng.device)
+
         if self.algorithm == "naive":
-            self.x_sums = self.x_sums + x_ng.sum(dim=0)
-            self.x_squared_sums = self.x_squared_sums + (x_ng**2).sum(dim=0)
-            self.x_size = self.x_size + x_ng.shape[0]
+            x_for_sum = x_ng
         elif self.algorithm == "shifted_data":
             assert self.x_shift is not None
             if (self.x_shift == 0).all():
@@ -136,27 +113,19 @@ class OnePassMeanVarStd(CellariumModel):
                 else:
                     x_shift = x_ng.mean(dim=0)
                 self.x_shift = x_shift
-            self.x_sums = self.x_sums + (x_ng - self.x_shift).sum(dim=0)
-            self.x_squared_sums = self.x_squared_sums + ((x_ng - self.x_shift) ** 2).sum(dim=0)
-            self.x_size = self.x_size + x_ng.shape[0]
+            x_for_sum = x_ng - self.x_shift
         else:
             raise ValueError(f"Unknown algorithm: {self.algorithm}")
 
-        # Per-batch accumulation (scatter_add for vectorized update)
-        if self.batch_key is not None:
-            if self.batch_key not in kwargs:
-                raise ValueError(
-                    f"batch_key '{self.batch_key}' not found in batch. Available: {list(kwargs.keys())}"
-                )
-            assert self.x_sums_bg is not None
-            assert self.x_squared_sums_bg is not None
-            assert self.x_size_b is not None
-            batch_idx_n = kwargs[self.batch_key].long()  # (n_cells,)
-            n_cells = x_ng.shape[0]
-            idx_expanded = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
-            self.x_sums_bg.scatter_add_(0, idx_expanded, x_ng.float())
-            self.x_squared_sums_bg.scatter_add_(0, idx_expanded, x_ng.float() ** 2)
-            self.x_size_b.scatter_add_(0, batch_idx_n, torch.ones(n_cells, device=x_ng.device))
+        n_cells = x_ng.shape[0]
+        idx_expanded = batch_index_n.unsqueeze(1).expand(n_cells, self.n_vars)
+        sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_for_sum.dtype, device=x_ng.device)
+        sq_sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_for_sum.dtype, device=x_ng.device)
+        sums_contrib.scatter_add_(0, idx_expanded, x_for_sum)
+        sq_sums_contrib.scatter_add_(0, idx_expanded, x_for_sum**2)
+        self.x_sums_bg = self.x_sums_bg + sums_contrib
+        self.x_squared_sums_bg = self.x_squared_sums_bg + sq_sums_contrib
+        self.x_size_b = self.x_size_b + torch.bincount(batch_index_n, minlength=self.n_batch)
 
         return {}
 
@@ -172,20 +141,13 @@ class OnePassMeanVarStd(CellariumModel):
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         if trainer.world_size == 1:
             return
-        dist.reduce(self.x_sums, dst=0, op=dist.ReduceOp.SUM)
-        dist.reduce(self.x_squared_sums, dst=0, op=dist.ReduceOp.SUM)
-        dist.reduce(self.x_size, dst=0, op=dist.ReduceOp.SUM)
-        if self._n_batch > 0:
-            assert self.x_sums_bg is not None
-            assert self.x_squared_sums_bg is not None
-            assert self.x_size_b is not None
-            dist.reduce(self.x_sums_bg, dst=0, op=dist.ReduceOp.SUM)
-            dist.reduce(self.x_squared_sums_bg, dst=0, op=dist.ReduceOp.SUM)
-            dist.reduce(self.x_size_b, dst=0, op=dist.ReduceOp.SUM)
+        dist.reduce(self.x_sums_bg, dst=0, op=dist.ReduceOp.SUM)
+        dist.reduce(self.x_squared_sums_bg, dst=0, op=dist.ReduceOp.SUM)
+        dist.reduce(self.x_size_b, dst=0, op=dist.ReduceOp.SUM)
 
     @property
     def mean_g(self) -> torch.Tensor:
-        mean_g = self.x_sums / self.x_size
+        mean_g = self.x_sums_bg.sum(0) / self.x_size_b.sum()
         if self.algorithm == "shifted_data":
             assert isinstance(self.x_shift, torch.Tensor)
             mean_g = mean_g + self.x_shift
@@ -193,7 +155,10 @@ class OnePassMeanVarStd(CellariumModel):
 
     @property
     def var_g(self) -> torch.Tensor:
-        return self.x_squared_sums / self.x_size - (self.x_sums / self.x_size) ** 2
+        x_sums_g = self.x_sums_bg.sum(0)
+        x_squared_sums_g = self.x_squared_sums_bg.sum(0)
+        x_size = self.x_size_b.sum()
+        return x_squared_sums_g / x_size - (x_sums_g / x_size) ** 2
 
     @property
     def std_g(self) -> torch.Tensor:
@@ -201,17 +166,15 @@ class OnePassMeanVarStd(CellariumModel):
 
     @property
     def batch_mean_bg(self) -> torch.Tensor:
-        """Per-batch mean, shape ``(n_batch, n_genes)``. Requires ``batch_key`` to be set."""
-        if self._n_batch == 0:
-            raise RuntimeError("`batch_mean_bg` requires `batch_key` to be set.")
-        assert self.x_sums_bg is not None and self.x_size_b is not None
-        return self.x_sums_bg / self.x_size_b.unsqueeze(1)
+        """Per-batch mean, shape ``(n_batch, n_genes)``."""
+        mean_bg = self.x_sums_bg / self.x_size_b.unsqueeze(1)
+        if self.algorithm == "shifted_data":
+            assert isinstance(self.x_shift, torch.Tensor)
+            mean_bg = mean_bg + self.x_shift
+        return mean_bg
 
     @property
     def batch_var_bg(self) -> torch.Tensor:
-        """Per-batch population variance, shape ``(n_batch, n_genes)``. Requires ``batch_key``."""
-        if self._n_batch == 0:
-            raise RuntimeError("`batch_var_bg` requires `batch_key` to be set.")
-        assert self.x_sums_bg is not None and self.x_squared_sums_bg is not None and self.x_size_b is not None
+        """Per-batch population variance, shape ``(n_batch, n_genes)``."""
         mean_bg = self.x_sums_bg / self.x_size_b.unsqueeze(1)
         return self.x_squared_sums_bg / self.x_size_b.unsqueeze(1) - mean_bg**2
