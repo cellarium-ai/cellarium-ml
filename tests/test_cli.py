@@ -444,6 +444,44 @@ CONFIGS = [
         },
     },
     {
+        "model_name": "hvg_seurat_v3",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.HVGSeuratV3",
+                    "init_args": {
+                        "n_top_genes": "10",
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                },
+                "batch_size": "50",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
+        },
+    },
+    {
         "model_name": "tdigest",
         "subcommand": "fit",
         "fit": {
