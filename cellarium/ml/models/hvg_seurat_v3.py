@@ -75,15 +75,22 @@ class HVGSeuratV3(CellariumModel):
         self._current_epoch: int = 0
 
         # Epoch-0 buffers: shape (n_batch, n_vars)
+        self.x_sums_bg: torch.Tensor
+        self.x_squared_sums_bg: torch.Tensor
+        self.x_size_b: torch.Tensor
         self.register_buffer("x_sums_bg", torch.zeros(n_batch, n_vars))
         self.register_buffer("x_squared_sums_bg", torch.zeros(n_batch, n_vars))
         self.register_buffer("x_size_b", torch.zeros(n_batch))
 
         # Set between epochs by on_train_epoch_end after epoch 0: shape (n_batch, n_vars)
+        self.clip_val_bg: torch.Tensor
+        self.reg_std_bg: torch.Tensor
         self.register_buffer("clip_val_bg", torch.zeros(n_batch, n_vars))
         self.register_buffer("reg_std_bg", torch.zeros(n_batch, n_vars))
 
         # Epoch-1 buffers: shape (n_batch, n_vars)
+        self.counts_sum_bg: torch.Tensor
+        self.sq_counts_sum_bg: torch.Tensor
         self.register_buffer("counts_sum_bg", torch.zeros(n_batch, n_vars))
         self.register_buffer("sq_counts_sum_bg", torch.zeros(n_batch, n_vars))
 
@@ -135,29 +142,29 @@ class HVGSeuratV3(CellariumModel):
 
         return {}
 
-    def _get_batch_indices(self, x_ng: torch.Tensor, kwargs: dict) -> torch.Tensor:
-        if self.batch_key is not None:
-            if self.batch_key not in kwargs:
-                raise ValueError(f"batch_key '{self.batch_key}' not found in batch. Available: {list(kwargs.keys())}")
-            return kwargs[self.batch_key].long()
-        else:
-            return torch.zeros(x_ng.shape[0], dtype=torch.long, device=x_ng.device)
-
     def _accumulate_epoch0(self, x_ng: torch.Tensor, batch_idx_n: torch.Tensor) -> None:
         n_cells = x_ng.shape[0]
         idx_exp = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
-        self.x_sums_bg.scatter_add_(0, idx_exp, x_ng.float())
-        self.x_squared_sums_bg.scatter_add_(0, idx_exp, x_ng.float() ** 2)
-        self.x_size_b.scatter_add_(0, batch_idx_n, torch.ones(n_cells, device=x_ng.device))
+        sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
+        sq_sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
+        sums_contrib.scatter_add_(0, idx_exp, x_ng)
+        sq_sums_contrib.scatter_add_(0, idx_exp, x_ng**2)
+        self.x_sums_bg = self.x_sums_bg + sums_contrib
+        self.x_squared_sums_bg = self.x_squared_sums_bg + sq_sums_contrib
+        self.x_size_b = self.x_size_b + torch.bincount(batch_idx_n, minlength=self.n_batch)
 
     def _accumulate_epoch1(self, x_ng: torch.Tensor, batch_idx_n: torch.Tensor) -> None:
         n_cells = x_ng.shape[0]
         # Per-cell clip value: shape (n_cells, n_vars)
-        per_cell_clip = self.clip_val_bg[batch_idx_n]  # (n_cells, n_vars)
-        x_clipped = torch.minimum(x_ng.float(), per_cell_clip)
+        per_cell_clip = self.clip_val_bg[batch_idx_n].to(x_ng.dtype)  # (n_cells, n_vars)
+        x_clipped = torch.minimum(x_ng, per_cell_clip)
         idx_exp = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
-        self.counts_sum_bg.scatter_add_(0, idx_exp, x_clipped)
-        self.sq_counts_sum_bg.scatter_add_(0, idx_exp, x_clipped**2)
+        sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
+        sq_sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
+        sums_contrib.scatter_add_(0, idx_exp, x_clipped)
+        sq_sums_contrib.scatter_add_(0, idx_exp, x_clipped**2)
+        self.counts_sum_bg = self.counts_sum_bg + sums_contrib
+        self.sq_counts_sum_bg = self.sq_counts_sum_bg + sq_sums_contrib
 
     # ------------------------------------------------------------------
     # on_train_start: validate DDP config
