@@ -43,6 +43,8 @@ lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML"]
 test = [
   "pytest-xdist",
+  "scanpy",
+  "scikit-misc",
   "tenacity",
   "tensorboard",
   "torchvision",
@@ -54,6 +56,9 @@ docs = [
   "sphinx",
   "sphinx_rtd_theme",
   "sphinx-copybutton",
+]
+seurat_v3 = [
+  "scikit-misc",
 ]
 dev = ["cellarium-ml[docs,lint,mypy,test]"]
 

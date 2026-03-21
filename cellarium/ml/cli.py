@@ -15,6 +15,7 @@ from operator import attrgetter
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
@@ -251,6 +252,33 @@ def compute_var_names_g(
     return output["var_names_g"]
 
 
+def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of categories in batch_index_n.
+
+    .. note::
+
+            If batch_index_n is comprised of multiple keys, the number of categories is computed
+            as the product of the number of categories in each key.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of categories in batch_index_n.
+    """
+    if "batch_index_n" not in data.batch_keys:
+        return 1  # for hvg selection when no batch key is given, treat all cells as a single batch
+    field = data.batch_keys["batch_index_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    x = obs[field.key]
+    if isinstance(x, pd.DataFrame):
+        return int(x.apply(lambda col: len(col.cat.categories)).product())
+    else:
+        return len(x.cat.categories)
+
+
 def lightning_cli_factory(
     model_class_path: str,
     link_arguments: list[LinkArguments] | None = None,
@@ -390,6 +418,62 @@ def geneformer(args: ArgsType = None) -> None:
                 compute_var_names_g,
             )
         ],
+    )
+    cli(args=args)
+
+
+@register_model
+def hvg_seurat_v3(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.HVGSeuratV3` model.
+
+    Computes highly variable genes using the Seurat v3 method over two Lightning
+    epochs.  Raw-count data (no log-normalisation) is expected.
+
+    The number of batches (``n_batch``) is inferred automatically from the
+    ``batch_n_categories`` batch key when a ``batch_key`` is supplied.  Include
+    ``batch_n_categories`` in ``data.batch_keys`` whenever you pass a
+    ``batch_key`` to the model::
+
+        batch_n_categories:
+          attr: obs
+          key: <your_batch_obs_column>
+          convert_fn: cellarium.ml.utilities.data.get_categories
+
+    Example run::
+
+        cellarium-ml hvg_seurat_v3 fit \
+            --model.model.init_args.n_top_genes 2000 \
+            --model.model.init_args.batch_key batch_index_n \
+            --model.model.init_args.output_path hvg.csv \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/counts_{0..3}.h5ad" \
+            --data.shard_size 10000 \
+            --data.max_cache_size 2 \
+            --data.batch_size 512 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.HVGSeuratV3",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+        ],
+        trainer_defaults={
+            "max_epochs": 2,
+            "strategy": {
+                "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                "dict_kwargs": {"broadcast_buffers": False},
+            },
+        },
     )
     cli(args=args)
 
