@@ -108,7 +108,15 @@ class HVGSeuratV3(CellariumModel):
             raise ValueError(
                 "n_batch must be at least 2 when use_batch_key is True. This error may also be triggered "
                 "if your dataloader is not providing the expected `batch_index_n` key: check your dataloader "
-                "batch_keys and ensure `batch_index_n` is included when use_batch_key=True."
+                "batch_keys and ensure `batch_index_n` is included when use_batch_key=True --"
+                "data:"
+                "  ..."
+                "  batch_keys:"
+                "    ..."
+                "    batch_index_n:"
+                "      attr: obs"
+                "      key: my_categorical_batch_column"
+                "      convert_fn: cellarium.ml.utilities.data.categories_to_codes"
             )
         self.span = span
         self.output_path = output_path
