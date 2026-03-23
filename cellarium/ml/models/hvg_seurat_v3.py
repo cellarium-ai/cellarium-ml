@@ -386,4 +386,4 @@ class HVGSeuratV3(CellariumModel):
         assert self.output_path is not None
         df.to_csv(self.output_path)
         hvg_series = df[df["highly_variable"]].sort_values("highly_variable_rank", ascending=True).reset_index()["gene"]
-        hvg_series.to_csv(self.output_path.replace(".csv", "__hvg_only.csv"), index=False, header=False)
+        hvg_series.to_csv(self.output_path.replace(".csv", "__hvg_only.csv"), index=False, header=True)
