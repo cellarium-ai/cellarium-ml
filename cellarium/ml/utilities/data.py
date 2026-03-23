@@ -132,6 +132,18 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
     return x.toarray()
 
 
+def series_to_str_list(x: pd.Series) -> list[str]:
+    """
+    Convert a pandas Series of strings to a list of strings.
+    Args:
+        x: Pandas Series object.
+
+    Returns:
+        List of strings.
+    """
+    return x.astype(str).to_list()
+
+
 def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
     """
     Convert a pandas Series or DataFrame of categorical data to a numpy array of codes.
