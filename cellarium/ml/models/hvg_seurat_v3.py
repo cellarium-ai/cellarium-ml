@@ -105,7 +105,11 @@ class HVGSeuratV3(CellariumModel):
         self.flavor = flavor
         self.use_batch_key = use_batch_key
         if use_batch_key and n_batch < 2:
-            raise ValueError("n_batch must be at least 2 when use_batch_key is True.")
+            raise ValueError(
+                "n_batch must be at least 2 when use_batch_key is True. This error may also be triggered "
+                "if your dataloader is not providing the expected `batch_index_n` key: check your dataloader "
+                "batch_keys and ensure `batch_index_n` is included when use_batch_key=True."
+            )
         self.span = span
         self.output_path = output_path
 
