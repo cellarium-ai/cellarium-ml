@@ -72,6 +72,9 @@ class HVGSeuratV3(CellariumModel):
         flavor:
             Multi-batch gene ranking strategy.  ``"seurat_v3_paper"`` (default)
             prioritises batch consistency; ``"seurat_v3"`` prioritises median rank.
+        use_batch_key:
+            Whether to expect a ``batch_index_n`` batch key in the dataloader output.
+             If False, the model will ignore batch keys and treat all data as a single batch.
         span:
             LOESS span (fraction of data used per local fit).  Default 0.3.
         output_path:
@@ -87,6 +90,7 @@ class HVGSeuratV3(CellariumModel):
         n_top_genes: int,
         n_batch: int = 1,
         flavor: str = "seurat_v3",
+        use_batch_key: bool = False,
         span: float = 0.3,
         output_path: str | None = None,
     ) -> None:
@@ -99,6 +103,9 @@ class HVGSeuratV3(CellariumModel):
         self.n_top_genes = n_top_genes
         self.n_batch = n_batch
         self.flavor = flavor
+        self.use_batch_key = use_batch_key
+        if use_batch_key and n_batch < 2:
+            raise ValueError("n_batch must be at least 2 when use_batch_key is True.")
         self.span = span
         self.output_path = output_path
 
@@ -159,6 +166,18 @@ class HVGSeuratV3(CellariumModel):
     ) -> dict[str, torch.Tensor | None]:
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        # help users avoid unintentional errors in configuring the use of batch_key
+        if self.use_batch_key and (batch_index_n is None):
+            raise UserWarning(
+                "batch_index_n is required when use_batch_key is True: add `batch_index_n` to your "
+                "dataloader batch_keys."
+            )
+        if (not self.use_batch_key) and (batch_index_n is not None):
+            raise UserWarning(
+                "batch_index_n was given but use_batch_key is False: either set use_batch_key=True or remove "
+                "batch_index_n from your dataloader batch_keys."
+            )
 
         if batch_index_n is None:
             batch_index_n = torch.zeros(x_ng.shape[0], dtype=torch.long, device=x_ng.device)

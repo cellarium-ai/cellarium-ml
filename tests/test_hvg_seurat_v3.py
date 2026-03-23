@@ -41,7 +41,7 @@ class _HVGDataset(torch.utils.data.Dataset):
         x: np.ndarray,
         var_names: np.ndarray,
         batch_idx: np.ndarray | None = None,
-        batch_key: str = "batch_idx_n",
+        batch_key: str | None = None,
     ) -> None:
         self.x = x.astype(np.float32)
         self.var_names = var_names
@@ -53,11 +53,13 @@ class _HVGDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         batch_index = self.batch_idx[idx : idx + 1] if self.batch_idx is not None else np.zeros(1, dtype=np.int64)
-        return {
+        batch = {
             "x_ng": self.x[idx : idx + 1],  # shape (1, n_genes)
             "var_names_g": self.var_names,
-            "batch_index_n": batch_index,
         }
+        if self.batch_key is not None:
+            batch[self.batch_key] = batch_index  # shape (1,)
+        return batch
 
 
 def _run_model(
@@ -75,12 +77,13 @@ def _run_model(
         var_names_g=var_names,
         n_top_genes=N_TOP_GENES,
         n_batch=n_batch,
+        use_batch_key=(batch_key is not None),
         flavor=flavor,
         output_path=output_path,
     )
     module = CellariumModule(model=model)
 
-    dataset = _HVGDataset(x, var_names, batch_idx=batch_idx, batch_key=batch_key or "batch_idx_n")
+    dataset = _HVGDataset(x, var_names, batch_idx=batch_idx, batch_key=batch_key)
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
@@ -329,21 +332,19 @@ def _load_adata():
     return adata, batch_column
 
 
-@pytest.mark.parametrize("flavor", ["seurat_v3", "seurat_v3_paper"], ids=["seurat_v3", "seurat_v3_paper"])
-def test_hvg_seurat_v3_flavor_matches_scanpy(tmp_path, flavor: str):
+def test_hvg_seurat_v3_paper_matches_scanpy(tmp_path):
     """
-    End-to-end test: compare HVGSeuratV3 against Scanpy for both flavors in
-    multi-batch mode.
+    End-to-end test: compare HVGSeuratV3 (``flavor='seurat_v3_paper'``) against
+    Scanpy in multi-batch mode.
 
-    Scanpy directly supports both ``flavor='seurat_v3'`` and
-    ``flavor='seurat_v3_paper'`` in :func:`scanpy.pp.highly_variable_genes`.
-    Both use identical statistics; only the final selection sort order differs,
-    so the underlying computation is validated by the existing
-    ``test_hvg_seurat_v3_matches_scanpy`` tests — here we focus on the
-    end-to-end Jaccard similarity with batch_key for each flavor.
+    ``seurat_v3`` with batch_key is already covered by
+    ``test_hvg_seurat_v3_matches_scanpy[with_batch]``.  This test validates the
+    ``seurat_v3_paper`` sort order (nbatches-primary) against Scanpy's own
+    implementation of that flavor.
     """
     import scanpy as sc
 
+    flavor = "seurat_v3_paper"
     adata, batch_col = _load_adata()
     x = _to_dense(adata.X)
     var_names = np.asarray(adata.var_names)
@@ -367,7 +368,7 @@ def test_hvg_seurat_v3_flavor_matches_scanpy(tmp_path, flavor: str):
         var_names=var_names,
         n_batch=n_batch,
         batch_idx=batch_idx,
-        batch_key="batch_idx_n",
+        batch_key="batch_index_n",
         output_path=output_file,
         flavor=flavor,
     )
@@ -409,7 +410,7 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
         cat_to_idx = {c: i for i, c in enumerate(batch_cats)}
         batch_idx = np.array([cat_to_idx[c] for c in adata.obs[batch_col]], dtype=np.int64)
         sc_batch_key = batch_col
-        model_batch_key = "batch_idx_n"
+        model_batch_key = "batch_index_n"
     else:
         n_batch = 1
         batch_idx = None
@@ -507,6 +508,7 @@ def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path):
                     "init_args": {
                         "n_top_genes": str(N_TOP_GENES),
                         "n_batch": None,  # wired by CLI from batch_n_categories
+                        "use_batch_key": True,
                         "flavor": "seurat_v3",
                         "output_path": output_file,
                     },
