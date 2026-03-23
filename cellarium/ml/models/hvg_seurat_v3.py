@@ -17,7 +17,7 @@ from cellarium.ml.utilities.testing import (
 )
 
 try:
-    import skmisc.loess  # noqa: F401
+    import skmisc  # noqa: F401
 except ImportError as e:
     if hasattr(e, "add_note"):  # Check if add_note is available
         e.add_note("HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
@@ -216,16 +216,6 @@ class HVGSeuratV3(CellariumModel):
             dist.broadcast(self.reg_std_bg, src=0)
 
     def _compute_clip_val(self) -> None:
-        try:
-            import skmisc.loess
-        except ImportError as e:
-            if hasattr(e, "add_note"):  # Check if add_note is available
-                e.add_note("Install scikit-misc: pip install scikit-misc")
-            else:
-                # Add a fallback for older Python versions
-                e.args = (*e.args, "Install scikit-misc: pip install scikit-misc")
-            raise
-
         n_vars = self.n_vars
         for b in range(self.n_batch):
             N = self.x_size_b[b].item()
