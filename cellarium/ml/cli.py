@@ -431,11 +431,9 @@ def hvg_seurat_v3(args: ArgsType = None) -> None:
     epochs.  Raw-count data (no log-normalisation) is expected.
 
     The number of batches (``n_batch``) is inferred automatically from the
-    ``batch_n_categories`` batch key when a ``batch_key`` is supplied.  Include
-    ``batch_n_categories`` in ``data.batch_keys`` whenever you pass a
-    ``batch_key`` to the model::
+    ``batch_index_n`` batch key in ``data.batch_keys``::
 
-        batch_n_categories:
+        batch_index_n:
           attr: obs
           key: <your_batch_obs_column>
           convert_fn: cellarium.ml.utilities.data.get_categories
