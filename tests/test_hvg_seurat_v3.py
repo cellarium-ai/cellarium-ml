@@ -459,9 +459,8 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
     union = our_hvg | sc_hvg
     jaccard = len(our_hvg & sc_hvg) / len(union)
 
-    # Multi-batch ranking introduces extra ordering variation; allow slightly
-    # more slack there.
-    threshold = 0.98 if use_batch_key else 0.98
+    # Jaccard threshold
+    threshold = 0.98
     assert jaccard >= threshold, (
         f"Jaccard similarity {jaccard:.4f} is below {threshold} for seurat_v3 "
         f"{'with' if use_batch_key else 'without'} batch_key"
