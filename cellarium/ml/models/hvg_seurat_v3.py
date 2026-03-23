@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
@@ -18,12 +20,8 @@ from cellarium.ml.utilities.testing import (
 
 try:
     import skmisc  # noqa: F401
-except ImportError as e:
-    if hasattr(e, "add_note"):  # Check if add_note is available
-        e.add_note("HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
-    else:
-        # Add a fallback for older Python versions
-        e.args = (*e.args, "HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
+except (ImportError, ModuleNotFoundError):
+    warnings.warn("HVGSeuratV3 requires scikit-misc: pip install scikit-misc", UserWarning)
     raise
 
 
