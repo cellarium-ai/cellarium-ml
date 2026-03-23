@@ -100,6 +100,16 @@ class HVGSeuratV3(CellariumModel):
 
         self.hvg_df: pd.DataFrame | None = None
 
+        try:
+            import skmisc.loess  # noqa: F401
+        except ImportError as e:
+            if hasattr(e, "add_note"):  # Check if add_note is available
+                e.add_note("HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
+            else:
+                # Add a fallback for older Python versions
+                e.args = (*e.args, "HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
+            raise
+
     def reset_parameters(self) -> None:
         self.x_sums_bg.zero_()
         self.x_squared_sums_bg.zero_()
