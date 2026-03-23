@@ -16,6 +16,16 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
+try:
+    import skmisc.loess  # noqa: F401
+except ImportError as e:
+    if hasattr(e, "add_note"):  # Check if add_note is available
+        e.add_note("HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
+    else:
+        # Add a fallback for older Python versions
+        e.args = (*e.args, "HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
+    raise
+
 
 class HVGSeuratV3(CellariumModel):
     """
@@ -99,16 +109,6 @@ class HVGSeuratV3(CellariumModel):
         self._dummy_param.data.zero_()
 
         self.hvg_df: pd.DataFrame | None = None
-
-        try:
-            import skmisc.loess  # noqa: F401
-        except ImportError as e:
-            if hasattr(e, "add_note"):  # Check if add_note is available
-                e.add_note("HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
-            else:
-                # Add a fallback for older Python versions
-                e.args = (*e.args, "HVGSeuratV3 requires scikit-misc: pip install scikit-misc")
-            raise
 
     def reset_parameters(self) -> None:
         self.x_sums_bg.zero_()
