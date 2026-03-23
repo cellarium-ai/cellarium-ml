@@ -78,8 +78,9 @@ class HVGSeuratV3(CellariumModel):
         span:
             LOESS span (fraction of data used per local fit).  Default 0.3.
         output_path:
-            If given, the result DataFrame is written to this path after training.
-            The format is inferred from the extension (``.csv`` or ``.parquet``).
+            If given, the result DataFrame is written to this CSV filepath after training.
+            (Ends with ``.csv``). If ``None``, no file is written, but you really want to
+            write this output, as it would require manually calling _compute_hvg_df() later.
     """
 
     _VALID_FLAVORS = frozenset({"seurat_v3", "seurat_v3_paper"})
@@ -92,7 +93,7 @@ class HVGSeuratV3(CellariumModel):
         flavor: str = "seurat_v3",
         use_batch_key: bool = False,
         span: float = 0.3,
-        output_path: str | None = None,
+        output_path: str | None = "hvg_seurat_v3_output.csv",
     ) -> None:
         super().__init__()
         if flavor not in self._VALID_FLAVORS:
@@ -119,6 +120,9 @@ class HVGSeuratV3(CellariumModel):
                 "      convert_fn: cellarium.ml.utilities.data.categories_to_codes"
             )
         self.span = span
+        if output_path is not None:
+            if not output_path.endswith(".csv"):
+                raise ValueError("output_path must end with .csv")
         self.output_path = output_path
 
         self._current_epoch: int = 0
@@ -380,7 +384,6 @@ class HVGSeuratV3(CellariumModel):
 
     def _save(self, df: pd.DataFrame) -> None:
         assert self.output_path is not None
-        if self.output_path.endswith(".parquet"):
-            df.to_parquet(self.output_path)
-        else:
-            df.to_csv(self.output_path)
+        df.to_csv(self.output_path)
+        hvg_series = df[df["highly_variable"]].sort_values("highly_variable_rank", ascending=True).reset_index()["gene"]
+        hvg_series.to_csv(self.output_path.replace(".csv", "__hvg_only.csv"), index=False, header=False)
