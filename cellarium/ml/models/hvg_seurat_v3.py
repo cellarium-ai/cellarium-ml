@@ -19,7 +19,7 @@ from cellarium.ml.utilities.testing import (
 )
 
 try:
-    import skmisc  # noqa: F401
+    import skmisc.loess  # noqa: F401
 except (ImportError, ModuleNotFoundError):
     warnings.warn("HVGSeuratV3 requires scikit-misc: pip install scikit-misc", UserWarning)
     raise
