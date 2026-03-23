@@ -41,9 +41,23 @@ class HVGSeuratV3(CellariumModel):
     batch, ranks genes, and writes ``self.hvg_df`` (and optionally a CSV/Parquet
     file at ``output_path``).
 
+    The ``flavor`` argument controls how genes are ranked across batches when
+    ``n_batch > 1``, matching the two multi-batch modes in Scanpy:
+
+    * ``"seurat_v3"`` *(default)* — sorts by ``highly_variable_rank`` ascending first, then
+      by ``highly_variable_nbatches`` descending as tiebreaker.  Genes with the
+      lowest median rank across batches are preferred.  This matches Scanpy's
+      ``flavor='seurat_v3'``.
+
+    * ``"seurat_v3_paper"`` — sorts by ``highly_variable_nbatches``
+      descending first, then by ``highly_variable_rank`` ascending as tiebreaker.
+      Genes that are highly variable in more batches are preferred, regardless
+      of their exact rank.  This matches Scanpy's ``flavor='seurat_v3_paper'``.
+
     Usage::
 
-        model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=2000, n_batch=4, span=0.3)
+        model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=2000, n_batch=4,
+                            flavor="seurat_v3_paper", span=0.3)
         trainer = pl.Trainer(max_epochs=2)
         trainer.fit(module, datamodule)
         df = model.hvg_df  # pandas DataFrame, Scanpy-compatible columns
@@ -55,6 +69,9 @@ class HVGSeuratV3(CellariumModel):
             Number of highly variable genes to select.
         n_batch:
             Number of batches (use 1 when no batch information is given).
+        flavor:
+            Multi-batch gene ranking strategy.  ``"seurat_v3_paper"`` (default)
+            prioritises batch consistency; ``"seurat_v3"`` prioritises median rank.
         span:
             LOESS span (fraction of data used per local fit).  Default 0.3.
         output_path:
@@ -62,20 +79,26 @@ class HVGSeuratV3(CellariumModel):
             The format is inferred from the extension (``.csv`` or ``.parquet``).
     """
 
+    _VALID_FLAVORS = frozenset({"seurat_v3", "seurat_v3_paper"})
+
     def __init__(
         self,
         var_names_g: np.ndarray,
         n_top_genes: int,
         n_batch: int = 1,
+        flavor: str = "seurat_v3",
         span: float = 0.3,
         output_path: str | None = None,
     ) -> None:
         super().__init__()
+        if flavor not in self._VALID_FLAVORS:
+            raise ValueError(f"flavor must be one of {sorted(self._VALID_FLAVORS)}, got {flavor!r}")
         self.var_names_g = var_names_g
         n_vars = len(var_names_g)
         self.n_vars = n_vars
         self.n_top_genes = n_top_genes
         self.n_batch = n_batch
+        self.flavor = flavor
         self.span = span
         self.output_path = output_path
 
@@ -307,10 +330,14 @@ class HVGSeuratV3(CellariumModel):
         # Use integer-position sort so duplicate gene names don't cause
         # df.loc to mark more than n_top_genes rows as highly variable.
         rank_vals = df["highly_variable_rank"].fillna(np.inf).values
-        # np.lexsort uses the LAST key as the primary sort key.
-        # Scanpy's seurat_v3 flavor: primary = rank ascending, secondary = nbatches descending.
-        # (seurat_v3_paper reverses these; we match seurat_v3.)
-        sort_positions = np.lexsort((-df["highly_variable_nbatches"].values, rank_vals))
+        nbatches_vals = df["highly_variable_nbatches"].values
+        # np.lexsort: LAST key = primary sort key.
+        if self.flavor == "seurat_v3":
+            # Primary: rank ascending; tiebreaker: nbatches descending.
+            sort_positions = np.lexsort((-nbatches_vals, rank_vals))
+        else:  # seurat_v3_paper
+            # Primary: nbatches descending; tiebreaker: rank ascending.
+            sort_positions = np.lexsort((rank_vals, -nbatches_vals))
         hvg_flags = np.zeros(len(df), dtype=bool)
         hvg_flags[sort_positions[: self.n_top_genes]] = True
         df["highly_variable"] = hvg_flags

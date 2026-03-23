@@ -68,12 +68,14 @@ def _run_model(
     batch_key: str | None,
     output_path: str,
     batch_size: int = 512,
+    flavor: str = "seurat_v3",
 ) -> HVGSeuratV3:
     """Instantiate, fit (2 epochs), and return the HVGSeuratV3 model."""
     model = HVGSeuratV3(
         var_names_g=var_names,
         n_top_genes=N_TOP_GENES,
         n_batch=n_batch,
+        flavor=flavor,
         output_path=output_path,
     )
     module = CellariumModule(model=model)
@@ -105,7 +107,8 @@ def _run_model(
 
 def test_hvg_seurat_v3_sort_order():
     """
-    Verify the sort order in _compute_hvg_df matches Scanpy's seurat_v3 flavor:
+    Verify the sort order for ``flavor='seurat_v3'`` in _compute_hvg_df matches
+    Scanpy's seurat_v3 flavor:
       - Primary  key: highly_variable_rank ASCENDING (lower rank = more variable)
       - Secondary key: highly_variable_nbatches DESCENDING (tiebreaker)
 
@@ -139,7 +142,7 @@ def test_hvg_seurat_v3_sort_order():
     n_top = 4
     N = 100
     gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
-    model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=2)
+    model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=2, flavor="seurat_v3")
 
     # Norm-var values chosen so that double-argsort gives the ranks listed above.
     # With x_sums_bg=0 and reg_std=1: nv = sq_counts_sum / (N-1)
@@ -174,9 +177,81 @@ def test_hvg_seurat_v3_sort_order():
         "over gene_2 and gene_6 which also have median_rank=2 but nbatches=1"
     )
     assert not df.loc["gene_2", "highly_variable"], (
-        "gene_2 (nbatches=1, median_rank=2) should NOT be selected — "
-        "gene_1 (nbatches=2, same rank) wins the tiebreaker"
+        "gene_2 (nbatches=1, median_rank=2) should NOT be selected — gene_1 (nbatches=2, same rank) wins the tiebreaker"
     )
+
+
+@pytest.mark.parametrize(
+    "flavor,expected_hvg,excluded_hvg",
+    [
+        # seurat_v3: rank primary → genes with median_rank=0 fill the top-2 slots;
+        # gene_1 (nbatches=3, rank=1) loses to gene_0 and gene_2 (both rank=0).
+        ("seurat_v3", {"gene_0", "gene_2"}, {"gene_1"}),
+        # seurat_v3_paper: nbatches primary → gene_1 (nbatches=3) takes the first
+        # slot regardless of rank; gene_0 (rank=0) takes the second slot.
+        # gene_2 (nbatches=1, rank=0) is displaced by gene_1.
+        ("seurat_v3_paper", {"gene_0", "gene_1"}, {"gene_2"}),
+    ],
+    ids=["seurat_v3", "seurat_v3_paper"],
+)
+def test_hvg_seurat_v3_flavor_sort_order(flavor, expected_hvg, excluded_hvg):
+    """
+    Verify that the two flavors produce *different* selected gene sets on data
+    specifically constructed so the flavors diverge.
+
+    Setup: 4 genes, 3 batches, n_top_genes=2.
+
+    Batch norm_var ordering (ranks derived from values below):
+      Batch 0: gene_0 > gene_1 > gene_2 > gene_3
+      Batch 1: gene_2 > gene_1 > gene_0 > gene_3
+      Batch 2: gene_3 > gene_1 > gene_0 > gene_2
+
+    Resulting nbatches/median_rank (n_top=2 per batch):
+      gene_0: nbatches=1, median_rank=0  (top in batch 0 only)
+      gene_1: nbatches=3, median_rank=1  (rank 1 in every batch)
+      gene_2: nbatches=1, median_rank=0  (top in batch 1 only)
+      gene_3: nbatches=1, median_rank=0  (top in batch 2 only)
+
+    seurat_v3   (rank primary):    top-2 = {gene_0, gene_2}  — gene_1 rank=1 loses
+    seurat_v3_paper (nbatches primary): top-2 = {gene_0, gene_1}  — gene_2 displaced
+    """
+    n_genes = 4
+    n_top = 2
+    N = 100
+    gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
+    model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=3, flavor=flavor)
+
+    # With x_sums_bg=0 and reg_std=1:
+    #   nv = sq_counts_sum / (N-1)  →  set sq_counts_sum = nv * (N-1)
+    nv_b0 = [100.0, 90.0, 80.0, 70.0]  # batch 0 ordering: gene_0>gene_1>gene_2>gene_3
+    nv_b1 = [80.0, 90.0, 100.0, 70.0]  # batch 1 ordering: gene_2>gene_1>gene_0>gene_3
+    nv_b2 = [80.0, 90.0, 70.0, 100.0]  # batch 2 ordering: gene_3>gene_1>gene_0>gene_2
+
+    model.x_size_b = torch.full((3,), float(N))
+    model.reg_std_bg = torch.ones(3, n_genes)
+    model.x_sums_bg = torch.zeros(3, n_genes)
+    model.counts_sum_bg = torch.zeros(3, n_genes)
+    model.sq_counts_sum_bg = torch.stack(
+        [
+            torch.tensor([v * (N - 1) for v in nv_b0]),
+            torch.tensor([v * (N - 1) for v in nv_b1]),
+            torch.tensor([v * (N - 1) for v in nv_b2]),
+        ]
+    )
+
+    df = model._compute_hvg_df()
+
+    assert df["highly_variable"].sum() == n_top
+    for gene in expected_hvg:
+        assert df.loc[gene, "highly_variable"], (
+            f"{gene} should be selected under flavor={flavor!r} "
+            f"but was not. Selected: {set(df[df['highly_variable']].index)}"
+        )
+    for gene in excluded_hvg:
+        assert not df.loc[gene, "highly_variable"], (
+            f"{gene} should NOT be selected under flavor={flavor!r} "
+            f"but was. Selected: {set(df[df['highly_variable']].index)}"
+        )
 
 
 def test_hvg_seurat_v3_invalid_batch_clip_not_zero():
@@ -222,7 +297,7 @@ def test_hvg_seurat_v3_invalid_batch_excluded_from_ranking():
     n_top = 3
     N = 100
     gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
-    model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=2)
+    model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=2, flavor="seurat_v3")
 
     model.x_size_b = torch.tensor([float(N), 1.0])  # batch 1 invalid
     model.reg_std_bg = torch.ones(2, n_genes)
@@ -252,6 +327,59 @@ def _load_adata():
     adata, batch_column = sc.datasets.ebi_expression_atlas("E-MTAB-10137"), "Sample Characteristic[individual]"
     adata.obs[batch_column] = adata.obs[batch_column].astype("category")
     return adata, batch_column
+
+
+@pytest.mark.parametrize("flavor", ["seurat_v3", "seurat_v3_paper"], ids=["seurat_v3", "seurat_v3_paper"])
+def test_hvg_seurat_v3_flavor_matches_scanpy(tmp_path, flavor: str):
+    """
+    End-to-end test: compare HVGSeuratV3 against Scanpy for both flavors in
+    multi-batch mode.
+
+    Scanpy directly supports both ``flavor='seurat_v3'`` and
+    ``flavor='seurat_v3_paper'`` in :func:`scanpy.pp.highly_variable_genes`.
+    Both use identical statistics; only the final selection sort order differs,
+    so the underlying computation is validated by the existing
+    ``test_hvg_seurat_v3_matches_scanpy`` tests — here we focus on the
+    end-to-end Jaccard similarity with batch_key for each flavor.
+    """
+    import scanpy as sc
+
+    adata, batch_col = _load_adata()
+    x = _to_dense(adata.X)
+    var_names = np.asarray(adata.var_names)
+
+    batch_cats = list(adata.obs[batch_col].cat.categories)
+    n_batch = len(batch_cats)
+    cat_to_idx = {c: i for i, c in enumerate(batch_cats)}
+    batch_idx = np.array([cat_to_idx[c] for c in adata.obs[batch_col]], dtype=np.int64)
+
+    sc_df = sc.pp.highly_variable_genes(
+        adata.copy(),
+        flavor=flavor,
+        n_top_genes=N_TOP_GENES,
+        batch_key=batch_col,
+        inplace=False,
+    )
+
+    output_file = str(tmp_path / f"hvg_{flavor}.csv")
+    model = _run_model(
+        x=x,
+        var_names=var_names,
+        n_batch=n_batch,
+        batch_idx=batch_idx,
+        batch_key="batch_idx_n",
+        output_path=output_file,
+        flavor=flavor,
+    )
+
+    hvg_df = model.hvg_df
+    assert hvg_df is not None
+    assert hvg_df["highly_variable"].sum() == N_TOP_GENES
+
+    our_hvg = set(hvg_df[hvg_df["highly_variable"]].index)
+    sc_hvg = set(sc_df[sc_df["highly_variable"]].index)
+    jaccard = len(our_hvg & sc_hvg) / len(our_hvg | sc_hvg)
+    assert jaccard >= 0.98, f"Jaccard {jaccard:.4f} below 0.98 for flavor={flavor!r} with batch_key"
 
 
 @pytest.mark.parametrize(
@@ -380,6 +508,7 @@ def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path):
                     "init_args": {
                         "n_top_genes": str(N_TOP_GENES),
                         "n_batch": None,  # wired by CLI from batch_n_categories
+                        "flavor": "seurat_v3",
                         "output_path": output_file,
                     },
                 },
