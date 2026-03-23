@@ -99,7 +99,150 @@ def _run_model(
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Unit tests (no network required)
+# ---------------------------------------------------------------------------
+
+
+def test_hvg_seurat_v3_sort_order():
+    """
+    Verify the sort order in _compute_hvg_df matches Scanpy's seurat_v3 flavor:
+      - Primary  key: highly_variable_rank ASCENDING (lower rank = more variable)
+      - Secondary key: highly_variable_nbatches DESCENDING (tiebreaker)
+
+    Two assertions are made:
+    1. A gene with median_rank=0 in one batch is preferred over a gene with
+       median_rank=2 in both batches — rank is primary, not nbatches.
+    2. Among genes with equal median_rank=2, the gene in two batches (nbatches=2)
+       is selected over the gene in only one batch (nbatches=1).
+    """
+    # 8 genes, 2 batches, n_top_genes=4
+    #
+    # Batch 0 norm_var ordering (best→worst): g0, g1(=gene_B), g2(=gene_A), g3, g4, g5, g6, g7
+    # Batch 1 norm_var ordering (best→worst): g4, g5, g6, g1(=gene_B), g0, g2(=gene_A), g3, g7
+    #
+    # With n_top_genes=4 (ranks 0-3 qualify):
+    #   g0:      b0-rank=0 (✓), b1-rank=4 (✗) → nbatches=1, median_rank=0
+    #   gene_B(g1): b0-rank=1 (✓), b1-rank=3 (✓) → nbatches=2, median_rank=2.0
+    #   gene_A(g2): b0-rank=2 (✓), b1-rank=5 (✗) → nbatches=1, median_rank=2.0  ← same rank as gene_B!
+    #   g3:      b0-rank=3 (✓), b1-rank=6 (✗) → nbatches=1, median_rank=3
+    #   g4:      b0-rank=4 (✗), b1-rank=0 (✓) → nbatches=1, median_rank=0
+    #   g5:      b0-rank=5 (✗), b1-rank=1 (✓) → nbatches=1, median_rank=1
+    #   g6:      b0-rank=6 (✗), b1-rank=2 (✓) → nbatches=1, median_rank=2.0  ← same rank as gene_B!
+    #   g7:      b0-rank=7 (✗), b1-rank=7 (✗) → nbatches=0, median_rank=nan
+    #
+    # Correct top-4 (rank primary, nbatches tiebreaker):
+    #   rank=0: g0, g4 → both selected
+    #   rank=1: g5       → selected
+    #   rank=2 tie: gene_B(nbatches=2) > gene_A(nbatches=1), gene_B > g6(nbatches=1) → gene_B selected
+    # → selected = {g0, g4, g5, gene_B}; gene_A NOT selected despite having same rank as gene_B.
+    n_genes = 8
+    n_top = 4
+    N = 100
+    gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
+    model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=2)
+
+    # Norm-var values chosen so that double-argsort gives the ranks listed above.
+    # With x_sums_bg=0 and reg_std=1: nv = sq_counts_sum / (N-1)
+    nv_b0 = [100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0]  # g0..g7 in batch 0
+    nv_b1 = [60.0, 70.0, 50.0, 40.0, 100.0, 90.0, 80.0, 30.0]  # g0..g7 in batch 1
+
+    model.x_size_b = torch.full((2,), float(N))
+    model.reg_std_bg = torch.ones(2, n_genes)
+    model.x_sums_bg = torch.zeros(2, n_genes)
+    model.counts_sum_bg = torch.zeros(2, n_genes)
+    model.sq_counts_sum_bg = torch.stack(
+        [
+            torch.tensor([v * (N - 1) for v in nv_b0]),
+            torch.tensor([v * (N - 1) for v in nv_b1]),
+        ]
+    )
+
+    df = model._compute_hvg_df()
+
+    assert df["highly_variable"].sum() == n_top
+
+    # Assertion 1: rank is primary — g0 (rank=0, nbatches=1) must be selected
+    # even though gene_B (nbatches=2) has more batch coverage.
+    assert df.loc["gene_0", "highly_variable"], (
+        "gene_0 (rank=0, nbatches=1) should be selected — median rank is the primary sort key"
+    )
+
+    # Assertion 2: nbatches is the tiebreaker at equal median_rank=2 —
+    # gene_1(gene_B, nbatches=2) must be selected over gene_2(gene_A, nbatches=1).
+    assert df.loc["gene_1", "highly_variable"], (
+        "gene_1 (nbatches=2, median_rank=2) must be selected as the tiebreaker winner "
+        "over gene_2 and gene_6 which also have median_rank=2 but nbatches=1"
+    )
+    assert not df.loc["gene_2", "highly_variable"], (
+        "gene_2 (nbatches=1, median_rank=2) should NOT be selected — "
+        "gene_1 (nbatches=2, same rank) wins the tiebreaker"
+    )
+
+
+def test_hvg_seurat_v3_invalid_batch_clip_not_zero():
+    """
+    Regression test: a batch with N < 2 must get clip_val=+inf, not 0.
+
+    Before the fix, _compute_clip_val skipped invalid batches and left
+    clip_val_bg[b]=0.  Epoch 1 then called torch.minimum(x_ng, 0), clipping
+    every count in that batch down to zero and corrupting the sums.
+    """
+    n_genes = 30
+    N = 100
+    gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
+    model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=5, n_batch=2)
+
+    model.x_size_b = torch.tensor([float(N), 1.0])  # batch 1 has N=1 → invalid
+
+    # Give batch 0 genes with varied means so LOESS can fit (overdispersed model):
+    # mean_j = (j+1)*0.5, var_j = mean_j * 2
+    means = torch.arange(1, n_genes + 1, dtype=torch.float32) * 0.5
+    vars_ = means * 2.0
+    model.x_sums_bg[0] = means * N
+    model.x_squared_sums_bg[0] = (vars_ + means**2) * N
+
+    model._compute_clip_val()
+
+    assert (model.clip_val_bg[1] == float("inf")).all(), (
+        "Invalid batch (N<2) must have clip_val=+inf so epoch-1 clipping is a no-op"
+    )
+    assert (model.clip_val_bg[0] > 0).all()
+    assert not (model.clip_val_bg[0] == float("inf")).any()
+
+
+def test_hvg_seurat_v3_invalid_batch_excluded_from_ranking():
+    """
+    Regression test: a batch with N < 2 must not contribute to
+    highly_variable_nbatches or median rank in _compute_hvg_df.
+
+    Before the fix, all-zero norm_vars for an invalid batch were still ranked,
+    causing the first n_top_genes to each gain an extra spurious nbatches count.
+    """
+    n_genes = 6
+    n_top = 3
+    N = 100
+    gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
+    model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=2)
+
+    model.x_size_b = torch.tensor([float(N), 1.0])  # batch 1 invalid
+    model.reg_std_bg = torch.ones(2, n_genes)
+    model.x_sums_bg = torch.zeros(2, n_genes)
+    model.counts_sum_bg = torch.zeros(2, n_genes)
+    # Give batch 0 distinct norm_vars; batch 1 buffers stay zero (N=1, skipped)
+    nv_b0 = [100.0, 90.0, 80.0, 70.0, 60.0, 50.0]
+    model.sq_counts_sum_bg[0] = torch.tensor([v * (N - 1) for v in nv_b0])
+
+    df = model._compute_hvg_df()
+
+    assert df["highly_variable"].sum() == n_top
+    assert df["highly_variable_nbatches"].max() == 1, (
+        "Invalid batch (N<2) should not be counted in highly_variable_nbatches; "
+        f"max was {df['highly_variable_nbatches'].max()} but expected 1"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Integration tests (require network to download E-MTAB-10137)
 # ---------------------------------------------------------------------------
 
 

@@ -43,8 +43,7 @@ class HVGSeuratV3(CellariumModel):
 
     Usage::
 
-        model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=2000, n_batch=4,
-                            batch_key="batch_idx_n", span=0.3)
+        model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=2000, n_batch=4, span=0.3)
         trainer = pl.Trainer(max_epochs=2)
         trainer.fit(module, datamodule)
         df = model.hvg_df  # pandas DataFrame, Scanpy-compatible columns
@@ -214,6 +213,8 @@ class HVGSeuratV3(CellariumModel):
             dist.broadcast(self.reg_std_bg, src=0)
 
     def _compute_clip_val(self) -> None:
+        # Default to +inf so any batch skipped below (N < 2) acts as a no-op clip.
+        self.clip_val_bg.fill_(float("inf"))
         n_vars = self.n_vars
         for b in range(self.n_batch):
             N = self.x_size_b[b].item()
@@ -279,14 +280,20 @@ class HVGSeuratV3(CellariumModel):
             nv[np.isnan(nv)] = 0.0
             norm_gene_vars[b] = nv
 
-        # Rank genes within each batch
-        ranked = np.argsort(np.argsort(-norm_gene_vars, axis=1), axis=1).astype(np.float32)
+        # Only rank over batches with sufficient data (N >= 2); invalid batches
+        # have norm_gene_vars == 0 and would otherwise pollute num_batches_high_var
+        # and median_ranked with arbitrary rankings of equal values.
+        valid_b = np.array([self.x_size_b[b].item() >= 2 for b in range(self.n_batch)])
+        norm_gene_vars_valid = norm_gene_vars[valid_b]
+
+        # Rank genes within each valid batch
+        ranked = np.argsort(np.argsort(-norm_gene_vars_valid, axis=1), axis=1).astype(np.float32)
         num_batches_high_var = (ranked < self.n_top_genes).sum(axis=0).astype(int)
         ranked[ranked >= self.n_top_genes] = np.nan
         ma = np.ma.masked_invalid(ranked)
         median_ranked = np.ma.median(ma, axis=0).filled(np.nan)
 
-        variances_norm = norm_gene_vars.mean(axis=0)
+        variances_norm = norm_gene_vars_valid.mean(axis=0)
 
         df = pd.DataFrame(
             index=pd.Index(self.var_names_g, name="gene"),
@@ -300,6 +307,9 @@ class HVGSeuratV3(CellariumModel):
         # Use integer-position sort so duplicate gene names don't cause
         # df.loc to mark more than n_top_genes rows as highly variable.
         rank_vals = df["highly_variable_rank"].fillna(np.inf).values
+        # np.lexsort uses the LAST key as the primary sort key.
+        # Scanpy's seurat_v3 flavor: primary = rank ascending, secondary = nbatches descending.
+        # (seurat_v3_paper reverses these; we match seurat_v3.)
         sort_positions = np.lexsort((-df["highly_variable_nbatches"].values, rank_vals))
         hvg_flags = np.zeros(len(df), dtype=bool)
         hvg_flags[sort_positions[: self.n_top_genes]] = True

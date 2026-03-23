@@ -30,8 +30,8 @@ def _hvg_seurat_single_batch(
     mean_log1p = torch.log1p(mean_g)
 
     df = pd.DataFrame()
-    df["means"] = mean_log1p.numpy()
-    df["dispersions"] = dispersion.numpy()
+    df["means"] = mean_log1p.detach().cpu().numpy()
+    df["dispersions"] = dispersion.detach().cpu().numpy()
     df["mean_bin"] = pd.cut(df["means"], bins=n_bins)
 
     disp_grouped = df.groupby("mean_bin", observed=False)["dispersions"]
