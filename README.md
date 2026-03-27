@@ -63,8 +63,8 @@ custom_logistic_regression --predict --config SOCAM_test_base_model_config.yaml
 
 Trained model weights:
 
-Will be made publicly accessible in future
+Publicly accessible here
 
 ```
-gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_training_split_20241106/models/Model_variation_3/lightning_logs/version_1/checkpoints/last.ckpt
+gs://cellarium-public/socam/socam_model.ckpt
 ```
