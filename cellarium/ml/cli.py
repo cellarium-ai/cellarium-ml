@@ -251,17 +251,29 @@ def compute_var_names_g(
     return output["var_names_g"]
 
 
-def lightning_cli_factory(
-    model_class_path: str,
-    link_arguments: list[LinkArguments] | None = None,
-    trainer_defaults: dict[str, Any] | None = None,
-) -> type[LightningCLI]:
+class CellariumCLI(LightningCLI):
     """
-    Factory function for creating a :class:`LightningCLI` with a preset model and custom argument linking.
+    A custom CLI for Cellarium ML.
+    This class is a subclass of :class:`~lightning.pytorch.cli.LightningCLI` and
+    is used to create a command line interface for the Cellarium ML library.
+    It allows users to easily configure and run Cellarium ML models and data modules
+    from the command line.
+
+    Args:
+        model_class_path:
+            A string representation of the model class path (e.g., ``"cellarium.ml.models.IncrementalPCA"``).
+        link_arguments:
+            A list of :class:`LinkArguments` that specify how to derive the value of a target
+            argument from the values of one or more source arguments. If ``None`` then no
+            arguments are linked.
+        trainer_defaults:
+            Default values for the trainer.
+        args:
+            Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
 
     Example::
 
-        cli = lightning_cli_factory(
+        cli = CellariumCLI(
             "cellarium.ml.models.IncrementalPCA",
             link_arguments=[
                 LinkArguments(
@@ -278,67 +290,59 @@ def lightning_cli_factory(
                 },
             },
         )
-
-    Args:
-        model_class_path:
-            A string representation of the model class path (e.g., ``"cellarium.ml.models.IncrementalPCA"``).
-        link_arguments:
-            A list of :class:`LinkArguments` that specify how to derive the value of a target
-            argument from the values of one or more source arguments. If ``None`` then no
-            arguments are linked.
-        trainer_defaults:
-            Default values for the trainer.
-
-    Returns:
-        A :class:`LightningCLI` class with the given model and argument linking.
     """
 
-    class NewLightningCLI(LightningCLI):
-        def __init__(self, args: ArgsType = None) -> None:
-            super().__init__(
-                CellariumModule,
-                CellariumAnnDataDataModule,
-                trainer_defaults=trainer_defaults,
-                args=args,
-            )
+    def __init__(
+        self,
+        model_class_path: str,
+        link_arguments: list[LinkArguments] | None = None,
+        trainer_defaults: dict[str, Any] | None = None,
+        args: ArgsType = None,
+    ) -> None:
+        self.model_class_path = model_class_path
+        self.link_arguments = link_arguments
+        super().__init__(
+            CellariumModule,
+            CellariumAnnDataDataModule,
+            trainer_defaults=trainer_defaults,
+            args=args,
+        )
 
-        def _add_instantiators(self) -> None:
-            # disable breaking dependency injection support change introduced in PyTorch Lightning 2.3
-            # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
-            pass
+    def _add_instantiators(self) -> None:
+        # disable breaking dependency injection support change introduced in PyTorch Lightning 2.3
+        # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
+        pass
 
-        def before_instantiate_classes(self):
-            # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
-            if self.subcommand == "predict":
-                return_predictions: bool = self.config["predict"]["return_predictions"]
-                if return_predictions:
-                    warnings.warn(
-                        "The `return_predictions` argument should be set to 'false' when running predict to avoid OOM. "
-                        "This can be set at indent level 0 in the config file. Example:\n"
-                        "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
-                        UserWarning,
-                    )
-            return super().before_instantiate_classes()
+    def before_instantiate_classes(self):
+        # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
+        if self.subcommand == "predict":
+            return_predictions: bool = self.config["predict"]["return_predictions"]
+            if return_predictions:
+                warnings.warn(
+                    "The `return_predictions` argument should be set to 'false' when running predict to avoid OOM. "
+                    "This can be set at indent level 0 in the config file. Example:\n"
+                    "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
+                    UserWarning,
+                )
+        return super().before_instantiate_classes()
 
-        def instantiate_classes(self) -> None:
-            with torch.device("meta"):
-                # skip the initialization of model parameters
-                # parameters are later initialized by the  `CellariumModule.configure_model` method
-                return super().instantiate_classes()
+    def instantiate_classes(self) -> None:
+        with torch.device("meta"):
+            # skip the initialization of model parameters
+            # parameters are later initialized by the  `CellariumModule.configure_model` method
+            return super().instantiate_classes()
 
-        def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
-            if link_arguments is not None:
-                for link in link_arguments:
-                    parser.link_arguments(link.source, link.target, link.compute_fn, link.apply_on)
-            # this is helpful for generating a default config file with --print_config
-            parser.set_defaults(
-                {
-                    "model.model": model_class_path,
-                    "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
-                }
-            )
-
-    return NewLightningCLI
+    def add_arguments_to_parser(self, parser: LightningArgumentParser) -> None:
+        if self.link_arguments is not None:
+            for link in self.link_arguments:
+                parser.link_arguments(link.source, link.target, link.compute_fn, link.apply_on)
+        # this is helpful for generating a default config file with --print_config
+        parser.set_defaults(
+            {
+                "model.model": self.model_class_path,
+                "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
+            }
+        )
 
 
 @register_model
@@ -349,8 +353,10 @@ def cellarium_gpt(args: ArgsType = None) -> None:
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    cli = lightning_cli_factory("cellarium.ml.models.CellariumGPT")
-    cli(args=args)
+    CellariumCLI(
+        "cellarium.ml.models.CellariumGPT",
+        args=args,
+    )
 
 
 @register_model
@@ -381,7 +387,7 @@ def geneformer(args: ArgsType = None) -> None:
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    cli = lightning_cli_factory(
+    CellariumCLI(
         "cellarium.ml.models.Geneformer",
         link_arguments=[
             LinkArguments(
@@ -390,8 +396,8 @@ def geneformer(args: ArgsType = None) -> None:
                 compute_var_names_g,
             )
         ],
+        args=args,
     )
-    cli(args=args)
 
 
 @register_model
@@ -425,7 +431,7 @@ def incremental_pca(args: ArgsType = None) -> None:
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    cli = lightning_cli_factory(
+    CellariumCLI(
         "cellarium.ml.models.IncrementalPCA",
         link_arguments=[
             LinkArguments(
@@ -441,8 +447,8 @@ def incremental_pca(args: ArgsType = None) -> None:
                 "dict_kwargs": {"broadcast_buffers": False},
             },
         },
+        args=args,
     )
-    cli(args=args)
 
 
 @register_model
@@ -472,7 +478,7 @@ def logistic_regression(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
 
-    cli = lightning_cli_factory(
+    CellariumCLI(
         "cellarium.ml.models.LogisticRegression",
         link_arguments=[
             LinkArguments(
@@ -483,8 +489,8 @@ def logistic_regression(args: ArgsType = None) -> None:
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
             LinkArguments("data", "model.model.init_args.y_categories", compute_y_categories),
         ],
+        args=args,
     )
-    cli(args=args)
 
 
 @register_model
@@ -515,7 +521,7 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    cli = lightning_cli_factory(
+    CellariumCLI(
         "cellarium.ml.models.OnePassMeanVarStd",
         link_arguments=[
             LinkArguments(
@@ -531,8 +537,8 @@ def onepass_mean_var_std(args: ArgsType = None) -> None:
                 "dict_kwargs": {"broadcast_buffers": False},
             },
         },
+        args=args,
     )
-    cli(args=args)
 
 
 @register_model
@@ -581,7 +587,7 @@ def probabilistic_pca(args: ArgsType = None) -> None:
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    cli = lightning_cli_factory(
+    CellariumCLI(
         "cellarium.ml.models.ProbabilisticPCA",
         link_arguments=[
             LinkArguments(
@@ -591,8 +597,8 @@ def probabilistic_pca(args: ArgsType = None) -> None:
             ),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
         ],
+        args=args,
     )
-    cli(args=args)
 
 
 @register_model
@@ -623,7 +629,7 @@ def tdigest(args: ArgsType = None) -> None:
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
-    cli = lightning_cli_factory(
+    CellariumCLI(
         "cellarium.ml.models.TDigest",
         link_arguments=[
             LinkArguments(
@@ -635,8 +641,8 @@ def tdigest(args: ArgsType = None) -> None:
         trainer_defaults={
             "max_epochs": 1,  # one pass
         },
+        args=args,
     )
-    cli(args=args)
 
 
 @register_model
