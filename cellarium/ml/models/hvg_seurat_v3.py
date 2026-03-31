@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
+from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -315,11 +316,23 @@ class HVGSeuratV3(CellariumModel):
 
         # 2. Rank 0: compute norm_var, rank, select top genes, build DataFrame
         if trainer.global_rank == 0:
-            self.hvg_df = self._compute_hvg_df()
+            # Retrieve adata.var annotation columns to enrich the output DataFrame.
+            var_df: pd.DataFrame | None = None
+            datamodule = getattr(trainer, "datamodule", None)
+            if isinstance(datamodule, CellariumAnnDataDataModule):
+                var_df = datamodule.dadc.schema.attr_values["var"]
+            else:
+                warnings.warn(
+                    "HVGSeuratV3: trainer.datamodule is not a CellariumAnnDataDataModule; "
+                    "adata.var annotations will not be added to the output DataFrame.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self.hvg_df = self._compute_hvg_df(var_df=var_df)
             if self.output_path is not None:
                 self._save(self.hvg_df)
 
-    def _compute_hvg_df(self) -> pd.DataFrame:
+    def _compute_hvg_df(self, var_df: pd.DataFrame | None = None) -> pd.DataFrame:
         n_vars = self.n_vars
         norm_gene_vars = np.zeros((self.n_batch, n_vars), dtype=np.float64)
 
@@ -380,10 +393,19 @@ class HVGSeuratV3(CellariumModel):
         if self.n_batch == 1:
             df = df.drop(columns=["highly_variable_nbatches"])
 
+        # Append any extra columns from adata.var (e.g. gene_id, gene_name).
+        # df.index values are var_names_g; var_df.index is adata.var_names.
+        # pandas .join() aligns on label values, so index *name* differences
+        # are harmless, and genes absent from var_df receive NaN.
+        if var_df is not None:
+            extra_cols = var_df.columns.difference(df.columns)
+            if len(extra_cols) > 0:
+                df = df.join(var_df[extra_cols], how="left")
+
         return df
 
     def _save(self, df: pd.DataFrame) -> None:
         assert self.output_path is not None
         df.to_csv(self.output_path)
-        hvg_series = df[df["highly_variable"]].sort_values("highly_variable_rank", ascending=True).reset_index()["gene"]
-        hvg_series.to_csv(self.output_path.replace(".csv", "__hvg_only.csv"), index=False, header=True)
+        hvg_df = df[df["highly_variable"]].sort_values("highly_variable_rank", ascending=True)
+        hvg_df.to_csv(self.output_path.replace(".csv", "__hvg_only.csv"), index=True, header=True)
