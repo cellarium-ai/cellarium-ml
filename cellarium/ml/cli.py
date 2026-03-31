@@ -129,12 +129,12 @@ class CheckpointLoader(FileLoader):
 
 def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> FileLoader:
     """Construct an object from a file."""
-    return FileLoader(**loader.construct_mapping(node))  # type: ignore[misc]
+    return FileLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
 
 
 def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
     """Construct an object from a checkpoint."""
-    return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[misc]
+    return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
 
 
 loader = DefaultLoader
