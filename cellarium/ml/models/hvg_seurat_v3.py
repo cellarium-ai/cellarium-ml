@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import warnings
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
+import skmisc.loess
 import torch
 import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
@@ -19,11 +21,29 @@ from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
 
-try:
-    import skmisc.loess  # noqa: F401
-except (ImportError, ModuleNotFoundError):
-    warnings.warn("HVGSeuratV3 requires scikit-misc: pip install scikit-misc", UserWarning)
-    raise
+
+def _fit_loess_with_jitter(
+    x: np.ndarray,
+    y: np.ndarray,
+    span: float,
+    max_jitter: float = 1e-6,
+    initial_jitter: float = 1e-18,
+    seed: int = 0,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    jitter = 0.0
+
+    while jitter <= max_jitter:
+        x_fit = x if jitter == 0 else x + rng.uniform(-jitter, jitter, size=x.shape[0])
+
+        try:
+            model = skmisc.loess.loess(x_fit, y, span=span, degree=2)
+            model.fit()
+            return model.outputs.fitted_values
+        except ValueError:
+            jitter = initial_jitter if jitter == 0 else jitter * 10
+
+    raise ValueError(f"LOESS fit failed after retrying with jitter up to {max_jitter}.")
 
 
 class HVGSeuratV3(CellariumModel):
@@ -91,7 +111,7 @@ class HVGSeuratV3(CellariumModel):
         var_names_g: np.ndarray,
         n_top_genes: int,
         n_batch: int = 1,
-        flavor: str = "seurat_v3",
+        flavor: Literal["seurat_v3", "seurat_v3_paper"] = "seurat_v3",
         use_batch_key: bool = False,
         span: float = 0.3,
         output_path: str | None = "hvg_seurat_v3_output.csv",
@@ -121,9 +141,8 @@ class HVGSeuratV3(CellariumModel):
                 "      convert_fn: cellarium.ml.utilities.data.categories_to_codes"
             )
         self.span = span
-        if output_path is not None:
-            if not output_path.endswith(".csv"):
-                raise ValueError("output_path must end with .csv")
+        if (output_path is not None) and (not output_path.endswith(".csv")):
+            raise ValueError("output_path must end with .csv")
         self.output_path = output_path
 
         self._current_epoch: int = 0
@@ -164,16 +183,9 @@ class HVGSeuratV3(CellariumModel):
         self.sq_counts_sum_bg.zero_()
         self._dummy_param.data.zero_()
 
-    # ------------------------------------------------------------------
-    # Lightning hook: cache current epoch so forward() can branch on it
-    # ------------------------------------------------------------------
-
     def on_train_epoch_start(self, trainer: pl.Trainer) -> None:
+        """Cache the current epoch number so forward() can branch on it."""
         self._current_epoch = trainer.current_epoch
-
-    # ------------------------------------------------------------------
-    # Forward: dispatches on epoch
-    # ------------------------------------------------------------------
 
     def forward(
         self,
@@ -186,12 +198,12 @@ class HVGSeuratV3(CellariumModel):
 
         # help users avoid unintentional errors in configuring the use of batch_key
         if self.use_batch_key and (batch_index_n is None):
-            raise UserWarning(
+            raise ValueError(
                 "batch_index_n is required when use_batch_key is True: add `batch_index_n` to your "
                 "dataloader batch_keys."
             )
         if (not self.use_batch_key) and (batch_index_n is not None):
-            raise UserWarning(
+            raise ValueError(
                 "batch_index_n was given but use_batch_key is False: either set use_batch_key=True or remove "
                 "batch_index_n from your dataloader batch_keys."
             )
@@ -234,22 +246,19 @@ class HVGSeuratV3(CellariumModel):
         self.counts_sum_bg = self.counts_sum_bg + sums_contrib
         self.sq_counts_sum_bg = self.sq_counts_sum_bg + sq_sums_contrib
 
-    # ------------------------------------------------------------------
-    # on_train_start: validate DDP config
-    # ------------------------------------------------------------------
-
     def on_train_start(self, trainer: pl.Trainer) -> None:
+        """Validation: if in a distributed setting, use DDP with broadcast_buffers=False."""
         if trainer.world_size > 1:
-            assert isinstance(trainer.strategy, DDPStrategy), "HVGSeuratV3 requires the DDP strategy."
-            assert trainer.strategy._ddp_kwargs["broadcast_buffers"] is False, (
-                "HVGSeuratV3 requires broadcast_buffers=False."
-            )
-
-    # ------------------------------------------------------------------
-    # on_train_epoch_end: reduce → LOESS (after epoch 0) or finalize (after epoch 1)
-    # ------------------------------------------------------------------
+            if not isinstance(trainer.strategy, DDPStrategy):
+                raise ValueError("HVGSeuratV3 requires the DDP strategy.")
+            if trainer.strategy._ddp_kwargs.get("broadcast_buffers") is not False:
+                raise ValueError("HVGSeuratV3 requires broadcast_buffers=False.")
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
+        """Implement the two-step Seurat v3 HVG method using hooks at the end of first and second epochs.
+        After epoch 0, reduce buffers and fit LOESS to set clip_val_bg and reg_std_bg.
+        After epoch 1, reduce buffers and compute hvg_df.
+        """
         if trainer.current_epoch == 0:
             self._finish_epoch0(trainer)
         elif trainer.current_epoch == 1:
@@ -288,19 +297,7 @@ class HVGSeuratV3(CellariumModel):
             if not_const.any():
                 x = np.log10(mean_g[not_const])
                 y = np.log10(var_g[not_const])
-                jitter = 0.0
-                max_jitter = 1e-6
-                while True:
-                    try:
-                        _x = x + np.random.default_rng(0).uniform(-jitter, jitter, x.shape[0]) if jitter > 0 else x
-                        model = skmisc.loess.loess(_x, y, span=self.span, degree=2)
-                        model.fit()
-                        estimated_var[not_const] = model.outputs.fitted_values
-                        break
-                    except ValueError:
-                        jitter = 1e-18 if jitter == 0 else jitter * 10
-                        if jitter > max_jitter:
-                            raise
+                estimated_var[not_const] = _fit_loess_with_jitter(x, y, span=self.span)
 
             reg_std = np.sqrt(10**estimated_var)  # shape (n_vars,)
             clip_val = reg_std * np.sqrt(N) + mean_g
@@ -314,7 +311,7 @@ class HVGSeuratV3(CellariumModel):
             dist.reduce(self.counts_sum_bg, dst=0, op=dist.ReduceOp.SUM)
             dist.reduce(self.sq_counts_sum_bg, dst=0, op=dist.ReduceOp.SUM)
 
-        # 2. Rank 0: compute norm_var, rank, select top genes, build DataFrame
+        # 2. Rank 0: compute norm_var, rank, select top genes, build DataFrame and optionally save to CSV
         if trainer.global_rank == 0:
             # Retrieve adata.var annotation columns to enrich the output DataFrame.
             var_df: pd.DataFrame | None = None
@@ -330,7 +327,7 @@ class HVGSeuratV3(CellariumModel):
                 )
             self.hvg_df = self._compute_hvg_df(var_df=var_df)
             if self.output_path is not None:
-                self._save(self.hvg_df)
+                self._save(df=self.hvg_df, output_path=self.output_path)
 
     def _compute_hvg_df(self, var_df: pd.DataFrame | None = None) -> pd.DataFrame:
         n_vars = self.n_vars
@@ -404,8 +401,7 @@ class HVGSeuratV3(CellariumModel):
 
         return df
 
-    def _save(self, df: pd.DataFrame) -> None:
-        assert self.output_path is not None
-        df.to_csv(self.output_path)
+    def _save(self, df: pd.DataFrame, output_path: str) -> None:
+        df.to_csv(output_path)
         hvg_df = df[df["highly_variable"]].sort_values("highly_variable_rank", ascending=True)
-        hvg_df.to_csv(self.output_path.replace(".csv", "__hvg_only.csv"), index=True, header=True)
+        hvg_df.to_csv(output_path.replace(".csv", "__hvg_only.csv"), index=True, header=True)

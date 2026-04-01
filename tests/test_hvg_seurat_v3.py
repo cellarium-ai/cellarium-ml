@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -12,6 +13,7 @@ import torch
 from cellarium.ml import CellariumModule
 from cellarium.ml.cli import main
 from cellarium.ml.models import HVGSeuratV3
+from cellarium.ml.models.hvg_seurat_v3 import _fit_loess_with_jitter
 from cellarium.ml.utilities.data import collate_fn
 
 N_TOP_GENES = 200
@@ -70,7 +72,7 @@ def _run_model(
     batch_key: str | None,
     output_path: str,
     batch_size: int = 512,
-    flavor: str = "seurat_v3",
+    flavor: Literal["seurat_v3", "seurat_v3_paper"] = "seurat_v3",
 ) -> HVGSeuratV3:
     """Instantiate, fit (2 epochs), and return the HVGSeuratV3 model."""
     model = HVGSeuratV3(
@@ -288,6 +290,37 @@ def test_hvg_seurat_v3_invalid_batch_clip_not_zero():
     assert not (model.clip_val_bg[0] == float("inf")).any()
 
 
+def test_fit_loess_with_jitter_jitter_recovery():
+    """
+    Verify that _fit_loess_with_jitter retries with increasing jitter when LOESS
+    fails on the first attempt.
+
+    All-zeros x causes a rank-deficient design matrix that skmisc.loess rejects.
+    The retry loop must add enough jitter to create numerical spread and eventually
+    return a fitted-values array of the correct shape.
+    """
+    n = 50
+    x = np.zeros(n)
+    y = np.linspace(1.0, 2.0, n)
+    result = _fit_loess_with_jitter(x, y, span=0.5)  # default max_jitter=1e-6
+    assert result.shape == (n,), f"Expected shape ({n},), got {result.shape}"
+
+
+def test_fit_loess_with_jitter_raises_on_exhaustion():
+    """
+    Verify that _fit_loess_with_jitter raises ValueError when jitter is capped
+    at a value so small that LOESS never succeeds.
+
+    Setting max_jitter=0.0 means: the while loop runs once (0.0 <= 0.0), the
+    first attempt fails on all-zeros x, jitter is then set to initial_jitter
+    which exceeds max_jitter, so the loop exits and ValueError is raised.
+    """
+    x = np.zeros(50)
+    y = np.linspace(1.0, 2.0, 50)
+    with pytest.raises(ValueError, match="LOESS fit failed"):
+        _fit_loess_with_jitter(x, y, span=0.5, max_jitter=0.0)
+
+
 def test_hvg_seurat_v3_invalid_batch_excluded_from_ranking():
     """
     Regression test: a batch with N < 2 must not contribute to
@@ -344,7 +377,7 @@ def test_hvg_seurat_v3_paper_matches_scanpy(tmp_path):
     """
     import scanpy as sc
 
-    flavor = "seurat_v3_paper"
+    flavor: Literal["seurat_v3", "seurat_v3_paper"] = "seurat_v3_paper"
     adata, batch_col = _load_adata()
     x = _to_dense(adata.X)
     var_names = np.asarray(adata.var_names)
