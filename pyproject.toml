@@ -32,6 +32,7 @@ dependencies = [
   "numpy<=1.26.4",
   "pyro-ppl>=1.9.1",
   "pytest",
+  "scikit-misc==0.5.1",
   "torch>=2.2.0",
   "transformers",
 ]
@@ -43,6 +44,7 @@ lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML"]
 test = [
   "pytest-xdist",
+  "scanpy",
   "tenacity",
   "tensorboard",
   "torchvision",
