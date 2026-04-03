@@ -201,14 +201,10 @@ def nmf_torch_update_loadings_hals_compiled(
         for k in range(h_rnk.shape[-1]):
             numer_rn = xwT_rnk[..., k] - torch.einsum("rnk,rk->rn", h_rnk, wwT_rkk[..., k])
             h_rn = h_rnk[..., k]
-            
+
             # Avoid division by zero using torch.where instead of manual checks
             denom = wwT_rkk[:, k, k].unsqueeze(-1)
-            hvec_rn = torch.where(
-                denom > 1e-12,
-                torch.clamp(h_rn + numer_rn / denom, min=0.0),
-                torch.zeros_like(h_rn)
-            )
+            hvec_rn = torch.where(denom > 1e-12, torch.clamp(h_rn + numer_rn / denom, min=0.0), torch.zeros_like(h_rn))
             h_rnk[..., k] = hvec_rn
 
     return h_rnk, max_iter
@@ -228,24 +224,22 @@ def nmf_torch_update_loadings_hals_with_compile(
     # Use smaller chunks of iterations with convergence checks
     chunk_size = 10
     total_iterations = 0
-    
+
     while total_iterations < max_iter:
         h_old = h_rnk.clone()
         current_chunk = min(chunk_size, max_iter - total_iterations)
-        
+
         # Run compiled function for a chunk of iterations
-        h_rnk_new, _ = nmf_torch_update_loadings_hals_compiled(
-            x_ng, w_rkg, h_rnk, current_chunk, h_tol
-        )
+        h_rnk_new, _ = nmf_torch_update_loadings_hals_compiled(x_ng, w_rkg, h_rnk, current_chunk, h_tol)
         h_rnk.copy_(h_rnk_new)
-        
+
         total_iterations += current_chunk
-        
+
         # Check convergence
         max_change = (h_rnk - h_old).abs().max()
         mean_h = h_rnk.mean(dim=(-2, -1))
-        relative_change = (max_change / torch.clamp(mean_h.max(), min=1e-12))
-        
+        relative_change = max_change / torch.clamp(mean_h.max(), min=1e-12)
+
         if relative_change < h_tol:
             # print(f"NMF HALS loadings update converged in {total_iterations} iterations.")
             break
@@ -325,13 +319,9 @@ def nmf_torch_update_factors_hals_compiled(
         for k in range(A_rkk.shape[-1]):
             numer_rg = B_rkg[:, k, :] - torch.einsum("rk,rkg->rg", A_rkk[:, k, :], w_rkg)
             w_new_rg = w_rkg[:, k, :] + numer_rg / A_rkk[:, k, k].unsqueeze(-1)
-            
+
             # Avoid division by zero using torch.where instead of manual checks
-            w_new_rg = torch.where(
-                torch.isnan(w_new_rg),
-                torch.zeros_like(w_new_rg),
-                torch.clamp(w_new_rg, min=0.0)
-            )
+            w_new_rg = torch.where(torch.isnan(w_new_rg), torch.zeros_like(w_new_rg), torch.clamp(w_new_rg, min=0.0))
             w_rkg[:, k, :] = w_new_rg
 
     return w_rkg, max_iter
@@ -351,24 +341,22 @@ def nmf_torch_update_factors_hals_with_compile(
     # Use smaller chunks of iterations with convergence checks
     chunk_size = 10
     total_iterations = 0
-    
+
     while total_iterations < max_iter:
         w_old = w_rkg.clone()
         current_chunk = min(chunk_size, max_iter - total_iterations)
-        
+
         # Run compiled function for a chunk of iterations
-        w_rkg_new, _ = nmf_torch_update_factors_hals_compiled(
-            w_rkg, A_rkk, B_rkg, current_chunk, w_tol
-        )
+        w_rkg_new, _ = nmf_torch_update_factors_hals_compiled(w_rkg, A_rkk, B_rkg, current_chunk, w_tol)
         w_rkg.copy_(w_rkg_new)
-        
+
         total_iterations += current_chunk
-        
+
         # Check convergence
         max_change = (w_rkg - w_old).abs().max()
         mean_w = w_rkg.mean(dim=(-2, -1))
-        relative_change = (max_change / torch.clamp(mean_w.max(), min=1e-12))
-        
+        relative_change = max_change / torch.clamp(mean_w.max(), min=1e-12)
+
         if relative_change < w_tol:
             # print(f"NMF HALS factors update converged in {total_iterations} iterations.")
             break
@@ -1087,27 +1075,23 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             for i, k in enumerate(self.k_values):
                 factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
                 loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
-                
+
                 # Compute reconstruction: WH for current batch using einsum
                 # loadings_rnk: (r, batch_size, k), factors_rkg: (r, k, g)
                 # -> reconstruction_rng: (r, batch_size, g)
                 reconstruction_rng = torch.einsum("rnk,rkg->rng", loadings_rnk, factors_rkg)
-                
+
                 # Compute squared reconstruction error using einsum
                 # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
                 x_expanded_rng = x_ng.unsqueeze(0).expand(self.r, -1, -1)  # (r, batch_size, g)
-                
+
                 # Compute squared Frobenius norm for each replicate
-                squared_error_r = F.mse_loss(
-                    x_expanded_rng, 
-                    reconstruction_rng, 
-                    reduction='none'
-                ).sum(dim=[1, 2])
+                squared_error_r = F.mse_loss(x_expanded_rng, reconstruction_rng, reduction="none").sum(dim=[1, 2])
                 # print(f"squared_error_r: {squared_error_r[:5]}")
-                
+
                 # Accumulate the squared error
                 self._err_running_sum_rk[:, i] += squared_error_r
-            
+
             # Track cells seen in this epoch
             self._cells_seen_in_epoch += x_ng.shape[0]
 
@@ -1150,9 +1134,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             assert isinstance(self._init_err_rk, torch.Tensor)
 
             current_overall_err_rk = torch.abs((self._prev_err_rk - cur_err_rk) / self._init_err_rk)
-            if (
-                current_overall_err_rk.max() < self._hals_tol
-            ):
+            if current_overall_err_rk.max() < self._hals_tol:
                 trainer.should_stop = True
                 print(f"Stopping early: converged, loss={cur_err_rk}")
 
