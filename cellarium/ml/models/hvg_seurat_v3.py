@@ -399,9 +399,10 @@ class HVGSeuratV3(CellariumModel):
             if len(extra_cols) > 0:
                 df = df.join(var_df[extra_cols], how="left")
 
+        df = df.iloc[sort_positions]  # reorder rows by rank
         return df
 
     def _save(self, df: pd.DataFrame, output_path: str) -> None:
         df.to_csv(output_path)
-        hvg_df = df[df["highly_variable"]].sort_values("highly_variable_rank", ascending=True)
+        hvg_df = df[df["highly_variable"]]
         hvg_df.to_csv(output_path.replace(".csv", "__hvg_only.csv"), index=True, header=True)
