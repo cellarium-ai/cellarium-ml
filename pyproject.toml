@@ -24,13 +24,15 @@ dependencies = [
   "anndata",
   "boltons",
   "braceexpand",
+  "cosine_annealing_warmup @ https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup/tarball/master#egg=cosine_annealing_warmupmatplotlib",
   "crick>=0.0.4",
   "google-cloud-storage",
   "jsonargparse[signatures]==4.27.7",
-  "lightning>=2.2.0",
+  "lightning>=2.2.0,<=2.5.2",
   "numpy<=1.26.4",
   "pyro-ppl>=1.9.1",
   "pytest",
+  "scikit-misc==0.5.1",
   "torch>=2.2.0",
   "transformers",
 ]
@@ -42,6 +44,7 @@ lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML"]
 test = [
   "pytest-xdist",
+  "scanpy",
   "tenacity",
   "tensorboard",
   "torchvision",
@@ -77,7 +80,7 @@ dev_template = "{tag}.post{ccount}"
 
 [tool.ruff]
 line-length = 120
-extend-include = ["*.ipynb"]
+extend-exclude = ["*.ipynb"]
 target-version = "py310"
 
 [tool.ruff.lint]

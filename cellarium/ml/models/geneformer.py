@@ -94,7 +94,7 @@ class Geneformer(CellariumModel, PredictMixin):
             "layer_norm_eps": layer_norm_eps,
             "pad_token_id": 0,
         }
-        self.config = BertConfig(**config)
+        self.config = BertConfig(**config)  # type: ignore[arg-type]
         self.bert = BertForMaskedLM(self.config)
         self.mlm_probability = mlm_probability
         self.feature_ids: torch.Tensor
