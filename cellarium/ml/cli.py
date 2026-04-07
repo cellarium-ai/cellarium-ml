@@ -124,8 +124,11 @@ class CheckpointLoader(FileLoader):
     convert_fn: Callable[[Any], Any] | str | None = None
 
     def __new__(cls, file_path, attr=None, key=None, convert_fn=None):
-        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, key, convert_fn)
+        return super().__new__(cls, file_path, _load_cellarium_module, attr, key, convert_fn)
 
+def _load_cellarium_module(path: str) -> CellariumModule:
+    """Wraps load_from_checkpoint, injecting weights_only=False, due to pytorch change in 2.4.0."""
+    return CellariumModule.load_from_checkpoint(path, weights_only=False)
 
 def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> FileLoader:
     """Construct an object from a file."""

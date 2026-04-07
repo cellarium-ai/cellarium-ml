@@ -28,7 +28,7 @@ dependencies = [
   "crick>=0.0.4",
   "google-cloud-storage",
   "jsonargparse[signatures]>=4.28.0",
-  "lightning>=2.2.0,<=2.5.2",
+  "lightning>=2.2.0",
   "numpy<=1.26.4",
   "pyro-ppl>=1.9.1",
   "pytest",
