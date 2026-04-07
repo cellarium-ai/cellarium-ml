@@ -110,6 +110,12 @@ class ImputationModel(SingleCellVariationalInference):
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
+        if self.use_size_factor_key:
+            assert total_mrna_umis_n is not None, "total_mrna_umis_n must be provided when use_size_factor_key=True"
+            library_size_n1 = torch.log(total_mrna_umis_n).unsqueeze(-1)
+        else:
+            library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
+
         inference_outputs = self.inference(
             x_ng=x_masked_ng,
             batch_nb=batch_nb,
@@ -118,7 +124,7 @@ class ImputationModel(SingleCellVariationalInference):
         )
         generative_outputs = self.generative(
             z_nk=inference_outputs["z"],
-            library_size_n1=inference_outputs["library_size_n1"],
+            library_size_n1=library_size_n1,
             batch_nb=batch_nb,
             continuous_covariates_nc=continuous_covariates_nc,
             categorical_covariate_np=categorical_covariate_np,

@@ -764,6 +764,49 @@ def scvi(args: ArgsType = None) -> None:
 
 
 @register_model
+def imputation_scvi(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.ImputationModel` model.
+
+    This example shows how to fit feature count data to the imputation-based scVI model [1].
+
+    Example run::
+
+        cellarium-ml imputation_scvi fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 5 \
+            --data.num_workers 1 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/imputation_scvi \
+            --trainer.max_steps 10
+
+    **References:**
+
+    1. `Deep generative modeling for single-cell transcriptomics (Lopez et al.)
+       <https://www.nature.com/articles/s41592-018-0229-2>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.ImputationModel",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+            LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
 def tdigest(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.TDigest` model.
