@@ -19,7 +19,7 @@ import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
-from jsonargparse._loaders_dumpers import DefaultLoader
+from jsonargparse._loaders_dumpers import get_yaml_default_loader
 from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -137,7 +137,7 @@ def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.Mapp
     return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
 
 
-loader = DefaultLoader
+loader = get_yaml_default_loader()
 loader.add_constructor("!FileLoader", file_loader_constructor)
 loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
 
