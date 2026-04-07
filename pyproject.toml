@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Machine learning library for single-cell data analysis"
 readme = "README.rst"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {file = "LICENSE.md"}
 classifiers = [
   "Intended Audience :: Developers",
@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "anndata",
+  "anndata>=0.12.4",
   "boltons",
   "braceexpand",
   "cosine_annealing_warmup @ https://github.com/katsura-jp/pytorch-cosine-annealing-with-warmup/tarball/master#egg=cosine_annealing_warmupmatplotlib",
