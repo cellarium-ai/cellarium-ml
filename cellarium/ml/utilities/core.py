@@ -87,7 +87,7 @@ def train_val_split(n_samples: int, train_size: float | int | None, val_size: fl
             assert_nonnegative("val_size", val_size)
             n_val = val_size
         elif isinstance(val_size, float):
-            if val_size < 0.0 or val_size >= 1.0:
+            if val_size < 0.0 or val_size > 1.0:
                 raise ValueError(f"If validation size is a float it should be 0.0 <= val_size < 1.0. Got {val_size}")
             n_val = math.ceil(n_samples * val_size)
         n_train = n_samples - n_val

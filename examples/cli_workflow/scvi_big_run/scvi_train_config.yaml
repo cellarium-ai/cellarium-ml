@@ -125,7 +125,6 @@ model:
       use_batch_norm: both
       use_layer_norm: none
       use_size_factor_key: false
-      use_observed_lib_size: true
   optim_fn: torch.optim.AdamW
   optim_kwargs: 
     lr: 1e-4

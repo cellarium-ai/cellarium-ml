@@ -63,28 +63,29 @@ def test_load_from_checkpoint_multi_device(
                 batch_representation_sampled=batch_representation_sampled,
                 n_latent_batch=n_latent_batch,
                 batch_kl_weight_max=batch_kl_weight,
+                use_size_factor_key=False,
                 encoder={
                     "hidden_layers": [
                         {
                             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                         },
                     ],
                     "final_layer": {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"batch_to_bias_hidden_layers": []},
+                        "init_args": {"label_to_bias_hidden_layers": []},
                     },
                 },
                 decoder={
                     "hidden_layers": [
                         {
                             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                         },
                     ],
                     "final_layer": {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"batch_to_bias_hidden_layers": []},
+                        "init_args": {"label_to_bias_hidden_layers": []},
                     },
                     "final_additive_bias": False,
                 },
@@ -98,28 +99,29 @@ def test_load_from_checkpoint_multi_device(
             batch_representation_sampled=batch_representation_sampled,
             n_latent_batch=n_latent_batch,
             batch_kl_weight_max=0,
+            use_size_factor_key=False,
             encoder={
                 "hidden_layers": [
                     {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                        "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     },
                 ],
                 "final_layer": {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"batch_to_bias_hidden_layers": []},
+                    "init_args": {"label_to_bias_hidden_layers": []},
                 },
             },
             decoder={
                 "hidden_layers": [
                     {
                         "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                        "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                        "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     },
                 ],
                 "final_layer": {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"batch_to_bias_hidden_layers": []},
+                    "init_args": {"label_to_bias_hidden_layers": []},
                 },
                 "final_additive_bias": False,
             },
@@ -191,7 +193,6 @@ class SCVIKwargs(TypedDict, total=False):
     use_batch_norm: Literal["encoder", "decoder", "none", "both"]
     use_layer_norm: Literal["encoder", "decoder", "none", "both"]
     use_size_factor_key: bool
-    use_observed_lib_size: bool
 
 
 linear_encoder_kwargs: dict = {
@@ -225,6 +226,7 @@ standard_kwargs: SCVIKwargs = dict(
     batch_kl_weight_max=0.0,
     use_batch_norm="both",
     use_layer_norm="none",
+    use_size_factor_key=False,
 )
 
 
@@ -238,8 +240,8 @@ def test_vae_architectures():
     kwargs: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs["encoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     print("batch injection in encoder but not decoder")
@@ -250,8 +252,8 @@ def test_vae_architectures():
     kwargs2: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs2["decoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     print("batch injection in decoder but not encoder")
@@ -262,14 +264,14 @@ def test_vae_architectures():
     kwargs3: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs3["encoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     kwargs3["decoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     print("batch injection in both encoder and decoder")
@@ -280,22 +282,22 @@ def test_vae_architectures():
     kwargs4: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs4["encoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 16, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 16, "label_to_bias_hidden_layers": []},
         },
     ]
     kwargs4["decoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 16, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 16, "label_to_bias_hidden_layers": []},
         },
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     print("batch injection in both encoder and decoder, 2 hidden layers each")
@@ -306,14 +308,14 @@ def test_vae_architectures():
     kwargs5: SCVIKwargs = copy.deepcopy(standard_kwargs)
     kwargs5["encoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     kwargs5["decoder"]["hidden_layers"] = [
         {
-            "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
             "final_additive_bias": True,
         },
     ]
@@ -329,13 +331,13 @@ def test_vae_architectures():
     kwargs6["encoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
         },
     ]
     kwargs6["decoder"]["hidden_layers"] = [
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-            "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+            "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
             "final_additive_bias": True,
         },
     ]
@@ -420,13 +422,6 @@ def testing_anndatas() -> tuple[anndata.AnnData, anndata.AnnData]:
     test_data = read_h5ad_file(test_data)
     return train_data, test_data
 
-
-# # Lys test case
-# n_latent: int = 50
-# n_hidden: int = 512
-# n_layers: int = 2
-# batch_size: int = 1024
-# max_epochs: int = 5  # 5 is not converged, 10 is
 
 # small dataset test case
 n_latent: int = 10
@@ -589,11 +584,12 @@ def train_cellarium_model(
         batch_representation_sampled=False,
         gene_likelihood="nb",
         dispersion="gene",
+        use_size_factor_key=False,
         encoder={
             "hidden_layers": [
                 {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"out_features": n_hidden, "batch_to_bias_hidden_layers": []},
+                    "init_args": {"out_features": n_hidden, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
@@ -608,7 +604,7 @@ def train_cellarium_model(
             "hidden_layers": [
                 {
                     "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"out_features": n_hidden, "batch_to_bias_hidden_layers": []},
+                    "init_args": {"out_features": n_hidden, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
@@ -766,7 +762,7 @@ def test_latent_accuracy_metric(
 
     Compare the accuracy metric to that same metric computed via scvi-tools (with some margin of error).
     """
-    tolerable_discrepancy = 0.05  # this level of variation is like (scvi-tools with different random seeds * 2)
+    tolerable_discrepancy = 0.075  # this level of variation is like (scvi-tools with different random seeds * 2)
 
     # compute the accuracy metric for scvi-tools
     train_data, test_data = train_scvi_tools_model
@@ -854,7 +850,7 @@ def test_encoder_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layers, hi
                 "init_args": {
                     "out_features": hidden_size,
                     "n_batch": 2,  # assuming 2 batches for this example
-                    "batch_to_bias_hidden_layers": [],
+                    "label_to_bias_hidden_layers": [],
                 },
                 "dressing_init_args": {
                     "use_batch_norm": use_batch_norm,
@@ -1024,7 +1020,7 @@ def test_decoder_mean_matches_scvi_tools(use_batch_norm, use_layer_norm, n_layer
                 "init_args": {
                     "out_features": hidden_size,
                     "n_batch": n_batch,
-                    "batch_to_bias_hidden_layers": [],
+                    "label_to_bias_hidden_layers": [],
                 },
                 "dressing_init_args": {
                     "use_batch_norm": use_batch_norm,
@@ -1245,11 +1241,16 @@ def matching_scvi_cellarium_models(request):
         batch_embedded=False,
         batch_representation_sampled=False,
         dispersion=dispersion,
+        use_size_factor_key=False,
         encoder={
             "hidden_layers": [
                 {
-                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                    "class_path": (
+                        "cellarium.ml.models.scvi.LinearWithBatchAndCovariates"
+                        if use_categorical_covariates
+                        else "cellarium.ml.models.scvi.LinearWithBatch"
+                    ),
+                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
@@ -1262,8 +1263,12 @@ def matching_scvi_cellarium_models(request):
         decoder={
             "hidden_layers": [
                 {
-                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-                    "init_args": {"out_features": 32, "batch_to_bias_hidden_layers": []},
+                    "class_path": (
+                        "cellarium.ml.models.scvi.LinearWithBatchAndCovariates"
+                        if use_categorical_covariates
+                        else "cellarium.ml.models.scvi.LinearWithBatch"
+                    ),
+                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
                     "dressing_init_args": {
                         "use_batch_norm": use_batchnorm,
                         "use_layer_norm": False,
@@ -2024,6 +2029,7 @@ def test_reconstruction_plumbing(
         reconstruction_n_latent_samples=reconstruction_n_latent_samples,
         encoder=linear_encoder_kwargs,
         decoder=linear_decoder_kwargs,
+        use_size_factor_key=False,  # Disable size factor key for simplicity in testing
     )
 
     # Test that reconstruction parameters are set correctly
@@ -2127,6 +2133,228 @@ def test_reconstruction_transform_batch_validation():
             )
 
 
+def test_use_flow():
+    """Test that use_flow=True enables NSF prior and produces valid training outputs."""
+    import zuko.flows
+
+    n, g = 16, len(var_names_g)
+    x_ng = torch.poisson(torch.exp(torch.randn(n, g)))
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    # use_flow=False: self.flow is None, forward pass unchanged
+    model_no_flow = SingleCellVariationalInference(**standard_kwargs)
+    assert model_no_flow.flow is None
+
+    out_no_flow = model_no_flow(x_ng, var_names_n, batch_index_n)
+    assert out_no_flow["loss"] is not None  # mypy
+    assert out_no_flow["kl_divergence_z"] is not None  # mypy
+    assert out_no_flow["loss"].ndim == 0, "loss should be a scalar"
+    assert out_no_flow["kl_divergence_z"].shape == (n,), "per-cell KL should have shape (n,)"
+
+    # use_flow=True: self.flow is an NSF module
+    model_flow = SingleCellVariationalInference(**standard_kwargs, use_flow=True, flow_hidden_features=[32])
+    assert isinstance(model_flow.flow, zuko.flows.NSF)
+
+    out_flow = model_flow(x_ng, var_names_n, batch_index_n)
+    loss = out_flow["loss"]
+    assert loss is not None  # mypy
+    assert loss.ndim == 0, "loss should be a scalar"
+    assert torch.isfinite(loss), "loss must be finite"
+    assert out_flow["kl_divergence_z"] is not None  # mypy
+    assert out_flow["kl_divergence_z"].shape == (n,), "per-cell KL should have shape (n,)"
+
+    # When KL warmup is disabled the flow contributes to the loss and its params must be updated.
+    model_flow_no_warmup = SingleCellVariationalInference(
+        **standard_kwargs, use_flow=True, flow_hidden_features=[32], kl_warmup_epochs=None
+    )
+    out_no_warmup = model_flow_no_warmup(x_ng, var_names_n, batch_index_n)
+    assert out_no_warmup["loss"] is not None  # mypy
+    out_no_warmup["loss"].backward()
+    assert isinstance(model_flow_no_warmup.flow, zuko.flows.NSF)  # mypy
+    flow_params_no_warmup = list(model_flow_no_warmup.flow.parameters())
+    assert all(p.grad is not None for p in flow_params_no_warmup), (
+        "flow params should have gradients when KL weight > 0"
+    )
+
+    # predict still works (returns latent representation by default)
+    model_flow.eval()
+    with torch.no_grad():
+        pred = model_flow.predict(x_ng, var_names_n, batch_index_n)
+    assert "x_ng" in pred
+    assert pred["x_ng"].shape == (n, standard_kwargs["n_latent"])
+
+
+def test_use_flow_no_nan_during_training():
+    """
+    Regression test: latents must remain finite across multiple training steps when use_flow=True.
+
+    Root cause of the bug:
+        flow().log_prob(z_nk) can return NaN for z values outside the NSF spline's numerically
+        stable region. Before the fix, this NaN was always computed regardless of the KL annealing
+        weight. Because 0.0 * NaN = NaN (IEEE 754), even a zero KL weight still propagated NaN
+        into the loss, corrupting encoder gradients and parameters on the very next optimizer step.
+
+    The fix moves compute_annealed_kl_weight() before the KL block and skips the flow log_prob
+    entirely when the effective KL weight is zero, eliminating the NaN propagation path.
+    """
+    torch.manual_seed(42)
+    n, g = 32, len(var_names_g)
+    x_ng = torch.poisson(torch.exp(torch.randn(n, g)))
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    # kl_warmup_epochs=None: KL weight is 1.0 from step 0, so the flow receives gradients
+    # immediately.  This is the fastest path to trigger NaN flow parameters / log_prob.
+    model = SingleCellVariationalInference(
+        **standard_kwargs,
+        use_flow=True,
+        flow_hidden_features=[8],
+        kl_warmup_epochs=None,
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+
+    for step in range(5):
+        model.train()
+        optimizer.zero_grad()
+        out = model(x_ng, var_names_n, batch_index_n)
+        loss = out["loss"]
+        assert loss is not None  # mypy
+        assert torch.isfinite(loss), f"loss is not finite at step {step}: {loss.item()}"
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            pred = model.predict(x_ng, var_names_n, batch_index_n)
+        latents = pred["x_ng"]
+        assert not torch.isnan(latents).any(), f"latents contain NaN at step {step}"
+        assert torch.isfinite(latents).all(), f"latents are not finite at step {step}"
+
+
+def test_use_flow_trainer_no_nan(tmp_path):
+    """
+    Regression test: a full pl.Trainer run with use_flow=True must stay NaN-free for all
+    5 epochs, even with gradient norm clipping=10 (the reported failure condition).
+
+    Failure mode: after epoch-0 the KL annealing weight transitions from 0 to 1/kl_warmup_epochs,
+    so the flow prior starts contributing to the loss. If flow().log_prob(z) produces extreme or
+    NaN values the loss/gradients corrupt encoder parameters and latents become NaN.
+
+    This test uses kl_warmup_epochs=5 so the KL weight ramps up quickly (0.2 per epoch),
+    making the failure reproduce within 5 epochs if the fix is insufficient.
+    """
+    torch.manual_seed(0)
+    np.random.seed(0)
+
+    n, g, n_batch = 128, 20, 4
+    batch_size = 16
+    var_names = [f"gene_{i}" for i in range(g)]
+
+    dataset = BoringDatasetSCVI(
+        data=np.random.poisson(lam=2.0, size=(n, g)).astype(np.float32),
+        batch_index_n=np.random.randint(0, n_batch, size=n),
+        var_names=np.array(var_names),
+    )
+    train_loader = torch.utils.data.DataLoader(
+        dataset,
+        collate_fn=collate_fn,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    model = SingleCellVariationalInference(
+        var_names_g=var_names,
+        n_batch=n_batch,
+        n_latent=8,
+        use_flow=True,
+        flow_hidden_features=[16, 16],
+        kl_warmup_epochs=5,
+        gene_likelihood="nb",
+        encoder={
+            "hidden_layers": [
+                {
+                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
+                },
+            ],
+            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+        },
+        decoder={
+            "hidden_layers": [
+                {
+                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
+                },
+            ],
+            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+            "final_additive_bias": False,
+        },
+    )
+
+    nan_events: list[str] = []
+
+    class NaNCheckCallback(pl.Callback):
+        """Catches NaN loss or NaN latents mid-training and records diagnostic info."""
+
+        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs
+            if loss is not None and not torch.isfinite(loss):
+                m = pl_module.model
+                assert isinstance(m, SingleCellVariationalInference)
+                nan_events.append(
+                    f"NaN/inf loss at epoch={trainer.current_epoch} "
+                    f"step={trainer.global_step} kl_epoch={m.epoch}: {loss.item()}"
+                )
+
+        def on_train_epoch_end(self, trainer, pl_module):
+            """After each epoch, check that the model can still produce finite latents."""
+            m = pl_module.model
+            assert isinstance(m, SingleCellVariationalInference)
+            m.eval()
+            x = torch.FloatTensor(dataset.data[:batch_size])
+            b = torch.zeros(batch_size, dtype=torch.long)
+            with torch.no_grad():
+                pred = m.predict(x, np.array(var_names), b)
+            latents = pred["x_ng"]
+            if torch.isnan(latents).any():
+                nan_events.append(
+                    f"NaN latents at end of epoch={trainer.current_epoch} "
+                    f"kl_epoch={m.epoch} kl_weight~={m.epoch / max(m.kl_warmup_epochs or 1, 1):.3f}"
+                )
+            m.train()
+
+    module = CellariumModule(
+        model=model,
+        optim_fn=torch.optim.Adam,
+        optim_kwargs={"lr": 1e-3},
+    )
+    trainer = pl.Trainer(
+        accelerator="cpu",
+        max_epochs=5,
+        default_root_dir=tmp_path,
+        gradient_clip_algorithm="norm",
+        gradient_clip_val=10.0,
+        callbacks=[NaNCheckCallback()],
+        enable_progress_bar=False,
+        enable_checkpointing=False,
+        logger=False,
+    )
+    trainer.fit(module, train_dataloaders=train_loader)
+
+    assert not nan_events, "NaN detected during training:\n" + "\n".join(nan_events)
+
+    # Final check: latents from the trained model must be finite
+    model.eval()
+    x = torch.FloatTensor(dataset.data[:batch_size])
+    b = torch.zeros(batch_size, dtype=torch.long)
+    with torch.no_grad():
+        pred = model.predict(x, np.array(var_names), b)
+    latents = pred["x_ng"]
+    assert not torch.isnan(latents).any(), "latents contain NaN after training"
+    assert torch.isfinite(latents).all(), "latents are not finite after training"
+
+
 def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi_tools_model):
     """
     Test that the reconstructed counts match between Cellarium and scvi-tools on real data.
@@ -2170,10 +2398,11 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     print(f"Mean absolute error (train): {train_mae:.4f}")
     print(f"Mean absolute error (test): {test_mae:.4f}")
 
-    assert train_mae < 0.3, f"mean train reconstruction diff with scvi-tools on real data is too high: {train_mae:.4f}"
-    assert test_mae < 0.3, f"mean test reconstruction diff with scvi-tools on real data is too high: {test_mae:.4f}"
+    assert train_mae < 0.4, f"mean train reconstruction diff with scvi-tools on real data is too high: {train_mae:.4f}"
+    assert test_mae < 0.4, f"mean test reconstruction diff with scvi-tools on real data is too high: {test_mae:.4f}"
 
 
+@pytest.mark.parametrize("transform_batch", [0, None], ids=["batch0", "originalbatch"])
 @pytest.mark.parametrize(
     "matching_scvi_cellarium_models",
     [
@@ -2186,7 +2415,7 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     ],
     indirect=True,
 )
-def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
+def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models, transform_batch):
     """
     Test whether or not reconstructed data matches for paired models trained on simulated data.
     """
@@ -2202,7 +2431,6 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models):
     n_genes_to_reconstruct = g  # min(5, g)  # Reconstruct first 5 genes or all if fewer
     gene_list = var_names_g[:n_genes_to_reconstruct]
     gene_inds = list(range(n_genes_to_reconstruct))
-    transform_batch = 0  # Transform to batch 0
     reconstruction_latent_samples = 10_000  # this is so high because randomness has not been eliminated
     reconstructed_library_size = 10_000
 

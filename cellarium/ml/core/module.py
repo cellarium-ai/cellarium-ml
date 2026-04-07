@@ -421,6 +421,10 @@ class CellariumModule(pl.LightningModule):
             if callable(set_epoch):
                 set_epoch(self.current_epoch)
 
+        on_train_epoch_start = getattr(self.model, "on_train_epoch_start", None)
+        if callable(on_train_epoch_start):
+            on_train_epoch_start(self.trainer)
+
     def on_train_start(self) -> None:
         """
         Calls the ``on_train_start`` method on the :attr:`model` attribute.
