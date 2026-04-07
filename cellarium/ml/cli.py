@@ -222,31 +222,6 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     return field(adata)
 
 
-def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
-    """
-    Compute the number of categories in batch_index_n.
-
-    .. note::
-
-            If batch_index_n is comprised of multiple keys, the number of categories is computed
-            as the product of the number of categories in each key.
-
-    Args:
-        data: A :class:`CellariumAnnDataDataModule` instance.
-
-    Returns:
-        The number of categories in batch_index_n.
-    """
-    field = data.batch_keys["batch_index_n"]
-    assert isinstance(field, AnnDataField)
-    obs = getattr(data.dadc[0], field.attr)
-    x = obs[field.key]
-    if isinstance(x, pd.DataFrame):
-        return int(x.apply(lambda col: len(col.cat.categories)).product())
-    else:
-        return len(x.cat.categories)
-
-
 def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
     """Extract the number of unique categories in each covariate in the "categorical_covariate_index_nd" batch_key.
 

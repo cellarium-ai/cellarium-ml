@@ -1,15 +1,16 @@
-"""Imputation model for missing genes in single-cell RNA-seq data."""
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
 
-from cellarium.ml.models.scvi import SingleCellVariationalInference
-import numpy as np
-import torch
-from torch.distributions import kl_divergence as kl
-from torch.distributions import Normal
+"""Imputation model for missing genes in single-cell RNA-seq data."""
 
 import logging
 
-from cellarium.ml.models.scvi import compute_annealed_kl_weight
+import numpy as np
+import torch
+from torch.distributions import Normal
+from torch.distributions import kl_divergence as kl
 
+from cellarium.ml.models.scvi import SingleCellVariationalInference, compute_annealed_kl_weight
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -27,7 +28,6 @@ class ImputationModel(SingleCellVariationalInference):
     """
 
     def __init__(self, *args, **kwargs):
-
         self.masking_probability = kwargs.pop("masking_probability", 0.5)
         self.noise2self_ratio = kwargs.pop("noise2self_ratio", 0.5)
 
@@ -35,11 +35,11 @@ class ImputationModel(SingleCellVariationalInference):
 
     def create_gene_mask(self, n_genes: int, device: torch.device) -> torch.Tensor:
         """Create a random gene mask for imputation.
-        
+
         Args:
             n_genes: Number of genes in the dataset
             device: Device to create the mask on
-            
+
         Returns:
             Boolean tensor of shape (n_genes,) where True indicates genes to be masked
         """
@@ -54,18 +54,18 @@ class ImputationModel(SingleCellVariationalInference):
 
     def apply_gene_mask(self, x_ng: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Apply gene mask to expression data.
-        
+
         Args:
             x_ng: Gene expression data of shape (n_cells, n_genes)
             mask: Boolean mask of shape (n_genes,) where True indicates genes to mask
-            
+
         Returns:
             Masked gene expression data with masked genes set to 0
         """
         x_masked_ng = x_ng.clone()
         x_masked_ng[:, mask] = 0.0
         return x_masked_ng
-        
+
     def forward(
         self,
         x_ng: torch.Tensor,
@@ -73,7 +73,7 @@ class ImputationModel(SingleCellVariationalInference):
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-        size_factor_n1: torch.Tensor | None = None,
+        total_mrna_umis_n: torch.Tensor | None = None,
     ):
         """
         Put data through the VAE, but use a noise2self loss, where we compute a randomized mask for each minibatch
@@ -90,8 +90,8 @@ class ImputationModel(SingleCellVariationalInference):
                 Continuous covariates for each cell (c-dimensional).
             categorical_covariate_index_nd:
                 Categorical covariates for each cell (d-dimensional). Integer membership categorical codes.
-            size_factor_n1:
-                Library size factor for each cell.
+            total_mrna_umis_n:
+                Total mRNA UMIs for each cell (not used here, but included for compatibility with the parent class).
 
         Returns:
             A dictionary with keys:
@@ -122,7 +122,6 @@ class ImputationModel(SingleCellVariationalInference):
             batch_nb=batch_nb,
             continuous_covariates_nc=continuous_covariates_nc,
             categorical_covariate_np=categorical_covariate_np,
-            size_factor_n1=size_factor_n1,
         )
 
         # KL divergence for z
@@ -149,12 +148,10 @@ class ImputationModel(SingleCellVariationalInference):
         )
 
         # compute the regular scvi reconstruction loss
-        rec_loss_n = -generative_outputs["px"].log_prob(x_ng)[
-            :, ~logical_mask_g].sum(-1)
+        rec_loss_n = -generative_outputs["px"].log_prob(x_ng)[:, ~logical_mask_g].sum(-1)
 
         # apply the noise2self mask when computing the reconstruction loss
-        noise2self_rec_loss_n = -generative_outputs["px"].log_prob(x_ng)[
-            :, logical_mask_g].sum(-1) 
+        noise2self_rec_loss_n = -generative_outputs["px"].log_prob(x_ng)[:, logical_mask_g].sum(-1)
 
         # full loss
         assert kl_annealing_weight >= 0.0 and kl_annealing_weight <= 1.0, (
