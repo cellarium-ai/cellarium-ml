@@ -137,7 +137,7 @@ def test_init_shard_size(adatas_path: Path, num_shards: int, last_shard_size: in
 
 @pytest.mark.parametrize(
     "row_select",
-    [(slice(0, 2), 1), (slice(1, 4), 2), ([1, 2, 3, 4], 2), ([6, 1, 3], 3)],
+    [(slice(0, 2), 1), (slice(1, 4), 2), ([1, 2, 4, 4], 2), ([6, 1, 3], 3)],
     ids=["one adata", "two adatas", "sorted two adatas", "unsorted three adatas"],
 )
 @pytest.mark.parametrize("vidx", [slice(0, 2), [3, 1, 0]])
@@ -186,7 +186,7 @@ def test_pickle(dat: DistributedAnnDataCollection):
 
 @pytest.mark.parametrize(
     "row_select",
-    [(slice(0, 2), 1), (slice(1, 4), 2), ([1, 2, 3, 4], 2), ([6, 1, 3], 3)],
+    [(slice(0, 2), 1), (slice(1, 4), 2), ([1, 2, 4, 4], 2), ([6, 1, 3], 3)],
     ids=["one adata", "two adatas", "sorted two adatas", "unsorted three adatas"],
 )
 def test_indexing_dataset(
