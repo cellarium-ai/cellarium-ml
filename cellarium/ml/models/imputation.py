@@ -33,6 +33,7 @@ class ImputationModel(SingleCellVariationalInference):
 
         super().__init__(*args, **kwargs)
 
+    @torch.no_grad()
     def create_gene_mask(self, n_genes: int, device: torch.device) -> torch.Tensor:
         """Create a random gene mask for imputation.
 
@@ -45,26 +46,21 @@ class ImputationModel(SingleCellVariationalInference):
         """
         # Create random tensor for gene selection
         random_tensor_g = torch.rand(n_genes, device=device)
-        # Select indices of genes to mask based on masking probability
-        mask_inds_i = torch.argsort(random_tensor_g)[: int(self.masking_probability * n_genes)].long()
-        # Create logical mask
-        logical_mask_g = torch.zeros(n_genes, device=device).bool()
-        logical_mask_g[mask_inds_i] = True
+        logical_mask_g = random_tensor_g < self.masking_probability
         return logical_mask_g
 
-    def apply_gene_mask(self, x_ng: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    @torch.no_grad()
+    def apply_gene_mask(self, x_ng: torch.Tensor, mask_g: torch.Tensor) -> torch.Tensor:
         """Apply gene mask to expression data.
 
         Args:
             x_ng: Gene expression data of shape (n_cells, n_genes)
-            mask: Boolean mask of shape (n_genes,) where True indicates genes to mask
+            mask_g: Boolean mask of shape (n_genes,) where True indicates genes to mask
 
         Returns:
             Masked gene expression data with masked genes set to 0
         """
-        x_masked_ng = x_ng.clone()
-        x_masked_ng[:, mask] = 0.0
-        return x_masked_ng
+        return x_ng * mask_g.unsqueeze(0)
 
     def forward(
         self,
