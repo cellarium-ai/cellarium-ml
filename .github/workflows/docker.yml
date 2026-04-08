@@ -3,6 +3,11 @@ name: Build and Push Docker Image
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Git tag to build (e.g. v1.2.3)"
+        required: true
 
 jobs:
   docker:
@@ -34,7 +39,7 @@ jobs:
         context: .
         file: ./Dockerfile
         push: true
-        build-args: VERSION=${{ github.ref_name }}
+        build-args: VERSION=${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
         tags: |
           us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ github.ref_name }}
           us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
