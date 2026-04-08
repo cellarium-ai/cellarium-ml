@@ -54,6 +54,7 @@ jobs:
         context: .
         file: ./Dockerfile
         push: true
+        platforms: linux/amd64
         build-args: VERSION=${{ steps.version.outputs.value }}
         tags: |
           us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
