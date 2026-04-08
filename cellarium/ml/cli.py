@@ -17,7 +17,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
-from transformers import pipeline
 import yaml
 from jsonargparse import Namespace, class_from_function
 from jsonargparse._loaders_dumpers import get_yaml_default_loader
@@ -348,9 +347,10 @@ def lightning_cli_factory(
             parser = super()._prepare_subcommand_parser(klass, subcommand, **kwargs)
             parser.set_defaults({"weights_only": False})
             return parser
-        
+
         def _parse_ckpt_path(self) -> None:
             from pathlib import Path
+
             if not self.config.get("subcommand"):
                 return
             ckpt_path = self.config[self.config.subcommand].get("ckpt_path")
@@ -370,6 +370,7 @@ def lightning_cli_factory(
                     self.config = self.parser.parse_object(hparams, self.config)
                 except SystemExit:
                     import sys
+
                     sys.stderr.write("Parsing of ckpt_path hyperparameters failed!\n")
                     raise
 
