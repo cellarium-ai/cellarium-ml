@@ -10,4 +10,3 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/* \
  && pip install git+https://github.com/cellarium-ai/cellarium-ml@${VERSION} \
  && rm -rf ~/.cache/pip
- 
