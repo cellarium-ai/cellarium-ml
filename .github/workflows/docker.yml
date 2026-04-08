@@ -17,7 +17,22 @@ jobs:
       id-token: write  # required for Workload Identity Federation
 
     steps:
+    - name: Resolve version
+      id: version
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "value=${{ inputs.version }}" >> $GITHUB_OUTPUT
+        else
+          echo "value=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+
     - name: Authenticate to Google Cloud
+      id: auth
       uses: google-github-actions/auth@v2
       with:
         workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -39,7 +54,7 @@ jobs:
         context: .
         file: ./Dockerfile
         push: true
-        build-args: VERSION=${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        build-args: VERSION=${{ steps.version.outputs.value }}
         tags: |
-          us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ github.ref_name }}
+          us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
           us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
