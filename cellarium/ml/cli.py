@@ -340,6 +340,12 @@ def lightning_cli_factory(
             # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
             pass
 
+        def _prepare_subcommand_parser(self, klass, subcommand, **kwargs):
+            """Override the default checkpoint loading with weights_only=True in torch 2.4.0+"""
+            parser = super()._prepare_subcommand_parser(klass, subcommand, **kwargs)
+            parser.set_defaults({"weights_only": False})
+            return parser
+
         def before_instantiate_classes(self):
             # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
             if self.subcommand == "predict":

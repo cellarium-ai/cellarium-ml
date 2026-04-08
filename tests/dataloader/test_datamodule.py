@@ -140,7 +140,7 @@ def test_cpu_transforms(
     module = _new_module()
     trainer = pl.Trainer(accelerator=accelerator, devices=1, max_steps=2, default_root_dir=tmp_path)
     print("Training one more step starting from a checkpoint...")
-    trainer.fit(module, datamodule, ckpt_path=ckpt_path)
+    trainer.fit(module, datamodule, ckpt_path=ckpt_path, weights_only=False)
     print("    ... ✓")
 
     print("Ensuring the pipeline is correctly configured in the restarted Trainer... ")

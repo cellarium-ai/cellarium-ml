@@ -370,10 +370,10 @@ def test_load_from_checkpoint(
     )
     try:
         ckpt_path = tmp_path / f"checkpoints/epoch=0-step={resume_step}.ckpt"
-        trainer2.fit(module2, datamodule2, ckpt_path=ckpt_path)
+        trainer2.fit(module2, datamodule2, ckpt_path=ckpt_path, weights_only=False)
     except FileNotFoundError:
         ckpt_path = tmp_path / f"checkpoints/epoch=1-step={resume_step}.ckpt"
-        trainer2.fit(module2, datamodule2, ckpt_path=ckpt_path)
+        trainer2.fit(module2, datamodule2, ckpt_path=ckpt_path, weights_only=False)
 
     iter_data1 = collate_fn(module1.model.iter_data)
     iter_data2 = collate_fn(module2.model.iter_data)
