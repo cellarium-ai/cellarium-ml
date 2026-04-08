@@ -255,7 +255,7 @@ def compute_var_names_g(
     # produce a mix of cpu and meta FakeTensors, causing _find_common_device to raise.
     # Only deepcopy when cpu tensors are present (e.g. CheckpointLoader transforms);
     # in the common case all tensors are already on meta so the copy is unnecessary.
-    if any(p.device.type == "cpu" for p in pipeline.parameters()):
+    if any(t.device.type == "cpu" for t in [*pipeline.parameters(), *pipeline.buffers()]):
         pipeline_meta = copy.deepcopy(pipeline)
         pipeline_meta.to_empty(device="meta")
     else:
