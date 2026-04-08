@@ -48,5 +48,6 @@ test-examples: FORCE
 	cellarium-ml incremental_pca fit --config examples/cli_workflow/ipca_train_config.yaml
 	cellarium-ml logistic_regression fit --config examples/cli_workflow/lr_train_config.yaml
 	cellarium-ml logistic_regression fit --config examples/cli_workflow/lr_resume_train_config.yaml
+	cellarium-ml hvg_seurat_v3 fit --config examples/cli_workflow/hvg_seurat_v3_train_config.yaml
 
 FORCE:

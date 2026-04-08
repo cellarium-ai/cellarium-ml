@@ -32,6 +32,7 @@ dependencies = [
   "pyro-ppl>=1.9.1",
   "pytest",
   "scikit-learn",
+  "scikit-misc==0.5.1",
   "torch>=2.2.0",
   "transformers",
 ]
@@ -43,6 +44,7 @@ lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML", "types-requests"]
 test = [
   "pytest-xdist",
+  "scanpy",
   "tenacity",
   "tensorboard",
   "torchvision",
@@ -79,7 +81,7 @@ dev_template = "{tag}.post{ccount}"
 
 [tool.ruff]
 line-length = 120
-extend-include = ["*.ipynb"]
+extend-exclude = ["*.ipynb"]
 target-version = "py310"
 
 [tool.ruff.lint]
