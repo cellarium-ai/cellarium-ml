@@ -249,13 +249,23 @@ def compute_var_names_g(
     adata = data.dadc[0]
     batch = tree_map(lambda field: field(adata), data.batch_keys)
     pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
+    # Normalize all pipeline tensors to meta device before entering FakeTensorMode.
+    # This is necessary because CheckpointLoader-loaded modules carry real cpu tensors,
+    # while freshly instantiated modules have meta tensors. FakeCopyMode would then
+    # produce a mix of cpu and meta FakeTensors, causing _find_common_device to raise.
+    # Only deepcopy when cpu tensors are present (e.g. CheckpointLoader transforms);
+    # in the common case all tensors are already on meta so the copy is unnecessary.
+    if any(p.device.type == "cpu" for p in pipeline.parameters()):
+        pipeline_meta = copy.deepcopy(pipeline)
+        pipeline_meta.to_empty(device="meta")
+    else:
+        pipeline_meta = pipeline
+    fake_batch = collate_fn([batch])
+    fake_batch = {k: v.to("meta") if isinstance(v, torch.Tensor) else v for k, v in fake_batch.items()}
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
-        fake_batch = collate_fn([batch])
-        fake_batch = {k: v.to("meta") if isinstance(v, torch.Tensor) else v for k, v in fake_batch.items()}
-        with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
-            with FakeCopyMode(fake_mode):
-                fake_pipeline = copy.deepcopy(pipeline)
-            output = fake_pipeline(fake_batch)
+        with FakeCopyMode(fake_mode):
+            fake_pipeline = copy.deepcopy(pipeline_meta)
+        output = fake_pipeline(fake_batch)
     return output["var_names_g"]
 
 
