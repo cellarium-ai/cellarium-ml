@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+from transformers import pipeline
 import yaml
 from jsonargparse import Namespace, class_from_function
 from jsonargparse._loaders_dumpers import get_yaml_default_loader
@@ -251,9 +252,11 @@ def compute_var_names_g(
     pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
     with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
         fake_batch = collate_fn([batch])
-        with FakeCopyMode(fake_mode):
-            fake_pipeline = copy.deepcopy(pipeline)
-        output = fake_pipeline(fake_batch)
+        fake_batch = {k: v.to("meta") if isinstance(v, torch.Tensor) else v for k, v in fake_batch.items()}
+        with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
+            with FakeCopyMode(fake_mode):
+                fake_pipeline = copy.deepcopy(pipeline)
+            output = fake_pipeline(fake_batch)
     return output["var_names_g"]
 
 
@@ -345,6 +348,30 @@ def lightning_cli_factory(
             parser = super()._prepare_subcommand_parser(klass, subcommand, **kwargs)
             parser.set_defaults({"weights_only": False})
             return parser
+        
+        def _parse_ckpt_path(self) -> None:
+            from pathlib import Path
+            if not self.config.get("subcommand"):
+                return
+            ckpt_path = self.config[self.config.subcommand].get("ckpt_path")
+            if ckpt_path and Path(ckpt_path).is_file():
+                ckpt = torch.load(ckpt_path, weights_only=False, map_location="cpu")
+                hparams = ckpt.get("hyper_parameters", {})
+                hparams.pop("_instantiator", None)
+                if not hparams:
+                    return
+                if "_class_path" in hparams:
+                    hparams = {
+                        "class_path": hparams.pop("_class_path"),
+                        "dict_kwargs": hparams,
+                    }
+                hparams = {self.config.subcommand: {"model": hparams}}
+                try:
+                    self.config = self.parser.parse_object(hparams, self.config)
+                except SystemExit:
+                    import sys
+                    sys.stderr.write("Parsing of ckpt_path hyperparameters failed!\n")
+                    raise
 
         def before_instantiate_classes(self):
             # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
