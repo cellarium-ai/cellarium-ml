@@ -195,7 +195,7 @@ def test_datamodule(tmp_path: Path, batch_size: int, accelerator: str) -> None:
     trainer.fit(module, datamodule)
 
     ckpt_path = str(tmp_path / "lightning_logs/version_0/checkpoints/epoch=0-step=1.ckpt")
-    kwargs: dict[str, Any] = {"dadc": dadc}
+    kwargs: dict[str, Any] = {"dadc": dadc, "weights_only": False}
     if batch_size is not None:
         kwargs["batch_size"] = batch_size
     loaded_datamodule = CellariumAnnDataDataModule.load_from_checkpoint(ckpt_path, **kwargs)
