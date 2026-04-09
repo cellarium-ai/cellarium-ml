@@ -56,7 +56,7 @@ class ImputationModel(SingleCellVariationalInference):
         super().__init__(*args, **kwargs)
         self._excluded_gene_indices = self.exclude_genes_from_masking()
 
-
+    @torch.no_grad()
     def exclude_genes_from_masking(self) -> list[int]:
         """Update the gene mask to exclude specified genes from being masked during imputation.
 
@@ -72,6 +72,7 @@ class ImputationModel(SingleCellVariationalInference):
                 excluded_gene_indices.append(int(matches[0]))
         return excluded_gene_indices
 
+    @torch.no_grad()
     def create_gene_mask(self, n_genes: int, device: torch.device) -> torch.Tensor:
         """Create a random gene mask for imputation.
         
@@ -104,6 +105,7 @@ class ImputationModel(SingleCellVariationalInference):
 
         return logical_mask_g
 
+    @torch.no_grad()
     def apply_gene_mask(self, x_ng: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Apply gene mask to expression data.
         
