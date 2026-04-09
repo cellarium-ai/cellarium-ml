@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/cuda:13.2.0-base-ubuntu24.04
+FROM nvcr.io/nvidia/cuda:13.2.0-cudnn-runtime-ubuntu24.04
 
 LABEL maintainer="Stephen Fleming <sfleming@broadinstitute.org>"
 ENV DOCKER=true \
