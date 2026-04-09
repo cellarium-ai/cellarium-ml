@@ -11,5 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* \
  && python3 -m venv /opt/venv \
+ && /opt/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu124 \
  && /opt/venv/bin/pip install git+https://github.com/cellarium-ai/cellarium-ml@${VERSION} \
  && rm -rf ~/.cache/pip
