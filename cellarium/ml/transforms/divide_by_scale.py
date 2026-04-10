@@ -2,20 +2,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from functools import cache
-
 import numpy as np
 import torch
 from torch import nn
 
-from cellarium.ml.utilities.data import get_var_names_g_indices
+from cellarium.ml.transforms.mixins import FilterCompatibilityMixin
 from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
     assert_nonnegative,
 )
 
 
-class DivideByScale(nn.Module):
+class DivideByScale(nn.Module, FilterCompatibilityMixin):
     """
     Divide gene counts by a scale.
 
@@ -39,10 +37,6 @@ class DivideByScale(nn.Module):
         self.var_names_g = var_names_g
         assert_nonnegative("eps", eps)
         self.eps = eps
-
-    @cache
-    def _get_indices(self, var_names_g: tuple) -> np.ndarray:
-        return get_var_names_g_indices(np.array(var_names_g), self.var_names_g)
 
     def forward(
         self,
