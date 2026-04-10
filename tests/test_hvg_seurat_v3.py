@@ -17,6 +17,7 @@ from cellarium.ml.models.hvg_seurat_v3 import _fit_loess_with_jitter
 from cellarium.ml.utilities.data import collate_fn
 
 N_TOP_GENES = 200
+jaccard_threshold = 1.0  # exact match
 
 
 # ---------------------------------------------------------------------------
@@ -71,13 +72,14 @@ def _run_model(
     batch_idx: np.ndarray | None,
     batch_key: str | None,
     output_path: str,
+    n_top_genes: int = N_TOP_GENES,
     batch_size: int = 512,
     flavor: Literal["seurat_v3", "seurat_v3_paper"] = "seurat_v3",
 ) -> HVGSeuratV3:
     """Instantiate, fit (2 epochs), and return the HVGSeuratV3 model."""
     model = HVGSeuratV3(
         var_names_g=var_names,
-        n_top_genes=N_TOP_GENES,
+        n_top_genes=n_top_genes,
         n_batch=n_batch,
         use_batch_key=(batch_key is not None),
         flavor=flavor,
@@ -165,7 +167,7 @@ def test_hvg_seurat_v3_sort_order():
         ]
     )
 
-    df = model._compute_hvg_df()
+    df = model._compute_hvg_df(n_top_genes=n_top)
 
     assert df["highly_variable"].sum() == n_top
 
@@ -244,7 +246,7 @@ def test_hvg_seurat_v3_flavor_sort_order(flavor, expected_hvg, excluded_hvg):
         ]
     )
 
-    df = model._compute_hvg_df()
+    df = model._compute_hvg_df(n_top_genes=n_top)
 
     assert df["highly_variable"].sum() == n_top
     for gene in expected_hvg:
@@ -343,7 +345,7 @@ def test_hvg_seurat_v3_invalid_batch_excluded_from_ranking():
     nv_b0 = [100.0, 90.0, 80.0, 70.0, 60.0, 50.0]
     model.sq_counts_sum_bg[0] = torch.tensor([v * (N - 1) for v in nv_b0])
 
-    df = model._compute_hvg_df()
+    df = model._compute_hvg_df(n_top_genes=n_top)
 
     assert df["highly_variable"].sum() == n_top
     assert df["highly_variable_nbatches"].max() == 1, (
@@ -357,75 +359,31 @@ def test_hvg_seurat_v3_invalid_batch_excluded_from_ranking():
 # ---------------------------------------------------------------------------
 
 
-def _load_adata():
+@pytest.fixture(scope="session")
+def adata_and_batch_col():
     import scanpy as sc
 
-    adata, batch_column = sc.datasets.ebi_expression_atlas("E-MTAB-10137"), "Sample Characteristic[individual]"
+    adata = sc.datasets.ebi_expression_atlas("E-MTAB-10137")
+    batch_column = "Sample Characteristic[individual]"
     adata.obs[batch_column] = adata.obs[batch_column].astype("category")
     return adata, batch_column
 
 
-def test_hvg_seurat_v3_paper_matches_scanpy(tmp_path):
-    """
-    End-to-end test: compare HVGSeuratV3 (``flavor='seurat_v3_paper'``) against
-    Scanpy in multi-batch mode.
-
-    ``seurat_v3`` with batch_key is already covered by
-    ``test_hvg_seurat_v3_matches_scanpy[with_batch]``.  This test validates the
-    ``seurat_v3_paper`` sort order (nbatches-primary) against Scanpy's own
-    implementation of that flavor.
-    """
-    import scanpy as sc
-
-    flavor: Literal["seurat_v3", "seurat_v3_paper"] = "seurat_v3_paper"
-    adata, batch_col = _load_adata()
-    x = _to_dense(adata.X)
-    var_names = np.asarray(adata.var_names)
-
-    batch_cats = list(adata.obs[batch_col].cat.categories)
-    n_batch = len(batch_cats)
-    cat_to_idx = {c: i for i, c in enumerate(batch_cats)}
-    batch_idx = np.array([cat_to_idx[c] for c in adata.obs[batch_col]], dtype=np.int64)
-
-    sc_df = sc.pp.highly_variable_genes(
-        adata.copy(),
-        flavor=flavor,
-        n_top_genes=N_TOP_GENES,
-        batch_key=batch_col,
-        inplace=False,
-    )
-
-    output_file = str(tmp_path / f"hvg_{flavor}.csv")
-    model = _run_model(
-        x=x,
-        var_names=var_names,
-        n_batch=n_batch,
-        batch_idx=batch_idx,
-        batch_key="batch_index_n",
-        output_path=output_file,
-        flavor=flavor,
-    )
-
-    hvg_df = model.hvg_df
-    assert hvg_df is not None
-    assert hvg_df["highly_variable"].sum() == N_TOP_GENES
-
-    our_hvg = set(hvg_df[hvg_df["highly_variable"]].index)
-    sc_hvg = set(sc_df[sc_df["highly_variable"]].index)
-    jaccard = len(our_hvg & sc_hvg) / len(our_hvg | sc_hvg)
-    assert jaccard >= 0.98, f"Jaccard {jaccard:.4f} below 0.98 for flavor={flavor!r} with batch_key"
-
-
+@pytest.mark.parametrize("n_top_genes", [500, 2000])
+@pytest.mark.parametrize("flavor", ["seurat_v3", "seurat_v3_paper"])
 @pytest.mark.parametrize(
     "use_batch_key",
     [False, True],
     ids=["no_batch", "with_batch"],
 )
-def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
+def test_hvg_seurat_v3_matches_scanpy(
+    tmp_path, adata_and_batch_col, n_top_genes: int, flavor: str, use_batch_key: bool
+):
     """
     End-to-end test: run HVGSeuratV3 through pl.Trainer(max_epochs=2) and
-    compare the selected HVG set with scanpy.pp.highly_variable_genes
-    (flavor='seurat_v3').
+    compare the selected HVG set with scanpy.pp.highly_variable_genes for
+    both flavors (``seurat_v3`` and ``seurat_v3_paper``), with and without a
+    batch key, and for multiple values of ``n_top_genes``.
 
     seurat_v3 expects *raw counts* (no log-transform), so we feed the count
     matrix directly to both our model and Scanpy.
@@ -433,7 +391,7 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
     import pandas as pd
     import scanpy as sc
 
-    adata, batch_col = _load_adata()
+    adata, batch_col = adata_and_batch_col
     x = _to_dense(adata.X)
     var_names = np.asarray(adata.var_names)
 
@@ -450,11 +408,11 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
         sc_batch_key = None
         model_batch_key = None
 
-    # ---- Scanpy reference (seurat_v3 uses raw counts) --------------------
+    # ---- Scanpy reference -----------------------------------------------
     sc_df = sc.pp.highly_variable_genes(
         adata.copy(),
-        flavor="seurat_v3",
-        n_top_genes=N_TOP_GENES,
+        flavor=flavor,
+        n_top_genes=n_top_genes,
         batch_key=sc_batch_key,
         inplace=False,
     )
@@ -468,23 +426,24 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
         batch_idx=batch_idx,
         batch_key=model_batch_key,
         output_path=output_file,
+        n_top_genes=n_top_genes,
+        flavor=flavor,
     )
 
     # ---- Assertions: output artefacts ------------------------------------
-    hvg_df = model.hvg_df
-    assert hvg_df is not None, "HVGSeuratV3.hvg_df was not populated after training"
-    assert os.path.exists(output_file), "on_train_epoch_end did not write the output CSV"
+    actual_output_file = output_file.replace(".csv", f"__top{n_top_genes}.csv")
+    assert os.path.exists(actual_output_file), "on_train_epoch_end did not write the output CSV"
 
-    # The saved file should round-trip cleanly
-    saved_df = pd.read_csv(output_file, index_col=0)
+    saved_df = pd.read_csv(actual_output_file, index_col=0)
     assert set(saved_df.columns).issuperset({"highly_variable"}), (
         f"Saved CSV is missing expected columns; got {list(saved_df.columns)}"
     )
 
     # ---- Assertions: HVG count ------------------------------------------
+    hvg_df = model.hvg_dfs[n_top_genes]
     assert "highly_variable" in hvg_df.columns
-    assert hvg_df["highly_variable"].sum() == N_TOP_GENES, (
-        f"Expected {N_TOP_GENES} HVGs, got {hvg_df['highly_variable'].sum()}"
+    assert hvg_df["highly_variable"].sum() == n_top_genes, (
+        f"Expected {n_top_genes} HVGs, got {hvg_df['highly_variable'].sum()}"
     )
 
     # ---- Assertions: overlap with Scanpy --------------------------------
@@ -493,11 +452,10 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
     union = our_hvg | sc_hvg
     jaccard = len(our_hvg & sc_hvg) / len(union)
 
-    # Jaccard threshold
-    threshold = 0.98
+    threshold = jaccard_threshold
     assert jaccard >= threshold, (
-        f"Jaccard similarity {jaccard:.4f} is below {threshold} for seurat_v3 "
-        f"{'with' if use_batch_key else 'without'} batch_key"
+        f"Jaccard similarity {jaccard:.4f} is below {threshold} for {flavor=!r} "
+        f"{'with' if use_batch_key else 'without'} batch_key, {n_top_genes=}"
     )
 
     # ---- Assertions: batch-specific columns ------------------------------
@@ -510,7 +468,7 @@ def test_hvg_seurat_v3_matches_scanpy(tmp_path, use_batch_key: bool):
         )
 
 
-def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path):
+def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path, adata_and_batch_col):
     """
     End-to-end CLI integration test: run HVGSeuratV3 via the Lightning CLI
     (``main()``) backed by a :class:`~cellarium.ml.CellariumAnnDataDataModule`
@@ -524,7 +482,7 @@ def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path):
     import pandas as pd
     import scanpy as sc
 
-    adata, batch_col = _load_adata()
+    adata, batch_col = adata_and_batch_col
     adata_path = tmp_path / "test.h5ad"
     adata.write_h5ad(adata_path)
     batch_cats = list(adata.obs[batch_col].cat.categories)
@@ -591,8 +549,9 @@ def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path):
     main(config)
 
     # ---- Output file was written by on_train_epoch_end -------------------
-    assert os.path.exists(output_file), "CLI did not write the HVG output CSV"
-    hvg_df = pd.read_csv(output_file, index_col=0)
+    output_filename = output_file.replace(".csv", f"__top{N_TOP_GENES}.csv")
+    assert os.path.exists(output_filename), "CLI did not write the HVG output CSV"
+    hvg_df = pd.read_csv(output_filename, index_col=0)
 
     # ---- Basic structural checks ----------------------------------------
     assert "highly_variable" in hvg_df.columns
@@ -614,4 +573,6 @@ def test_hvg_seurat_v3_cli_matches_scanpy(tmp_path):
     our_hvg = set(hvg_df[hvg_df["highly_variable"]].index)
     sc_hvg = set(sc_df[sc_df["highly_variable"]].index)
     jaccard = len(our_hvg & sc_hvg) / len(our_hvg | sc_hvg)
-    assert jaccard >= 0.98, f"CLI Jaccard similarity {jaccard:.4f} is below 0.98 for seurat_v3 with batch_key"
+    assert jaccard >= jaccard_threshold, (
+        f"CLI Jaccard similarity {jaccard:.4f} is below {jaccard_threshold} for seurat_v3 with batch_key"
+    )
