@@ -377,7 +377,11 @@ def adata_and_batch_col():
     ids=["no_batch", "with_batch"],
 )
 def test_hvg_seurat_v3_matches_scanpy(
-    tmp_path, adata_and_batch_col, n_top_genes: int, flavor: str, use_batch_key: bool
+    tmp_path,
+    adata_and_batch_col,
+    n_top_genes: int,
+    flavor: Literal["seurat_v3", "seurat_v3_paper"],
+    use_batch_key: bool,
 ):
     """
     End-to-end test: run HVGSeuratV3 through pl.Trainer(max_epochs=2) and
@@ -440,7 +444,9 @@ def test_hvg_seurat_v3_matches_scanpy(
     )
 
     # ---- Assertions: HVG count ------------------------------------------
-    hvg_df = model.hvg_dfs[n_top_genes]
+    hvg_dfs = model.hvg_dfs
+    assert hvg_dfs is not None, "Model should have an hvg_dfs dict after fitting"  # mypy
+    hvg_df = hvg_dfs[n_top_genes]
     assert "highly_variable" in hvg_df.columns
     assert hvg_df["highly_variable"].sum() == n_top_genes, (
         f"Expected {n_top_genes} HVGs, got {hvg_df['highly_variable'].sum()}"
