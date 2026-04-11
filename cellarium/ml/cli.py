@@ -90,6 +90,81 @@ class FileLoader:
 
 
 @dataclass
+class FileMultiLoader:
+    """
+    A YAML constructor for loading a file once and extracting multiple fields from it.
+
+    Applied to a ``init_args`` mapping, it returns a dict that is unpacked as keyword
+    arguments to the constructor, allowing all fields to be specified in a single block
+    instead of repeating the file path and loader for each argument.
+
+    Example:
+
+    .. code-block:: yaml
+
+        model:
+          transforms:
+            - class_path: cellarium.ml.transforms.ZScore
+              init_args: !FileMultiLoader
+                file_path: gs://dsp-cellarium-cas-public/test-data/onepass.csv
+                loader_fn: pandas.read_csv
+                fields:
+                  mean_g:
+                    attr: mean_g
+                    convert_fn: torch.tensor
+                  std_g:
+                    attr: std_g
+                    convert_fn: torch.tensor
+                  var_names_g:
+                    attr: var_names_g
+                    convert_fn: pandas.Series.to_numpy
+
+    Args:
+        file_path:
+            The file path to load the object from.
+        loader_fn:
+            A function to load the object from the file path.
+        fields:
+            A mapping from output key names to field specs. Each spec may contain:
+            ``attr`` (dotted attribute path), ``key`` (item key), and ``convert_fn``
+            (importable callable string or ``None``).
+    """
+
+    file_path: str
+    loader_fn: Callable[[str], Any] | str
+    fields: dict[str, dict]
+
+    def __new__(cls, file_path, loader_fn, fields):
+        if isinstance(loader_fn, str):
+            loader_fn = import_object(loader_fn)
+        if loader_fn not in cached_loaders:
+            cached_loaders[loader_fn] = cache(loader_fn)
+        loader_fn = cached_loaders[loader_fn]
+        obj = loader_fn(file_path)
+
+        result = {}
+        for name, spec in fields.items():
+            value = obj
+            attr = spec.get("attr")
+            key = spec.get("key")
+            convert_fn = spec.get("convert_fn")
+
+            if attr is not None:
+                value = attrgetter(attr)(value)
+            if key is not None:
+                value = value[key]
+
+            if isinstance(convert_fn, str):
+                convert_fn = import_object(convert_fn)
+            if convert_fn is not None:
+                value = convert_fn(value)
+
+            result[name] = value
+
+        return result
+
+
+@dataclass
 class CheckpointLoader(FileLoader):
     """
     A YAML constructor for loading a :class:`~cellarium.ml.core.CellariumModule` checkpoint and accessing its
@@ -132,6 +207,11 @@ def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNod
     return FileLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
 
 
+def file_multi_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> dict:
+    """Construct a dict of objects from a file."""
+    return FileMultiLoader(**loader.construct_mapping(node, deep=True))  # type: ignore[arg-type]
+
+
 def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
     """Construct an object from a checkpoint."""
     return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
@@ -139,6 +219,7 @@ def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.Mapp
 
 loader = DefaultLoader
 loader.add_constructor("!FileLoader", file_loader_constructor)
+loader.add_constructor("!FileMultiLoader", file_multi_loader_constructor)
 loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
 
 
