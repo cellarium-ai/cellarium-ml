@@ -13,7 +13,7 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-class ZScore(nn.Module, FilterCompatibilityMixin):
+class ZScore(FilterCompatibilityMixin, nn.Module):
     """
     ZScore gene counts with  mean and standard deviation.
 

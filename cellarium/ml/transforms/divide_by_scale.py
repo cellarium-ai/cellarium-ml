@@ -13,7 +13,7 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-class DivideByScale(nn.Module, FilterCompatibilityMixin):
+class DivideByScale(FilterCompatibilityMixin, nn.Module):
     """
     Divide gene counts by a scale.
 
