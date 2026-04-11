@@ -468,6 +468,14 @@ class CellariumModule(pl.LightningModule):
         if callable(on_train_batch_end):
             on_train_batch_end(self.trainer)
 
+    def on_train_end(self) -> None:
+        """
+        Calls the ``on_train_end`` method on the module.
+        """
+        on_train_end = getattr(self.model, "on_train_end", None)
+        if callable(on_train_end):
+            on_train_end(self.trainer)
+
     def move_cpu_transforms_to_dataloader(self) -> None:
         if not self._cpu_transforms_in_module_pipeline:
             warnings.warn(
