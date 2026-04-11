@@ -2,23 +2,24 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils._pytree import tree_map
 
 
 def write_prediction(
-    prediction: torch.Tensor,
+    prediction: dict[str, torch.Tensor] | torch.Tensor,
     obs_names_n: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
-    fields: Mapping[str, np.ndarray | torch.Tensor] | None = None,
     gzip: bool = True,
     executor: ThreadPoolExecutor | None = None,
 ) -> None:
@@ -34,10 +35,6 @@ def write_prediction(
             The directory to write the prediction to.
         postfix:
             A postfix to add to the CSV file name.
-        fields:
-            Additional fields to write to the CSV file. The keys of the mapping will be used as
-            column names, and the values will be written as columns in the CSV file. The values
-            must have the same number of rows as the prediction. If ``None``, no additional fields will be written.
         gzip:
             Whether to compress the CSV file using gzip.
         executor:
@@ -45,10 +42,9 @@ def write_prediction(
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    df = pd.DataFrame(prediction.cpu())
-    if fields is not None:
-        for field_name, field_data in fields.items():
-            df.insert(0, field_name, field_data)
+    # move to cpu using tree_map
+    prediction = tree_map(lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, prediction)
+    df = pd.DataFrame(prediction)
     df.insert(0, "obs_names_n", obs_names_n)
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv" + (".gz" if gzip else ""))
     to_csv_kwargs: dict[str, str | bool] = {"header": False, "index": False}
@@ -126,17 +122,11 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
     def __init__(
         self,
         output_dir: Path | str,
-        prediction_size: int | None = None,
-        key: str = "x_ng",
         gzip: bool = True,
         max_threadpool_workers: int = 8,
-        field_names: Sequence[str] | None = None,
     ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
-        self.prediction_size = prediction_size
-        self.field_names = field_names
-        self.key = key
         self.executor = BoundedThreadPoolExecutor(
             max_workers=max_threadpool_workers,
             max_queue_size=max_threadpool_workers * 2,
@@ -153,35 +143,64 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         pl_module: pl.LightningModule,
         prediction: dict[str, torch.Tensor],
         batch_indices: Sequence[int] | None,
-        batch: dict[str, np.ndarray | torch.Tensor],
+        batch: dict[str, Any],
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:
-        if self.key not in batch.keys():
-            raise ValueError(
-                f"PredictionWriter callback specified the key '{self.key}' as the relevant output of `predict()`,"
-                " but the key is not present. Specify a different key as an input argument to the callback, or"
-                " modify the output keys of `predict()`."
-            )
-        prediction_np = prediction[self.key]
-        if self.prediction_size is not None:
-            prediction_np = prediction_np[:, : self.prediction_size]
+        gene_prompt_size_n = batch["gene_prompt_size_n"]
+        gene_query_size_n = batch["gene_query_size_n"]
+        total_mrna_umis_downsampled_n = batch["total_mrna_umis_downsampled_n"]
+
+        label_nc_dict = batch["label_nc_dict"]
+        logits_nck_dict = prediction
+        label_weight_nc_dict = batch["label_weight_nc_dict"]
+
+        loss_n_dict = {}
+        cross_entropy_loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
+        mse_loss_fn = torch.nn.MSELoss(reduction="none")
+        mae_loss_fn = torch.nn.L1Loss(reduction="none")
+        # Make sure that label_nc_dict is created by concatenating the gene_value and metadata labels
+        # in the same order as the embeddings.
+        key = "gene_value"
+        label_nc = label_nc_dict[key]
+        logits_nck = logits_nck_dict[key]
+        assert isinstance(logits_nck, torch.Tensor)
+        label_weight_nc = label_weight_nc_dict[key]
+        assert isinstance(label_weight_nc, torch.Tensor)
+        cross_entropy_loss_nc = cross_entropy_loss_fn(
+            logits_nck.view(label_nc.numel(), -1), label_nc.view(-1).long()
+        ).reshape(label_nc.shape)
+        loss_n_dict["cross_entropy"] = torch.sum(cross_entropy_loss_nc * label_weight_nc, dim=-1) / label_weight_nc.sum(
+            dim=-1
+        )
+
+        # compute the mean gene_value from logits_nck expression in order to compute the mse and mae loss
+        probs_nck = torch.softmax(logits_nck, dim=-1)
+        k_range = torch.arange(logits_nck.shape[-1], device=logits_nck.device, dtype=logits_nck.dtype)
+        mean_gene_value_nc = probs_nck @ k_range
+        # compute the standard deviation of the gene_value
+        var_gene_value_nc = torch.sum(probs_nck * (k_range - mean_gene_value_nc.unsqueeze(-1)) ** 2, dim=-1)
+        # compute the mse and mae loss
+        mse_loss_nc = mse_loss_fn(mean_gene_value_nc, label_nc) / var_gene_value_nc
+        mae_loss_nc = mae_loss_fn(mean_gene_value_nc, label_nc) / torch.sqrt(var_gene_value_nc)
+        loss_n_dict["mse"] = torch.sum(mse_loss_nc * label_weight_nc, dim=-1) / label_weight_nc.sum(dim=-1)
+        loss_n_dict["mae"] = torch.sum(mae_loss_nc * label_weight_nc, dim=-1) / label_weight_nc.sum(dim=-1)
+
+        loss_n_dict["prompt_size"] = gene_prompt_size_n.cpu().int()
+        loss_n_dict["query_size"] = gene_query_size_n.cpu().int()
+        loss_n_dict["total_mrna_umis_downsampled"] = total_mrna_umis_downsampled_n.cpu()
 
         if "obs_names_n" not in batch.keys():
             raise ValueError(
                 "PredictionWriter callback requires the batch_key 'obs_names_n'. Add this to the YAML config."
             )
         assert isinstance(batch["obs_names_n"], np.ndarray)
-        if self.field_names is None:
-            fields = None
-        else:
-            fields = {field_name: batch[field_name] for field_name in self.field_names}
+
         write_prediction(
-            prediction=prediction_np,
+            prediction=loss_n_dict,
             obs_names_n=batch["obs_names_n"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,
-            fields=fields,
             gzip=self.gzip,
             executor=self.executor,
         )

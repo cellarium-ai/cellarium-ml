@@ -113,6 +113,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         drop_incomplete_batch: bool = False,
         train_size: float | int | None = None,
         val_size: float | int | None = None,
+        pred_size: float | int | None = None,
         worker_seed: int | None = None,
         test_mode: bool = False,
         # DataLoader args
@@ -134,6 +135,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.shuffle_seed = shuffle_seed
         self.drop_last_indices = drop_last_indices
         self.n_train, self.n_val = train_val_split(len(dadc), train_size, val_size)
+        if pred_size is not None:
+            _, self.n_pred = train_val_split(len(dadc), None, pred_size)
+        else:
+            self.n_pred = len(dadc)
         self.worker_seed = worker_seed
         self.test_mode = test_mode
         # DataLoader args
@@ -196,6 +201,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                start_idx=len(self.dadc) - self.n_pred,
+                end_idx=len(self.dadc),
             )
 
         if stage == "test":

@@ -15,6 +15,7 @@ from operator import attrgetter
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
@@ -64,9 +65,10 @@ class FileLoader:
     file_path: str
     loader_fn: Callable[[str], Any] | str
     attr: str | None = None
+    key: str | None = None
     convert_fn: Callable[[Any], Any] | str | None = None
 
-    def __new__(cls, file_path, loader_fn, attr, convert_fn):
+    def __new__(cls, file_path, loader_fn, attr=None, key=None, convert_fn=None):
         if isinstance(loader_fn, str):
             loader_fn = import_object(loader_fn)
         if loader_fn not in cached_loaders:
@@ -76,6 +78,8 @@ class FileLoader:
 
         if attr is not None:
             obj = attrgetter(attr)(obj)
+        if key is not None:
+            obj = obj[key]
 
         if isinstance(convert_fn, str):
             convert_fn = import_object(convert_fn)
@@ -116,20 +120,21 @@ class CheckpointLoader(FileLoader):
 
     file_path: str
     attr: str | None = None
+    key: str | None = None
     convert_fn: Callable[[Any], Any] | str | None = None
 
-    def __new__(cls, file_path, attr, convert_fn):
-        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, convert_fn)
+    def __new__(cls, file_path, attr=None, key=None, convert_fn=None):
+        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, key, convert_fn)
 
 
 def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> FileLoader:
     """Construct an object from a file."""
-    return FileLoader(**loader.construct_mapping(node))  # type: ignore[misc]
+    return FileLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
 
 
 def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
     """Construct an object from a checkpoint."""
-    return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[misc]
+    return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
 
 
 loader = DefaultLoader
@@ -182,6 +187,19 @@ def compute_n_obs(data: CellariumAnnDataDataModule) -> int:
     return data.dadc.n_obs
 
 
+def compute_n_vars(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of observations in the data.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of variables in the data.
+    """
+    return data.dadc.n_vars
+
+
 def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     """
     Compute the categories in the target variable.
@@ -229,9 +247,35 @@ def compute_var_names_g(
         fake_batch = collate_fn([batch])
         with FakeCopyMode(fake_mode):
             fake_pipeline = copy.deepcopy(pipeline)
-        fake_pipeline.to("cpu")
         output = fake_pipeline(fake_batch)
     return output["var_names_g"]
+
+
+def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of categories in batch_index_n.
+
+    .. note::
+
+            If batch_index_n is comprised of multiple keys, the number of categories is computed
+            as the product of the number of categories in each key.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of categories in batch_index_n.
+    """
+    if "batch_index_n" not in data.batch_keys:
+        return 1  # for hvg selection when no batch key is given, treat all cells as a single batch
+    field = data.batch_keys["batch_index_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    x = obs[field.key]
+    if isinstance(x, pd.DataFrame):
+        return int(x.apply(lambda col: len(col.cat.categories)).product())
+    else:
+        return len(x.cat.categories)
 
 
 def lightning_cli_factory(
@@ -373,6 +417,60 @@ def geneformer(args: ArgsType = None) -> None:
                 compute_var_names_g,
             )
         ],
+    )
+    cli(args=args)
+
+
+@register_model
+def hvg_seurat_v3(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.HVGSeuratV3` model.
+
+    Computes highly variable genes using the Seurat v3 method over two Lightning
+    epochs.  Raw-count data (no log-normalisation) is expected.
+
+    The number of batches (``n_batch``) is inferred automatically from the
+    ``batch_index_n`` batch key in ``data.batch_keys``::
+
+        batch_index_n:
+          attr: obs
+          key: <your_batch_obs_column>
+          convert_fn: cellarium.ml.utilities.data.get_categories
+
+    Example run::
+
+        cellarium-ml hvg_seurat_v3 fit \
+            --model.model.init_args.n_top_genes 2000 \
+            --model.model.init_args.batch_key batch_index_n \
+            --model.model.init_args.output_path hvg.csv \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/counts_{0..3}.h5ad" \
+            --data.shard_size 10000 \
+            --data.max_cache_size 2 \
+            --data.batch_size 512 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.HVGSeuratV3",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+        ],
+        trainer_defaults={
+            "max_epochs": 2,
+            "strategy": {
+                "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                "dict_kwargs": {"broadcast_buffers": False},
+            },
+        },
     )
     cli(args=args)
 
@@ -617,6 +715,45 @@ def tdigest(args: ArgsType = None) -> None:
         ],
         trainer_defaults={
             "max_epochs": 1,  # one pass
+        },
+    )
+    cli(args=args)
+
+
+@register_model
+def contrastive_mlp(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.ContrastiveMLP` model.
+
+    This example shows how to perform contrastive learning with a default augmentation
+    strategy for omics data.
+
+    Example run::
+
+        cellarium-ml contrastive_mlp fit \
+            --model.model.init_args.hidden_size 4096 2048 1024 512 \
+            --model.model.init_args.embed_dim 256 \
+            --model.model.init_args.temperature 1.0 \
+            --model.model.init_args.target_count 10000 \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/contrastive \
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.ContrastiveMLP",
+        link_arguments=[
+            LinkArguments("data", "model.model.init_args.n_obs", compute_n_vars),
+        ],
+        trainer_defaults={
+            "max_epochs": 20,
         },
     )
     cli(args=args)

@@ -6,14 +6,14 @@ import numpy as np
 import torch
 from torch import nn
 
+from cellarium.ml.transforms.mixins import FilterCompatibilityMixin
 from cellarium.ml.utilities.testing import (
-    assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
     assert_nonnegative,
 )
 
 
-class DivideByScale(nn.Module):
+class DivideByScale(FilterCompatibilityMixin, nn.Module):
     """
     Divide gene counts by a scale.
 
@@ -48,7 +48,8 @@ class DivideByScale(nn.Module):
             x_ng:
                 Gene counts.
             var_names_g:
-                The list of the variable names in the input data. If ``None``, no validation is performed.
+                The list of the variable names in the input data. Must be a subset of (or equal
+                to) the ``var_names_g`` schema the transform was initialized with, in any order.
 
         Returns:
             A dictionary with the following keys:
@@ -56,9 +57,14 @@ class DivideByScale(nn.Module):
             - ``x_ng``: The gene counts divided by the scale.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
-        x_ng = x_ng / (self.scale_g + self.eps)
+        if np.array_equal(var_names_g, self.var_names_g):
+            scale_g = self.scale_g
+        else:
+            idx = self._get_indices(tuple(var_names_g))
+            scale_g = self.scale_g[idx]
+
+        x_ng = x_ng / (scale_g + self.eps)
 
         return {"x_ng": x_ng}
 
