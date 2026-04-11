@@ -134,7 +134,7 @@ class FileMultiLoader:
     loader_fn: Callable[[str], Any] | str
     fields: dict[str, dict]
 
-    def __new__(cls, file_path, loader_fn, fields):
+    def __new__(cls, file_path, loader_fn, fields) -> dict:  # type: ignore[misc]
         if isinstance(loader_fn, str):
             loader_fn = import_object(loader_fn)
         if loader_fn not in cached_loaders:
@@ -209,7 +209,7 @@ def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNod
 
 def file_multi_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> dict:
     """Construct a dict of objects from a file."""
-    return FileMultiLoader(**loader.construct_mapping(node, deep=True))  # type: ignore[arg-type]
+    return FileMultiLoader(**loader.construct_mapping(node, deep=True))  # type: ignore[arg-type, return-value]
 
 
 def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
