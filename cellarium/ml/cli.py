@@ -105,16 +105,17 @@ class FileMultiLoader:
         model:
           transforms:
             - class_path: cellarium.ml.transforms.ZScore
-              init_args: !FileMultiLoader
-                file_path: gs://dsp-cellarium-cas-public/test-data/onepass.csv
+              init_args:
+                !FileMultiLoader
+                file_path: /tmp/test_examples/onepass/onepass.csv
                 loader_fn: pandas.read_csv
                 fields:
                   mean_g:
-                    attr: mean_g
-                    convert_fn: torch.tensor
+                    attr: mean_g.values
+                    convert_fn: torch.FloatTensor
                   std_g:
-                    attr: std_g
-                    convert_fn: torch.tensor
+                    attr: std_g.values
+                    convert_fn: torch.FloatTensor
                   var_names_g:
                     attr: var_names_g
                     convert_fn: pandas.Series.to_numpy
