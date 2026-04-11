@@ -63,22 +63,20 @@ model:
         target_count: 10_000
     - cellarium.ml.transforms.Log1p
     - class_path: cellarium.ml.transforms.ZScore
-      init_args:
-        mean_g:
-          !CheckpointLoader
-          file_path: /tmp/test_examples/onepass/lightning_logs/version_0/checkpoints/epoch=0-step=2.ckpt
-          attr: model.mean_g
-          convert_fn: null
-        std_g:
-          !CheckpointLoader
-          file_path: /tmp/test_examples/onepass/lightning_logs/version_0/checkpoints/epoch=0-step=2.ckpt
-          attr: model.std_g
-          convert_fn: null
-        var_names_g:
-          !CheckpointLoader
-          file_path: /tmp/test_examples/onepass/lightning_logs/version_0/checkpoints/epoch=0-step=2.ckpt
-          attr: model.var_names_g
-          convert_fn: null
+      init_args: 
+        !FileMultiLoader
+        file_path: /tmp/test_examples/onepass/onepass.csv
+        loader_fn: pandas.read_csv
+        fields:
+          mean_g:
+            attr: mean_g
+            convert_fn: torch.tensor
+          std_g:
+            attr: std_g
+            convert_fn: torch.tensor
+          var_names_g:
+            attr: var_names_g
+            convert_fn: pandas.Series.to_numpy
   model:
     class_path: cellarium.ml.models.IncrementalPCA
     init_args:
