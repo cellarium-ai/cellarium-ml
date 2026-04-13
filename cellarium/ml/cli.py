@@ -35,7 +35,7 @@ def _resolve_loader(loader_fn: Callable[[str], Any] | str) -> Callable[[str], An
     if isinstance(loader_fn, str):
         loader_fn = import_object(loader_fn)
     if loader_fn not in cached_loaders:
-        cached_loaders[loader_fn] = cache(loader_fn)
+        cached_loaders[loader_fn] = cache(loader_fn)  # type: ignore[arg-type]
     return cached_loaders[loader_fn]
 
 
@@ -52,7 +52,7 @@ def _resolve_value(
     if isinstance(convert_fn, str):
         convert_fn = import_object(convert_fn)
     if convert_fn is not None:
-        obj = convert_fn(obj)
+        obj = convert_fn(obj)  # type: ignore[operator]
     return obj
 
 
