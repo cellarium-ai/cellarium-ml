@@ -31,6 +31,31 @@ from cellarium.ml.utilities.data import AnnDataField, collate_fn
 cached_loaders = {}
 
 
+def _resolve_loader(loader_fn: Callable[[str], Any] | str) -> Callable[[str], Any]:
+    if isinstance(loader_fn, str):
+        loader_fn = import_object(loader_fn)
+    if loader_fn not in cached_loaders:
+        cached_loaders[loader_fn] = cache(loader_fn)
+    return cached_loaders[loader_fn]
+
+
+def _resolve_value(
+    obj: Any,
+    attr: str | None = None,
+    key: Any = None,
+    convert_fn: Callable[[Any], Any] | str | None = None,
+) -> Any:
+    if attr is not None:
+        obj = attrgetter(attr)(obj)
+    if key is not None:
+        obj = obj[key]
+    if isinstance(convert_fn, str):
+        convert_fn = import_object(convert_fn)
+    if convert_fn is not None:
+        obj = convert_fn(obj)
+    return obj
+
+
 @dataclass
 class FileLoader:
     """
@@ -69,24 +94,8 @@ class FileLoader:
     convert_fn: Callable[[Any], Any] | str | None = None
 
     def __new__(cls, file_path, loader_fn, attr=None, key=None, convert_fn=None):
-        if isinstance(loader_fn, str):
-            loader_fn = import_object(loader_fn)
-        if loader_fn not in cached_loaders:
-            cached_loaders[loader_fn] = cache(loader_fn)
-        loader_fn = cached_loaders[loader_fn]
-        obj = loader_fn(file_path)
-
-        if attr is not None:
-            obj = attrgetter(attr)(obj)
-        if key is not None:
-            obj = obj[key]
-
-        if isinstance(convert_fn, str):
-            convert_fn = import_object(convert_fn)
-        if convert_fn is not None:
-            obj = convert_fn(obj)
-
-        return obj
+        obj = _resolve_loader(loader_fn)(file_path)
+        return _resolve_value(obj, attr=attr, key=key, convert_fn=convert_fn)
 
 
 @dataclass
@@ -136,33 +145,8 @@ class FileMultiLoader:
     fields: dict[str, dict]
 
     def __new__(cls, file_path, loader_fn, fields) -> dict:  # type: ignore[misc]
-        if isinstance(loader_fn, str):
-            loader_fn = import_object(loader_fn)
-        if loader_fn not in cached_loaders:
-            cached_loaders[loader_fn] = cache(loader_fn)
-        loader_fn = cached_loaders[loader_fn]
-        obj = loader_fn(file_path)
-
-        result = {}
-        for name, spec in fields.items():
-            value = obj
-            attr = spec.get("attr")
-            key = spec.get("key")
-            convert_fn = spec.get("convert_fn")
-
-            if attr is not None:
-                value = attrgetter(attr)(value)
-            if key is not None:
-                value = value[key]
-
-            if isinstance(convert_fn, str):
-                convert_fn = import_object(convert_fn)
-            if convert_fn is not None:
-                value = convert_fn(value)
-
-            result[name] = value
-
-        return result
+        obj = _resolve_loader(loader_fn)(file_path)
+        return {name: _resolve_value(obj, **spec) for name, spec in fields.items()}
 
 
 @dataclass
