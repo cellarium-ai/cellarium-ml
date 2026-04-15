@@ -1478,6 +1478,43 @@ class NMFOutput:
     A class to facilitate interaction with a trained NMF model and computation of downstream outputs.
     """
 
+    @staticmethod
+    def combine_nmf_modules(nmf_modules: list["cellarium.ml.CellariumModule"]) -> "cellarium.ml.CellariumModule":
+        """
+        Combine multiple NMF modules trained with different k into a single module for consensus analysis.
+
+        Args:
+            nmf_modules: A list of NMF modules trained with different k.
+        Returns:
+            A single NMF module with the same model architecture but with factors from all input modules.
+        """
+        if len(nmf_modules) == 0:
+            raise ValueError("nmf_modules list cannot be empty")
+
+        base_module = nmf_modules[0]
+        for module in nmf_modules[1:]:
+            if not isinstance(module.model, NonNegativeMatrixFactorization):
+                raise ValueError("All modules must have a NonNegativeMatrixFactorization model")
+            if module.datamodule != base_module.datamodule:
+                raise ValueError("All modules must have the same datamodule")
+
+        combined_model = NonNegativeMatrixFactorization(
+            var_names_g=base_module.model.var_names_g,
+            k_values=[k for module in nmf_modules for k in module.model.k_values],
+            r=nmf_modules[0].model.r,
+            algorithm=nmf_modules[0].model.algorithm,
+            init=nmf_modules[0].model.init,
+            transformed_data_mean=nmf_modules[0].model.transformed_data_mean,
+        )
+
+        # copy factors from each module into combined model
+        for module in nmf_modules:
+            for k in module.model.k_values:
+                setattr(combined_model, f"D_{k}_rkg", getattr(module.model, f"D_{k}_rkg").clone())
+
+        combined_module = cellarium.ml.CellariumModule(model=combined_model, datamodule=base_module.datamodule)
+        return combined_module
+
     def __init__(
         self,
         nmf_module: "cellarium.ml.CellariumModule",
