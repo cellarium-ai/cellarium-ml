@@ -34,6 +34,7 @@ dependencies = [
   "scikit-misc==0.5.1",
   "torch>=2.2.0",
   "transformers",
+  "zuko",
 ]
 
 dynamic = ["version"]
@@ -47,6 +48,8 @@ test = [
   "tenacity",
   "tensorboard",
   "torchvision",
+  "scvi-tools",
+  "zarr",
 ]
 docs = [
   "nbsphinx",

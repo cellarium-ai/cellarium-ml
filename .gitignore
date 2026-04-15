@@ -1,8 +1,10 @@
 __pycache__/
 data/
 runs/
+.DS_Store
 .ipynb_checkpoints
 .mypy_cache/
+.idea/
 .ruff_cache/
 .pytest_cache/
 .vscode/
