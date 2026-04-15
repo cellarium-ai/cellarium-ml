@@ -59,7 +59,7 @@ class HVGSeuratV3(CellariumModel):
     ``clip_val``, and accumulates clipped sums.
 
     After epoch 1 (``on_train_epoch_end``) — computes normalized variance per
-    batch, ranks genes, and writes ``self.hvg_df`` (and optionally a CSV/Parquet
+    batch, ranks genes, and writes ``self.hvg_dfs`` (and optionally a CSV
     file at ``output_path``).
 
     The ``flavor`` argument controls how genes are ranked across batches when
@@ -84,24 +84,21 @@ class HVGSeuratV3(CellariumModel):
         df = model.hvg_df  # pandas DataFrame, Scanpy-compatible columns
 
     Args:
-        var_names_g:
-            Array of gene names, length ``n_genes``.
-        n_top_genes:
-            Number of highly variable genes to select.
-        n_batch:
-            Number of batches (use 1 when no batch information is given).
-        flavor:
-            Multi-batch gene ranking strategy.  ``"seurat_v3_paper"`` (default)
+        var_names_g: Array of gene names, length ``n_genes``.
+        n_top_genes: Number of highly variable genes to select. Can be a list of ints
+            to produce multiple gene sets in a single training run.
+        n_batch: Number of batches (use 1 when no batch information is given).
+        flavor: Multi-batch gene ranking strategy.  ``"seurat_v3_paper"`` (default)
             prioritises batch consistency; ``"seurat_v3"`` prioritises median rank.
-        use_batch_key:
-            Whether to expect a ``batch_index_n`` batch key in the dataloader output.
-             If False, the model will ignore batch keys and treat all data as a single batch.
-        span:
-            LOESS span (fraction of data used per local fit).  Default 0.3.
-        output_path:
-            If given, the result DataFrame is written to this CSV filepath after training.
+        use_batch_key: Whether to expect a ``batch_index_n`` batch key in the dataloader output.
+            If False, the model will ignore batch keys and treat all data as a single batch.
+        span: LOESS span (fraction of data used per local fit).  Default 0.3.
+        output_path: If given, the result DataFrame is written to this CSV filepath after training.
             (Ends with ``.csv``). If ``None``, no file is written, but you really want to
             write this output, as it would require manually calling _compute_hvg_df() later.
+        batch_n_cell_minimum: Minimum number of cells required for a batch to be considered valid.
+        n_batch_minimum: Minimum number of batches in which the gene is in n_top_genes highly variable
+            for a gene to make the final list.
     """
 
     _VALID_FLAVORS = frozenset({"seurat_v3", "seurat_v3_paper"})
@@ -109,12 +106,14 @@ class HVGSeuratV3(CellariumModel):
     def __init__(
         self,
         var_names_g: np.ndarray,
-        n_top_genes: int,
+        n_top_genes: int | list[int],
         n_batch: int = 1,
         flavor: Literal["seurat_v3", "seurat_v3_paper"] = "seurat_v3",
         use_batch_key: bool = False,
         span: float = 0.3,
         output_path: str | None = "hvg_seurat_v3_output.csv",
+        batch_n_cell_minimum: int = 2,
+        n_batch_minimum: int = 1,
     ) -> None:
         super().__init__()
         if flavor not in self._VALID_FLAVORS:
@@ -122,7 +121,10 @@ class HVGSeuratV3(CellariumModel):
         self.var_names_g = var_names_g
         n_vars = len(var_names_g)
         self.n_vars = n_vars
-        self.n_top_genes = n_top_genes
+        if isinstance(n_top_genes, int):
+            self.n_top_genes_list = [n_top_genes]
+        else:
+            self.n_top_genes_list = sorted(set(n_top_genes))
         self.n_batch = n_batch
         self.flavor = flavor
         self.use_batch_key = use_batch_key
@@ -144,6 +146,10 @@ class HVGSeuratV3(CellariumModel):
         if (output_path is not None) and (not output_path.endswith(".csv")):
             raise ValueError("output_path must end with .csv")
         self.output_path = output_path
+        self.batch_n_cell_minimum = batch_n_cell_minimum
+        if n_batch_minimum > n_batch:
+            raise ValueError(f"n_batch_minimum ({n_batch_minimum}) cannot exceed n_batch ({n_batch}).")
+        self.n_batch_minimum = n_batch_minimum
 
         self._current_epoch: int = 0
 
@@ -151,27 +157,27 @@ class HVGSeuratV3(CellariumModel):
         self.x_sums_bg: torch.Tensor
         self.x_squared_sums_bg: torch.Tensor
         self.x_size_b: torch.Tensor
-        self.register_buffer("x_sums_bg", torch.zeros(n_batch, n_vars))
-        self.register_buffer("x_squared_sums_bg", torch.zeros(n_batch, n_vars))
+        self.register_buffer("x_sums_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
+        self.register_buffer("x_squared_sums_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
         self.register_buffer("x_size_b", torch.zeros(n_batch))
 
         # Set between epochs by on_train_epoch_end after epoch 0: shape (n_batch, n_vars)
         self.clip_val_bg: torch.Tensor
         self.reg_std_bg: torch.Tensor
-        self.register_buffer("clip_val_bg", torch.zeros(n_batch, n_vars))
-        self.register_buffer("reg_std_bg", torch.zeros(n_batch, n_vars))
+        self.register_buffer("clip_val_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
+        self.register_buffer("reg_std_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
 
         # Epoch-1 buffers: shape (n_batch, n_vars)
         self.counts_sum_bg: torch.Tensor
         self.sq_counts_sum_bg: torch.Tensor
-        self.register_buffer("counts_sum_bg", torch.zeros(n_batch, n_vars))
-        self.register_buffer("sq_counts_sum_bg", torch.zeros(n_batch, n_vars))
+        self.register_buffer("counts_sum_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
+        self.register_buffer("sq_counts_sum_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
 
         # Dummy parameter so Lightning treats this as a trainable module
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self._dummy_param.data.zero_()
 
-        self.hvg_df: pd.DataFrame | None = None
+        self.hvg_dfs: dict[int, pd.DataFrame] | None = None
 
     def reset_parameters(self) -> None:
         self.x_sums_bg.zero_()
@@ -224,27 +230,29 @@ class HVGSeuratV3(CellariumModel):
 
     def _accumulate_epoch0(self, x_ng: torch.Tensor, batch_idx_n: torch.Tensor) -> None:
         n_cells = x_ng.shape[0]
-        idx_exp = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
-        sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
-        sq_sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
-        sums_contrib.scatter_add_(0, idx_exp, x_ng)
-        sq_sums_contrib.scatter_add_(0, idx_exp, x_ng**2)
-        self.x_sums_bg = self.x_sums_bg + sums_contrib
-        self.x_squared_sums_bg = self.x_squared_sums_bg + sq_sums_contrib
+        x64_ng = x_ng.double()
+        idx_exp_ng = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
+        sums_contrib_bg = torch.zeros(self.n_batch, self.n_vars, dtype=torch.float64, device=x_ng.device)
+        sq_sums_contrib_bg = torch.zeros(self.n_batch, self.n_vars, dtype=torch.float64, device=x_ng.device)
+        sums_contrib_bg.scatter_add_(0, idx_exp_ng, x64_ng)
+        sq_sums_contrib_bg.scatter_add_(0, idx_exp_ng, x64_ng**2)
+        self.x_sums_bg = self.x_sums_bg + sums_contrib_bg
+        self.x_squared_sums_bg = self.x_squared_sums_bg + sq_sums_contrib_bg
         self.x_size_b = self.x_size_b + torch.bincount(batch_idx_n, minlength=self.n_batch)
 
     def _accumulate_epoch1(self, x_ng: torch.Tensor, batch_idx_n: torch.Tensor) -> None:
         n_cells = x_ng.shape[0]
+        x64_ng = x_ng.double()
         # Per-cell clip value: shape (n_cells, n_vars)
-        per_cell_clip = self.clip_val_bg[batch_idx_n].to(x_ng.dtype)  # (n_cells, n_vars)
-        x_clipped = torch.minimum(x_ng, per_cell_clip)
-        idx_exp = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
-        sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
-        sq_sums_contrib = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
-        sums_contrib.scatter_add_(0, idx_exp, x_clipped)
-        sq_sums_contrib.scatter_add_(0, idx_exp, x_clipped**2)
-        self.counts_sum_bg = self.counts_sum_bg + sums_contrib
-        self.sq_counts_sum_bg = self.sq_counts_sum_bg + sq_sums_contrib
+        per_cell_clip_ng = self.clip_val_bg[batch_idx_n]  # float64
+        x_clipped_ng = torch.minimum(x64_ng, per_cell_clip_ng)
+        idx_exp_ng = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
+        sums_contrib_bg = torch.zeros(self.n_batch, self.n_vars, dtype=torch.float64, device=x_ng.device)
+        sq_sums_contrib_bg = torch.zeros(self.n_batch, self.n_vars, dtype=torch.float64, device=x_ng.device)
+        sums_contrib_bg.scatter_add_(0, idx_exp_ng, x_clipped_ng)
+        sq_sums_contrib_bg.scatter_add_(0, idx_exp_ng, x_clipped_ng**2)
+        self.counts_sum_bg = self.counts_sum_bg + sums_contrib_bg
+        self.sq_counts_sum_bg = self.sq_counts_sum_bg + sq_sums_contrib_bg
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         """Validation: if in a distributed setting, use DDP with broadcast_buffers=False."""
@@ -281,15 +289,18 @@ class HVGSeuratV3(CellariumModel):
             dist.broadcast(self.reg_std_bg, src=0)
 
     def _compute_clip_val(self) -> None:
-        # Default to +inf so any batch skipped below (N < 2) acts as a no-op clip.
+        # Default to +inf so any batch skipped below (N < batch_n_cell_minimum) acts as a no-op clip.
         self.clip_val_bg.fill_(float("inf"))
         n_vars = self.n_vars
         for b in range(self.n_batch):
             N = self.x_size_b[b].item()
-            if N < 2:
+            if N < self.batch_n_cell_minimum:
                 continue
-            mean_g = (self.x_sums_bg[b] / N).cpu().numpy().astype(np.float64)
-            var_g = (self.x_squared_sums_bg[b] / N - (self.x_sums_bg[b] / N) ** 2).cpu().numpy().astype(np.float64)
+            sums = self.x_sums_bg[b].cpu().numpy()
+            sq_sums = self.x_squared_sums_bg[b].cpu().numpy()
+            mean_g = sums / N
+            # Unbiased (sample) variance with Bessel's correction, matching Scanpy's correction=1
+            var_g = (sq_sums - sums**2 / N) / (N - 1)
 
             not_const = var_g > 0
             estimated_var = np.zeros(n_vars, dtype=np.float64)
@@ -302,8 +313,8 @@ class HVGSeuratV3(CellariumModel):
             reg_std = np.sqrt(10**estimated_var)  # shape (n_vars,)
             clip_val = reg_std * np.sqrt(N) + mean_g
 
-            self.reg_std_bg[b] = torch.tensor(reg_std, dtype=torch.float32)
-            self.clip_val_bg[b] = torch.tensor(clip_val, dtype=torch.float32)
+            self.reg_std_bg[b] = torch.tensor(reg_std)
+            self.clip_val_bg[b] = torch.tensor(clip_val)
 
     def _finish_epoch1(self, trainer: pl.Trainer) -> None:
         # 1. Reduce epoch-1 buffers to rank 0
@@ -325,66 +336,72 @@ class HVGSeuratV3(CellariumModel):
                     UserWarning,
                     stacklevel=2,
                 )
-            self.hvg_df = self._compute_hvg_df(var_df=var_df)
-            if self.output_path is not None:
-                self._save(df=self.hvg_df, output_path=self.output_path)
+            self.hvg_dfs = {}
+            for n in self.n_top_genes_list:
+                df = self._compute_hvg_df(n_top_genes=n, var_df=var_df)
+                self.hvg_dfs[n] = df
+                if self.output_path is not None:
+                    path = self.output_path.replace(".csv", f"__top{n}.csv")
+                    self._save(df=df, output_path=path)
 
-    def _compute_hvg_df(self, var_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    def _compute_hvg_df(self, n_top_genes: int, var_df: pd.DataFrame | None = None) -> pd.DataFrame:
         n_vars = self.n_vars
-        norm_gene_vars = np.zeros((self.n_batch, n_vars), dtype=np.float64)
+        norm_gene_var_bg = np.zeros((self.n_batch, n_vars), dtype=np.float64)
 
         for b in range(self.n_batch):
             N = self.x_size_b[b].item()
-            if N < 2:
+            if N < self.batch_n_cell_minimum:
                 continue
-            mean_bg = (self.x_sums_bg[b] / N).cpu().numpy().astype(np.float64)
-            reg_std = self.reg_std_bg[b].cpu().numpy().astype(np.float64)
-            sum_bg = self.counts_sum_bg[b].cpu().numpy().astype(np.float64)
-            sq_sum_bg = self.sq_counts_sum_bg[b].cpu().numpy().astype(np.float64)
+            mean_g = (self.x_sums_bg[b] / N).cpu().numpy().astype(np.float64)
+            reg_std_g = self.reg_std_bg[b].cpu().numpy().astype(np.float64)
+            sum_g = self.counts_sum_bg[b].cpu().numpy().astype(np.float64)
+            sq_sum_g = self.sq_counts_sum_bg[b].cpu().numpy().astype(np.float64)
 
-            denom = (N - 1) * reg_std**2
+            denom_g = (N - 1) * reg_std_g**2
             with np.errstate(divide="ignore", invalid="ignore"):
-                nv = (N * mean_bg**2 + sq_sum_bg - 2 * mean_bg * sum_bg) / denom
-            nv[np.isnan(nv)] = 0.0
-            norm_gene_vars[b] = nv
+                norm_gene_var_g = (N * mean_g**2 + sq_sum_g - 2 * mean_g * sum_g) / denom_g
+            norm_gene_var_g[np.isnan(norm_gene_var_g)] = 0.0
+            norm_gene_var_bg[b] = norm_gene_var_g
 
-        # Only rank over batches with sufficient data (N >= 2); invalid batches
+        # Only rank over batches with sufficient data (N >= batch_n_cell_minimum); invalid batches
         # have norm_gene_vars == 0 and would otherwise pollute num_batches_high_var
         # and median_ranked with arbitrary rankings of equal values.
-        valid_b = np.array([self.x_size_b[b].item() >= 2 for b in range(self.n_batch)])
-        norm_gene_vars_valid = norm_gene_vars[valid_b]
+        valid_b = np.array([self.x_size_b[b].item() >= self.batch_n_cell_minimum for b in range(self.n_batch)])
+        norm_gene_vars_valid_vg = norm_gene_var_bg[valid_b]
 
-        # Rank genes within each valid batch
-        ranked = np.argsort(np.argsort(-norm_gene_vars_valid, axis=1), axis=1).astype(np.float32)
-        num_batches_high_var = (ranked < self.n_top_genes).sum(axis=0).astype(int)
-        ranked[ranked >= self.n_top_genes] = np.nan
-        ma = np.ma.masked_invalid(ranked)
-        median_ranked = np.ma.median(ma, axis=0).filled(np.nan)
+        # Rank genes within each valid batch v
+        hvg_rank_vg = np.argsort(np.argsort(-norm_gene_vars_valid_vg, axis=1), axis=1).astype(np.float32)
+        num_batches_high_var_v = (hvg_rank_vg < n_top_genes).sum(axis=0).astype(int)
+        hvg_rank_vg[hvg_rank_vg >= n_top_genes] = np.nan
+        masked_hvg_rank_vg = np.ma.masked_invalid(hvg_rank_vg)
+        median_hvg_rank_g = np.ma.median(masked_hvg_rank_vg, axis=0).filled(np.nan)
 
-        variances_norm = norm_gene_vars_valid.mean(axis=0)
+        variances_norm_g = norm_gene_vars_valid_vg.mean(axis=0)
 
         df = pd.DataFrame(
             index=pd.Index(self.var_names_g, name="gene"),
             data={
-                "highly_variable_nbatches": num_batches_high_var,
-                "highly_variable_rank": median_ranked,
-                "variances_norm": variances_norm,
+                "highly_variable_nbatches": num_batches_high_var_v,
+                "highly_variable_rank": median_hvg_rank_g,
+                "variances_norm": variances_norm_g,
             },
         )
 
         # Use integer-position sort so duplicate gene names don't cause
         # df.loc to mark more than n_top_genes rows as highly variable.
-        rank_vals = df["highly_variable_rank"].fillna(np.inf).values
-        nbatches_vals = df["highly_variable_nbatches"].values
+        rank_vals_g = df["highly_variable_rank"].fillna(np.inf).values
+        nbatches_vals_g = df["highly_variable_nbatches"].values
         # np.lexsort: LAST key = primary sort key.
         if self.flavor == "seurat_v3":
             # Primary: rank ascending; tiebreaker: nbatches descending.
-            sort_positions = np.lexsort((-nbatches_vals, rank_vals))
+            sort_positions_g = np.lexsort((-nbatches_vals_g, rank_vals_g))
         else:  # seurat_v3_paper
             # Primary: nbatches descending; tiebreaker: rank ascending.
-            sort_positions = np.lexsort((rank_vals, -nbatches_vals))
+            sort_positions_g = np.lexsort((rank_vals_g, -nbatches_vals_g))
+        eligible_g = df["highly_variable_nbatches"].values >= self.n_batch_minimum
+        eligible_in_sort_order_g = sort_positions_g[eligible_g[sort_positions_g]]
         hvg_flags = np.zeros(len(df), dtype=bool)
-        hvg_flags[sort_positions[: self.n_top_genes]] = True
+        hvg_flags[eligible_in_sort_order_g[:n_top_genes]] = True
         df["highly_variable"] = hvg_flags
 
         if self.n_batch == 1:
@@ -399,9 +416,10 @@ class HVGSeuratV3(CellariumModel):
             if len(extra_cols) > 0:
                 df = df.join(var_df[extra_cols], how="left")
 
+        df = df.iloc[sort_positions_g]  # reorder rows by rank
         return df
 
     def _save(self, df: pd.DataFrame, output_path: str) -> None:
         df.to_csv(output_path)
-        hvg_df = df[df["highly_variable"]].sort_values("highly_variable_rank", ascending=True)
+        hvg_df = df[df["highly_variable"]]
         hvg_df.to_csv(output_path.replace(".csv", "__hvg_only.csv"), index=True, header=True)

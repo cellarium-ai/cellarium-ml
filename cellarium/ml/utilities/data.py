@@ -196,3 +196,43 @@ def get_categories(x: pd.Series) -> np.ndarray:
         Numpy array.
     """
     return np.asarray(x.cat.categories)
+
+
+def get_var_names_g_indices(
+    input_var_names_g: np.ndarray,
+    stored_var_names_g: np.ndarray,
+) -> np.ndarray:
+    """
+    Return integer indices that map each gene in ``input_var_names_g`` to its position in
+    ``stored_var_names_g``.
+
+    This allows parametric transforms (e.g. :class:`~cellarium.ml.transforms.ZScore`,
+    :class:`~cellarium.ml.transforms.DivideByScale`) to accept any subset or reordering of
+    the gene space they were initialized with, by looking up the per-gene statistics for only
+    the genes present in the current batch.
+
+    Args:
+        input_var_names_g:
+            Gene names arriving at the transform (may be a subset or reordering of
+            ``stored_var_names_g``).
+        stored_var_names_g:
+            The full gene-name schema the transform was initialized with.
+
+    Returns:
+        A 1-D integer array of length ``len(input_var_names_g)`` where element ``i`` is the
+        index of ``input_var_names_g[i]`` in ``stored_var_names_g``.
+
+    Raises:
+        ValueError: If any gene in ``input_var_names_g`` is absent from ``stored_var_names_g``.
+    """
+    stored_index: dict[str, int] = {name: idx for idx, name in enumerate(stored_var_names_g)}
+    indices: list[int] = []
+    missing: list[str] = []
+    for gene in input_var_names_g:
+        if gene in stored_index:
+            indices.append(stored_index[gene])
+        else:
+            missing.append(gene)
+    if missing:
+        raise ValueError(f"The following genes in `var_names_g` are not present in the stored schema: {missing}")
+    return np.array(indices, dtype=np.intp)
