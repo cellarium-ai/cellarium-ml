@@ -44,6 +44,7 @@ else
 endif
 
 test-examples: FORCE
+	rm -r /tmp/test_examples || true
 	cellarium-ml onepass_mean_var_std fit --config examples/cli_workflow/onepass_train_config.yaml
 	cellarium-ml incremental_pca fit --config examples/cli_workflow/ipca_train_config.yaml
 	cellarium-ml logistic_regression fit --config examples/cli_workflow/lr_train_config.yaml

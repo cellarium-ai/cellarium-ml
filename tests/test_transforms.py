@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumPipeline
-from cellarium.ml.transforms import Filter, Log1p, NormalizeTotal, ZScore
+from cellarium.ml.transforms import DivideByScale, Filter, Log1p, NormalizeTotal, ZScore
 
 n, g, target_count = 100, 3, 10_000
 
@@ -139,3 +139,146 @@ def test_filter_cache():
     assert transform.filter.cache_info().currsize == m
     assert transform.filter.cache_info().misses == m
     assert transform.filter.cache_info().hits == m * (m - 1) / 2
+
+
+# ---------------------------------------------------------------------------
+# ZScore flexible gene-subset tests
+# ---------------------------------------------------------------------------
+
+G_FULL = 5
+_full_var_names = np.array([f"gene_{i}" for i in range(G_FULL)])
+
+
+@pytest.fixture
+def zscore_full():
+    """ZScore initialized on the full G_FULL-gene space."""
+    rng = torch.Generator()
+    rng.manual_seed(42)
+    mean_g = torch.rand(G_FULL, generator=rng)
+    std_g = torch.rand(G_FULL, generator=rng) + 0.1
+    return ZScore(mean_g, std_g, _full_var_names.copy())
+
+
+def test_zscore_full_space_unchanged(zscore_full: ZScore):
+    """Full schema input still works as before."""
+    x = torch.ones(3, G_FULL)
+    out = zscore_full(x, _full_var_names)
+    assert out["x_ng"].shape == (3, G_FULL)
+
+
+def test_zscore_subset_correct_stats(zscore_full: ZScore):
+    """Input is a strict subset; only the matching per-gene stats are applied."""
+    subset_names = np.array(["gene_1", "gene_3"])
+    x = torch.ones(4, 2)
+    out = zscore_full(x, subset_names)
+    assert out["x_ng"].shape == (4, 2)
+
+    # Verify values: z = (1 - mean_g[i]) / (std_g[i] + eps)
+    idx = np.array([1, 3])
+    expected = (x - zscore_full.mean_g[idx]) / (zscore_full.std_g[idx] + zscore_full.eps)
+    np.testing.assert_allclose(out["x_ng"].numpy(), expected.numpy(), rtol=1e-5)
+
+
+def test_zscore_reordered_correct_stats(zscore_full: ZScore):
+    """Input genes are a reordering of the full schema; stats follow input order."""
+    reordered = np.array(["gene_4", "gene_0", "gene_2", "gene_1", "gene_3"])
+    x = torch.ones(2, G_FULL)
+    out = zscore_full(x, reordered)
+    assert out["x_ng"].shape == (2, G_FULL)
+
+    idx = np.array([4, 0, 2, 1, 3])
+    expected = (x - zscore_full.mean_g[idx]) / (zscore_full.std_g[idx] + zscore_full.eps)
+    np.testing.assert_allclose(out["x_ng"].numpy(), expected.numpy(), rtol=1e-5)
+
+
+def test_zscore_unknown_gene_raises(zscore_full: ZScore):
+    """Gene absent from stored schema raises ValueError."""
+    bad_names = np.array(["gene_0", "gene_unknown"])
+    x = torch.ones(2, 2)
+    with pytest.raises(ValueError, match="gene_unknown"):
+        zscore_full(x, bad_names)
+
+
+# ---------------------------------------------------------------------------
+# DivideByScale flexible gene-subset tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def divide_by_scale_full():
+    """DivideByScale initialized on the full G_FULL-gene space."""
+    rng = torch.Generator()
+    rng.manual_seed(7)
+    scale_g = torch.rand(G_FULL, generator=rng) + 0.5
+    return DivideByScale(scale_g, _full_var_names.copy())
+
+
+def test_divide_by_scale_subset_correct_stats(divide_by_scale_full: DivideByScale):
+    """Input is a strict subset; only matching per-gene scales are applied."""
+    subset_names = np.array(["gene_0", "gene_2", "gene_4"])
+    x = torch.ones(3, 3) * 2.0
+    out = divide_by_scale_full(x, subset_names)
+    assert out["x_ng"].shape == (3, 3)
+
+    idx = np.array([0, 2, 4])
+    expected = x / (divide_by_scale_full.scale_g[idx] + divide_by_scale_full.eps)
+    np.testing.assert_allclose(out["x_ng"].numpy(), expected.numpy(), rtol=1e-5)
+
+
+def test_divide_by_scale_unknown_gene_raises(divide_by_scale_full: DivideByScale):
+    """Gene absent from stored schema raises ValueError."""
+    bad_names = np.array(["gene_0", "gene_missing"])
+    x = torch.ones(2, 2)
+    with pytest.raises(ValueError, match="gene_missing"):
+        divide_by_scale_full(x, bad_names)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end pipeline: Filter → NormalizeTotal → Log1p → ZScore
+# ---------------------------------------------------------------------------
+
+
+def test_filter_then_zscore_pipeline():
+    """
+    ZScore is initialized on the full gene space.  A Filter upstream reduces
+    the batch to a subset before ZScore sees it — this must work without error
+    and produce numerically correct results.
+    """
+    n_cells = 20
+    G_PIPE = 6
+    full_names = np.array([f"gene_{i}" for i in range(G_PIPE)])
+    keep = ["gene_1", "gene_3", "gene_5"]
+
+    rng = torch.Generator()
+    rng.manual_seed(99)
+    x_ng = torch.poisson(torch.rand(n_cells, G_PIPE, generator=rng) * 30 + 1)
+
+    # Compute reference stats on the filtered+log-normalized data
+    keep_idx = np.array([1, 3, 5])
+    x_sub = x_ng[:, keep_idx]
+    normed = target_count * x_sub / x_sub.sum(dim=-1, keepdim=True)
+    logged = torch.log1p(normed)
+    mean_g = logged.mean(dim=0)
+    std_g = logged.std(dim=0)
+
+    # Build ZScore on the FULL gene space by padding with dummy stats for unused genes
+    mean_full = torch.zeros(G_PIPE)
+    std_full = torch.ones(G_PIPE)
+    mean_full[keep_idx] = mean_g
+    std_full[keep_idx] = std_g
+
+    pipeline = CellariumPipeline(
+        [
+            Filter(keep),
+            NormalizeTotal(target_count),
+            Log1p(),
+            ZScore(mean_full, std_full, full_names),
+        ]
+    )
+
+    batch = {"x_ng": x_ng, "var_names_g": full_names}
+    result = pipeline(batch)["x_ng"]
+
+    assert result.shape == (n_cells, len(keep))
+    np.testing.assert_allclose(result.mean(dim=0).numpy(), np.zeros(len(keep)), atol=1e-5)
+    np.testing.assert_allclose(result.std(dim=0).numpy(), np.ones(len(keep)), atol=1e-5)
