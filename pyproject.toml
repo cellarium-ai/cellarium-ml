@@ -49,6 +49,7 @@ test = [
   "tensorboard",
   "torchvision",
   "scvi-tools",
+  "zarr",
 ]
 docs = [
   "nbsphinx",
