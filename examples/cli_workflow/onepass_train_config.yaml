@@ -66,6 +66,7 @@ model:
     class_path: cellarium.ml.models.OnePassMeanVarStd
     init_args:
       algorithm: shifted_data
+      output_path: /tmp/test_examples/onepass/onepass.csv
   optim_fn: null
   optim_kwargs: null
   scheduler_fn: null
