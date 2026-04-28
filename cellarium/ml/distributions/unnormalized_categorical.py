@@ -51,6 +51,7 @@ class TorchCategorical(Distribution):
         logits (Tensor): event log probabilities (unnormalized)
     """
 
+    # the only difference from pytorch here is that things are not on a simplex
     arg_constraints = {"probs": constraints.real_vector, "logits": constraints.real_vector}
     has_enumerate_support = True
 
