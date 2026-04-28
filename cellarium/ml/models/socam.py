@@ -133,52 +133,14 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0], dim=-2):
             logits_nc = self._compute_regression(x_ng, W_gc)
             if self.probability_propagation_flag:
-                logits_nc = self.propagated_logits(logits_nc=logits_nc)
+                logits_nc = self.propagate_logits(logits_nc=logits_nc)
             pyro.sample("y", self.out_distribution(logits=logits_nc), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
-        """
-        Predict the target logits.
-
-        Args:
-            x_ng:
-                The input data.
-            var_names_g:
-                The variable names for the input data.
-
-        Returns:
-            A dictionary with the target logits.
-        """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        logits_nc = self._compute_regression(x_ng, self.W_gc)
-        probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
-        if self.probability_propagation_flag:
-            probs_nc = self.probability_propagation(probs_nc=probs_nc)
-        return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
-
-    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
-        if trainer.global_rank != 0:
-            return
-
-        if not self.log_metrics:
-            return
-
-        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
-            return
-
-        for logger in trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                logger.experiment.add_histogram(
-                    "W_gc",
-                    self.W_gc,
-                    global_step=trainer.global_step,
-                )
-
-    def probability_propagation(self, probs_nc: torch.Tensor) -> torch.Tensor:
+    @torch.compile()
+    def propagate_probs(self, probs_nc: torch.Tensor) -> torch.Tensor:
         """
         Propagate probabilities up the hierarchy defined by `descendant_tensor` using matrix multiplication.
         This effectively sums the probabilities of all descendant categories for each category.
@@ -198,7 +160,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         return torch.clamp(propagated_probs_nc, max=1.0)
 
     @torch.compile()
-    def propagated_logits(self, logits_nc: torch.Tensor):
+    def propagate_logits(self, logits_nc: torch.Tensor):
         """
         Perform probability propagation in logit space.
 
@@ -214,3 +176,42 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         desc_matrix_cc = self.descendant_tensor
         temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
         return temp.logsumexp(dim=1)
+
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+        """
+        Predict the target logits.
+
+        Args:
+            x_ng:
+                The input data.
+            var_names_g:
+                The variable names for the input data.
+
+        Returns:
+            A dictionary with the target logits.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+        logits_nc = self._compute_regression(x_ng, self.W_gc)
+        probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
+        if self.probability_propagation_flag:
+            probs_nc = self.propagate_probs(probs_nc=probs_nc)
+        return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
+
+    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
+        if trainer.global_rank != 0:
+            return
+
+        if not self.log_metrics:
+            return
+
+        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
+            return
+
+        for logger in trainer.loggers:
+            if isinstance(logger, pl.loggers.TensorBoardLogger):
+                logger.experiment.add_histogram(
+                    "W_gc",
+                    self.W_gc,
+                    global_step=trainer.global_step,
+                )
