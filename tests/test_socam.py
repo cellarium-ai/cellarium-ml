@@ -66,7 +66,6 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
 
     # Create test data
     output_categories = [f"cell_type_{i}" for i in range(c)]
-    input_categories = output_categories
     descendant_matrix = torch.eye(c, dtype=torch.float32)
 
     # Dataloader
@@ -84,9 +83,8 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     model = SOCAM(
         n_obs=n,
         var_names_g=var_names_g,
-        output_row_descendent_col_torch_tensor=descendant_matrix,
-        output_categories=output_categories,
-        input_categories=input_categories,
+        descendant_tensor=descendant_matrix,
+        cl_names=output_categories,
         W_prior_scale=1.0,
         W_init_scale=1.0,
         seed=42,
@@ -121,9 +119,9 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
 
     # Assert model attributes match
     assert np.array_equal(model.var_names_g, loaded_model.var_names_g)
-    assert model.input_categories == loaded_model.input_categories
+    assert model.cl_names == loaded_model.cl_names
     assert model.n_categories == loaded_model.n_categories
-    assert model.n_output_categories == loaded_model.n_output_categories
+    # assert model.n_output_categories == loaded_model.n_output_categories
     assert model.probability_propagation_flag == loaded_model.probability_propagation_flag
 
     # Test prediction from loaded checkpoint
@@ -154,16 +152,14 @@ def test_socam_predict():
 
     # Create test data
     output_categories = [f"cell_type_{i}" for i in range(c)]
-    input_categories = output_categories
     descendant_matrix = torch.eye(c, dtype=torch.float32)
 
     # Model
     model = SOCAM(
         n_obs=n,
         var_names_g=var_names_g,
-        output_row_descendent_col_torch_tensor=descendant_matrix,
-        output_categories=output_categories,
-        input_categories=input_categories,
+        descendant_tensor=descendant_matrix,
+        cl_names=output_categories,
         probability_propagation_flag=False,
         log_metrics=False,
     )
@@ -201,7 +197,6 @@ def test_socam_probability_propagation():
 
     # Create test data with a hierarchical descendant matrix
     output_categories = [f"cell_type_{i}" for i in range(c)]
-    input_categories = output_categories
 
     # Create a simple hierarchy: type 0 -> type 1, type 2 -> type 3, type 4 standalone
     descendant_matrix = torch.eye(c, dtype=torch.float32)
@@ -212,9 +207,8 @@ def test_socam_probability_propagation():
     model = SOCAM(
         n_obs=n,
         var_names_g=var_names_g,
-        output_row_descendent_col_torch_tensor=descendant_matrix,
-        output_categories=output_categories,
-        input_categories=input_categories,
+        descendant_tensor=descendant_matrix,
+        cl_names=output_categories,
         probability_propagation_flag=True,
         log_metrics=False,
     )
