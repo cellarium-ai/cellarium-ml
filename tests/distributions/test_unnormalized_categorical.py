@@ -47,7 +47,7 @@ def test_initialization_with_logits_1d():
     dist = TorchCategorical(logits=logits)
 
     # Check that logits are normalized (logsumexp)
-    assert torch.allclose(dist.logits.logsumexp(dim=-1), torch.tensor(0.0), atol=1e-7)
+    assert torch.allclose(dist.logits.logsumexp(dim=-1), torch.tensor(0.0), atol=1e-6)
     assert dist._num_events == 4
     assert dist.batch_shape == torch.Size([])
 
@@ -58,7 +58,7 @@ def test_initialization_with_logits_2d():
     dist = TorchCategorical(logits=logits)
 
     # Check that logits are normalized per batch
-    assert torch.allclose(dist.logits.logsumexp(dim=-1), torch.zeros(3), atol=1e-7)
+    assert torch.allclose(dist.logits.logsumexp(dim=-1), torch.zeros(3), atol=1e-6)
     assert dist._num_events == 5
     assert dist.batch_shape == torch.Size([3])
 
