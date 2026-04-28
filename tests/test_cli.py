@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
 from cellarium.ml.cli import main
 
@@ -509,6 +510,76 @@ CONFIGS = [
             "trainer": {
                 "accelerator": "cpu",
                 "devices": devices,
+            },
+        },
+    },
+    {
+        "model_name": "socam",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "model": {
+                    "class_path": "cellarium.ml.models.SOCAM",
+                    "init_args": {
+                        "n_obs": "200",
+                        "descendant_tensor": torch.eye(666),
+                        "cl_names": [f"CL:000000{i}" for i in range(666)],
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["cell_type_ontology_term_id"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {
+                        "attr": "var_names",
+                    },
+                    "y_n": {
+                        "attr": "obs",
+                        "key": "cell_type_ontology_term_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                },
+                "batch_size": "50",
+                "shuffle": "true",
+                "num_workers": "2",
+                "val_size": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "4",
+                "val_check_interval": "2",
             },
         },
     },

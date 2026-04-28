@@ -2,5 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from cellarium.ml.distributions.negative_binomial import NegativeBinomial
+from cellarium.ml.distributions.unnormalized_categorical import PyroCategorical
 
-__all__ = ["NegativeBinomial"]
+__all__ = ["NegativeBinomial", "PyroCategorical"]
