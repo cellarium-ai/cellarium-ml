@@ -133,8 +133,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0], dim=-2):
             logits_nc = self._compute_regression(x_ng, W_gc)
             if self.probability_propagation_flag:
-                compiled_propagated_logits = torch.compile(self.log_probs)
-                logits_nc = compiled_propagated_logits(logits_nc=logits_nc)
+                logits_nc = self.propagated_logits(logits_nc=logits_nc)
             pyro.sample("y", self.out_distribution(logits=logits_nc), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
@@ -180,6 +179,17 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 )
 
     def probability_propagation(self, probs_nc: torch.Tensor) -> torch.Tensor:
+        """
+        Propagate probabilities up the hierarchy defined by `descendant_tensor` using matrix multiplication.
+        This effectively sums the probabilities of all descendant categories for each category.
+        The output is then clamped to a maximum of 1.0 to ensure valid probability values.
+
+        Args:
+            probs_nc: Tensor of shape (n, c) containing the probabilities for each category
+
+        Returns:
+            Tensor of shape (n, c) containing the propagated probabilities for each category
+        """
         propagated_probs_nc = torch.einsum(
             "nc,kc->nk",
             probs_nc,
@@ -187,18 +197,18 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         )
         return torch.clamp(propagated_probs_nc, max=1.0)
 
-    def log_probs(self, logits_nc: torch.Tensor):
+    @torch.compile()
+    def propagated_logits(self, logits_nc: torch.Tensor):
         """
-        logits = torch Tensor of shape nxc
-        step 1: propagated_logits: LSE (L_i) where i belongs to the
-        set of descendents of each column in c and column c
-        step 2: logits_rowwise_sum: LSE (L_m) where m belongs to the
-        2613 classes c in each row (sum of all logits in each row of n before propagation)
-        log(1-p_k') = log{(sum(p_i) i belongs to set(descendents(k)) + p_k)/sum(p_m), m = total cell types}
-        step 3: LSE(L_i) - LSE(L_m)
+        Perform probability propagation in logit space.
+
+        Args:
+            logits_nc: Tensor of shape (n, c) containing the logits for each category
+        Returns:
+            Tensor of shape (n, c) containing the logits for each category after propagation
         """
-        log_probs = self.logsumexp_propagated(logits_nc) - torch.logsumexp(logits_nc, dim=1, keepdim=True)
-        return log_probs
+        propagated_logits_nc = self.logsumexp_propagated(logits_nc) - torch.logsumexp(logits_nc, dim=1, keepdim=True)
+        return propagated_logits_nc
 
     def logsumexp_propagated(self, logits_nc):
         desc_matrix_cc = self.descendant_tensor
