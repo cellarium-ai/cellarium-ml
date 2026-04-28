@@ -200,3 +200,57 @@ def get_var_names_g_indices(
     if missing:
         raise ValueError(f"The following genes in `var_names_g` are not present in the stored schema: {missing}")
     return np.array(indices, dtype=np.intp)
+
+
+def _get_classes_from_owl(owl_uri: str, prefix: str = "CL_") -> list[str]:
+    import owlready2
+
+    cl = owlready2.get_ontology(owl_uri).load()
+    
+    # only keep CL classes with a singleton label
+    classes = list(
+        _class for _class in cl.classes() if _class.name.startswith(prefix) and len(_class.label) == 1
+    )
+    return classes
+
+
+def get_cl_classes_from_owl(owl_uri: str) -> list[str]:
+    return _get_classes_from_owl(owl_uri, prefix="CL_")
+
+
+def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
+    """
+    Get a descendant tensor from an OWL file.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns:
+        A descendant tensor, where the entry at index (i, j) is True if i=j or cell type j is a descendant of 
+        cell type i, and False otherwise.
+    """
+    
+    cl_classes = get_cl_classes_from_owl(owl_uri)
+    
+    cell_type_to_index = {cell_type: idx for idx, cell_type in enumerate(cl_classes)}
+    descendant_tensor = torch.zeros((len(cl_classes), len(cl_classes)), dtype=torch.bool)
+    for cl_class in cl_classes:
+        idx = cell_type_to_index[cl_class]
+        descendant_tensor[idx, idx] = True  # identity is included in this tensor
+        for descendant in cl_class.descendants():
+            descendant_idx = cell_type_to_index[descendant]
+            descendant_tensor[idx, descendant_idx] = True
+    return descendant_tensor
+
+
+def get_cl_names_from_owl(owl_uri: str) -> list[str]:
+    """
+    Get cell type names (CL_0000123) from an OWL file.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns:
+        A list of cell type names, where the name at index i corresponds to the cell type 
+        at index i in the descendant tensor.
+    """
+    cl_classes = get_cl_classes_from_owl(owl_uri)
+    return [_class.name for _class in cl_classes]
