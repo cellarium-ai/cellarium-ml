@@ -24,34 +24,25 @@ def compute_valid_mask(input_categories: list[str], output_categories: list[str]
 
 class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
     """
-    Logistic regression model.
+    Logistic regression model for cell type ontology classification.
 
     Args:
-        n_obs:
-            Number of observations in the dataset (used to size the Pyro plate).
-        var_names_g:
-            The variable-name schema for the input data; used for validation.
-        output_categories:
-            Total number of target categories expected at prediction/validation time.
+        n_obs: Number of observations in the dataset (used to size the Pyro plate).
+        var_names_g: The variable-name schema for the input data; used for validation.
+        output_categories: Total number of target categories expected at prediction/validation time.
             Used when the trained model has fewer categories than the final output space.
-        output_row_descendent_col_torch_tensor:
-            A binary (0/1) tensor of shape (n_categories, n_categories) defining
+        descendant_tensor: Binary (0/1) tensor of shape (n_categories, n_categories) defining
             the descendant relationships between categories. Row i contains ones
-            for all categories considered descendants of category i. Used for
+            for all categories considered descendants of category i (plus self). Used for
             probability-propagation.
-        input_categories:
-            Array of unique category identifiers for the training labels.
-            Boolean or integer mask mapping the model’s category indices to the
-        probability_propagation_flag:
-            If True, applies hierarchical probability propagation before sampling
+        cl_names: Array of unique category identifiers for the training labels.
+            Boolean or integer mask mapping the model's category indices to the
+        probability_propagation_flag: If True, applies hierarchical probability propagation before sampling
             or predicting the output distribution.
-        W_prior_scale:
-            Scale (b) parameter of the Laplace prior on the weight matrix `W_gc`.
-        W_init_scale:
-            Standard deviation for initializing `W_gc`.
-        seed:
-            Random seed used to initialize parameters.
-        log_metrics:
+        W_prior_scale: Scale (b) parameter of the Laplace prior on the weight matrix `W_gc`.
+        W_init_scale: Standard deviation for initializing `W_gc`.
+        seed: Random seed used to initialize parameters.
+        log_metrics: If True, logs weight histograms (TensorBoard) during training.
             If True, logs weight histograms (TensorBoard) during training.
     """
 
@@ -59,9 +50,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self,
         n_obs: int,
         var_names_g: np.ndarray,
-        output_row_descendent_col_torch_tensor: torch.Tensor,
-        output_categories: list[str],
-        input_categories: list[str],
+        descendant_tensor: torch.Tensor,
+        cl_names: list[str],
         probability_propagation_flag: bool = True,
         W_prior_scale: float = 1.0,
         W_init_scale: float = 1.0,
@@ -69,19 +59,25 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         log_metrics: bool = True,
     ) -> None:
         super().__init__()
-
-        # data
         self.n_obs = n_obs
         self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
-        self.input_categories = input_categories
-        self.target_row_descendent_col_torch_tensor = output_row_descendent_col_torch_tensor
-        self.n_output_categories = output_row_descendent_col_torch_tensor.shape[0]
-        self.n_categories = len(self.input_categories)
+        self.cl_names = cl_names
+        if descendant_tensor.shape[0] != descendant_tensor.shape[1]:
+            raise ValueError("`descendant_tensor` should be a square matrix.")
+        if descendant_tensor.trace() != descendant_tensor.shape[0]:
+            raise ValueError(
+                "`descendant_tensor` should have ones on the diagonal (each category is a descendant of itself)."
+            )
+        if len(cl_names) != descendant_tensor.shape[0]:
+            raise ValueError("Length of `cl_names` should match the number of rows in `descendant_tensor`.")
+        self._descendant_tensor = descendant_tensor
+        self.register_buffer("descendant_tensor", descendant_tensor)
+        self.n_categories = descendant_tensor.shape[0]
         self.probability_propagation_flag = probability_propagation_flag
         self.out_distribution = PyroCategorical
         self.seed = seed
-        self.output_categories = output_categories
+
         # parameters
         self._W_prior_scale = W_prior_scale
         self.W_init_scale = W_init_scale
@@ -89,28 +85,17 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.register_buffer("W_prior_scale", torch.empty(()))
         self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_categories))
         self.b_c = torch.nn.Parameter(torch.empty(self.n_categories))
-        self.reset_parameters()
-
-        # loss
         self.elbo = pyro.infer.Trace_ELBO()
-
         self.log_metrics = log_metrics
 
-        self.valid_mask = compute_valid_mask(
-            input_categories=self.input_categories, output_categories=self.output_categories
-        )
-
-        if self.n_categories > self.n_output_categories:
-            raise ValueError("`n_categories` can't be greater than `output_categories`.")
-
-        if self.n_output_categories != len(self.output_categories):
-            raise ValueError("`n_output_categories` and `output_categories` should be equal.")
+        self.reset_parameters()
 
     def reset_parameters(self) -> None:
         rng_device = self.W_gc.device.type if self.W_gc.device.type != "meta" else "cpu"
         rng = torch.Generator(device=rng_device)
         rng.manual_seed(self.seed)
         self.W_prior_scale.fill_(self._W_prior_scale)
+        self.descendant_tensor.copy_(self._descendant_tensor)
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
         self.b_c.data.zero_()
 
@@ -136,19 +121,21 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n)
         return {"loss": loss}
 
+    def _compute_regression(self, x_ng: torch.Tensor, W_gc: torch.Tensor) -> torch.Tensor:
+        logits_nc = x_ng @ W_gc + self.b_c
+        return logits_nc
+
     def model(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         W_gc = pyro.sample(
             "W",
             dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, self.n_categories]).to_event(2),
         )
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0], dim=-2):
-            logits_nc = x_ng @ W_gc + self.b_c
-            if not self.probability_propagation_flag:  # only used for base model
-                pyro.sample("y", dist.Categorical(logits=logits_nc), obs=y_n)
-            else:
+            logits_nc = self._compute_regression(x_ng, W_gc)
+            if self.probability_propagation_flag:
                 compiled_propagated_logits = torch.compile(self.log_probs)
-                propagated_logits = compiled_propagated_logits(logits=logits_nc)
-                pyro.sample("y", self.out_distribution(logits=propagated_logits), obs=y_n)
+                logits_nc = compiled_propagated_logits(logits_nc=logits_nc)
+            pyro.sample("y", self.out_distribution(logits=logits_nc), obs=y_n)
 
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
@@ -168,16 +155,11 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        logits_nc = x_ng @ self.W_gc + self.b_c
-        if self.n_output_categories == self.W_gc.shape[1]:
-            activation_out = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-        else:  # when trained model has fewer classes than expected during validation
-            activation_out_filtered = torch.nn.functional.softmax(logits_nc.to(dtype=torch.float), dim=1)
-            activation_out = torch.zeros(x_ng.shape[0], self.n_output_categories, device=x_ng.device)
-            activation_out[:, self.valid_mask] = activation_out_filtered
+        logits_nc = self._compute_regression(x_ng, self.W_gc)
+        probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
         if self.probability_propagation_flag:
-            activation_out = self.probability_propagation(activation_out_gpu=activation_out)
-        return {"y_logits_nc": logits_nc, "cell_type_probs_nc": activation_out}
+            probs_nc = self.probability_propagation(probs_nc=probs_nc)
+        return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:
@@ -197,22 +179,15 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                     global_step=trainer.global_step,
                 )
 
-    def probability_propagation(self, activation_out_gpu: torch.Tensor) -> torch.Tensor:
-        """
-        for each column in activation_out_gpu_clone, col, we get a tensor of
-        activation_out_gpu[:,[children_indices[col]]],
-        then we take the rowwise sume of these columns.
-        then we add those values with all rows in 'col' column in activation_out_gpu_clone
-        TRIAL CODE AVAILABLE IN TRIAL.IPYNB - PROBABILITY PROPAGATION CODE TRIAL
-        """
-        propagated_p = torch.einsum(
+    def probability_propagation(self, probs_nc: torch.Tensor) -> torch.Tensor:
+        propagated_probs_nc = torch.einsum(
             "nc,kc->nk",
-            activation_out_gpu,
-            self.target_row_descendent_col_torch_tensor.to(device=activation_out_gpu.device),
+            probs_nc,
+            self.descendant_tensor,
         )
-        return torch.clamp(propagated_p, max=1.0)
+        return torch.clamp(propagated_probs_nc, max=1.0)
 
-    def log_probs(self, logits: torch.Tensor):
+    def log_probs(self, logits_nc: torch.Tensor):
         """
         logits = torch Tensor of shape nxc
         step 1: propagated_logits: LSE (L_i) where i belongs to the
@@ -222,11 +197,10 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         log(1-p_k') = log{(sum(p_i) i belongs to set(descendents(k)) + p_k)/sum(p_m), m = total cell types}
         step 3: LSE(L_i) - LSE(L_m)
         """
-        log_probs = self.logsumexp_propagated(logits) - torch.logsumexp(logits, dim=1, keepdim=True)
+        log_probs = self.logsumexp_propagated(logits_nc) - torch.logsumexp(logits_nc, dim=1, keepdim=True)
         return log_probs
 
     def logsumexp_propagated(self, logits_nc):
-        # matrix multiplication for torch with replacement/optimization
-        desc_matrix_cc = self.target_row_descendent_col_torch_tensor.to(device=logits_nc.device, dtype=torch.float)
+        desc_matrix_cc = self.descendant_tensor
         temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
         return temp.logsumexp(dim=1)
