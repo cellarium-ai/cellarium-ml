@@ -202,19 +202,27 @@ def get_var_names_g_indices(
     return np.array(indices, dtype=np.intp)
 
 
-def _get_classes_from_owl(owl_uri: str, prefix: str = "CL_") -> list[str]:
+def _get_classes_from_owl(owl_uri: str, prefix: str = "CL_") -> list:
+    """
+    Load an OWL file and return classes with a given prefix and a singleton label.
+    """
     import owlready2
 
     cl = owlready2.get_ontology(owl_uri).load()
-    
+
     # only keep CL classes with a singleton label
-    classes = list(
-        _class for _class in cl.classes() if _class.name.startswith(prefix) and len(_class.label) == 1
-    )
+    classes = list(_class for _class in cl.classes() if _class.name.startswith(prefix) and len(_class.label) == 1)
     return classes
 
 
-def get_cl_classes_from_owl(owl_uri: str) -> list[str]:
+def get_cl_classes_from_owl(owl_uri: str) -> list:
+    """
+    Get CL classes from an OWL file: the ontology IDs, e.g. CL_0000123.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns: A list of CL classes
+    """
     return _get_classes_from_owl(owl_uri, prefix="CL_")
 
 
@@ -225,12 +233,12 @@ def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
     Args:
         owl_uri: The URI of the OWL file.
     Returns:
-        A descendant tensor, where the entry at index (i, j) is True if i=j or cell type j is a descendant of 
+        A descendant tensor, where the entry at index (i, j) is True if i=j or cell type j is a descendant of
         cell type i, and False otherwise.
     """
-    
+
     cl_classes = get_cl_classes_from_owl(owl_uri)
-    
+
     cell_type_to_index = {cell_type: idx for idx, cell_type in enumerate(cl_classes)}
     descendant_tensor = torch.zeros((len(cl_classes), len(cl_classes)), dtype=torch.bool)
     for cl_class in cl_classes:
@@ -249,7 +257,7 @@ def get_cl_names_from_owl(owl_uri: str) -> list[str]:
     Args:
         owl_uri: The URI of the OWL file.
     Returns:
-        A list of cell type names, where the name at index i corresponds to the cell type 
+        A list of cell type names, where the name at index i corresponds to the cell type
         at index i in the descendant tensor.
     """
     cl_classes = get_cl_classes_from_owl(owl_uri)
