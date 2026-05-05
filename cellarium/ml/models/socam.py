@@ -87,7 +87,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c = torch.nn.Parameter(torch.empty(self.n_categories))
         self.elbo = pyro.infer.Trace_ELBO()
         self.log_metrics = log_metrics
-        self._subset_cache: dict[tuple[str, ...], tuple[list[str], list[int], torch.Tensor]] = {}
+        self._subset_cache: dict[tuple[str, ...], tuple[list[str], list[int], torch.Tensor, dict[str, int]]] = {}
+        self._full_label_lookup: dict[str, int] | None = None
 
         self.reset_parameters()
 
@@ -100,24 +101,27 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
         self.b_c.data.zero_()
         self._subset_cache.clear()
+        self._full_label_lookup = None
 
-    def _get_subset_info(self, cl_name_subset: list[str]) -> tuple[list[str], list[int], torch.Tensor]:
+    def _get_subset_info(self, cl_name_subset: list[str]) -> tuple[list[str], list[int], torch.Tensor, dict[str, int]]:
         """
-        Return the sorted category names, their indices into ``self.cl_names``, and the
-        corresponding submatrix of ``self.descendant_tensor`` for a requested subset.
+        Return the sorted category names, their indices into ``self.cl_names``, the
+        corresponding submatrix of ``self.descendant_tensor``, and a pre-built label
+        lookup dict ``{name: subset_index}`` for fast per-batch label conversion.
         Results are cached by the sorted tuple of names so that order does not matter
-        and the submatrix is only computed once.
+        and all outputs are only computed once per unique subset.
 
         Args:
             cl_name_subset:
                 Category names to select. Must all be present in ``self.cl_names``.
 
         Returns:
-            A 3-tuple ``(sorted_names, indices, descendant_tensor_subset_cc)`` where
-            ``sorted_names`` is the alphabetically sorted list of requested names,
+            A 4-tuple ``(sorted_names, indices, descendant_tensor_subset_cc, label_lookup)``
+            where ``sorted_names`` is the alphabetically sorted list of requested names,
             ``indices`` is the corresponding list of integer positions in ``self.cl_names``,
-            and ``descendant_tensor_subset_cc`` is the square submatrix of shape
-            ``(len(indices), len(indices))``.
+            ``descendant_tensor_subset_cc`` is the square submatrix of shape
+            ``(len(indices), len(indices))``, and ``label_lookup`` maps each subset
+            category name to its 0-based position within the sorted subset.
         """
         key = tuple(sorted(cl_name_subset))
         if key not in self._subset_cache:
@@ -125,14 +129,39 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             indices = [index_map[cat] for cat in key]
             ix = torch.tensor(indices, dtype=torch.long, device=self.descendant_tensor.device)
             descendant_tensor_subset_cc = self.descendant_tensor[ix][:, ix]
-            self._subset_cache[key] = (list(key), indices, descendant_tensor_subset_cc)
+            label_lookup: dict[str, int] = {name: pos for pos, name in enumerate(key)}
+            self._subset_cache[key] = (list(key), indices, descendant_tensor_subset_cc, label_lookup)
         return self._subset_cache[key]
+
+    def _cl_names_to_indices(self, cl_names_n: np.ndarray, label_lookup: dict[str, int]) -> torch.Tensor:
+        """
+        Convert a per-cell array of string category names to a 1-D integer tensor of
+        0-based indices into the active category list, using a pre-built lookup dict.
+
+        Args:
+            cl_names_n:
+                Array of length n containing category name strings for each cell.
+            label_lookup:
+                Pre-built mapping from category name to 0-based integer index.
+                Obtained from ``_get_subset_info`` or ``_full_label_lookup``.
+
+        Returns:
+            Long tensor of shape ``(n,)`` with integer category indices.
+
+        Raises:
+            ValueError: If any label in ``cl_names_n`` is not present in ``label_lookup``.
+        """
+        try:
+            return torch.tensor([label_lookup[c] for c in cl_names_n], dtype=torch.long)
+        except KeyError as exc:
+            valid = sorted(label_lookup.keys())
+            raise ValueError(f"Label {exc} is not in the active category list. Valid labels are: {valid}") from exc
 
     def forward(
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
-        y_n: torch.Tensor,
+        cl_names_n: np.ndarray,
         cl_name_subset: list[str] | None = None,
         **kwargs,
     ) -> dict[str, torch.Tensor | None]:
@@ -142,9 +171,10 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 The input data.
             var_names_g:
                 The variable names for the input data.
-            y_n:
-                The target data. When ``cl_name_subset`` is provided, values must be
-                0-based indices into the sorted subset order.
+            cl_names_n:
+                Array of length n containing a category name string (from ``self.cl_names``) for
+                each cell. When ``cl_name_subset`` is provided, every label must be a member of
+                that subset.
             cl_name_subset:
                 Optional list of category names (from ``self.cl_names``) to restrict
                 training to. The list is sorted internally so order does not matter.
@@ -156,10 +186,14 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         if cl_name_subset is not None:
-            _, indices, descendant_tensor_subset_cc = self._get_subset_info(cl_name_subset)
+            _, indices, descendant_tensor_subset_cc, label_lookup = self._get_subset_info(cl_name_subset)
         else:
             indices = None
             descendant_tensor_subset_cc = self.descendant_tensor
+            if self._full_label_lookup is None:
+                self._full_label_lookup = {name: i for i, name in enumerate(self.cl_names)}
+            label_lookup = self._full_label_lookup
+        y_n = self._cl_names_to_indices(cl_names_n, label_lookup)
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, indices, descendant_tensor_subset_cc)
         return {"loss": loss}
 
@@ -271,7 +305,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         if cl_name_subset is not None:
-            _, indices, descendant_tensor_subset_cc = self._get_subset_info(cl_name_subset)
+            _, indices, descendant_tensor_subset_cc, _ = self._get_subset_info(cl_name_subset)
             W_gc = self.W_gc[:, indices]
             b_c = self.b_c[indices]
         else:
