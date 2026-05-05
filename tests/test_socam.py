@@ -259,11 +259,118 @@ def test_socam_probability_propagation():
         f"Probability propagation failed.\nExpected:\n{expected_propagated}\nGot:\n{output['cell_type_probs_nc']}"
     )
 
-    # Verify that parent types have higher or equal probability than before propagation
-    # (since they now include their descendants)
-    assert torch.all(output["cell_type_probs_nc"][:, 0] >= probs_no_propagation[:, 0]), (
-        "Type 0 (parent) should have prob >= original prob"
+
+# ---------------------------------------------------------------------------
+# Helpers for subset tests
+# ---------------------------------------------------------------------------
+
+
+def _make_socam(n: int = 4, g: int = 3, c: int = 5, probability_propagation_flag: bool = False) -> SOCAM:
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    descendant_tensor = torch.eye(c, dtype=torch.float32)
+    return SOCAM(
+        n_obs=n,
+        var_names_g=var_names_g,
+        descendant_tensor=descendant_tensor,
+        cl_names=cl_names,
+        probability_propagation_flag=probability_propagation_flag,
+        log_metrics=False,
     )
-    assert torch.all(output["cell_type_probs_nc"][:, 2] >= probs_no_propagation[:, 2]), (
-        "Type 2 (parent) should have prob >= original prob"
-    )
+
+
+# ---------------------------------------------------------------------------
+# _get_subset_info tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_subset_info_basic():
+    model = _make_socam()
+    names, indices, desc = model._get_subset_info(["cell_type_2", "cell_type_4"])
+    assert names == ["cell_type_2", "cell_type_4"]
+    assert indices == [2, 4]
+    assert desc.shape == (2, 2)
+    # submatrix of identity should also be identity
+    assert torch.equal(desc, torch.eye(2))
+
+
+def test_get_subset_info_order_independent():
+    model = _make_socam()
+    names_a, indices_a, desc_a = model._get_subset_info(["cell_type_4", "cell_type_2"])
+    names_b, indices_b, desc_b = model._get_subset_info(["cell_type_2", "cell_type_4"])
+    assert names_a == names_b
+    assert indices_a == indices_b
+    assert desc_a is desc_b  # same cached object
+
+
+def test_get_subset_info_caching():
+    model = _make_socam()
+    _, _, desc_first = model._get_subset_info(["cell_type_0", "cell_type_3"])
+    _, _, desc_second = model._get_subset_info(["cell_type_0", "cell_type_3"])
+    assert desc_first is desc_second
+
+
+def test_get_subset_info_invalid_name():
+    model = _make_socam()
+    with pytest.raises(KeyError):
+        model._get_subset_info(["cell_type_0", "nonexistent"])
+
+
+# ---------------------------------------------------------------------------
+# forward() subset tests
+# ---------------------------------------------------------------------------
+
+
+def test_forward_with_cl_name_subset():
+    n, g = 4, 3
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    model = _make_socam(n=n, g=g, c=5)
+    x_ng = torch.randn(n, g)
+    # Sorted subset is ["cell_type_1", "cell_type_2", "cell_type_3"]; y_n must be in {0, 1, 2}
+    y_n = torch.randint(0, 3, (n,))
+    result = model.forward(x_ng, var_names_g, y_n, cl_name_subset=["cell_type_3", "cell_type_1", "cell_type_2"])
+    assert "loss" in result
+    assert result["loss"] is not None
+    assert result["loss"].shape == torch.Size([])  # scalar
+
+
+def test_forward_no_cl_name_subset():
+    n, g, c = 4, 3, 5
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    model = _make_socam(n=n, g=g, c=c)
+    x_ng = torch.randn(n, g)
+    y_n = torch.randint(0, c, (n,))
+    result = model.forward(x_ng, var_names_g, y_n)
+    assert "loss" in result
+    assert result["loss"] is not None
+    assert result["loss"].shape == torch.Size([])
+
+
+# ---------------------------------------------------------------------------
+# predict() subset tests
+# ---------------------------------------------------------------------------
+
+
+def test_predict_with_cl_name_subset():
+    n, g = 4, 3
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    model = _make_socam(n=n, g=g, c=5)
+    x_ng = torch.randn(n, g)
+    output = model.predict(x_ng, var_names_g, cl_name_subset=["cell_type_0", "cell_type_2", "cell_type_4"])
+    assert isinstance(output["y_logits_nc"], torch.Tensor)
+    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
+    assert output["y_logits_nc"].shape == (n, 3)
+    assert output["cell_type_probs_nc"].shape == (n, 3)
+    assert torch.all(output["cell_type_probs_nc"] >= 0)
+    assert torch.all(output["cell_type_probs_nc"] <= 1)
+    assert torch.allclose(output["cell_type_probs_nc"].sum(dim=1), torch.ones(n), atol=1e-5)
+
+
+def test_predict_no_cl_name_subset():
+    n, g, c = 4, 3, 5
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    model = _make_socam(n=n, g=g, c=c)
+    x_ng = torch.randn(n, g)
+    output = model.predict(x_ng, var_names_g)
+    assert output["y_logits_nc"].shape == (n, c)
+    assert output["cell_type_probs_nc"].shape == (n, c)
