@@ -37,6 +37,9 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             probability-propagation.
         cl_names: Array of unique category identifiers for the training labels.
             Boolean or integer mask mapping the model's category indices to the
+        cl_name_subset: Optional list of category names (from ``cl_names``) to restrict
+            training and prediction to. The list is sorted internally so order does not matter.
+            When ``None``, all categories are used.
         probability_propagation_flag: If True, applies hierarchical probability propagation before sampling
             or predicting the output distribution.
         W_prior_scale: Scale (b) parameter of the Laplace prior on the weight matrix `W_gc`.
@@ -52,8 +55,9 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         var_names_g: np.ndarray,
         descendant_tensor: torch.Tensor,
         cl_names: list[str],
+        cl_name_subset: list[str] | None = None,
         probability_propagation_flag: bool = True,
-        W_prior_scale: float = 1.0,
+        W_prior_scale: float = 1e-2,
         W_init_scale: float = 1.0,
         seed: int = 0,
         log_metrics: bool = True,
@@ -74,6 +78,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self._descendant_tensor = descendant_tensor
         self.register_buffer("descendant_tensor", descendant_tensor)
         self.n_categories = descendant_tensor.shape[0]
+        self.cl_name_subset = cl_name_subset
         self.probability_propagation_flag = probability_propagation_flag
         self.out_distribution = PyroCategorical
         self.seed = seed
@@ -162,7 +167,6 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         cl_names_n: np.ndarray,
-        cl_name_subset: list[str] | None = None,
         **kwargs,
     ) -> dict[str, torch.Tensor | None]:
         """
@@ -173,20 +177,16 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 The variable names for the input data.
             cl_names_n:
                 Array of length n containing a category name string (from ``self.cl_names``) for
-                each cell. When ``cl_name_subset`` is provided, every label must be a member of
+                each cell. When ``self.cl_name_subset`` is set, every label must be a member of
                 that subset.
-            cl_name_subset:
-                Optional list of category names (from ``self.cl_names``) to restrict
-                training to. The list is sorted internally so order does not matter.
-                When ``None``, all categories are used.
 
         Returns:
             A dictionary with the loss value.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        if cl_name_subset is not None:
-            _, indices, descendant_tensor_subset_cc, label_lookup = self._get_subset_info(cl_name_subset)
+        if self.cl_name_subset is not None:
+            _, indices, descendant_tensor_subset_cc, label_lookup = self._get_subset_info(self.cl_name_subset)
         else:
             indices = None
             descendant_tensor_subset_cc = self.descendant_tensor
@@ -283,7 +283,6 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
-        cl_name_subset: list[str] | None = None,
     ) -> dict[str, np.ndarray | torch.Tensor]:
         """
         Predict the target logits.
@@ -293,19 +292,16 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 The input data.
             var_names_g:
                 The variable names for the input data.
-            cl_name_subset:
-                Optional list of category names (from ``self.cl_names``) to restrict
-                prediction to. The list is sorted internally so order does not matter.
-                When ``None``, all categories are used. Output tensors will have shape
-                ``(n, len(cl_name_subset))`` when provided.
 
         Returns:
-            A dictionary with the target logits.
+            A dictionary with the target logits. Output tensors have shape
+            ``(n, len(self.cl_name_subset))`` when ``self.cl_name_subset`` is set,
+            otherwise ``(n, n_categories)``.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        if cl_name_subset is not None:
-            _, indices, descendant_tensor_subset_cc, _ = self._get_subset_info(cl_name_subset)
+        if self.cl_name_subset is not None:
+            _, indices, descendant_tensor_subset_cc, _ = self._get_subset_info(self.cl_name_subset)
             W_gc = self.W_gc[:, indices]
             b_c = self.b_c[indices]
         else:
