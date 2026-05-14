@@ -1,0 +1,124 @@
+# lightning.pytorch==2.2.1
+seed_everything: true
+trainer:
+  accelerator: auto
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: 32-true
+  max_epochs: 6
+  max_steps: -1
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 20
+  gradient_clip_val: 10.0
+  gradient_clip_algorithm: norm
+  default_root_dir: tmp
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
+      log_momentum: false
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      every_n_train_steps: 1000
+      save_top_k: -1
+      save_last: true
+model:
+  optim_fn: torch.optim.Adam
+  optim_kwargs:
+    lr: 5e-3 
+  transforms:
+  - class_path: cellarium.ml.transforms.NormalizeTotal
+    init_args:
+      target_count: 10000
+      eps: 1.0e-06
+  - class_path: cellarium.ml.transforms.Log1p
+  - class_path: cellarium.ml.transforms.DivideByScale
+    init_args:
+      scale_g:
+        !CheckpointLoader
+        file_path: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/tdigest_NT_log1p_lrexp_human/lightning_logs/version_0/checkpoints/epoch=0-step=420.ckpt
+        attr: model.median_g
+        convert_fn: torch.Tensor.float
+      var_names_g:
+        !CheckpointLoader
+        file_path: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/tdigest_NT_log1p_lrexp_human/lightning_logs/version_0/checkpoints/epoch=0-step=420.ckpt
+        attr: model.var_names_g
+        convert_fn: null
+  - class_path: cellarium.ml.transforms.Filter
+    init_args:
+      filter_list:
+        !FileLoader
+        file_path: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/features_TPM_above_1_intersection_with_CAS_lrexp_human_train.csv
+        loader_fn: pandas.read_csv
+        attr: original_feature_id
+        convert_fn: pandas.Series.to_list
+  model:
+    class_path: cellarium.ml.models.SOCAM
+    init_args:
+      n_obs: null
+      var_names_g: null
+      descendant_tensor:
+        !FileLoader
+        file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2024-01-04/cl.owl
+        loader_fn: cellarium.ml.utilities.data.get_cl_descendant_tensor_from_owl
+      cl_names:
+        !FileLoader
+        file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2024-01-04/cl.owl
+        loader_fn: cellarium.ml.utilities.data.get_cl_names_from_owl
+      seed: 0
+      
+  scheduler_fn: torch.optim.lr_scheduler.SequentialLR
+  scheduler_kwargs:
+    schedulers: 
+      - scheduler_fn: torch.optim.lr_scheduler.LinearLR
+        scheduler_kwargs:
+          start_factor: 0.0001 
+          end_factor: 1.0
+          total_iters: 12299
+      - scheduler_fn: torch.optim.lr_scheduler.CosineAnnealingLR
+        scheduler_kwargs: 
+          T_max: 49196
+    milestones: 
+      - 12299
+  is_initialized: false
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      filenames: gs://cellarium-file-system/curriculum/lrexp_human_training_split_20241106/extract_files/extract_{0..4198}.h5ad
+      limits: null
+      shard_size: 10000
+      # last_shard_size: 515 
+      max_cache_size: 3
+      cache_size_strictly_enforced: true
+      label: null
+      keys: null
+      index_unique: null
+      convert: null
+      indices_strict: true
+      obs_columns_to_validate: []
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
+    var_names_g:
+      attr: var_names
+    total_mrna_umis_n:
+      attr: obs
+      key: raw_sums
+    cl_names_n:
+      attr: obs
+      key: cell_type_ontology_term_id
+    obs_names_n:
+      attr: obs_names   
+  batch_size: 2048
+  iteration_strategy: cache_efficient
+  shuffle: true
+  seed: 0
+  drop_last_indices: false
+  num_workers: 4
+  drop_incomplete_batch: false
+  prefetch_factor: 2
+  persistent_workers: false
+ckpt_path: null
