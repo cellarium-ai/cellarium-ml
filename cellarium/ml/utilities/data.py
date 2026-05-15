@@ -236,3 +236,85 @@ def get_var_names_g_indices(
     if missing:
         raise ValueError(f"The following genes in `var_names_g` are not present in the stored schema: {missing}")
     return np.array(indices, dtype=np.intp)
+
+
+def compute_cl_distance_matrix(owl_uri: str) -> pd.DataFrame:
+    """
+    Compute an all-pairs shortest-path distance matrix over the Cell Ontology (CL).
+
+    Nodes are all CL classes found in the OWL file. Distances are computed on the
+    **undirected** ontology graph, so sibling cell types separated by a common parent
+    get a finite distance (2 hops) rather than infinity.
+
+    This is a slow, one-time offline pre-computation (typically ~1 minute for the full
+    CL ontology). Save the result to disk and pass it to the scVI model constructor via
+    ``ontology_distance_matrix``. Example::
+
+        df = compute_cl_distance_matrix(
+            "https://github.com/obophenotype/cell-ontology/releases/download/v2024-01-04/cl.owl"
+        )
+        df.to_parquet("cl_distance_matrix.parquet")
+
+    Args:
+        owl_uri: URI or local path of the CL OWL file (passed to
+            ``owlready2.get_ontology(...).load()``).
+
+    Returns:
+        A symmetric square :class:`pandas.DataFrame` of ``float32`` values with CL ID
+        strings (e.g. ``"CL:0000540"``) as both index and columns. Diagonal entries are
+        ``0.0``; disconnected pairs have ``inf``.
+
+    Raises:
+        ImportError: If ``owlready2`` or ``networkx`` are not installed.
+            Install with ``pip install cellarium-ml[ontology]``.
+    """
+    try:
+        import networkx as nx
+        import owlready2
+    except ImportError as e:
+        raise ImportError(
+            "owlready2 and networkx are required for compute_cl_distance_matrix. "
+            "Install them with: pip install cellarium-ml[ontology]"
+        ) from e
+
+    ontology = owlready2.get_ontology(owl_uri).load()
+    all_classes = list(ontology.classes())
+
+    # Filter to CL classes that have exactly one label
+    cl_prefix = "CL_"
+    classes = [c for c in all_classes if c.name.startswith(cl_prefix) and len(c.label) == 1]
+    cl_ids = [c.name.replace("_", ":") for c in classes]
+    name_to_idx: dict[str, int] = {cl_id: i for i, cl_id in enumerate(cl_ids)}
+    classes_set = set(classes)
+
+    # Build directed graph using parent/child relationships
+    graph = nx.DiGraph()
+    for cl_id in cl_ids:
+        graph.add_node(cl_id)
+    for cls in classes:
+        cl_id = cls.name.replace("_", ":")
+        for parent in ontology.get_parents_of(cls):
+            if parent not in classes_set:
+                continue
+            parent_id = parent.name.replace("_", ":")
+            graph.add_edge(parent_id, cl_id)
+        for child in ontology.get_children_of(cls):
+            if child not in classes_set:
+                continue
+            child_id = child.name.replace("_", ":")
+            graph.add_edge(cl_id, child_id)
+
+    # Use undirected graph so sibling pairs are reachable
+    undirected = graph.to_undirected()
+
+    n = len(cl_ids)
+    dist_matrix = np.full((n, n), np.inf, dtype=np.float32)
+    np.fill_diagonal(dist_matrix, 0.0)
+
+    for source, lengths in nx.all_pairs_shortest_path_length(undirected):
+        src_idx = name_to_idx[source]
+        for target, d in lengths.items():
+            tgt_idx = name_to_idx[target]
+            dist_matrix[src_idx, tgt_idx] = float(d)
+
+    return pd.DataFrame(dist_matrix, index=cl_ids, columns=cl_ids)
