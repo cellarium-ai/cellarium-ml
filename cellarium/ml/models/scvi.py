@@ -652,10 +652,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         self.flow_hidden_features = flow_hidden_features
 
         # optional validation data metrics setup
-        if (cell_type_categories is None) != (ontology_distance_matrix is None):
-            raise ValueError(
-                "Both cell_type_categories and ontology_distance_matrix must be provided together, or neither."
+        # ontology_distance_matrix without cell_type_categories: matrix is silently ignored
+        # (can happen when the CLI links cell_type_categories from data but the batch key is absent)
+        if cell_type_categories is None and ontology_distance_matrix is not None:
+            logger.warning(
+                "ontology_distance_matrix was provided but cell_type_categories is None; "
+                "the matrix will be ignored and ontology-based metrics will be disabled."
             )
+            ontology_distance_matrix = None
         self.cell_type_categories = list(cell_type_categories) if cell_type_categories is not None else None
         self.num_classes = len(cell_type_categories) if cell_type_categories is not None else None
         self.val_cell_type_classifier_reservoir_size = val_cell_type_classifier_reservoir_size

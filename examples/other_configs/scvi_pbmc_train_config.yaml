@@ -65,13 +65,7 @@ model:
       n_batch: null
 
       # if using a validation data set
-      cell_type_categories:
-        !FileLoader
-          file_path: /tmp/pbmc_count.h5ad
-          loader_fn: anndata.read_h5ad
-          attr: obs
-          key: cl_cell_type_ontology_term_id
-          convert_fn: cellarium.ml.utilities.data.get_categories
+      # cell_type_categories is linked automatically from data.batch_keys.validation_cell_type_index_n
       ontology_distance_matrix:
         !FileLoader
           file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2024-01-04/cl.owl

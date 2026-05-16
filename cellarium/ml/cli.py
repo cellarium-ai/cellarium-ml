@@ -381,6 +381,28 @@ def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
         return len(x.cat.categories)
 
 
+def compute_cell_type_categories(data: CellariumAnnDataDataModule) -> list[str] | None:
+    """Derive ``cell_type_categories`` from the ``validation_cell_type_index_n`` batch key.
+
+    Reads the pandas Categorical from the first shard and returns its categories as a plain
+    list of strings, in the same order as ``.cat.categories`` (which matches ``.cat.codes``).
+    Returns ``None`` when the batch key is absent so that validation metrics are simply skipped.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        Ordered list of CL ID strings, or ``None`` if the batch key is not configured.
+    """
+    if "validation_cell_type_index_n" not in data.batch_keys:
+        return None
+    field = data.batch_keys["validation_cell_type_index_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    series = obs[field.key]
+    return list(series.cat.categories)
+
+
 def lightning_cli_factory(
     model_class_path: str,
     link_arguments: list[LinkArguments] | None = None,
@@ -824,6 +846,7 @@ def scvi(args: ArgsType = None) -> None:
             ),
             LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
             LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
+            LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
         ],
     )
     cli(args=args)
