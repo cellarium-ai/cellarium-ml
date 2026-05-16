@@ -68,7 +68,7 @@ model:
       # cell_type_categories is linked automatically from data.batch_keys.validation_cell_type_index_n
       ontology_distance_matrix:
         !FileLoader
-          file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2024-01-04/cl.owl
+          file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2025-07-30/cl-basic.owl
           loader_fn: cellarium.ml.utilities.data.compute_cl_distance_matrix
 
       # these can be changed
