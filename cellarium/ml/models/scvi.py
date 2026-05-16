@@ -541,6 +541,11 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             will slice and reorder this to match ``cell_type_categories``. Enables the
             frequency-weighted Spearman correlation metric (``val_ontology_spearman``) during
             validation. Not saved to checkpoints.
+        val_cell_type_classifier_reservoir_size: Maximum number of cells to retain per split
+            (train / test) for the logistic regression cell type classifier. Reservoir sampling
+            is used so this bound is respected regardless of validation set size. Train cells
+            are drawn from even-numbered validation batches; test cells from odd-numbered
+            batches. Ignored when ``cell_type_categories`` is not provided. Default 50_000.
     """
 
     def __init__(
@@ -580,6 +585,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         flow_hidden_features: list[int] = [64, 64],
         cell_type_categories: list[str] | None = None,
         ontology_distance_matrix: pd.DataFrame | None = None,
+        val_cell_type_classifier_reservoir_size: int = 50_000,
     ):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -645,12 +651,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         self.use_flow = use_flow
         self.flow_hidden_features = flow_hidden_features
 
+        # optional validation data metrics setup
         if (cell_type_categories is None) != (ontology_distance_matrix is None):
             raise ValueError(
                 "Both cell_type_categories and ontology_distance_matrix must be provided together, or neither."
             )
         self.cell_type_categories = list(cell_type_categories) if cell_type_categories is not None else None
         self.num_classes = len(cell_type_categories) if cell_type_categories is not None else None
+        self.val_cell_type_classifier_reservoir_size = val_cell_type_classifier_reservoir_size
         if cell_type_categories is not None and ontology_distance_matrix is not None:
             missing = [c for c in cell_type_categories if c not in ontology_distance_matrix.index]
             if missing:
@@ -658,10 +666,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                     f"The following cell type categories are absent from ontology_distance_matrix: {missing}"
                 )
             sub = ontology_distance_matrix.loc[cell_type_categories, cell_type_categories]
-            onto_tensor = torch.tensor(sub.to_numpy(dtype=np.float32))
-            self.register_buffer("descendant_matrix", onto_tensor, persistent=False)
+            self._ontology_matrix_numpy: np.ndarray | None = sub.to_numpy(dtype=np.float32)
+            self.register_buffer(
+                "ontology_distance_matrix", torch.tensor(self._ontology_matrix_numpy), persistent=False
+            )
         else:
-            self.register_buffer("descendant_matrix", None, persistent=False)
+            self._ontology_matrix_numpy = None
+            self.register_buffer("ontology_distance_matrix", None, persistent=False)
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")
@@ -833,6 +844,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                     features=self.n_latent, context=0, hidden_features=self.flow_hidden_features
                 )
             self.flow.load_state_dict({k: v.to(target_device) for k, v in fresh_flow.state_dict().items()})
+        if self._ontology_matrix_numpy is not None:
+            # Re-register after meta-device materialization: persistent=False buffers are not
+            # restored by the state dict, and to_empty() leaves them as uninitialised storage.
+            self.register_buffer(
+                "ontology_distance_matrix",
+                torch.tensor(self._ontology_matrix_numpy, device=self.px_r.device),
+                persistent=False,
+            )
 
     def batch_embedding_distribution(self, batch_index_n: torch.Tensor) -> Distribution:
         assert self.batch_representation_mean_bd is not None
@@ -1371,6 +1390,18 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             self._val_batch_z_sq_sum_b = torch.zeros(self.n_batch, device=device)
             self._val_batch_count_b = torch.zeros(self.n_batch, device=device)
 
+        # Cell type classifier reservoirs (train = even batch_idx, test = odd batch_idx)
+        if self.num_classes is not None:
+            rs = self.val_cell_type_classifier_reservoir_size
+            self._val_cl_train_z = torch.zeros(rs, self.n_latent, device=device)
+            self._val_cl_train_y = torch.zeros(rs, dtype=torch.long, device=device)
+            self._val_cl_train_fill = 0
+            self._val_cl_train_seen = 0
+            self._val_cl_test_z = torch.zeros(rs, self.n_latent, device=device)
+            self._val_cl_test_y = torch.zeros(rs, dtype=torch.long, device=device)
+            self._val_cl_test_fill = 0
+            self._val_cl_test_seen = 0
+
     def validate(
         self,
         trainer: pl.Trainer,
@@ -1382,7 +1413,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
         total_mrna_umis_n: torch.Tensor | None = None,
-        cell_type_index_n: torch.Tensor | None = None,
+        validation_cell_type_index_n: torch.Tensor | None = None,
     ) -> None:
         n = x_ng.shape[0]
 
@@ -1413,8 +1444,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         z_nk = output["z_nk"].detach()
 
         # accumulate per-class latent sums for ontology metric
-        if cell_type_index_n is not None and self.num_classes is not None:
-            idx = cell_type_index_n.long()
+        if validation_cell_type_index_n is not None and self.num_classes is not None:
+            idx = validation_cell_type_index_n.long()
             self._val_z_sum_kd.index_add_(0, idx, z_nk)
             self._val_class_count_k.index_add_(0, idx, torch.ones(n, device=x_ng.device))
 
@@ -1424,6 +1455,39 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             self._val_batch_z_sum_bk.index_add_(0, bidx, z_nk)
             self._val_batch_z_sq_sum_b.index_add_(0, bidx, (z_nk**2).sum(dim=-1))
             self._val_batch_count_b.index_add_(0, bidx, torch.ones(n, device=x_ng.device))
+
+        # reservoir sampling for cell type classifier
+        if validation_cell_type_index_n is not None and self.num_classes is not None:
+            if batch_idx % 2 == 0:
+                buf_z, buf_y = self._val_cl_train_z, self._val_cl_train_y
+                fill, seen = self._val_cl_train_fill, self._val_cl_train_seen
+            else:
+                buf_z, buf_y = self._val_cl_test_z, self._val_cl_test_y
+                fill, seen = self._val_cl_test_fill, self._val_cl_test_seen
+
+            rs = self.val_cell_type_classifier_reservoir_size
+            labels = validation_cell_type_index_n.long()
+
+            # phase 1: direct fill up to capacity
+            space = rs - fill
+            direct = min(space, n)
+            if direct > 0:
+                buf_z[fill : fill + direct] = z_nk[:direct]
+                buf_y[fill : fill + direct] = labels[:direct]
+                fill += direct
+
+            # phase 2: reservoir replacement for overflow cells
+            for i in range(direct, n):
+                j = int(torch.randint(0, seen + i - direct + 1, (1,)).item())
+                if j < rs:
+                    buf_z[j] = z_nk[i]
+                    buf_y[j] = labels[i]
+
+            seen += n
+            if batch_idx % 2 == 0:
+                self._val_cl_train_fill, self._val_cl_train_seen = fill, seen
+            else:
+                self._val_cl_test_fill, self._val_cl_test_seen = fill, seen
 
     @staticmethod
     def _weighted_spearman(
@@ -1450,12 +1514,19 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         rx = scipy.stats.rankdata(x)
         ry = scipy.stats.rankdata(y)
         cov = np.cov(rx, ry, aweights=w)
-        denom = float(np.sqrt(cov[0, 0] * cov[1, 1]))
-        if denom == 0.0:
-            return float("nan")
+
+        denom = float(np.sqrt(max(0.0, cov[0, 0] * cov[1, 1])))
+        if (denom == 0.0) or np.isnan(denom):
+            logger.warning(
+                "val_ontology_spearman: zero variance in ontology distances (all pairs at equal distance); logging 0.0"
+            )
+            return 0.0
         return float(cov[0, 1] / denom)
 
     def on_validation_epoch_end(self, trainer: pl.Trainer) -> None:
+        if trainer.sanity_checking:
+            return
+
         # sync all accumulators across DDP ranks
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
@@ -1471,6 +1542,31 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                     ]
                 for t in tensors_to_sync:
                     torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+                # gather classifier reservoirs: exchange fill counts then concatenate valid slices
+                if self.num_classes is not None:
+                    for buf_z, buf_y, fill_attr, seen_attr in [
+                        (self._val_cl_train_z, self._val_cl_train_y, "_val_cl_train_fill", "_val_cl_train_seen"),
+                        (self._val_cl_test_z, self._val_cl_test_y, "_val_cl_test_fill", "_val_cl_test_seen"),
+                    ]:
+                        fill = getattr(self, fill_attr)
+                        fill_t = torch.tensor([fill], device=buf_z.device)
+                        fills = [torch.zeros_like(fill_t) for _ in range(world_size)]
+                        torch.distributed.all_gather(fills, fill_t)
+                        gathered_z = [torch.zeros_like(buf_z) for _ in range(world_size)]
+                        gathered_y = [torch.zeros_like(buf_y) for _ in range(world_size)]
+                        torch.distributed.all_gather(gathered_z, buf_z)
+                        torch.distributed.all_gather(gathered_y, buf_y)
+                        combined_z = torch.cat([g[: int(f.item())] for g, f in zip(gathered_z, fills)], dim=0)
+                        combined_y = torch.cat([g[: int(f.item())] for g, f in zip(gathered_y, fills)], dim=0)
+                        # apply reservoir sub-sampling if combined exceeds capacity
+                        rs = self.val_cell_type_classifier_reservoir_size
+                        if combined_z.shape[0] > rs:
+                            perm = torch.randperm(combined_z.shape[0], device=combined_z.device)[:rs]
+                            combined_z = combined_z[perm]
+                            combined_y = combined_y[perm]
+                        buf_z[: combined_z.shape[0]] = combined_z
+                        buf_y[: combined_y.shape[0]] = combined_y
+                        setattr(self, fill_attr, combined_z.shape[0])
 
         # only rank 0 computes and logs the epoch-level metrics
         if trainer.global_rank != 0:
@@ -1488,14 +1584,15 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             trainer.logger.log_metrics({"val_elbo": val_elbo}, step=step)
 
         # ontology-weighted Spearman
-        if self.num_classes is not None and self.descendant_matrix is not None:
+        if self.num_classes is not None and self.ontology_distance_matrix is not None:
             valid_mask = self._val_class_count_k > 0
             n_valid = int(valid_mask.sum().item())
             if n_valid >= 2:
                 counts_valid = self._val_class_count_k[valid_mask]
                 centroids = self._val_z_sum_kd[valid_mask] / counts_valid.unsqueeze(1)
                 latent_dists = torch.cdist(centroids, centroids)
-                onto_dists = self.descendant_matrix[valid_mask][:, valid_mask]
+                onto_dists = self.ontology_distance_matrix[valid_mask][:, valid_mask]
+
                 spearman = self._weighted_spearman(latent_dists, onto_dists, counts_valid)
                 if not np.isnan(spearman):
                     trainer.logger.log_metrics({"val_ontology_spearman": spearman}, step=step)
@@ -1517,6 +1614,47 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 s_b = (b_b - intra_b) / torch.max(b_b, intra_b).clamp(min=1e-12)
                 val_silhouette = (s_b * counts_b).sum() / counts_b.sum()
                 trainer.logger.log_metrics({"val_batch_silhouette": val_silhouette.item()}, step=step)
+
+        # cell type logistic regression classifier
+        if self.num_classes is not None and self._val_cl_train_fill >= 2 and self._val_cl_test_fill >= 1:
+            X_train = self._val_cl_train_z[: self._val_cl_train_fill].float()
+            y_train = self._val_cl_train_y[: self._val_cl_train_fill]
+            X_test = self._val_cl_test_z[: self._val_cl_test_fill].float()
+            y_test = self._val_cl_test_y[: self._val_cl_test_fill]
+
+            # normalize features for stable LBFGS convergence
+            mu = X_train.mean(0)
+            sigma = X_train.std(0).clamp(min=1e-8)
+            X_train = (X_train - mu) / sigma
+            X_test = (X_test - mu) / sigma
+
+            W = torch.zeros(self.num_classes, self.n_latent, device=X_train.device, requires_grad=True)
+            b = torch.zeros(self.num_classes, device=X_train.device, requires_grad=True)
+            opt = torch.optim.LBFGS([W, b], max_iter=200, line_search_fn="strong_wolfe")
+
+            def closure():
+                opt.zero_grad()
+                loss = torch.nn.functional.cross_entropy(X_train @ W.T + b, y_train)
+                loss.backward()
+                return loss
+
+            with torch.enable_grad():
+                opt.step(closure)
+
+            with torch.no_grad():
+                logits_test = X_test @ W.T + b
+                preds = logits_test.argmax(dim=-1)
+                top1 = (preds == y_test).float().mean().item()
+                trainer.logger.log_metrics({"val_cell_type_top1_accuracy": top1}, step=step)
+
+                if self.ontology_distance_matrix is not None:
+                    wrong_mask = preds != y_test
+                    if wrong_mask.any():
+                        err_dist = self.ontology_distance_matrix[preds[wrong_mask], y_test[wrong_mask]]
+                        finite = err_dist.isfinite()
+                        if finite.any():
+                            mean_err = err_dist[finite].mean().item()
+                            trainer.logger.log_metrics({"val_cell_type_mean_error_distance": mean_err}, step=step)
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         self.step = trainer.global_step
