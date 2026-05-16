@@ -42,6 +42,7 @@ dynamic = ["version"]
 [project.optional-dependencies]
 lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML"]
+ontology = ["networkx", "owlready2"]
 test = [
   "pytest-xdist",
   "scanpy",

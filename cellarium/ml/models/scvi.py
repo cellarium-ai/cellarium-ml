@@ -20,7 +20,7 @@ from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.distributions import NegativeBinomial
 from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.data import categories_to_product_codes
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -462,7 +462,7 @@ def compute_annealed_kl_weight(
     return max_kl_weight
 
 
-class SingleCellVariationalInference(CellariumModel, PredictMixin):
+class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin):
     """
     Flexible version of single-cell variational inference (scVI) [1] re-implemented in Cellarium ML.
 
@@ -531,6 +531,21 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
             standard normal N(0, I). The flow is unconditional (batch-blind) and is jointly trained with the
             encoder/decoder via an MC-KL estimate: E_q[log q(z|x) - log p_flow(z)].
         flow_hidden_features: Hidden layer widths for the NSF. Only used when ``use_flow=True``.
+        cell_type_categories: Ordered list of CL ID strings (e.g. ``["CL:0000540", ...]``) that
+            matches ``adata.obs[cell_type_col].cat.categories`` exactly (same order), so that
+            integer codes from ``.cat.codes`` map directly to rows of the internal distance
+            buffer. Required if ``ontology_distance_matrix`` is provided.
+        ontology_distance_matrix: Square :class:`pandas.DataFrame` with CL ID strings as both
+            index and columns, as returned by
+            :func:`~cellarium.ml.utilities.data.compute_cl_distance_matrix`. The constructor
+            will slice and reorder this to match ``cell_type_categories``. Enables the
+            frequency-weighted Spearman correlation metric (``val_ontology_spearman``) during
+            validation. Not saved to checkpoints.
+        val_cell_type_classifier_reservoir_size: Maximum number of cells to retain per split
+            (train / test) for the logistic regression cell type classifier. Reservoir sampling
+            is used so this bound is respected regardless of validation set size. Train cells
+            are drawn from even-numbered validation batches; test cells from odd-numbered
+            batches. Ignored when ``cell_type_categories`` is not provided. Default 50_000.
     """
 
     def __init__(
@@ -568,6 +583,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         reconstruction_transform_categorical_covariates: list[int] | None = None,
         use_flow: bool = False,
         flow_hidden_features: list[int] = [64, 64],
+        cell_type_categories: list[str] | None = None,
+        ontology_distance_matrix: pd.DataFrame | None = None,
+        val_cell_type_classifier_reservoir_size: int = 50_000,
     ):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -632,6 +650,33 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
         self.reconstruction_transform_categorical_covariates = reconstruction_transform_categorical_covariates
         self.use_flow = use_flow
         self.flow_hidden_features = flow_hidden_features
+
+        # optional validation data metrics setup
+        # ontology_distance_matrix without cell_type_categories: matrix is silently ignored
+        # (can happen when the CLI links cell_type_categories from data but the batch key is absent)
+        if cell_type_categories is None and ontology_distance_matrix is not None:
+            logger.warning(
+                "ontology_distance_matrix was provided but cell_type_categories is None; "
+                "the matrix will be ignored and ontology-based metrics will be disabled."
+            )
+            ontology_distance_matrix = None
+        self.cell_type_categories = list(cell_type_categories) if cell_type_categories is not None else None
+        self.num_classes = len(cell_type_categories) if cell_type_categories is not None else None
+        self.val_cell_type_classifier_reservoir_size = val_cell_type_classifier_reservoir_size
+        if cell_type_categories is not None and ontology_distance_matrix is not None:
+            missing = [c for c in cell_type_categories if c not in ontology_distance_matrix.index]
+            if missing:
+                raise ValueError(
+                    f"The following cell type categories are absent from ontology_distance_matrix: {missing}"
+                )
+            sub = ontology_distance_matrix.loc[cell_type_categories, cell_type_categories]
+            self._ontology_matrix_numpy: np.ndarray | None = sub.to_numpy(dtype=np.float32)
+            self.register_buffer(
+                "ontology_distance_matrix", torch.tensor(self._ontology_matrix_numpy), persistent=False
+            )
+        else:
+            self._ontology_matrix_numpy = None
+            self.register_buffer("ontology_distance_matrix", None, persistent=False)
 
         if n_continuous_cov > 0:
             raise NotImplementedError("Continuous covariates are not yet implemented")
@@ -803,6 +848,14 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                     features=self.n_latent, context=0, hidden_features=self.flow_hidden_features
                 )
             self.flow.load_state_dict({k: v.to(target_device) for k, v in fresh_flow.state_dict().items()})
+        if self._ontology_matrix_numpy is not None:
+            # Re-register after meta-device materialization: persistent=False buffers are not
+            # restored by the state dict, and to_empty() leaves them as uninitialised storage.
+            self.register_buffer(
+                "ontology_distance_matrix",
+                torch.tensor(self._ontology_matrix_numpy, device=self.px_r.device),
+                persistent=False,
+            )
 
     def batch_embedding_distribution(self, batch_index_n: torch.Tensor) -> Distribution:
         assert self.batch_representation_mean_bd is not None
@@ -1318,6 +1371,294 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin):
                 x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list) * sum(importance_weight_means))
 
         return {"x_ng": x_tilde_np}
+
+    # ------------------------------------------------------------------
+    # Validation hooks
+    # ------------------------------------------------------------------
+
+    def on_validation_epoch_start(self, trainer: pl.Trainer) -> None:
+        device = next(self.parameters()).device
+
+        # ELBO accumulators
+        self._val_elbo_sum = torch.zeros(1, device=device)
+        self._val_n_cells = torch.zeros(1, device=device)
+
+        # Ontology accumulators (only when num_classes is configured)
+        if self.num_classes is not None:
+            self._val_z_sum_kd = torch.zeros(self.num_classes, self.n_latent, device=device)
+            self._val_class_count_k = torch.zeros(self.num_classes, device=device)
+
+        # Batch silhouette accumulators
+        if self.n_batch > 1:
+            self._val_batch_z_sum_bk = torch.zeros(self.n_batch, self.n_latent, device=device)
+            self._val_batch_z_sq_sum_b = torch.zeros(self.n_batch, device=device)
+            self._val_batch_count_b = torch.zeros(self.n_batch, device=device)
+
+        # Cell type classifier reservoirs (train = even batch_idx, test = odd batch_idx)
+        if self.num_classes is not None:
+            rs = self.val_cell_type_classifier_reservoir_size
+            self._val_cl_train_z = torch.zeros(rs, self.n_latent, device=device)
+            self._val_cl_train_y = torch.zeros(rs, dtype=torch.long, device=device)
+            self._val_cl_train_fill = 0
+            self._val_cl_train_seen = 0
+            self._val_cl_test_z = torch.zeros(rs, self.n_latent, device=device)
+            self._val_cl_test_y = torch.zeros(rs, dtype=torch.long, device=device)
+            self._val_cl_test_fill = 0
+            self._val_cl_test_seen = 0
+
+    def validate(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        batch_idx: int,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        batch_index_n: torch.Tensor,
+        continuous_covariates_nc: torch.Tensor | None = None,
+        categorical_covariate_index_nd: torch.Tensor | None = None,
+        total_mrna_umis_n: torch.Tensor | None = None,
+        validation_cell_type_index_n: torch.Tensor | None = None,
+    ) -> None:
+        n = x_ng.shape[0]
+
+        output = self(
+            x_ng=x_ng,
+            var_names_g=var_names_g,
+            batch_index_n=batch_index_n,
+            continuous_covariates_nc=continuous_covariates_nc,
+            categorical_covariate_index_nd=categorical_covariate_index_nd,
+            total_mrna_umis_n=total_mrna_umis_n,
+        )
+
+        # log annealed loss for progress bar / on-step visibility
+        if isinstance(output["loss"], torch.Tensor):
+            pl_module.log("val_loss", output["loss"], sync_dist=True, on_epoch=True, batch_size=n)
+
+        # accumulate exact ELBO (no annealing)
+        kl_batch = output["kl_divergence_batch"]
+        if not isinstance(kl_batch, torch.Tensor):
+            kl_batch = torch.zeros(n, device=x_ng.device)
+        assert isinstance(output["reconstruction_loss"], torch.Tensor)
+        assert isinstance(output["kl_divergence_z"], torch.Tensor)
+        assert isinstance(output["z_nk"], torch.Tensor)
+        elbo_n = -(output["reconstruction_loss"] + output["kl_divergence_z"] + kl_batch)
+        self._val_elbo_sum += elbo_n.sum().detach()
+        self._val_n_cells += n
+
+        z_nk = output["z_nk"].detach()
+
+        # accumulate per-class latent sums for ontology metric
+        if validation_cell_type_index_n is not None and self.num_classes is not None:
+            idx = validation_cell_type_index_n.long()
+            self._val_z_sum_kd.index_add_(0, idx, z_nk)
+            self._val_class_count_k.index_add_(0, idx, torch.ones(n, device=x_ng.device))
+
+        # accumulate per-batch latent sums for silhouette metric
+        if self.n_batch > 1:
+            bidx = batch_index_n.long()
+            self._val_batch_z_sum_bk.index_add_(0, bidx, z_nk)
+            self._val_batch_z_sq_sum_b.index_add_(0, bidx, (z_nk**2).sum(dim=-1))
+            self._val_batch_count_b.index_add_(0, bidx, torch.ones(n, device=x_ng.device))
+
+        # reservoir sampling for cell type classifier
+        if validation_cell_type_index_n is not None and self.num_classes is not None:
+            if batch_idx % 2 == 0:
+                buf_z, buf_y = self._val_cl_train_z, self._val_cl_train_y
+                fill, seen = self._val_cl_train_fill, self._val_cl_train_seen
+            else:
+                buf_z, buf_y = self._val_cl_test_z, self._val_cl_test_y
+                fill, seen = self._val_cl_test_fill, self._val_cl_test_seen
+
+            rs = self.val_cell_type_classifier_reservoir_size
+            labels = validation_cell_type_index_n.long()
+
+            # phase 1: direct fill up to capacity
+            space = rs - fill
+            direct = min(space, n)
+            if direct > 0:
+                buf_z[fill : fill + direct] = z_nk[:direct]
+                buf_y[fill : fill + direct] = labels[:direct]
+                fill += direct
+
+            # phase 2: reservoir replacement for overflow cells
+            for i in range(direct, n):
+                j = int(torch.randint(0, seen + i - direct + 1, (1,)).item())
+                if j < rs:
+                    buf_z[j] = z_nk[i]
+                    buf_y[j] = labels[i]
+
+            seen += n
+            if batch_idx % 2 == 0:
+                self._val_cl_train_fill, self._val_cl_train_seen = fill, seen
+            else:
+                self._val_cl_test_fill, self._val_cl_test_seen = fill, seen
+
+    @staticmethod
+    def _weighted_spearman(
+        latent_dists: torch.Tensor,
+        onto_dists: torch.Tensor,
+        counts: torch.Tensor,
+    ) -> float:
+        import scipy.stats
+
+        m = latent_dists.shape[0]
+        if m < 2:
+            return float("nan")
+        idx = torch.triu_indices(m, m, offset=1)
+        x = latent_dists[idx[0], idx[1]].cpu().float().numpy()
+        y = onto_dists[idx[0], idx[1]].cpu().float().numpy()
+        w = (counts[idx[0]] * counts[idx[1]]).cpu().float().numpy()
+
+        # exclude disconnected pairs (inf ontology distance — different DAG subtrees)
+        finite_mask = np.isfinite(y)
+        if finite_mask.sum() < 3:
+            return float("nan")
+        x, y, w = x[finite_mask], y[finite_mask], w[finite_mask]
+
+        rx = scipy.stats.rankdata(x)
+        ry = scipy.stats.rankdata(y)
+        cov = np.cov(rx, ry, aweights=w)
+
+        denom = float(np.sqrt(max(0.0, cov[0, 0] * cov[1, 1])))
+        if (denom == 0.0) or np.isnan(denom):
+            logger.warning(
+                "val_ontology_spearman: zero variance in ontology distances (all pairs at equal distance); logging 0.0"
+            )
+            return 0.0
+        return float(cov[0, 1] / denom)
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer) -> None:
+        if trainer.sanity_checking:
+            return
+
+        # sync all accumulators across DDP ranks
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            if world_size > 1:
+                tensors_to_sync = [self._val_elbo_sum, self._val_n_cells]
+                if self.num_classes is not None:
+                    tensors_to_sync += [self._val_z_sum_kd, self._val_class_count_k]
+                if self.n_batch > 1:
+                    tensors_to_sync += [
+                        self._val_batch_z_sum_bk,
+                        self._val_batch_z_sq_sum_b,
+                        self._val_batch_count_b,
+                    ]
+                for t in tensors_to_sync:
+                    torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+                # gather classifier reservoirs: exchange fill counts then concatenate valid slices
+                if self.num_classes is not None:
+                    for buf_z, buf_y, fill_attr, seen_attr in [
+                        (self._val_cl_train_z, self._val_cl_train_y, "_val_cl_train_fill", "_val_cl_train_seen"),
+                        (self._val_cl_test_z, self._val_cl_test_y, "_val_cl_test_fill", "_val_cl_test_seen"),
+                    ]:
+                        fill = getattr(self, fill_attr)
+                        fill_t = torch.tensor([fill], device=buf_z.device)
+                        fills = [torch.zeros_like(fill_t) for _ in range(world_size)]
+                        torch.distributed.all_gather(fills, fill_t)
+                        gathered_z = [torch.zeros_like(buf_z) for _ in range(world_size)]
+                        gathered_y = [torch.zeros_like(buf_y) for _ in range(world_size)]
+                        torch.distributed.all_gather(gathered_z, buf_z)
+                        torch.distributed.all_gather(gathered_y, buf_y)
+                        combined_z = torch.cat([g[: int(f.item())] for g, f in zip(gathered_z, fills)], dim=0)
+                        combined_y = torch.cat([g[: int(f.item())] for g, f in zip(gathered_y, fills)], dim=0)
+                        # apply reservoir sub-sampling if combined exceeds capacity
+                        rs = self.val_cell_type_classifier_reservoir_size
+                        if combined_z.shape[0] > rs:
+                            perm = torch.randperm(combined_z.shape[0], device=combined_z.device)[:rs]
+                            combined_z = combined_z[perm]
+                            combined_y = combined_y[perm]
+                        buf_z[: combined_z.shape[0]] = combined_z
+                        buf_y[: combined_y.shape[0]] = combined_y
+                        setattr(self, fill_attr, combined_z.shape[0])
+
+        # only rank 0 computes and logs the epoch-level metrics
+        if trainer.global_rank != 0:
+            return
+
+        if trainer.logger is None:
+            return
+
+        step = trainer.global_step
+
+        # ELBO
+        n_cells = self._val_n_cells.item()
+        if n_cells > 0:
+            val_elbo = (self._val_elbo_sum / self._val_n_cells).item()
+            trainer.logger.log_metrics({"val_elbo": val_elbo}, step=step)
+
+        # ontology-weighted Spearman
+        if self.num_classes is not None and self.ontology_distance_matrix is not None:
+            valid_mask = self._val_class_count_k > 0
+            n_valid = int(valid_mask.sum().item())
+            if n_valid >= 2:
+                counts_valid = self._val_class_count_k[valid_mask]
+                centroids = self._val_z_sum_kd[valid_mask] / counts_valid.unsqueeze(1)
+                latent_dists = torch.cdist(centroids, centroids)
+                onto_dists = self.ontology_distance_matrix[valid_mask][:, valid_mask]
+
+                spearman = self._weighted_spearman(latent_dists, onto_dists, counts_valid)
+                if not np.isnan(spearman):
+                    trainer.logger.log_metrics({"val_ontology_spearman": spearman}, step=step)
+
+        # centroid-based batch silhouette
+        if self.n_batch > 1:
+            valid_mask = self._val_batch_count_b > 0
+            n_valid = int(valid_mask.sum().item())
+            if n_valid >= 2:
+                counts_b = self._val_batch_count_b[valid_mask]
+                centroids_bk = self._val_batch_z_sum_bk[valid_mask] / counts_b.unsqueeze(1)
+                mean_sq_b = self._val_batch_z_sq_sum_b[valid_mask] / counts_b
+                # within-batch spread: sqrt(E[||z||^2] - ||centroid||^2)
+                intra_b = (mean_sq_b - centroids_bk.pow(2).sum(dim=-1)).clamp(min=0.0).sqrt()
+                D = torch.cdist(centroids_bk, centroids_bk)
+                # mask self-distances
+                D.fill_diagonal_(float("inf"))
+                b_b = D.min(dim=1).values  # nearest other centroid distance
+                s_b = (b_b - intra_b) / torch.max(b_b, intra_b).clamp(min=1e-12)
+                val_silhouette = (s_b * counts_b).sum() / counts_b.sum()
+                trainer.logger.log_metrics({"val_batch_silhouette": val_silhouette.item()}, step=step)
+
+        # cell type logistic regression classifier
+        if self.num_classes is not None and self._val_cl_train_fill >= 2 and self._val_cl_test_fill >= 1:
+            X_train = self._val_cl_train_z[: self._val_cl_train_fill].float()
+            y_train = self._val_cl_train_y[: self._val_cl_train_fill]
+            X_test = self._val_cl_test_z[: self._val_cl_test_fill].float()
+            y_test = self._val_cl_test_y[: self._val_cl_test_fill]
+
+            # normalize features for stable LBFGS convergence
+            mu = X_train.mean(0)
+            sigma = X_train.std(0).clamp(min=1e-8)
+            X_train = (X_train - mu) / sigma
+            X_test = (X_test - mu) / sigma
+
+            W = torch.zeros(self.num_classes, self.n_latent, device=X_train.device, requires_grad=True)
+            b = torch.zeros(self.num_classes, device=X_train.device, requires_grad=True)
+            opt = torch.optim.LBFGS([W, b], max_iter=200, line_search_fn="strong_wolfe")
+
+            def closure():
+                opt.zero_grad()
+                loss = torch.nn.functional.cross_entropy(X_train @ W.T + b, y_train)
+                loss.backward()
+                return loss
+
+            with torch.enable_grad():
+                opt.step(closure)
+
+            with torch.no_grad():
+                logits_test = X_test @ W.T + b
+                preds = logits_test.argmax(dim=-1)
+                top1 = (preds == y_test).float().mean().item()
+                trainer.logger.log_metrics({"val_cell_type_top1_accuracy": top1}, step=step)
+
+                if self.ontology_distance_matrix is not None:
+                    wrong_mask = preds != y_test
+                    if wrong_mask.any():
+                        err_dist = self.ontology_distance_matrix[preds[wrong_mask], y_test[wrong_mask]]
+                        finite = err_dist.isfinite()
+                        if finite.any():
+                            mean_err = err_dist[finite].mean().item()
+                            trainer.logger.log_metrics({"val_cell_type_mean_error_distance": mean_err}, step=step)
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         self.step = trainer.global_step
