@@ -317,4 +317,13 @@ def compute_cl_distance_matrix(owl_uri: str) -> pd.DataFrame:
             tgt_idx = name_to_idx[target]
             dist_matrix[src_idx, tgt_idx] = float(d)
 
-    return pd.DataFrame(dist_matrix, index=cl_ids, columns=cl_ids)
+    df = pd.DataFrame(dist_matrix, index=cl_ids, columns=cl_ids)
+
+    # Append an "unknown" label with inf distance to all other labels (and 0 to itself).
+    # This allows datasets that include an "unknown" cell type to pass through the constructor
+    # without errors; the inf distances will be excluded from all finite-only metric calculations.
+    df.loc["unknown", :] = np.inf
+    df.loc[:, "unknown"] = np.inf
+    df.loc["unknown", "unknown"] = 0.0
+
+    return df
