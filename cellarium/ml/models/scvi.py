@@ -1379,8 +1379,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
     def on_validation_epoch_start(self, trainer: pl.Trainer) -> None:
         device = next(self.parameters()).device
 
-        # ELBO accumulators
+        # ELBO / reconstruction accumulators
         self._val_elbo_sum = torch.zeros(1, device=device)
+        self._val_rec_sum = torch.zeros(1, device=device)
         self._val_n_cells = torch.zeros(1, device=device)
 
         # Ontology accumulators (only when num_classes is configured)
@@ -1443,6 +1444,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         assert isinstance(output["z_nk"], torch.Tensor)
         elbo_n = -(output["reconstruction_loss"] + output["kl_divergence_z"] + kl_batch)
         self._val_elbo_sum += elbo_n.sum().detach()
+        self._val_rec_sum += output["reconstruction_loss"].sum().detach()
         self._val_n_cells += n
 
         z_nk = output["z_nk"].detach()
@@ -1535,7 +1537,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
             if world_size > 1:
-                tensors_to_sync = [self._val_elbo_sum, self._val_n_cells]
+                tensors_to_sync = [self._val_elbo_sum, self._val_rec_sum, self._val_n_cells]
                 if self.num_classes is not None:
                     tensors_to_sync += [self._val_z_sum_kd, self._val_class_count_k]
                 if self.n_batch > 1:
@@ -1581,11 +1583,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         step = trainer.global_step
 
-        # ELBO
+        # ELBO and reconstruction loss
         n_cells = self._val_n_cells.item()
         if n_cells > 0:
             val_elbo = (self._val_elbo_sum / self._val_n_cells).item()
             trainer.logger.log_metrics({"val_elbo": val_elbo}, step=step)
+            val_rec = (self._val_rec_sum / self._val_n_cells).item()
+            trainer.logger.log_metrics({"val_reconstruction_loss": val_rec}, step=step)
 
         # ontology-weighted Spearman
         if self.num_classes is not None and self.ontology_distance_matrix is not None:
