@@ -70,7 +70,9 @@ class AnnDataField:
         return value
 
 
-def convert_to_tensor(value: np.ndarray) -> np.ndarray | torch.Tensor:
+def convert_to_tensor(value: np.ndarray | pd.Series) -> np.ndarray | torch.Tensor:
+    if isinstance(value, pd.Series):
+        value = value.to_numpy()
     if np.issubdtype(value.dtype, np.str_) or np.issubdtype(value.dtype, np.object_):
         return value
     return torch.tensor(value, device="cpu")
