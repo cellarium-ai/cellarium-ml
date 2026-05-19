@@ -8,18 +8,12 @@ import pyro.distributions as dist
 import torch
 import torch.nn.functional
 
-from cellarium.ml.distributions import PyroCategorical
+from cellarium.ml.distributions import UnconstrainedPyroCategorical
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
-
-
-def compute_valid_mask(input_categories: list[str], output_categories: list[str]) -> list[int]:
-    # Return indices of output_categories in the same order as input_categories
-    index_map = {cat: i for i, cat in enumerate(output_categories)}
-    return [index_map[cat] for cat in input_categories]
 
 
 class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
@@ -80,7 +74,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.n_categories = descendant_tensor.shape[0]
         self.cl_name_subset = cl_name_subset
         self.probability_propagation_flag = probability_propagation_flag
-        self.out_distribution = PyroCategorical
+        self.out_distribution = UnconstrainedPyroCategorical
         self.seed = seed
 
         # parameters

@@ -11,47 +11,8 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.socam import SOCAM, compute_valid_mask
+from cellarium.ml.models.socam import SOCAM
 from cellarium.ml.utilities.data import collate_fn
-
-
-def test_compute_valid_mask_identical_categories():
-    """Test when input and output categories are identical."""
-    categories = ["a", "b", "c"]
-    result = compute_valid_mask(input_categories=categories, output_categories=categories)
-    assert result == [0, 1, 2]
-
-
-def test_compute_valid_mask_subset_categories():
-    """Test when input categories are a subset of output categories."""
-    input_categories = ["b", "d"]
-    output_categories = ["a", "b", "c", "d", "e"]
-    result = compute_valid_mask(input_categories=input_categories, output_categories=output_categories)
-    assert result == [1, 3]
-
-
-def test_compute_valid_mask_reordered_categories():
-    """Test when input categories are reordered relative to output."""
-    input_categories = ["c", "a", "b"]
-    output_categories = ["a", "b", "c"]
-    result = compute_valid_mask(input_categories=input_categories, output_categories=output_categories)
-    assert result == [2, 0, 1]
-
-
-def test_compute_valid_mask_single_category():
-    """Test with a single input category."""
-    input_categories = ["b"]
-    output_categories = ["a", "b", "c"]
-    result = compute_valid_mask(input_categories=input_categories, output_categories=output_categories)
-    assert result == [1]
-
-
-def test_compute_valid_mask_missing_category_raises_error():
-    """Test that missing category in output raises KeyError."""
-    input_categories = ["a", "x"]
-    output_categories = ["a", "b", "c"]
-    with pytest.raises(KeyError):
-        compute_valid_mask(input_categories=input_categories, output_categories=output_categories)
 
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):

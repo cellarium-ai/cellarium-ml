@@ -12,10 +12,11 @@ from torch.distributions.distribution import Distribution
 from torch.distributions.utils import lazy_property, logits_to_probs, probs_to_logits
 
 
-class TorchCategorical(Distribution):
+class UnconstrainedTorchCategorical(Distribution):
     r"""
     Creates a categorical distribution parameterized by either :attr:`probs` or
-    :attr:`logits` (but not both).
+    :attr:`logits` (but not both). Only difference from PyTorch is that the inputs
+    are not required to be on a simplex.
 
     .. note::
         It is equivalent to the distribution that :func:`torch.multinomial`
@@ -42,7 +43,7 @@ class TorchCategorical(Distribution):
     Example::
 
         >>> # xdoctest: +IGNORE_WANT("non-deterministic")
-        >>> m = Categorical(torch.tensor([ 0.25, 0.25, 0.25, 0.25 ]))
+        >>> m = UnconstrainedTorchCategorical(torch.tensor([ 0.25, 0.25, 0.25, 0.25 ]))
         >>> m.sample()  # equal probability of 0, 1, 2, 3
         tensor(3)
 
@@ -73,7 +74,7 @@ class TorchCategorical(Distribution):
         super().__init__(batch_shape, validate_args=validate_args)
 
     def expand(self, batch_shape, _instance=None):
-        new = self._get_checked_instance(TorchCategorical, _instance)
+        new = self._get_checked_instance(UnconstrainedTorchCategorical, _instance)
         batch_shape = torch.Size(batch_shape)
         param_shape = batch_shape + torch.Size((self._num_events,))
         if "probs" in self.__dict__:
@@ -83,7 +84,7 @@ class TorchCategorical(Distribution):
             new.logits = self.logits.expand(param_shape)
             new._param = new.logits
         new._num_events = self._num_events
-        super(TorchCategorical, new).__init__(batch_shape, validate_args=False)
+        super(UnconstrainedTorchCategorical, new).__init__(batch_shape, validate_args=False)
         new._validate_args = self._validate_args
         return new
 
@@ -158,7 +159,7 @@ class TorchCategorical(Distribution):
         return values
 
 
-class PyroCategorical(TorchCategorical, TorchDistributionMixin):
+class UnconstrainedPyroCategorical(UnconstrainedTorchCategorical, TorchDistributionMixin):
     arg_constraints = {"probs": constraints.real_vector, "logits": constraints.real_vector}
 
     def log_prob(self, value):
