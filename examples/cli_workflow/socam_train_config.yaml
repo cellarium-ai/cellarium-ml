@@ -103,10 +103,11 @@ data:
       attr: X
       convert_fn: cellarium.ml.utilities.data.densify
     var_names_g:
-      attr: var_names
+      attr: var
+      key: feature_id
     total_mrna_umis_n:
       attr: obs
-      key: raw_sums
+      key: raw_sum
     cl_names_n:
       attr: obs
       key: cell_type_ontology_term_id
@@ -115,7 +116,6 @@ data:
   batch_size: 2048
   iteration_strategy: cache_efficient
   shuffle: true
-  seed: 0
   drop_last_indices: false
   num_workers: 4
   drop_incomplete_batch: false
