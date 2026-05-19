@@ -18,7 +18,7 @@ from anndata.experimental.multi_files._anncollection import (
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
-from cellarium.ml.data.fileio import read_h5ad_file
+from cellarium.ml.data.fileio import backed_mode_default, backed_mode_type, read_h5ad_file
 from cellarium.ml.data.schema import AnnDataSchema
 
 
@@ -27,6 +27,8 @@ class getattr_mode:
 
 
 _GETATTR_MODE = getattr_mode()
+
+allowed_backed_modes = [None, True, False, "r"]
 
 
 @contextmanager
@@ -155,6 +157,12 @@ class DistributedAnnDataCollection(AnnCollection):
         obs_columns_to_validate:
             Subset of columns to validate in the :attr:`obs` attribute.
             If ``None``, all columns are validated.
+        backed:
+            Optional backing mode for the h5ad files. ``'r'`` will leave count matrices
+            on disk until specific cell indices are queried, enabling the use of very large
+            h5ad files, while ``None`` will load entire count matrices from individual h5ad files
+            into cached memory as needed: a strategy that necessitates smaller chunked h5ad files.
+            See :func:`anndata.read_h5ad` for details on backing modes.
     """
 
     def __init__(
@@ -171,6 +179,7 @@ class DistributedAnnDataCollection(AnnCollection):
         convert: ConvertType | None = None,
         indices_strict: bool = True,
         obs_columns_to_validate: Sequence[str] | None = None,
+        backed: backed_mode_type = backed_mode_default,
     ):
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
@@ -192,8 +201,11 @@ class DistributedAnnDataCollection(AnnCollection):
         self.cache = LRU(max_cache_size)
         self.max_cache_size = max_cache_size
         self.cache_size_strictly_enforced = cache_size_strictly_enforced
+        if backed not in allowed_backed_modes:
+            raise ValueError(f"Invalid backed mode: {backed}. Choose from {allowed_backed_modes}")
+        self.backed = backed
         # schema
-        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
+        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0], backed=backed)
         if len(adata0) != limits[0]:
             raise ValueError(
                 f"The number of cells in the first anndata file ({len(adata0)}) "
@@ -203,7 +215,7 @@ class DistributedAnnDataCollection(AnnCollection):
         self.schema = AnnDataSchema(adata0, obs_columns_to_validate)
         # lazy anndatas
         lazy_adatas = [
-            LazyAnnData(filename, (start, end), self.schema, self.cache)
+            LazyAnnData(filename, (start, end), self.schema, self.cache, backed=backed)
             for start, end, filename in zip([0] + limits, limits, self.filenames)
         ]
         # use filenames as default keys
@@ -298,10 +310,10 @@ class DistributedAnnDataCollection(AnnCollection):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.cache = LRU(self.max_cache_size)
-        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0])
+        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0], backed=self.backed)
         self.schema = AnnDataSchema(adata0, self.obs_columns_to_validate)
         self.adatas = [
-            LazyAnnData(filename, (start, end), self.schema, self.cache)
+            LazyAnnData(filename, (start, end), self.schema, self.cache, backed=self.backed)
             for start, end, filename in zip([0] + self.limits, self.limits, self.filenames)
         ]
         self.obs_names = pd.Index([f"cell_{i}" for i in range(self.limits[-1])])
@@ -323,6 +335,11 @@ class LazyAnnData:
             Schema used as a reference for lazy attributes.
         cache:
             Shared LRU cache storing buffered anndatas.
+        backed:
+            Optional backing mode for the anndata. ``'r'`` will leave count matrix
+            on disk, while ``None`` will load count matrix in memory (when the anndata is
+            cached by calling the `.adata` property).
+            See :func:`anndata.read_h5ad` for details on backing modes.
     """
 
     _lazy_attrs = ["obs", "obsm", "layers", "var", "varm", "varp", "var_names"]
@@ -343,10 +360,14 @@ class LazyAnnData:
         limits: tuple[int, int],
         schema: AnnDataSchema,
         cache: LRU | None = None,
+        backed: backed_mode_type = backed_mode_default,
     ):
         self.filename = filename
         self.limits = limits
         self.schema = schema
+        if backed not in allowed_backed_modes:
+            raise ValueError(f"Invalid backed mode: {backed}. Choose from {allowed_backed_modes}")
+        self.backed = backed
         if cache is None:
             cache = LRU()
         self.cache = cache
@@ -382,16 +403,16 @@ class LazyAnnData:
 
     @property
     def adata(self) -> AnnData:
-        """Return backed anndata from the filename"""
+        """Return anndata from the filename"""
         try:
             adata = self.cache[self.filename]
         except KeyError:
             # fetch anndata
-            adata = read_h5ad_file(self.filename)
+            adata = read_h5ad_file(self.filename, backed=self.backed)
             # validate anndata
             if self.n_obs != adata.n_obs:
                 raise ValueError(
-                    "Expected `n_obs` for LazyAnnData object and backed anndata to match "
+                    "Expected `n_obs` for LazyAnnData object and loaded anndata to match "
                     f"but found {self.n_obs} and {adata.n_obs}, respectively."
                 )
             self.schema.validate_anndata(adata)
@@ -426,8 +447,9 @@ class LazyAnnData:
             buffered = "Cached "
         else:
             buffered = ""
-        backed_at = f" backed at {str(self.filename)!r}"
-        descr = f"{buffered}LazyAnnData object with n_obs × n_vars = {self.n_obs} × {self.n_vars}{backed_at}"
+        located_at = f" referencing {str(self.filename)!r}"
+        backed = " in backed mode" if (self.backed in [True, "r"]) else " in memory mode"
+        descr = f"{buffered}LazyAnnData object with n_obs × n_vars = {self.n_obs} × {self.n_vars}{located_at}{backed}"
         if self.cached:
             for attr in self._all_attrs:
                 keys = getattr(self, attr).keys()
