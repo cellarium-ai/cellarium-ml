@@ -188,7 +188,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             if self._full_label_lookup is None:
                 self._full_label_lookup = {name: i for i, name in enumerate(self.cl_names)}
             label_lookup = self._full_label_lookup
-        y_n = self._cl_names_to_indices(cl_names_n, label_lookup)
+        y_n = self._cl_names_to_indices(cl_names_n, label_lookup).to(x_ng.device)
         loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, indices, descendant_tensor_subset_cc)
         return {"loss": loss}
 
