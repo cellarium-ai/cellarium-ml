@@ -16,6 +16,58 @@ from cellarium.ml.utilities.testing import (
 )
 
 
+@torch.compile()
+def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
+    """
+    Propagate probabilities up the hierarchy defined by ``descendant_tensor_cc`` using matrix multiplication.
+    This effectively sums the probabilities of all descendant categories for each category.
+    The output is then clamped to a maximum of 1.0 to ensure valid probability values.
+
+    Args:
+        probs_nc: Tensor of shape (n, c) containing the probabilities for each category.
+        descendant_tensor_cc: Binary tensor of shape (c, c) defining descendant relationships.
+
+    Returns:
+        Tensor of shape (n, c) containing the propagated probabilities for each category
+    """
+    propagated_probs_nc = torch.einsum(
+        "nc,kc->nk",
+        probs_nc,
+        descendant_tensor_cc,
+    )
+    return torch.clamp(propagated_probs_nc, max=1.0)
+
+
+# def logsumexp_propagated(self, logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
+#     temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
+#     return temp.logsumexp(dim=1)
+
+
+def logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
+    """Memory-safe logsumexp-like propagation."""
+    max_n1 = logits_nc.max(dim=1, keepdim=True).values   # (n, 1)
+    exp_nc = torch.exp(logits_nc - max_n1)               # (n, c)
+    sums_nc = exp_nc @ desc_matrix_cc.T                  # (n, c) — matmul replaces the masked sum
+    return torch.log(sums_nc) + max_n1                   # (n, c)
+
+
+@torch.compile()
+def propagate_logits(logits_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
+    """
+    Perform probability propagation in logit space.
+
+    Args:
+        logits_nc: Tensor of shape (n, c) containing the logits for each category.
+        descendant_tensor_cc: Binary tensor of shape (c, c) defining descendant relationships.
+    Returns:
+        Tensor of shape (n, c) containing the logits for each category after propagation
+    """
+    propagated_logits_nc = logsumexp_propagated(logits_nc, descendant_tensor_cc) - torch.logsumexp(
+        logits_nc, dim=1, keepdim=True
+    )
+    return propagated_logits_nc
+
+
 class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
     """
     Logistic regression model for cell type ontology classification.
@@ -218,7 +270,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0], dim=-2):
             logits_nc = self._compute_regression(x_ng, W_gc, b_c)
             if self.probability_propagation_flag:
-                logits_nc = self.propagate_logits(logits_nc, desc_cc)
+                logits_nc = propagate_logits(logits_nc, desc_cc)
             pyro.sample("y", self.out_distribution(logits=logits_nc), obs=y_n)
 
     def guide(
@@ -232,47 +284,6 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             pyro.sample("W", dist.Delta(self.W_gc[:, indices]).to_event(2))
         else:
             pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
-
-    @torch.compile()
-    def propagate_probs(self, probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
-        """
-        Propagate probabilities up the hierarchy defined by ``descendant_tensor_cc`` using matrix multiplication.
-        This effectively sums the probabilities of all descendant categories for each category.
-        The output is then clamped to a maximum of 1.0 to ensure valid probability values.
-
-        Args:
-            probs_nc: Tensor of shape (n, c) containing the probabilities for each category.
-            descendant_tensor_cc: Binary tensor of shape (c, c) defining descendant relationships.
-
-        Returns:
-            Tensor of shape (n, c) containing the propagated probabilities for each category
-        """
-        propagated_probs_nc = torch.einsum(
-            "nc,kc->nk",
-            probs_nc,
-            descendant_tensor_cc,
-        )
-        return torch.clamp(propagated_probs_nc, max=1.0)
-
-    @torch.compile()
-    def propagate_logits(self, logits_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
-        """
-        Perform probability propagation in logit space.
-
-        Args:
-            logits_nc: Tensor of shape (n, c) containing the logits for each category.
-            descendant_tensor_cc: Binary tensor of shape (c, c) defining descendant relationships.
-        Returns:
-            Tensor of shape (n, c) containing the logits for each category after propagation
-        """
-        propagated_logits_nc = self.logsumexp_propagated(logits_nc, descendant_tensor_cc) - torch.logsumexp(
-            logits_nc, dim=1, keepdim=True
-        )
-        return propagated_logits_nc
-
-    def logsumexp_propagated(self, logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
-        temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
-        return temp.logsumexp(dim=1)
 
     def predict(
         self,
@@ -306,7 +317,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         logits_nc = self._compute_regression(x_ng, W_gc, b_c)
         probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
         if self.probability_propagation_flag:
-            probs_nc = self.propagate_probs(probs_nc, descendant_tensor_subset_cc)
+            probs_nc = propagate_probs(probs_nc, descendant_tensor_subset_cc)
         return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:

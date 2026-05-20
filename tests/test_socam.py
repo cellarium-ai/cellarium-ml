@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.socam import SOCAM
+from cellarium.ml.models.socam import SOCAM, logsumexp_propagated
 from cellarium.ml.utilities.data import collate_fn
 
 
@@ -400,3 +400,77 @@ def test_cl_names_to_indices_lookup_reused_across_batches():
     _, _, _, lookup_1 = model._get_subset_info(["cell_type_1", "cell_type_3"])
     _, _, _, lookup_2 = model._get_subset_info(["cell_type_3", "cell_type_1"])
     assert lookup_1 is lookup_2  # no re-creation between batches
+
+
+# ---------------------------------------------------------------------------
+# logsumexp_propagated tests
+# ---------------------------------------------------------------------------
+
+
+def _naive_logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
+    """Reference implementation via the original (n, c, c) approach."""
+    temp = torch.where(
+        desc_matrix_cc.T == 0,
+        torch.full((), float("-inf")),
+        logits_nc.unsqueeze(-1).expand(-1, -1, desc_matrix_cc.shape[0]),
+    )
+    return temp.logsumexp(dim=1)
+
+
+def test_logsumexp_propagated_identity():
+    """With an identity descendant matrix each output logit equals the corresponding input logit."""
+    n, c = 4, 5
+    logits_nc = torch.randn(n, c)
+    desc = torch.eye(c)
+    result = logsumexp_propagated(logits_nc, desc)
+    assert result.shape == (n, c)
+    assert torch.allclose(result, logits_nc, atol=1e-5)
+
+
+def test_logsumexp_propagated_matches_naive():
+    """Output matches the reference (n, c, c) implementation on a non-trivial hierarchy."""
+    n, c = 6, 5
+    torch.manual_seed(0)
+    logits_nc = torch.randn(n, c)
+    desc = torch.eye(c)
+    desc[0, 1] = 1.0  # category 0 has category 1 as a descendant
+    desc[2, 3] = 1.0  # category 2 has category 3 as a descendant
+    result = logsumexp_propagated(logits_nc, desc)
+    expected = _naive_logsumexp_propagated(logits_nc, desc)
+    assert torch.allclose(result, expected, atol=1e-5)
+
+
+def test_logsumexp_propagated_no_overflow():
+    """Large positive logits must not produce inf in the output."""
+    n, c = 4, 5
+    logits_nc = torch.full((n, c), 1e30)
+    desc = torch.eye(c)
+    desc[0, 1] = 1.0
+    result = logsumexp_propagated(logits_nc, desc)
+    assert torch.all(torch.isfinite(result)), f"Got non-finite values: {result}"
+
+
+def test_logsumexp_propagated_no_underflow():
+    """Large negative logits must not produce -inf (or nan) where descendants exist."""
+    n, c = 4, 5
+    logits_nc = torch.full((n, c), -1e30)
+    desc = torch.eye(c)
+    result = logsumexp_propagated(logits_nc, desc)
+    # Each category is its own only descendant; output should equal input.
+    assert torch.all(torch.isfinite(result)), f"Got non-finite values: {result}"
+    assert torch.allclose(result, logits_nc, atol=1e-3)
+
+
+def test_logsumexp_propagated_semantics():
+    """
+    For a simple two-category hierarchy (parent 0, child 1) check that
+    logsumexp_propagated(logits)[0] == log(exp(l0) + exp(l1)).
+    """
+    logits_nc = torch.tensor([[1.0, 2.0]])
+    desc = torch.eye(2)
+    desc[0, 1] = 1.0  # 0 is parent of 1
+    result = logsumexp_propagated(logits_nc, desc)
+    expected_parent = torch.log(torch.exp(torch.tensor(1.0)) + torch.exp(torch.tensor(2.0)))
+    expected_child = torch.tensor(2.0)  # category 1 has only itself
+    assert torch.allclose(result[0, 0], expected_parent, atol=1e-6)
+    assert torch.allclose(result[0, 1], expected_child, atol=1e-6)
