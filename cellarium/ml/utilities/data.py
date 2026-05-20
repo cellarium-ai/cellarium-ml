@@ -249,6 +249,7 @@ def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
         for descendant in cl_class.descendants():
             descendant_idx = cell_type_to_index[descendant]
             descendant_tensor[idx, descendant_idx] = True
+    descendant_tensor[-1, -1] = True  # "unknown" is a descendant of itself and no other cell types
     return descendant_tensor
 
 
