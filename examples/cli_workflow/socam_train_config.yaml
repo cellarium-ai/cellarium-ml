@@ -68,19 +68,19 @@ model:
         loader_fn: cellarium.ml.utilities.data.get_cl_names_from_owl
       seed: 0
       
-  scheduler_fn: torch.optim.lr_scheduler.SequentialLR
-  scheduler_kwargs:
-    schedulers: 
-      - scheduler_fn: torch.optim.lr_scheduler.LinearLR
-        scheduler_kwargs:
-          start_factor: 0.0001 
-          end_factor: 1.0
-          total_iters: 12299
-      - scheduler_fn: torch.optim.lr_scheduler.CosineAnnealingLR
-        scheduler_kwargs: 
-          T_max: 49196
-    milestones: 
-      - 12299
+  # scheduler_fn: torch.optim.lr_scheduler.SequentialLR
+  # scheduler_kwargs:
+  #   schedulers: 
+  #     - scheduler_fn: torch.optim.lr_scheduler.LinearLR
+  #       scheduler_kwargs:
+  #         start_factor: 0.0001 
+  #         end_factor: 1.0
+  #         total_iters: 12299
+  #     - scheduler_fn: torch.optim.lr_scheduler.CosineAnnealingLR
+  #       scheduler_kwargs: 
+  #         T_max: 49196
+  #   milestones: 
+  #     - 12299
   is_initialized: false
 data:
   dadc:
