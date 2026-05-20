@@ -477,37 +477,47 @@ def test_logsumexp_propagated_semantics():
 
 
 def test_logsumexp_propagated_no_underflow_gradient():
-    """Backward pass must not produce NaN gradients when exp underflows to zero.
+    """Per-column logsumexp must produce finite gradients even when one category
+    dominates the row but is not a descendant of the output category.
 
-    With W_init_scale=1.0 and ~900 categories this is easily reached in practice:
-    exp(logit_i - max) underflows to 0 for the smallest logits, making sums_nc=0
-    for leaf categories.  Without the clamp, d/d(sums)[log(0)] = 1/0 = inf, and
-    inf * 0_underflowed_grad = NaN propagates back into W_gc.
+    This is the scenario that caused NaN in training: after a gradient step,
+    a single category (e.g., index 4) gets a very large logit.  For output
+    category 0 (parent of 1 and 2 only), the per-row-max approach would shift
+    by logit[4], underflowing exp(logit[0..2] - logit[4]) to zero and producing
+    a zero sum — giving log(0) = -inf and 1/0 = inf in the gradient.
+    The per-column logsumexp uses only the indices {0,1,2} for category 0's
+    max, so no underflow occurs.
     """
     n, c = 4, 5
-    # Spread logits widely so some exp() values flush to zero in float32
-    # (gap of >87 nats guarantees underflow)
-    logits_nc = torch.zeros(n, c, requires_grad=True)
+    logits_nc = torch.zeros(n, c).requires_grad_(True)
+    # Give index 4 a huge logit — it is NOT a descendant of category 0
     with torch.no_grad():
-        logits_nc[0, 0] = 100.0  # large positive — all others underflow relative to this
-    logits_nc = logits_nc.detach().requires_grad_(True)
+        logits_nc_ = logits_nc.clone()
+        logits_nc_[:, 4] = 100.0
+    logits_nc = logits_nc_.requires_grad_(True)
     desc = torch.eye(c)
+    desc[0, 1] = 1.0
+    desc[0, 2] = 1.0  # category 0 is parent of 1 and 2; category 4 unrelated
     result = _logsumexp_propagated(logits_nc, desc)
     result.sum().backward()
     assert logits_nc.grad is not None
-    assert torch.all(torch.isfinite(logits_nc.grad)), f"NaN/inf gradient detected: {logits_nc.grad}"
+    assert torch.all(torch.isfinite(logits_nc.grad)), f"NaN/inf gradient: {logits_nc.grad}"
 
 
-def test_logsumexp_propagated_all_neginf_rows():
-    """Rows where all logits are -inf should produce finite (not NaN) outputs.
-
-    -inf - (-inf) = NaN unless the max is sanitised before the subtraction.
+def test_logsumexp_propagated_per_column_max():
+    """Correctness check for the per-column max: category 2 holds the row max
+    but is not a descendant of category 0, so it must not affect category 0's
+    propagated logit.
     """
-    n, c = 3, 4
-    logits_nc = torch.full((n, c), float("-inf"))
-    desc = torch.eye(c)
+    n = 3
+    desc = torch.eye(3)
+    desc[0, 1] = 1.0  # 0 is parent of 1; category 2 is unrelated
+    logits_nc = torch.tensor([[1.0, 2.0, 100.0]] * n)
     result = _logsumexp_propagated(logits_nc, desc)
-    assert not torch.any(torch.isnan(result)), f"NaN values in output: {result}"
+    expected_0 = torch.log(torch.exp(torch.tensor(1.0)) + torch.exp(torch.tensor(2.0)))
+    assert torch.allclose(result[:, 0], expected_0.expand(n), atol=1e-5)
+    assert torch.allclose(result[:, 1], torch.tensor(2.0).expand(n), atol=1e-5)
+    assert torch.allclose(result[:, 2], torch.tensor(100.0).expand(n), atol=1e-5)
 
 
 def test_logsumexp_propagated_mixed_extreme_logits():

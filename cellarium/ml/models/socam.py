@@ -44,23 +44,20 @@ def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) 
 
 
 def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
-    """Memory-safe logsumexp-like propagation.
+    """Memory- and numerically-safe logsumexp-based propagation.
 
-    Uses the standard max-shift trick to avoid overflow, with two additional guards:
-    - ``nan_to_num`` on the row max prevents ``-inf - (-inf) = NaN`` when all logits
-      in a row are ``-inf``.
-    - ``clamp(min=tiny)`` before ``log`` prevents ``log(0) = -inf`` and, critically,
-      the ``1/0 = inf`` gradient that causes ``inf * 0_grad = NaN`` during backprop
-      when underflow zeros out some ``exp`` values.
+    For each output category ``j``, computes ``logsumexp`` over the logits of
+    ``j``'s descendants using ``torch.logsumexp``, which applies a per-column
+    max shift.  This avoids the underflow that occurs when a global (per-row)
+    max shift is used: if none of ``j``'s descendants hold the row-maximum
+    logit, all their shifted ``exp`` values flush to zero, producing ``log(0)``
+    and NaN gradients on subsequent steps.
     """
-    tiny = torch.finfo(logits_nc.dtype).tiny
-    max_n1 = logits_nc.amax(dim=1, keepdim=True)  # (n, 1)
-    exp_nc = torch.exp(logits_nc - max_n1.nan_to_num(neginf=0.0))  # (n, c)
-    sums_nc = exp_nc @ desc_matrix_cc.T  # (n, c)
-    return torch.log(sums_nc.clamp(min=tiny)) + max_n1  # (n, c)
+    c = desc_matrix_cc.shape[0]
+    cols = [desc_matrix_cc[j].nonzero(as_tuple=True)[0] for j in range(c)]
+    return torch.stack([logits_nc[:, idx].logsumexp(dim=1) for idx in cols], dim=1)
 
 
-@torch.compile()
 def propagate_logits(logits_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
     """
     Perform probability propagation in logit space.
