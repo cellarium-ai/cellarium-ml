@@ -33,7 +33,7 @@ class DivideByScale(FilterCompatibilityMixin, nn.Module):
     def __init__(self, scale_g: torch.Tensor, var_names_g: np.ndarray, eps: float = 1e-6) -> None:
         super().__init__()
         self.scale_g: torch.Tensor
-        self.register_buffer("scale_g", scale_g)
+        self.register_buffer("scale_g", scale_g.float())
         self.var_names_g = var_names_g
         assert_nonnegative("eps", eps)
         self.eps = eps
