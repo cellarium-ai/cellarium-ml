@@ -58,6 +58,7 @@ def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor)
     return torch.stack([logits_nc[:, idx].logsumexp(dim=1) for idx in cols], dim=1)
 
 
+@torch.compile()
 def propagate_logits(logits_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
     """
     Perform probability propagation in logit space.
