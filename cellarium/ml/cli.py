@@ -345,6 +345,22 @@ def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
         return len(x.cat.categories)
 
 
+def compute_cl_name_subset(data: CellariumAnnDataDataModule) -> list[str]:
+    """
+    Compute the list of category names in cl_names_n.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The sorted list of unique category names in the ``cl_names_n`` batch key.
+    """
+    field = data.batch_keys["cl_names_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    return list(obs[field.key].cat.categories)
+
+
 def lightning_cli_factory(
     model_class_path: str,
     link_arguments: list[LinkArguments] | None = None,
@@ -862,6 +878,7 @@ def socam(args: ArgsType = None) -> None:
                 compute_var_names_g,
             ),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.cl_name_subset", compute_cl_name_subset),
         ],
     )
     cli(args=args)
