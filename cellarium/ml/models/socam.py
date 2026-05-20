@@ -61,6 +61,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.var_names_g = var_names_g
         self.n_vars = len(var_names_g)
         self.cl_names = cl_names
+        descendant_tensor = descendant_tensor.float()
         if descendant_tensor.shape[0] != descendant_tensor.shape[1]:
             raise ValueError("`descendant_tensor` should be a square matrix.")
         if descendant_tensor.trace() != descendant_tensor.shape[0]:
