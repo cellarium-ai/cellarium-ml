@@ -45,10 +45,10 @@ def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) 
 
 def logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
     """Memory-safe logsumexp-like propagation."""
-    max_n1 = logits_nc.max(dim=1, keepdim=True).values   # (n, 1)
-    exp_nc = torch.exp(logits_nc - max_n1)               # (n, c)
-    sums_nc = exp_nc @ desc_matrix_cc.T                  # (n, c) — matmul replaces the masked sum
-    return torch.log(sums_nc) + max_n1                   # (n, c)
+    max_n1 = logits_nc.max(dim=1, keepdim=True).values  # (n, 1)
+    exp_nc = torch.exp(logits_nc - max_n1)  # (n, c)
+    sums_nc = exp_nc @ desc_matrix_cc.T  # (n, c) — matmul replaces the masked sum
+    return torch.log(sums_nc) + max_n1  # (n, c)
 
 
 @torch.compile()
