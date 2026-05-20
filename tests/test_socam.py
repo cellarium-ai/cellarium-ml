@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.socam import SOCAM, logsumexp_propagated
+from cellarium.ml.models.socam import SOCAM, _logsumexp_propagated
 from cellarium.ml.utilities.data import collate_fn
 
 
@@ -422,7 +422,7 @@ def test_logsumexp_propagated_identity():
     n, c = 4, 5
     logits_nc = torch.randn(n, c)
     desc = torch.eye(c)
-    result = logsumexp_propagated(logits_nc, desc)
+    result = _logsumexp_propagated(logits_nc, desc)
     assert result.shape == (n, c)
     assert torch.allclose(result, logits_nc, atol=1e-5)
 
@@ -435,7 +435,7 @@ def test_logsumexp_propagated_matches_naive():
     desc = torch.eye(c)
     desc[0, 1] = 1.0  # category 0 has category 1 as a descendant
     desc[2, 3] = 1.0  # category 2 has category 3 as a descendant
-    result = logsumexp_propagated(logits_nc, desc)
+    result = _logsumexp_propagated(logits_nc, desc)
     expected = _naive_logsumexp_propagated(logits_nc, desc)
     assert torch.allclose(result, expected, atol=1e-5)
 
@@ -446,7 +446,7 @@ def test_logsumexp_propagated_no_overflow():
     logits_nc = torch.full((n, c), 1e30)
     desc = torch.eye(c)
     desc[0, 1] = 1.0
-    result = logsumexp_propagated(logits_nc, desc)
+    result = _logsumexp_propagated(logits_nc, desc)
     assert torch.all(torch.isfinite(result)), f"Got non-finite values: {result}"
 
 
@@ -455,7 +455,7 @@ def test_logsumexp_propagated_no_underflow():
     n, c = 4, 5
     logits_nc = torch.full((n, c), -1e30)
     desc = torch.eye(c)
-    result = logsumexp_propagated(logits_nc, desc)
+    result = _logsumexp_propagated(logits_nc, desc)
     # Each category is its own only descendant; output should equal input.
     assert torch.all(torch.isfinite(result)), f"Got non-finite values: {result}"
     assert torch.allclose(result, logits_nc, atol=1e-3)
@@ -469,7 +469,7 @@ def test_logsumexp_propagated_semantics():
     logits_nc = torch.tensor([[1.0, 2.0]])
     desc = torch.eye(2)
     desc[0, 1] = 1.0  # 0 is parent of 1
-    result = logsumexp_propagated(logits_nc, desc)
+    result = _logsumexp_propagated(logits_nc, desc)
     expected_parent = torch.log(torch.exp(torch.tensor(1.0)) + torch.exp(torch.tensor(2.0)))
     expected_child = torch.tensor(2.0)  # category 1 has only itself
     assert torch.allclose(result[0, 0], expected_parent, atol=1e-6)

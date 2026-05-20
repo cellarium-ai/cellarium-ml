@@ -43,7 +43,7 @@ def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) 
 #     return temp.logsumexp(dim=1)
 
 
-def logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
+def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
     """Memory-safe logsumexp-like propagation."""
     max_n1 = logits_nc.max(dim=1, keepdim=True).values  # (n, 1)
     exp_nc = torch.exp(logits_nc - max_n1)  # (n, c)
@@ -62,7 +62,7 @@ def propagate_logits(logits_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor
     Returns:
         Tensor of shape (n, c) containing the logits for each category after propagation
     """
-    propagated_logits_nc = logsumexp_propagated(logits_nc, descendant_tensor_cc) - torch.logsumexp(
+    propagated_logits_nc = _logsumexp_propagated(logits_nc, descendant_tensor_cc) - torch.logsumexp(
         logits_nc, dim=1, keepdim=True
     )
     return propagated_logits_nc
