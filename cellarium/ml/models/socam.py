@@ -44,11 +44,20 @@ def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) 
 
 
 def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
-    """Memory-safe logsumexp-like propagation."""
-    max_n1 = logits_nc.max(dim=1, keepdim=True).values  # (n, 1)
-    exp_nc = torch.exp(logits_nc - max_n1)  # (n, c)
-    sums_nc = exp_nc @ desc_matrix_cc.T  # (n, c) — matmul replaces the masked sum
-    return torch.log(sums_nc) + max_n1  # (n, c)
+    """Memory-safe logsumexp-like propagation.
+
+    Uses the standard max-shift trick to avoid overflow, with two additional guards:
+    - ``nan_to_num`` on the row max prevents ``-inf - (-inf) = NaN`` when all logits
+      in a row are ``-inf``.
+    - ``clamp(min=tiny)`` before ``log`` prevents ``log(0) = -inf`` and, critically,
+      the ``1/0 = inf`` gradient that causes ``inf * 0_grad = NaN`` during backprop
+      when underflow zeros out some ``exp`` values.
+    """
+    tiny = torch.finfo(logits_nc.dtype).tiny
+    max_n1 = logits_nc.amax(dim=1, keepdim=True)  # (n, 1)
+    exp_nc = torch.exp(logits_nc - max_n1.nan_to_num(neginf=0.0))  # (n, c)
+    sums_nc = exp_nc @ desc_matrix_cc.T  # (n, c)
+    return torch.log(sums_nc.clamp(min=tiny)) + max_n1  # (n, c)
 
 
 @torch.compile()
