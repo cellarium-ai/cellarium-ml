@@ -83,8 +83,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.W_init_scale = W_init_scale
         self.W_prior_scale: torch.Tensor
         self.register_buffer("W_prior_scale", torch.empty(()))
-        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_categories))
-        self.b_c = torch.nn.Parameter(torch.empty(self.n_categories))
+        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_categories, dtype=torch.float))
+        self.b_c = torch.nn.Parameter(torch.empty(self.n_categories, dtype=torch.float))
         self.elbo = pyro.infer.Trace_ELBO()
         self.log_metrics = log_metrics
         self._subset_cache: dict[tuple[str, ...], tuple[list[str], list[int], torch.Tensor, dict[str, int]]] = {}
