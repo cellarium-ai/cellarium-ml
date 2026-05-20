@@ -230,7 +230,7 @@ def get_cl_classes_from_owl(owl_uri: str) -> list:
 
 def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
     """
-    Get a descendant tensor from an OWL file.
+    Get a descendant tensor from an OWL file. Include "unknown" a new disconnected category at the end.
 
     Args:
         owl_uri: The URI of the OWL file.
@@ -242,7 +242,7 @@ def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
     cl_classes = get_cl_classes_from_owl(owl_uri)
 
     cell_type_to_index = {cell_type: idx for idx, cell_type in enumerate(cl_classes)}
-    descendant_tensor = torch.zeros((len(cl_classes), len(cl_classes)), dtype=torch.bool)
+    descendant_tensor = torch.zeros((len(cl_classes) + 1, len(cl_classes) + 1), dtype=torch.bool)
     for cl_class in cl_classes:
         idx = cell_type_to_index[cl_class]
         descendant_tensor[idx, idx] = True  # identity is included in this tensor
@@ -254,7 +254,7 @@ def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
 
 def get_cl_names_from_owl(owl_uri: str) -> list[str]:
     """
-    Get cell type names (e.g., CL:0000123) from an OWL file.
+    Get cell type names (e.g., CL:0000123) from an OWL file, with "unknown" appended as a new disconnected category.
 
     Args:
         owl_uri: The URI of the OWL file.
@@ -265,4 +265,4 @@ def get_cl_names_from_owl(owl_uri: str) -> list[str]:
     cl_classes = get_cl_classes_from_owl(owl_uri)
     underscore_names = [_class.name for _class in cl_classes]
     colon_names = [name.replace("CL_", "CL:") for name in underscore_names]
-    return colon_names
+    return colon_names + ["unknown"]
