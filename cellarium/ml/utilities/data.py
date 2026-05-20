@@ -254,7 +254,7 @@ def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
 
 def get_cl_names_from_owl(owl_uri: str) -> list[str]:
     """
-    Get cell type names (CL_0000123) from an OWL file.
+    Get cell type names (e.g., CL:0000123) from an OWL file.
 
     Args:
         owl_uri: The URI of the OWL file.
@@ -263,4 +263,6 @@ def get_cl_names_from_owl(owl_uri: str) -> list[str]:
         at index i in the descendant tensor.
     """
     cl_classes = get_cl_classes_from_owl(owl_uri)
-    return [_class.name for _class in cl_classes]
+    underscore_names = [_class.name for _class in cl_classes]
+    colon_names = [name.replace("CL_", "CL:") for name in underscore_names]
+    return colon_names
