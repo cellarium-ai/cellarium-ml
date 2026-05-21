@@ -369,6 +369,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         )
         return {"loss": loss}
 
+    @torch.compile()
     def _compute_regression(self, x_ng: torch.Tensor, W_gc: torch.Tensor, b_c: torch.Tensor) -> torch.Tensor:
         return x_ng @ W_gc + b_c
 
