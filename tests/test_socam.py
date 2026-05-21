@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.socam import SOCAM, _expand_with_ancestors, _logsumexp_propagated
+from cellarium.ml.models.socam import SOCAM, _build_nonleaf_info, _expand_with_ancestors, _logsumexp_propagated
 from cellarium.ml.utilities.data import collate_fn
 
 
@@ -266,7 +266,7 @@ def _make_socam(
 
 def test_get_subset_info_basic():
     model = _make_socam()
-    names, indices, desc, label_lookup = model._get_subset_info(["cell_type_2", "cell_type_4"])
+    names, indices, desc, label_lookup, _, _ = model._get_subset_info(["cell_type_2", "cell_type_4"])
     assert names == ["cell_type_2", "cell_type_4"]
     assert indices == [2, 4]
     assert desc.shape == (2, 2)
@@ -277,8 +277,8 @@ def test_get_subset_info_basic():
 
 def test_get_subset_info_order_independent():
     model = _make_socam()
-    names_a, indices_a, desc_a, lookup_a = model._get_subset_info(["cell_type_4", "cell_type_2"])
-    names_b, indices_b, desc_b, lookup_b = model._get_subset_info(["cell_type_2", "cell_type_4"])
+    names_a, indices_a, desc_a, lookup_a, _, _ = model._get_subset_info(["cell_type_4", "cell_type_2"])
+    names_b, indices_b, desc_b, lookup_b, _, _ = model._get_subset_info(["cell_type_2", "cell_type_4"])
     assert names_a == names_b
     assert indices_a == indices_b
     assert desc_a is desc_b  # same cached object
@@ -287,8 +287,8 @@ def test_get_subset_info_order_independent():
 
 def test_get_subset_info_caching():
     model = _make_socam()
-    _, _, desc_first, lookup_first = model._get_subset_info(["cell_type_0", "cell_type_3"])
-    _, _, desc_second, lookup_second = model._get_subset_info(["cell_type_0", "cell_type_3"])
+    _, _, desc_first, lookup_first, _, _ = model._get_subset_info(["cell_type_0", "cell_type_3"])
+    _, _, desc_second, lookup_second, _, _ = model._get_subset_info(["cell_type_0", "cell_type_3"])
     assert desc_first is desc_second
     assert lookup_first is lookup_second
 
@@ -366,7 +366,7 @@ def test_predict_no_cl_name_subset():
 
 def test_cl_names_to_indices_basic():
     model = _make_socam()
-    _, _, _, label_lookup = model._get_subset_info(["cell_type_0", "cell_type_2", "cell_type_4"])
+    _, _, _, label_lookup, _, _ = model._get_subset_info(["cell_type_0", "cell_type_2", "cell_type_4"])
     cl_names_n = np.array(["cell_type_4", "cell_type_0", "cell_type_2", "cell_type_0"])
     result = model._cl_names_to_indices(cl_names_n, label_lookup)
     assert isinstance(result, torch.Tensor)
@@ -388,7 +388,7 @@ def test_cl_names_to_indices_full_lookup():
 
 def test_cl_names_to_indices_invalid_name():
     model = _make_socam()
-    _, _, _, label_lookup = model._get_subset_info(["cell_type_0", "cell_type_1"])
+    _, _, _, label_lookup, _, _ = model._get_subset_info(["cell_type_0", "cell_type_1"])
     cl_names_n = np.array(["cell_type_0", "cell_type_99"])
     with pytest.raises(ValueError, match="cell_type_99"):
         model._cl_names_to_indices(cl_names_n, label_lookup)
@@ -397,8 +397,8 @@ def test_cl_names_to_indices_invalid_name():
 def test_cl_names_to_indices_lookup_reused_across_batches():
     """The same label_lookup dict object is returned on repeated _get_subset_info calls."""
     model = _make_socam()
-    _, _, _, lookup_1 = model._get_subset_info(["cell_type_1", "cell_type_3"])
-    _, _, _, lookup_2 = model._get_subset_info(["cell_type_3", "cell_type_1"])
+    _, _, _, lookup_1, _, _ = model._get_subset_info(["cell_type_1", "cell_type_3"])
+    _, _, _, lookup_2, _, _ = model._get_subset_info(["cell_type_3", "cell_type_1"])
     assert lookup_1 is lookup_2  # no re-creation between batches
 
 
@@ -664,3 +664,71 @@ def test_include_ancestors_none_subset_unaffected():
     """When cl_name_subset is None the flag has no effect."""
     model, _ = _make_chain_socam()
     assert model.cl_name_subset is None
+
+
+# ---------------------------------------------------------------------------
+# _build_nonleaf_info and propagate_logits (2-bin) tests
+# ---------------------------------------------------------------------------
+
+
+def test_build_nonleaf_info_identity_matrix():
+    """All-identity desc matrix -> every node is a leaf, nonleaf_mask all False."""
+    c = 5
+    desc = torch.eye(c)
+    nonleaf_desc_cc, nonleaf_mask = _build_nonleaf_info(desc)
+    assert nonleaf_mask.shape == (c,)
+    assert not nonleaf_mask.any()
+    assert nonleaf_desc_cc.shape == (0, c)
+
+
+def test_build_nonleaf_info_mixed():
+    """3-node chain: A (root) -> B -> C. A and B are non-leaf, C is leaf."""
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = 1
+    desc[0, 1] = 1
+    desc[0, 2] = 1  # A
+    desc[1, 1] = 1
+    desc[1, 2] = 1  # B
+    desc[2, 2] = 1  # C
+    nonleaf_desc_cc, nonleaf_mask = _build_nonleaf_info(desc)
+    assert nonleaf_mask.tolist() == [True, True, False]
+    assert nonleaf_desc_cc.shape == (2, c)
+    assert torch.equal(nonleaf_desc_cc, desc[:2])
+
+
+def test_propagate_logits_matches_full_reference():
+    """propagate_logits with 2-bin split must match the original full-matrix formula."""
+    torch.manual_seed(42)
+    n, c = 8, 6
+    logits_nc = torch.randn(n, c)
+    desc = torch.eye(c)
+    desc[0, 1] = 1
+    desc[0, 2] = 1
+    desc[3, 4] = 1
+
+    # reference: original full-matrix path
+    ref = _logsumexp_propagated(logits_nc, desc) - torch.logsumexp(logits_nc, dim=1, keepdim=True)
+
+    # new 2-bin path
+    from cellarium.ml.models.socam import propagate_logits
+
+    nonleaf_desc_cc, nonleaf_mask = _build_nonleaf_info(desc)
+    result = propagate_logits(logits_nc, nonleaf_desc_cc, nonleaf_mask)
+
+    assert result.shape == (n, c)
+    assert torch.allclose(result, ref, atol=1e-5), f"Max diff: {(result - ref).abs().max()}"
+
+
+def test_propagate_logits_all_leaves_is_log_softmax():
+    """With identity desc matrix (all leaves) propagate_logits == log_softmax."""
+    torch.manual_seed(7)
+    n, c = 4, 5
+    logits_nc = torch.randn(n, c)
+    desc = torch.eye(c)
+    nonleaf_desc_cc, nonleaf_mask = _build_nonleaf_info(desc)
+    from cellarium.ml.models.socam import propagate_logits
+
+    result = propagate_logits(logits_nc, nonleaf_desc_cc, nonleaf_mask)
+    expected = torch.nn.functional.log_softmax(logits_nc, dim=1)
+    assert torch.allclose(result, expected, atol=1e-5)

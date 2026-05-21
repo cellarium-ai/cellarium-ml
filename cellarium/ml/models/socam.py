@@ -45,6 +45,29 @@ def _expand_with_ancestors(
     return sorted(cl_names[i] for i in expanded)
 
 
+def _build_nonleaf_info(desc_matrix_cc: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute the non-leaf descriptor tensors needed by ``propagate_logits``.
+
+    A category is a *leaf* when its only descendant is itself
+    (``desc_matrix_cc[k].sum() == 1``).  For leaf output categories the
+    logsumexp over their single-element descendant set is the identity, so they
+    do not need the full reduction.  Only non-leaf categories require it.
+
+    Runs once per unique ``desc_matrix_cc`` (construction time, not the hot path).
+
+    Args:
+        desc_matrix_cc: Binary ``(c, c)`` descendant tensor.
+
+    Returns:
+        nonleaf_desc_cc: ``(c_nonleaf, c)`` — rows of ``desc_matrix_cc`` for
+            non-leaf output categories only.
+        nonleaf_mask: ``(c,)`` bool tensor — ``True`` at non-leaf positions.
+    """
+    nonleaf_mask = desc_matrix_cc.sum(dim=1) > 1  # (c,)
+    nonleaf_desc_cc = desc_matrix_cc[nonleaf_mask]  # (c_nonleaf, c)
+    return nonleaf_desc_cc, nonleaf_mask
+
+
 @torch.compile()
 def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
     """
@@ -73,20 +96,31 @@ def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor)
 
 
 @torch.compile()
-def propagate_logits(logits_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
+def propagate_logits(
+    logits_nc: torch.Tensor,
+    nonleaf_desc_cc: torch.Tensor,
+    nonleaf_mask: torch.Tensor,
+) -> torch.Tensor:
     """
     Perform probability propagation in logit space.
 
+    Leaf output categories (only descendant is themselves) copy their logit
+    directly.  Non-leaf output categories reduce over all their descendants via
+    ``_logsumexp_propagated``, using a ``(c_nonleaf, c)`` submatrix so the
+    intermediate tensor is ``(n, c, c_nonleaf)`` rather than ``(n, c, c)``.
+
     Args:
-        logits_nc: Tensor of shape (n, c) containing the logits for each category.
-        descendant_tensor_cc: Binary tensor of shape (c, c) defining descendant relationships.
+        logits_nc: Tensor of shape ``(n, c)`` containing the raw logits.
+        nonleaf_desc_cc: ``(c_nonleaf, c)`` descendant rows for non-leaf outputs
+            (from ``_build_nonleaf_info``).
+        nonleaf_mask: ``(c,)`` bool mask — ``True`` at non-leaf positions
+            (from ``_build_nonleaf_info``).
     Returns:
-        Tensor of shape (n, c) containing the logits for each category after propagation
+        Tensor of shape ``(n, c)`` containing the propagated log-probabilities.
     """
-    propagated_logits_nc = _logsumexp_propagated(logits_nc, descendant_tensor_cc) - torch.logsumexp(
-        logits_nc, dim=1, keepdim=True
-    )
-    return propagated_logits_nc
+    out = logits_nc.clone()  # leaf outputs: logsumexp({logit_k}) == logit_k
+    out[:, nonleaf_mask] = _logsumexp_propagated(logits_nc, nonleaf_desc_cc)
+    return out - torch.logsumexp(logits_nc, dim=1, keepdim=True)
 
 
 class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
@@ -164,8 +198,12 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c = torch.nn.Parameter(torch.empty(self.n_categories, dtype=torch.float))
         self.elbo = pyro.infer.Trace_ELBO()
         self.log_metrics = log_metrics
-        self._subset_cache: dict[tuple[str, ...], tuple[list[str], list[int], torch.Tensor, dict[str, int]]] = {}
+        self._subset_cache: dict[
+            tuple[str, ...],
+            tuple[list[str], list[int], torch.Tensor, dict[str, int], torch.Tensor, torch.Tensor],
+        ] = {}
         self._full_label_lookup: dict[str, int] | None = None
+        self._full_nonleaf_info: tuple[torch.Tensor, torch.Tensor] | None = None
 
         self.reset_parameters()
 
@@ -179,12 +217,15 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c.data.zero_()
         self._subset_cache.clear()
         self._full_label_lookup = None
+        self._full_nonleaf_info = None
 
-    def _get_subset_info(self, cl_name_subset: list[str]) -> tuple[list[str], list[int], torch.Tensor, dict[str, int]]:
+    def _get_subset_info(
+        self, cl_name_subset: list[str]
+    ) -> tuple[list[str], list[int], torch.Tensor, dict[str, int], torch.Tensor, torch.Tensor]:
         """
         Return the sorted category names, their indices into ``self.cl_names``, the
-        corresponding submatrix of ``self.descendant_tensor``, and a pre-built label
-        lookup dict ``{name: subset_index}`` for fast per-batch label conversion.
+        corresponding submatrix of ``self.descendant_tensor``, a pre-built label
+        lookup dict, and the non-leaf descriptor tensors for ``propagate_logits``.
         Results are cached by the sorted tuple of names so that order does not matter
         and all outputs are only computed once per unique subset.
 
@@ -193,12 +234,11 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 Category names to select. Must all be present in ``self.cl_names``.
 
         Returns:
-            A 4-tuple ``(sorted_names, indices, descendant_tensor_subset_cc, label_lookup)``
-            where ``sorted_names`` is the alphabetically sorted list of requested names,
-            ``indices`` is the corresponding list of integer positions in ``self.cl_names``,
-            ``descendant_tensor_subset_cc`` is the square submatrix of shape
-            ``(len(indices), len(indices))``, and ``label_lookup`` maps each subset
-            category name to its 0-based position within the sorted subset.
+            A 6-tuple ``(sorted_names, indices, descendant_tensor_subset_cc,
+            label_lookup, nonleaf_desc_cc, nonleaf_mask)`` where
+            ``descendant_tensor_subset_cc`` is the ``(c, c)`` submatrix,
+            ``nonleaf_desc_cc`` is ``(c_nonleaf, c)``, and ``nonleaf_mask`` is
+            the ``(c,)`` bool mask identifying non-leaf output categories.
         """
         key = tuple(sorted(cl_name_subset))
         if key not in self._subset_cache:
@@ -207,7 +247,15 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             ix = torch.tensor(indices, dtype=torch.long, device=self.descendant_tensor.device)
             descendant_tensor_subset_cc = self.descendant_tensor[ix][:, ix]
             label_lookup: dict[str, int] = {name: pos for pos, name in enumerate(key)}
-            self._subset_cache[key] = (list(key), indices, descendant_tensor_subset_cc, label_lookup)
+            nonleaf_desc_cc, nonleaf_mask = _build_nonleaf_info(descendant_tensor_subset_cc)
+            self._subset_cache[key] = (
+                list(key),
+                indices,
+                descendant_tensor_subset_cc,
+                label_lookup,
+                nonleaf_desc_cc,
+                nonleaf_mask,
+            )
         return self._subset_cache[key]
 
     def _cl_names_to_indices(self, cl_names_n: np.ndarray, label_lookup: dict[str, int]) -> torch.Tensor:
@@ -258,15 +306,17 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         if self.cl_name_subset is not None:
-            _, indices, descendant_tensor_subset_cc, label_lookup = self._get_subset_info(self.cl_name_subset)
+            _, indices, _, label_lookup, nonleaf_desc_cc, nonleaf_mask = self._get_subset_info(self.cl_name_subset)
         else:
             indices = None
-            descendant_tensor_subset_cc = self.descendant_tensor
             if self._full_label_lookup is None:
                 self._full_label_lookup = {name: i for i, name in enumerate(self.cl_names)}
             label_lookup = self._full_label_lookup
+            if self._full_nonleaf_info is None:
+                self._full_nonleaf_info = _build_nonleaf_info(self.descendant_tensor)
+            nonleaf_desc_cc, nonleaf_mask = self._full_nonleaf_info
         y_n = self._cl_names_to_indices(cl_names_n, label_lookup).to(x_ng.device)
-        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, indices, descendant_tensor_subset_cc)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, indices, nonleaf_desc_cc, nonleaf_mask)
         return {"loss": loss}
 
     def _compute_regression(self, x_ng: torch.Tensor, W_gc: torch.Tensor, b_c: torch.Tensor) -> torch.Tensor:
@@ -277,17 +327,15 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         x_ng: torch.Tensor,
         y_n: torch.Tensor,
         indices: list[int] | None = None,
-        descendant_tensor_subset_cc: torch.Tensor | None = None,
+        nonleaf_desc_cc: torch.Tensor | None = None,
+        nonleaf_mask: torch.Tensor | None = None,
     ) -> None:
         if indices is not None:
             n_cats = len(indices)
             b_c = self.b_c[indices]
-            assert descendant_tensor_subset_cc is not None
-            desc_cc = descendant_tensor_subset_cc
         else:
             n_cats = self.n_categories
             b_c = self.b_c
-            desc_cc = descendant_tensor_subset_cc if descendant_tensor_subset_cc is not None else self.descendant_tensor
         W_gc = pyro.sample(
             "W",
             dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, n_cats]).to_event(2),
@@ -295,7 +343,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0], dim=-2):
             logits_nc = self._compute_regression(x_ng, W_gc, b_c)
             if self.probability_propagation_flag:
-                logits_nc = propagate_logits(logits_nc, desc_cc)
+                assert nonleaf_desc_cc is not None and nonleaf_mask is not None
+                logits_nc = propagate_logits(logits_nc, nonleaf_desc_cc, nonleaf_mask)
             pyro.sample("y", self.out_distribution(logits=logits_nc), obs=y_n)
 
     def guide(
@@ -303,7 +352,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         x_ng: torch.Tensor,
         y_n: torch.Tensor,
         indices: list[int] | None = None,
-        descendant_tensor_subset_cc: torch.Tensor | None = None,
+        nonleaf_desc_cc: torch.Tensor | None = None,
+        nonleaf_mask: torch.Tensor | None = None,
     ) -> None:
         if indices is not None:
             pyro.sample("W", dist.Delta(self.W_gc[:, indices]).to_event(2))
@@ -332,7 +382,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         if self.cl_name_subset is not None:
-            _, indices, descendant_tensor_subset_cc, _ = self._get_subset_info(self.cl_name_subset)
+            _, indices, descendant_tensor_subset_cc, _, _, _ = self._get_subset_info(self.cl_name_subset)
             W_gc = self.W_gc[:, indices]
             b_c = self.b_c[indices]
         else:
