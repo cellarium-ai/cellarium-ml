@@ -38,24 +38,9 @@ def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) 
     return torch.clamp(propagated_probs_nc, max=1.0)
 
 
-# def logsumexp_propagated(self, logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
-#     temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
-#     return temp.logsumexp(dim=1)
-
-
 def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
-    """Memory- and numerically-safe logsumexp-based propagation.
-
-    For each output category ``j``, computes ``logsumexp`` over the logits of
-    ``j``'s descendants using ``torch.logsumexp``, which applies a per-column
-    max shift.  This avoids the underflow that occurs when a global (per-row)
-    max shift is used: if none of ``j``'s descendants hold the row-maximum
-    logit, all their shifted ``exp`` values flush to zero, producing ``log(0)``
-    and NaN gradients on subsequent steps.
-    """
-    c = desc_matrix_cc.shape[0]
-    cols = [desc_matrix_cc[j].nonzero(as_tuple=True)[0] for j in range(c)]
-    return torch.stack([logits_nc[:, idx].logsumexp(dim=1) for idx in cols], dim=1)
+    temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
+    return temp.logsumexp(dim=1)
 
 
 @torch.compile()
