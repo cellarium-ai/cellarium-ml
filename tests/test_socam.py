@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.socam import SOCAM, _logsumexp_propagated
+from cellarium.ml.models.socam import SOCAM, _expand_with_ancestors, _logsumexp_propagated
 from cellarium.ml.utilities.data import collate_fn
 
 
@@ -533,3 +533,134 @@ def test_logsumexp_propagated_mixed_extreme_logits():
     result.sum().backward()
     assert isinstance(logits_nc.grad, torch.Tensor)
     assert torch.all(torch.isfinite(logits_nc.grad)), f"Non-finite gradient: {logits_nc.grad}"
+
+
+# ---------------------------------------------------------------------------
+# _expand_with_ancestors tests
+# ---------------------------------------------------------------------------
+
+
+def _make_chain_socam() -> tuple[SOCAM, list[str]]:
+    """3-node chain: A (root) -> B -> C (leaf).
+
+    descendant_tensor rows: A=[1,1,1], B=[0,1,1], C=[0,0,1]
+    """
+    cl_names = ["A", "B", "C"]
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = 1  # A is its own descendant
+    desc[0, 1] = 1  # A -> B
+    desc[0, 2] = 1  # A -> C
+    desc[1, 1] = 1  # B is its own descendant
+    desc[1, 2] = 1  # B -> C
+    desc[2, 2] = 1  # C is its own descendant
+    var_names_g = np.array(["gene_0"])
+    return (
+        SOCAM(
+            n_obs=4,
+            var_names_g=var_names_g,
+            descendant_tensor=desc,
+            cl_names=cl_names,
+            log_metrics=False,
+        ),
+        cl_names,
+    )
+
+
+def test_expand_with_ancestors_leaf_gets_all_ancestors():
+    """Requesting only the leaf C should expand to [A, B, C]."""
+    _, cl_names = _make_chain_socam()
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = 1
+    desc[0, 1] = 1
+    desc[0, 2] = 1
+    desc[1, 1] = 1
+    desc[1, 2] = 1
+    desc[2, 2] = 1
+    result = _expand_with_ancestors(["C"], cl_names, desc)
+    assert result == ["A", "B", "C"]
+
+
+def test_expand_with_ancestors_mid_node_gets_root():
+    """Requesting B should expand to [A, B] (not C, since C is a descendant not an ancestor)."""
+    _, cl_names = _make_chain_socam()
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = 1
+    desc[0, 1] = 1
+    desc[0, 2] = 1
+    desc[1, 1] = 1
+    desc[1, 2] = 1
+    desc[2, 2] = 1
+    result = _expand_with_ancestors(["B"], cl_names, desc)
+    assert result == ["A", "B"]
+
+
+def test_expand_with_ancestors_already_complete():
+    """If the subset already contains all ancestors, output equals the sorted input."""
+    _, cl_names = _make_chain_socam()
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = 1
+    desc[0, 1] = 1
+    desc[0, 2] = 1
+    desc[1, 1] = 1
+    desc[1, 2] = 1
+    desc[2, 2] = 1
+    result = _expand_with_ancestors(["A", "B", "C"], cl_names, desc)
+    assert result == ["A", "B", "C"]
+
+
+def test_include_ancestors_wired_in_init():
+    """SOCAM with include_ancestors_of_cl_name_subset=True expands self.cl_name_subset."""
+    model, _ = _make_chain_socam()
+    # Re-create with subset=["C"] and flag=True (default)
+    cl_names = ["A", "B", "C"]
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = 1
+    desc[0, 1] = 1
+    desc[0, 2] = 1
+    desc[1, 1] = 1
+    desc[1, 2] = 1
+    desc[2, 2] = 1
+    model = SOCAM(
+        n_obs=4,
+        var_names_g=np.array(["gene_0"]),
+        descendant_tensor=desc,
+        cl_names=cl_names,
+        cl_name_subset=["C"],
+        include_ancestors_of_cl_name_subset=True,
+        log_metrics=False,
+    )
+    assert model.cl_name_subset == ["A", "B", "C"]
+
+
+def test_include_ancestors_flag_false_leaves_subset_unchanged():
+    """When flag=False, self.cl_name_subset is the original user input (sorted by _get_subset_info, not here)."""
+    cl_names = ["A", "B", "C"]
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = 1
+    desc[0, 1] = 1
+    desc[0, 2] = 1
+    desc[1, 1] = 1
+    desc[1, 2] = 1
+    desc[2, 2] = 1
+    model = SOCAM(
+        n_obs=4,
+        var_names_g=np.array(["gene_0"]),
+        descendant_tensor=desc,
+        cl_names=cl_names,
+        cl_name_subset=["C"],
+        include_ancestors_of_cl_name_subset=False,
+        log_metrics=False,
+    )
+    assert model.cl_name_subset == ["C"]
+
+
+def test_include_ancestors_none_subset_unaffected():
+    """When cl_name_subset is None the flag has no effect."""
+    model, _ = _make_chain_socam()
+    assert model.cl_name_subset is None

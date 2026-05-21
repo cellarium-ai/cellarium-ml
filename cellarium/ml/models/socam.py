@@ -16,6 +16,35 @@ from cellarium.ml.utilities.testing import (
 )
 
 
+def _expand_with_ancestors(
+    cl_name_subset: list[str],
+    cl_names: list[str],
+    descendant_tensor: torch.Tensor,
+) -> list[str]:
+    """Return ``cl_name_subset`` extended to include every ancestor of each node.
+
+    ``descendant_tensor[k, j] == 1`` means j is a descendant of k, equivalently k
+    is an ancestor of j.  So the ancestors of j are all k where column j is 1.
+
+    Args:
+        cl_name_subset: Category names requested by the user.
+        cl_names: Full ordered list of category names (rows/cols of ``descendant_tensor``).
+        descendant_tensor: Binary ``(C, C)`` tensor on any device.
+
+    Returns:
+        Sorted list containing every name in ``cl_name_subset`` plus all of their
+        ancestors that are present in ``cl_names``.
+    """
+    index_map = {cat: i for i, cat in enumerate(cl_names)}
+    expanded: set[int] = set()
+    for name in cl_name_subset:
+        j = index_map[name]
+        # column j: entry k==1 means k is an ancestor of j (including j itself)
+        ancestor_indices = (descendant_tensor[:, j] > 0).nonzero(as_tuple=True)[0].tolist()
+        expanded.update(ancestor_indices)
+    return sorted(cl_names[i] for i in expanded)
+
+
 @torch.compile()
 def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
     """
@@ -99,6 +128,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         W_init_scale: float = 1.0,
         seed: int = 0,
         log_metrics: bool = True,
+        include_ancestors_of_cl_name_subset: bool = True,
     ) -> None:
         super().__init__()
         self.n_obs = n_obs
@@ -117,6 +147,9 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self._descendant_tensor = descendant_tensor
         self.register_buffer("descendant_tensor", descendant_tensor)
         self.n_categories = descendant_tensor.shape[0]
+        self.include_ancestors_of_cl_name_subset = include_ancestors_of_cl_name_subset
+        if include_ancestors_of_cl_name_subset and cl_name_subset is not None:
+            cl_name_subset = _expand_with_ancestors(cl_name_subset, cl_names, descendant_tensor)
         self.cl_name_subset = cl_name_subset
         self.probability_propagation_flag = probability_propagation_flag
         self.out_distribution = UnconstrainedPyroCategorical
