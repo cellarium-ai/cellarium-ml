@@ -5,12 +5,9 @@ from typing import TypedDict
 
 import lightning.pytorch as pl
 import numpy as np
-import pyro
-import pyro.distributions as dist
 import torch
 import torch.nn.functional
 
-from cellarium.ml.distributions import UnconstrainedPyroCategorical
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -19,16 +16,6 @@ from cellarium.ml.utilities.testing import (
 
 
 class NonleafInfo(TypedDict):
-    nonleaf_desc_cc: torch.Tensor
-    perm: torch.Tensor
-    inv_perm: torch.Tensor
-
-
-class SubsetInfo(TypedDict):
-    names: list[str]
-    indices: list[int]
-    descendant_tensor_cc: torch.Tensor
-    label_lookup: dict[str, int]
     nonleaf_desc_cc: torch.Tensor
     perm: torch.Tensor
     inv_perm: torch.Tensor
@@ -162,7 +149,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
     Logistic regression model for cell type ontology classification.
 
     Args:
-        n_obs: Number of observations in the dataset (used to size the Pyro plate).
+        n_obs: Number of observations in the dataset (used to scale the cross-entropy loss).
         var_names_g: The variable-name schema for the input data; used for validation.
         output_categories: Total number of target categories expected at prediction/validation time.
             Used when the trained model has fewer categories than the final output space.
@@ -170,13 +157,12 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             the descendant relationships between categories. Row i contains ones
             for all categories considered descendants of category i (plus self). Used for
             probability-propagation.
-        cl_names: Array of unique category identifiers for the training labels.
-            Boolean or integer mask mapping the model's category indices to the
+        cl_names: Full list of category identifiers matching the rows/columns of ``descendant_tensor``.
         cl_name_subset: Optional list of category names (from ``cl_names``) to restrict
             training and prediction to. The list is sorted internally so order does not matter.
             When ``None``, all categories are used.
-        probability_propagation_flag: If True, applies hierarchical probability propagation before sampling
-            or predicting the output distribution.
+        probability_propagation_flag: If True, applies hierarchical probability propagation
+            before predicting the output distribution.
         W_prior_scale: Scale (b) parameter of the Laplace prior on the weight matrix `W_gc`.
         W_init_scale: Standard deviation for initializing `W_gc`.
         seed: Random seed used to initialize parameters.
@@ -220,21 +206,43 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             cl_name_subset = _expand_with_ancestors(cl_name_subset, cl_names, descendant_tensor)
         self.cl_name_subset = cl_name_subset
         self.probability_propagation_flag = probability_propagation_flag
-        self.out_distribution = UnconstrainedPyroCategorical
         self.seed = seed
+        self.log_metrics = log_metrics
 
-        # parameters
+        # Build active category set (subset if given, else full list)
+        active_cl_names: list[str] = cl_name_subset if cl_name_subset is not None else list(cl_names)
+        self.active_cl_names = active_cl_names
+        self.n_active_cats = len(active_cl_names)
+        self.label_lookup: dict[str, int] = {name: i for i, name in enumerate(active_cl_names)}
+
+        # Precompute the active-category submatrix of the descendant tensor.
+        # Use the raw (pre-registration) descendant_tensor so this works even when
+        # __init__ is called inside a meta-device context (register_buffer would
+        # create a meta tensor, but descendant_tensor here is still a real CPU tensor).
+        index_map_init = {cat: i for i, cat in enumerate(cl_names)}
+        active_indices = [index_map_init[cat] for cat in active_cl_names]
+        ix = torch.tensor(active_indices, dtype=torch.long)
+        active_descendant_tensor_cc = descendant_tensor[ix][:, ix]
+        nonleaf_info = _build_nonleaf_info(active_descendant_tensor_cc)
+
+        # Store CPU copies so reset_parameters() can repopulate after meta→real copy.
+        self._active_descendant_tensor_cc = active_descendant_tensor_cc
+        self._nonleaf_desc_cc = nonleaf_info["nonleaf_desc_cc"]
+        self._perm = nonleaf_info["perm"]
+        self._inv_perm = nonleaf_info["inv_perm"]
+
+        self.register_buffer("active_descendant_tensor_cc", active_descendant_tensor_cc)
+        self.register_buffer("nonleaf_desc_cc", nonleaf_info["nonleaf_desc_cc"])
+        self.register_buffer("perm", nonleaf_info["perm"])
+        self.register_buffer("inv_perm", nonleaf_info["inv_perm"])
+
+        # Trainable parameters — sized to active categories only
         self._W_prior_scale = W_prior_scale
         self.W_init_scale = W_init_scale
         self.W_prior_scale: torch.Tensor
         self.register_buffer("W_prior_scale", torch.empty(()))
-        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_categories, dtype=torch.float))
-        self.b_c = torch.nn.Parameter(torch.empty(self.n_categories, dtype=torch.float))
-        self.elbo = pyro.infer.Trace_ELBO()
-        self.log_metrics = log_metrics
-        self._subset_cache: dict[tuple[str, ...], SubsetInfo] = {}
-        self._full_label_lookup: dict[str, int] | None = None
-        self._full_nonleaf_info: NonleafInfo | None = None
+        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_active_cats, dtype=torch.float))
+        self.b_c = torch.nn.Parameter(torch.empty(self.n_active_cats, dtype=torch.float))
 
         self.reset_parameters()
 
@@ -244,76 +252,32 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         rng.manual_seed(self.seed)
         self.W_prior_scale.fill_(self._W_prior_scale)
         self.descendant_tensor.copy_(self._descendant_tensor)
+        self.active_descendant_tensor_cc.copy_(self._active_descendant_tensor_cc)
+        self.nonleaf_desc_cc.copy_(self._nonleaf_desc_cc)
+        self.perm.copy_(self._perm)
+        self.inv_perm.copy_(self._inv_perm)
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
         self.b_c.data.zero_()
-        self._subset_cache.clear()
-        self._full_label_lookup = None
-        self._full_nonleaf_info = None
 
-    def _get_subset_info(self, cl_name_subset: list[str]) -> SubsetInfo:
-        """
-        Return cached information for a category subset.
-
-        Results are cached by the sorted tuple of names so that order does not
-        matter and all outputs are computed only once per unique subset.
-
-        Args:
-            cl_name_subset:
-                Category names to select. Must all be present in ``self.cl_names``.
-
-        Returns:
-            A :class:`SubsetInfo` dict with keys:
-
-            * ``names``: sorted list of the requested category names.
-            * ``indices``: their integer positions in ``self.cl_names``.
-            * ``descendant_tensor_cc``: ``(c, c)`` submatrix of
-              ``self.descendant_tensor``.
-            * ``label_lookup``: ``{name: subset_index}`` for fast per-batch
-              label conversion.
-            * ``nonleaf_desc_cc``, ``perm``, ``inv_perm``: see
-              :func:`_build_nonleaf_info`.
-        """
-        key = tuple(sorted(cl_name_subset))
-        if key not in self._subset_cache:
-            index_map = {cat: i for i, cat in enumerate(self.cl_names)}
-            indices = [index_map[cat] for cat in key]
-            ix = torch.tensor(indices, dtype=torch.long, device=self.descendant_tensor.device)
-            descendant_tensor_cc = self.descendant_tensor[ix][:, ix]
-            label_lookup: dict[str, int] = {name: pos for pos, name in enumerate(key)}
-            nonleaf_info = _build_nonleaf_info(descendant_tensor_cc)
-            self._subset_cache[key] = {
-                "names": list(key),
-                "indices": indices,
-                "descendant_tensor_cc": descendant_tensor_cc,
-                "label_lookup": label_lookup,
-                "nonleaf_desc_cc": nonleaf_info["nonleaf_desc_cc"],
-                "perm": nonleaf_info["perm"],
-                "inv_perm": nonleaf_info["inv_perm"],
-            }
-        return self._subset_cache[key]
-
-    def _cl_names_to_indices(self, cl_names_n: np.ndarray, label_lookup: dict[str, int]) -> torch.Tensor:
+    def _cl_names_to_indices(self, cl_names_n: np.ndarray) -> torch.Tensor:
         """
         Convert a per-cell array of string category names to a 1-D integer tensor of
-        0-based indices into the active category list, using a pre-built lookup dict.
+        0-based indices into the active category list.
 
         Args:
             cl_names_n:
                 Array of length n containing category name strings for each cell.
-            label_lookup:
-                Pre-built mapping from category name to 0-based integer index.
-                Obtained from ``_get_subset_info`` or ``_full_label_lookup``.
 
         Returns:
             Long tensor of shape ``(n,)`` with integer category indices.
 
         Raises:
-            ValueError: If any label in ``cl_names_n`` is not present in ``label_lookup``.
+            ValueError: If any label in ``cl_names_n`` is not present in ``self.label_lookup``.
         """
         try:
-            return torch.tensor([label_lookup[c] for c in cl_names_n], dtype=torch.long)
+            return torch.tensor([self.label_lookup[c] for c in cl_names_n], dtype=torch.long)
         except KeyError as exc:
-            valid = sorted(label_lookup.keys())
+            valid = sorted(self.label_lookup.keys())
             raise ValueError(f"Label {exc} is not in the active category list. Valid labels are: {valid}") from exc
 
     def forward(
@@ -339,79 +303,19 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        if self.cl_name_subset is not None:
-            info = self._get_subset_info(self.cl_name_subset)
-            indices = info["indices"]
-            label_lookup = info["label_lookup"]
-            nonleaf_desc_cc = info["nonleaf_desc_cc"]
-            perm = info["perm"]
-            inv_perm = info["inv_perm"]
-        else:
-            indices = None
-            if self._full_label_lookup is None:
-                self._full_label_lookup = {name: i for i, name in enumerate(self.cl_names)}
-            label_lookup = self._full_label_lookup
-            if self._full_nonleaf_info is None:
-                self._full_nonleaf_info = _build_nonleaf_info(self.descendant_tensor)
-            nonleaf_desc_cc = self._full_nonleaf_info["nonleaf_desc_cc"]
-            perm = self._full_nonleaf_info["perm"]
-            inv_perm = self._full_nonleaf_info["inv_perm"]
-        y_n = self._cl_names_to_indices(cl_names_n, label_lookup).to(x_ng.device)
-        loss = self.elbo.differentiable_loss(
-            self.model,
-            self.guide,
-            x_ng,
-            y_n,
-            indices,
-            nonleaf_desc_cc,
-            perm,
-            inv_perm,
-        )
+        y_n = self._cl_names_to_indices(cl_names_n).to(x_ng.device)
+        logits_nc = self._compute_regression(x_ng, self.W_gc, self.b_c)
+        if self.probability_propagation_flag:
+            logits_nc = propagate_logits(logits_nc, self.nonleaf_desc_cc, self.perm, self.inv_perm)
+        scale = self.n_obs / x_ng.shape[0]
+        ce_loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="sum") * scale
+        laplace_loss = self.W_gc.abs().sum() / self.W_prior_scale
+        loss = ce_loss + laplace_loss
         return {"loss": loss}
 
     @torch.compile()
     def _compute_regression(self, x_ng: torch.Tensor, W_gc: torch.Tensor, b_c: torch.Tensor) -> torch.Tensor:
         return x_ng @ W_gc + b_c
-
-    def model(
-        self,
-        x_ng: torch.Tensor,
-        y_n: torch.Tensor,
-        indices: list[int] | None = None,
-        nonleaf_desc_cc: torch.Tensor | None = None,
-        perm: torch.Tensor | None = None,
-        inv_perm: torch.Tensor | None = None,
-    ) -> None:
-        if indices is not None:
-            n_cats = len(indices)
-            b_c = self.b_c[indices]
-        else:
-            n_cats = self.n_categories
-            b_c = self.b_c
-        W_gc = pyro.sample(
-            "W",
-            dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, n_cats]).to_event(2),
-        )
-        with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0], dim=-2):
-            logits_nc = self._compute_regression(x_ng, W_gc, b_c)
-            if self.probability_propagation_flag:
-                assert nonleaf_desc_cc is not None and perm is not None and inv_perm is not None
-                logits_nc = propagate_logits(logits_nc, nonleaf_desc_cc, perm, inv_perm)
-            pyro.sample("y", self.out_distribution(logits=logits_nc), obs=y_n)
-
-    def guide(
-        self,
-        x_ng: torch.Tensor,
-        y_n: torch.Tensor,
-        indices: list[int] | None = None,
-        nonleaf_desc_cc: torch.Tensor | None = None,
-        perm: torch.Tensor | None = None,
-        inv_perm: torch.Tensor | None = None,
-    ) -> None:
-        if indices is not None:
-            pyro.sample("W", dist.Delta(self.W_gc[:, indices]).to_event(2))
-        else:
-            pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
     def predict(
         self,
@@ -429,25 +333,14 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
 
         Returns:
             A dictionary with the target logits. Output tensors have shape
-            ``(n, len(self.cl_name_subset))`` when ``self.cl_name_subset`` is set,
-            otherwise ``(n, n_categories)``.
+            ``(n, n_active_cats)``.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        if self.cl_name_subset is not None:
-            info = self._get_subset_info(self.cl_name_subset)
-            indices = info["indices"]
-            descendant_tensor_subset_cc = info["descendant_tensor_cc"]
-            W_gc = self.W_gc[:, indices]
-            b_c = self.b_c[indices]
-        else:
-            W_gc = self.W_gc
-            b_c = self.b_c
-            descendant_tensor_subset_cc = self.descendant_tensor
-        logits_nc = self._compute_regression(x_ng, W_gc, b_c)
+        logits_nc = self._compute_regression(x_ng, self.W_gc, self.b_c)
         probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
         if self.probability_propagation_flag:
-            probs_nc = propagate_probs(probs_nc, descendant_tensor_subset_cc)
+            probs_nc = propagate_probs(probs_nc, self.active_descendant_tensor_cc)
         return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:

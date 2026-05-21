@@ -260,41 +260,35 @@ def _make_socam(
 
 
 # ---------------------------------------------------------------------------
-# _get_subset_info tests
+# active category / label_lookup tests (replaces _get_subset_info tests)
 # ---------------------------------------------------------------------------
 
 
-def test_get_subset_info_basic():
-    model = _make_socam()
-    info = model._get_subset_info(["cell_type_2", "cell_type_4"])
-    assert info["names"] == ["cell_type_2", "cell_type_4"]
-    assert info["indices"] == [2, 4]
-    assert info["descendant_tensor_cc"].shape == (2, 2)
-    # submatrix of identity should also be identity
-    assert torch.equal(info["descendant_tensor_cc"], torch.eye(2))
-    assert info["label_lookup"] == {"cell_type_2": 0, "cell_type_4": 1}
+def test_active_categories_basic():
+    model = _make_socam(cl_name_subset=["cell_type_2", "cell_type_4"])
+    assert model.active_cl_names == ["cell_type_2", "cell_type_4"]
+    assert model.n_active_cats == 2
+    assert model.label_lookup == {"cell_type_2": 0, "cell_type_4": 1}
+    assert model.active_descendant_tensor_cc.shape == (2, 2)
+    assert torch.equal(model.active_descendant_tensor_cc, torch.eye(2))
 
 
-def test_get_subset_info_order_independent():
-    model = _make_socam()
-    info_a = model._get_subset_info(["cell_type_4", "cell_type_2"])
-    info_b = model._get_subset_info(["cell_type_2", "cell_type_4"])
-    assert info_a is info_b  # same cached dict
-    assert info_a["names"] == info_b["names"]
-    assert info_a["indices"] == info_b["indices"]
+def test_active_categories_order_independent():
+    model_a = _make_socam(cl_name_subset=["cell_type_4", "cell_type_2"])
+    model_b = _make_socam(cl_name_subset=["cell_type_2", "cell_type_4"])
+    assert model_a.active_cl_names == model_b.active_cl_names
+    assert model_a.label_lookup == model_b.label_lookup
 
 
-def test_get_subset_info_caching():
-    model = _make_socam()
-    info_first = model._get_subset_info(["cell_type_0", "cell_type_3"])
-    info_second = model._get_subset_info(["cell_type_0", "cell_type_3"])
-    assert info_first is info_second  # same cached dict object
+def test_label_lookup_is_stable():
+    """label_lookup is a plain attribute; the same dict object is returned on repeated access."""
+    model = _make_socam(cl_name_subset=["cell_type_0", "cell_type_3"])
+    assert model.label_lookup is model.label_lookup
 
 
-def test_get_subset_info_invalid_name():
-    model = _make_socam()
+def test_active_categories_invalid_name():
     with pytest.raises(KeyError):
-        model._get_subset_info(["cell_type_0", "nonexistent"])
+        _make_socam(cl_name_subset=["cell_type_0", "nonexistent"])
 
 
 # ---------------------------------------------------------------------------
@@ -363,41 +357,32 @@ def test_predict_no_cl_name_subset():
 
 
 def test_cl_names_to_indices_basic():
-    model = _make_socam()
-    info = model._get_subset_info(["cell_type_0", "cell_type_2", "cell_type_4"])
+    model = _make_socam(cl_name_subset=["cell_type_0", "cell_type_2", "cell_type_4"])
     cl_names_n = np.array(["cell_type_4", "cell_type_0", "cell_type_2", "cell_type_0"])
-    result = model._cl_names_to_indices(cl_names_n, info["label_lookup"])
+    result = model._cl_names_to_indices(cl_names_n)
     assert isinstance(result, torch.Tensor)
     assert result.dtype == torch.long
     assert result.tolist() == [2, 0, 1, 0]  # sorted subset: 0=ct0, 1=ct2, 2=ct4
 
 
 def test_cl_names_to_indices_full_lookup():
-    model = _make_socam()
-    # Trigger caching of full lookup via forward (no subset)
-    var_names_g = np.array([f"gene_{i}" for i in range(3)])
-    x_ng = torch.randn(4, 3)
+    model = _make_socam()  # no subset — label_lookup covers all categories
     cl_names_n = np.array(["cell_type_0", "cell_type_1", "cell_type_2", "cell_type_3"])
-    model.forward(x_ng, var_names_g, cl_names_n)
-    assert model._full_label_lookup is not None
-    result = model._cl_names_to_indices(cl_names_n, model._full_label_lookup)
+    result = model._cl_names_to_indices(cl_names_n)
     assert result.tolist() == [0, 1, 2, 3]
 
 
 def test_cl_names_to_indices_invalid_name():
-    model = _make_socam()
-    info = model._get_subset_info(["cell_type_0", "cell_type_1"])
+    model = _make_socam(cl_name_subset=["cell_type_0", "cell_type_1"])
     cl_names_n = np.array(["cell_type_0", "cell_type_99"])
     with pytest.raises(ValueError, match="cell_type_99"):
-        model._cl_names_to_indices(cl_names_n, info["label_lookup"])
+        model._cl_names_to_indices(cl_names_n)
 
 
 def test_cl_names_to_indices_lookup_reused_across_batches():
-    """The same label_lookup dict object is returned on repeated _get_subset_info calls."""
-    model = _make_socam()
-    info_1 = model._get_subset_info(["cell_type_1", "cell_type_3"])
-    info_2 = model._get_subset_info(["cell_type_3", "cell_type_1"])
-    assert info_1 is info_2  # same cached SubsetInfo dict
+    """label_lookup is set once at init; the same dict is used for all batches."""
+    model = _make_socam(cl_name_subset=["cell_type_1", "cell_type_3"])
+    assert model.label_lookup is model.label_lookup  # same dict object
 
 
 # ---------------------------------------------------------------------------
