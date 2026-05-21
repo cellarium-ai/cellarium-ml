@@ -43,33 +43,85 @@ def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) 
 #     return temp.logsumexp(dim=1)
 
 
-def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
-    """Memory- and numerically-safe logsumexp-based propagation.
+def _build_desc_index_table(desc_matrix_cc: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build a padded index table from a descendant matrix.
 
-    For each output category ``j``, computes ``logsumexp`` over the logits of
-    ``j``'s descendants using ``torch.logsumexp``, which applies a per-column
-    max shift.  This avoids the underflow that occurs when a global (per-row)
-    max shift is used: if none of ``j``'s descendants hold the row-maximum
-    logit, all their shifted ``exp`` values flush to zero, producing ``log(0)``
-    and NaN gradients on subsequent steps.
+    Runs once per unique ``desc_matrix_cc`` (not on the training hot path).
+    The resulting tensors are passed to ``_logsumexp_propagated`` and
+    ``propagate_logits`` every batch, keeping the hot path free of Python
+    loops and data-dependent shapes so ``torch.compile`` can trace cleanly.
+
+    Args:
+        desc_matrix_cc: Binary ``(c, c)`` descendant tensor.
+
+    Returns:
+        desc_indices_cm: ``(c, max_desc)`` long tensor — row ``j`` holds the
+            indices of ``j``'s descendants, right-padded with ``0``.
+        desc_mask_cm: ``(c, max_desc)`` bool tensor — ``True`` for real
+            descendants, ``False`` for padding positions.
     """
     c = desc_matrix_cc.shape[0]
-    cols = [desc_matrix_cc[j].nonzero(as_tuple=True)[0] for j in range(c)]
-    return torch.stack([logits_nc[:, idx].logsumexp(dim=1) for idx in cols], dim=1)
+    max_desc = int(desc_matrix_cc.sum(dim=1).max().item())
+    device = desc_matrix_cc.device
+    desc_indices = torch.zeros(c, max_desc, dtype=torch.long, device=device)
+    desc_mask = torch.zeros(c, max_desc, dtype=torch.bool, device=device)
+    for j in range(c):
+        idx = desc_matrix_cc[j].nonzero(as_tuple=True)[0]
+        k = len(idx)
+        desc_indices[j, :k] = idx
+        desc_mask[j, :k] = True
+    return desc_indices, desc_mask
+
+
+def _logsumexp_propagated(
+    logits_nc: torch.Tensor,
+    desc_indices_cm: torch.Tensor,
+    desc_mask_cm: torch.Tensor,
+) -> torch.Tensor:
+    """Memory- and numerically-safe logsumexp-based propagation.
+
+    Gathers the logits for each output category's descendants into a padded
+    ``(n, c, max_desc)`` tensor, masks padding positions to ``-inf``, then
+    applies ``logsumexp`` along the last dimension.  This gives a per-column
+    max shift — only the true descendants of each category participate in the
+    shift — avoiding the underflow that occurs when a global per-row max is
+    used and a dominant logit outside a category's descendant set causes all
+    descendant ``exp`` values to flush to zero.
+
+    Args:
+        logits_nc: ``(n, c)`` logit tensor.
+        desc_indices_cm: ``(c, max_desc)`` padded index table from
+            ``_build_desc_index_table``.
+        desc_mask_cm: ``(c, max_desc)`` boolean mask from
+            ``_build_desc_index_table``.
+
+    Returns:
+        ``(n, c)`` tensor of propagated log-sum-exp values.
+    """
+    gathered_ncm = logits_nc[:, desc_indices_cm]  # (n, c, max_desc)
+    gathered_ncm = gathered_ncm.masked_fill(~desc_mask_cm, float("-inf"))
+    return gathered_ncm.logsumexp(dim=2)  # (n, c)
 
 
 @torch.compile()
-def propagate_logits(logits_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
+def propagate_logits(
+    logits_nc: torch.Tensor,
+    desc_indices_cm: torch.Tensor,
+    desc_mask_cm: torch.Tensor,
+) -> torch.Tensor:
     """
     Perform probability propagation in logit space.
 
     Args:
         logits_nc: Tensor of shape (n, c) containing the logits for each category.
-        descendant_tensor_cc: Binary tensor of shape (c, c) defining descendant relationships.
+        desc_indices_cm: ``(c, max_desc)`` padded index table from
+            ``_build_desc_index_table``.
+        desc_mask_cm: ``(c, max_desc)`` boolean mask from
+            ``_build_desc_index_table``.
     Returns:
         Tensor of shape (n, c) containing the logits for each category after propagation
     """
-    propagated_logits_nc = _logsumexp_propagated(logits_nc, descendant_tensor_cc) - torch.logsumexp(
+    propagated_logits_nc = _logsumexp_propagated(logits_nc, desc_indices_cm, desc_mask_cm) - torch.logsumexp(
         logits_nc, dim=1, keepdim=True
     )
     return propagated_logits_nc
@@ -146,8 +198,12 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c = torch.nn.Parameter(torch.empty(self.n_categories, dtype=torch.float))
         self.elbo = pyro.infer.Trace_ELBO()
         self.log_metrics = log_metrics
-        self._subset_cache: dict[tuple[str, ...], tuple[list[str], list[int], torch.Tensor, dict[str, int]]] = {}
+        self._subset_cache: dict[
+            tuple[str, ...],
+            tuple[list[str], list[int], torch.Tensor, dict[str, int], tuple[torch.Tensor, torch.Tensor]],
+        ] = {}
         self._full_label_lookup: dict[str, int] | None = None
+        self._full_desc_index_table: tuple[torch.Tensor, torch.Tensor] | None = None
 
         self.reset_parameters()
 
@@ -161,12 +217,15 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c.data.zero_()
         self._subset_cache.clear()
         self._full_label_lookup = None
+        self._full_desc_index_table = None
 
-    def _get_subset_info(self, cl_name_subset: list[str]) -> tuple[list[str], list[int], torch.Tensor, dict[str, int]]:
+    def _get_subset_info(
+        self, cl_name_subset: list[str]
+    ) -> tuple[list[str], list[int], torch.Tensor, dict[str, int], tuple[torch.Tensor, torch.Tensor]]:
         """
         Return the sorted category names, their indices into ``self.cl_names``, the
-        corresponding submatrix of ``self.descendant_tensor``, and a pre-built label
-        lookup dict ``{name: subset_index}`` for fast per-batch label conversion.
+        corresponding submatrix of ``self.descendant_tensor``, a pre-built label
+        lookup dict, and the padded index table for ``_logsumexp_propagated``.
         Results are cached by the sorted tuple of names so that order does not matter
         and all outputs are only computed once per unique subset.
 
@@ -175,12 +234,10 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 Category names to select. Must all be present in ``self.cl_names``.
 
         Returns:
-            A 4-tuple ``(sorted_names, indices, descendant_tensor_subset_cc, label_lookup)``
-            where ``sorted_names`` is the alphabetically sorted list of requested names,
-            ``indices`` is the corresponding list of integer positions in ``self.cl_names``,
-            ``descendant_tensor_subset_cc`` is the square submatrix of shape
-            ``(len(indices), len(indices))``, and ``label_lookup`` maps each subset
-            category name to its 0-based position within the sorted subset.
+            A 5-tuple ``(sorted_names, indices, descendant_tensor_subset_cc,
+            label_lookup, desc_index_table)`` where ``desc_index_table`` is the
+            ``(desc_indices_cm, desc_mask_cm)`` pair returned by
+            ``_build_desc_index_table``.
         """
         key = tuple(sorted(cl_name_subset))
         if key not in self._subset_cache:
@@ -189,7 +246,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             ix = torch.tensor(indices, dtype=torch.long, device=self.descendant_tensor.device)
             descendant_tensor_subset_cc = self.descendant_tensor[ix][:, ix]
             label_lookup: dict[str, int] = {name: pos for pos, name in enumerate(key)}
-            self._subset_cache[key] = (list(key), indices, descendant_tensor_subset_cc, label_lookup)
+            desc_index_table = _build_desc_index_table(descendant_tensor_subset_cc)
+            self._subset_cache[key] = (list(key), indices, descendant_tensor_subset_cc, label_lookup, desc_index_table)
         return self._subset_cache[key]
 
     def _cl_names_to_indices(self, cl_names_n: np.ndarray, label_lookup: dict[str, int]) -> torch.Tensor:
@@ -240,15 +298,18 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         if self.cl_name_subset is not None:
-            _, indices, descendant_tensor_subset_cc, label_lookup = self._get_subset_info(self.cl_name_subset)
+            _, indices, _, label_lookup, desc_index_table = self._get_subset_info(self.cl_name_subset)
         else:
             indices = None
-            descendant_tensor_subset_cc = self.descendant_tensor
             if self._full_label_lookup is None:
                 self._full_label_lookup = {name: i for i, name in enumerate(self.cl_names)}
             label_lookup = self._full_label_lookup
+            if self._full_desc_index_table is None:
+                self._full_desc_index_table = _build_desc_index_table(self.descendant_tensor)
+            desc_index_table = self._full_desc_index_table
+        desc_indices_cm, desc_mask_cm = desc_index_table
         y_n = self._cl_names_to_indices(cl_names_n, label_lookup).to(x_ng.device)
-        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, indices, descendant_tensor_subset_cc)
+        loss = self.elbo.differentiable_loss(self.model, self.guide, x_ng, y_n, indices, desc_indices_cm, desc_mask_cm)
         return {"loss": loss}
 
     def _compute_regression(self, x_ng: torch.Tensor, W_gc: torch.Tensor, b_c: torch.Tensor) -> torch.Tensor:
@@ -259,17 +320,15 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         x_ng: torch.Tensor,
         y_n: torch.Tensor,
         indices: list[int] | None = None,
-        descendant_tensor_subset_cc: torch.Tensor | None = None,
+        desc_indices_cm: torch.Tensor | None = None,
+        desc_mask_cm: torch.Tensor | None = None,
     ) -> None:
         if indices is not None:
             n_cats = len(indices)
             b_c = self.b_c[indices]
-            assert descendant_tensor_subset_cc is not None
-            desc_cc = descendant_tensor_subset_cc
         else:
             n_cats = self.n_categories
             b_c = self.b_c
-            desc_cc = descendant_tensor_subset_cc if descendant_tensor_subset_cc is not None else self.descendant_tensor
         W_gc = pyro.sample(
             "W",
             dist.Laplace(0, self.W_prior_scale).expand([self.n_vars, n_cats]).to_event(2),
@@ -277,7 +336,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         with pyro.plate("batch", size=self.n_obs, subsample_size=x_ng.shape[0], dim=-2):
             logits_nc = self._compute_regression(x_ng, W_gc, b_c)
             if self.probability_propagation_flag:
-                logits_nc = propagate_logits(logits_nc, desc_cc)
+                assert desc_indices_cm is not None and desc_mask_cm is not None
+                logits_nc = propagate_logits(logits_nc, desc_indices_cm, desc_mask_cm)
             pyro.sample("y", self.out_distribution(logits=logits_nc), obs=y_n)
 
     def guide(
@@ -285,7 +345,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         x_ng: torch.Tensor,
         y_n: torch.Tensor,
         indices: list[int] | None = None,
-        descendant_tensor_subset_cc: torch.Tensor | None = None,
+        desc_indices_cm: torch.Tensor | None = None,
+        desc_mask_cm: torch.Tensor | None = None,
     ) -> None:
         if indices is not None:
             pyro.sample("W", dist.Delta(self.W_gc[:, indices]).to_event(2))
@@ -314,7 +375,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         if self.cl_name_subset is not None:
-            _, indices, descendant_tensor_subset_cc, _ = self._get_subset_info(self.cl_name_subset)
+            _, indices, descendant_tensor_subset_cc, _, _ = self._get_subset_info(self.cl_name_subset)
             W_gc = self.W_gc[:, indices]
             b_c = self.b_c[indices]
         else:

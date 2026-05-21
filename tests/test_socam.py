@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.socam import SOCAM, _logsumexp_propagated
+from cellarium.ml.models.socam import SOCAM, _build_desc_index_table, _logsumexp_propagated
 from cellarium.ml.utilities.data import collate_fn
 
 
@@ -266,7 +266,7 @@ def _make_socam(
 
 def test_get_subset_info_basic():
     model = _make_socam()
-    names, indices, desc, label_lookup = model._get_subset_info(["cell_type_2", "cell_type_4"])
+    names, indices, desc, label_lookup, _ = model._get_subset_info(["cell_type_2", "cell_type_4"])
     assert names == ["cell_type_2", "cell_type_4"]
     assert indices == [2, 4]
     assert desc.shape == (2, 2)
@@ -277,8 +277,8 @@ def test_get_subset_info_basic():
 
 def test_get_subset_info_order_independent():
     model = _make_socam()
-    names_a, indices_a, desc_a, lookup_a = model._get_subset_info(["cell_type_4", "cell_type_2"])
-    names_b, indices_b, desc_b, lookup_b = model._get_subset_info(["cell_type_2", "cell_type_4"])
+    names_a, indices_a, desc_a, lookup_a, _ = model._get_subset_info(["cell_type_4", "cell_type_2"])
+    names_b, indices_b, desc_b, lookup_b, _ = model._get_subset_info(["cell_type_2", "cell_type_4"])
     assert names_a == names_b
     assert indices_a == indices_b
     assert desc_a is desc_b  # same cached object
@@ -287,8 +287,8 @@ def test_get_subset_info_order_independent():
 
 def test_get_subset_info_caching():
     model = _make_socam()
-    _, _, desc_first, lookup_first = model._get_subset_info(["cell_type_0", "cell_type_3"])
-    _, _, desc_second, lookup_second = model._get_subset_info(["cell_type_0", "cell_type_3"])
+    _, _, desc_first, lookup_first, _ = model._get_subset_info(["cell_type_0", "cell_type_3"])
+    _, _, desc_second, lookup_second, _ = model._get_subset_info(["cell_type_0", "cell_type_3"])
     assert desc_first is desc_second
     assert lookup_first is lookup_second
 
@@ -366,7 +366,7 @@ def test_predict_no_cl_name_subset():
 
 def test_cl_names_to_indices_basic():
     model = _make_socam()
-    _, _, _, label_lookup = model._get_subset_info(["cell_type_0", "cell_type_2", "cell_type_4"])
+    _, _, _, label_lookup, _ = model._get_subset_info(["cell_type_0", "cell_type_2", "cell_type_4"])
     cl_names_n = np.array(["cell_type_4", "cell_type_0", "cell_type_2", "cell_type_0"])
     result = model._cl_names_to_indices(cl_names_n, label_lookup)
     assert isinstance(result, torch.Tensor)
@@ -388,7 +388,7 @@ def test_cl_names_to_indices_full_lookup():
 
 def test_cl_names_to_indices_invalid_name():
     model = _make_socam()
-    _, _, _, label_lookup = model._get_subset_info(["cell_type_0", "cell_type_1"])
+    _, _, _, label_lookup, _ = model._get_subset_info(["cell_type_0", "cell_type_1"])
     cl_names_n = np.array(["cell_type_0", "cell_type_99"])
     with pytest.raises(ValueError, match="cell_type_99"):
         model._cl_names_to_indices(cl_names_n, label_lookup)
@@ -397,8 +397,8 @@ def test_cl_names_to_indices_invalid_name():
 def test_cl_names_to_indices_lookup_reused_across_batches():
     """The same label_lookup dict object is returned on repeated _get_subset_info calls."""
     model = _make_socam()
-    _, _, _, lookup_1 = model._get_subset_info(["cell_type_1", "cell_type_3"])
-    _, _, _, lookup_2 = model._get_subset_info(["cell_type_3", "cell_type_1"])
+    _, _, _, lookup_1, _ = model._get_subset_info(["cell_type_1", "cell_type_3"])
+    _, _, _, lookup_2, _ = model._get_subset_info(["cell_type_3", "cell_type_1"])
     assert lookup_1 is lookup_2  # no re-creation between batches
 
 
@@ -417,12 +417,17 @@ def _naive_logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.T
     return temp.logsumexp(dim=1)
 
 
+def _lsp(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
+    """Test wrapper: builds the index table then calls _logsumexp_propagated."""
+    return _logsumexp_propagated(logits_nc, *_build_desc_index_table(desc_matrix_cc))
+
+
 def test_logsumexp_propagated_identity():
     """With an identity descendant matrix each output logit equals the corresponding input logit."""
     n, c = 4, 5
     logits_nc = torch.randn(n, c)
     desc = torch.eye(c)
-    result = _logsumexp_propagated(logits_nc, desc)
+    result = _lsp(logits_nc, desc)
     assert result.shape == (n, c)
     assert torch.allclose(result, logits_nc, atol=1e-5)
 
@@ -435,7 +440,7 @@ def test_logsumexp_propagated_matches_naive():
     desc = torch.eye(c)
     desc[0, 1] = 1.0  # category 0 has category 1 as a descendant
     desc[2, 3] = 1.0  # category 2 has category 3 as a descendant
-    result = _logsumexp_propagated(logits_nc, desc)
+    result = _lsp(logits_nc, desc)
     expected = _naive_logsumexp_propagated(logits_nc, desc)
     assert torch.allclose(result, expected, atol=1e-5)
 
@@ -446,7 +451,7 @@ def test_logsumexp_propagated_no_overflow():
     logits_nc = torch.full((n, c), 1e30)
     desc = torch.eye(c)
     desc[0, 1] = 1.0
-    result = _logsumexp_propagated(logits_nc, desc)
+    result = _lsp(logits_nc, desc)
     assert torch.all(torch.isfinite(result)), f"Got non-finite values: {result}"
 
 
@@ -455,7 +460,7 @@ def test_logsumexp_propagated_no_underflow():
     n, c = 4, 5
     logits_nc = torch.full((n, c), -1e30)
     desc = torch.eye(c)
-    result = _logsumexp_propagated(logits_nc, desc)
+    result = _lsp(logits_nc, desc)
     # Each category is its own only descendant; output should equal input.
     assert torch.all(torch.isfinite(result)), f"Got non-finite values: {result}"
     assert torch.allclose(result, logits_nc, atol=1e-3)
@@ -469,7 +474,7 @@ def test_logsumexp_propagated_semantics():
     logits_nc = torch.tensor([[1.0, 2.0]])
     desc = torch.eye(2)
     desc[0, 1] = 1.0  # 0 is parent of 1
-    result = _logsumexp_propagated(logits_nc, desc)
+    result = _lsp(logits_nc, desc)
     expected_parent = torch.log(torch.exp(torch.tensor(1.0)) + torch.exp(torch.tensor(2.0)))
     expected_child = torch.tensor(2.0)  # category 1 has only itself
     assert torch.allclose(result[0, 0], expected_parent, atol=1e-6)
@@ -498,7 +503,7 @@ def test_logsumexp_propagated_no_underflow_gradient():
     desc = torch.eye(c)
     desc[0, 1] = 1.0
     desc[0, 2] = 1.0  # category 0 is parent of 1 and 2; category 4 unrelated
-    result = _logsumexp_propagated(logits_nc, desc)
+    result = _lsp(logits_nc, desc)
     result.sum().backward()
     assert logits_nc.grad is not None
     assert torch.all(torch.isfinite(logits_nc.grad)), f"NaN/inf gradient: {logits_nc.grad}"
@@ -513,7 +518,7 @@ def test_logsumexp_propagated_per_column_max():
     desc = torch.eye(3)
     desc[0, 1] = 1.0  # 0 is parent of 1; category 2 is unrelated
     logits_nc = torch.tensor([[1.0, 2.0, 100.0]] * n)
-    result = _logsumexp_propagated(logits_nc, desc)
+    result = _lsp(logits_nc, desc)
     expected_0 = torch.log(torch.exp(torch.tensor(1.0)) + torch.exp(torch.tensor(2.0)))
     assert torch.allclose(result[:, 0], expected_0.expand(n), atol=1e-5)
     assert torch.allclose(result[:, 1], torch.tensor(2.0).expand(n), atol=1e-5)
@@ -528,7 +533,7 @@ def test_logsumexp_propagated_mixed_extreme_logits():
     desc = torch.eye(c)
     desc[0, 1] = 1.0
     desc[2, 3] = 1.0
-    result = _logsumexp_propagated(logits_nc, desc)
+    result = _lsp(logits_nc, desc)
     assert torch.all(torch.isfinite(result)), f"Non-finite values: {result}"
     result.sum().backward()
     assert isinstance(logits_nc.grad, torch.Tensor)
