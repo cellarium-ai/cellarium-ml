@@ -268,13 +268,12 @@ def test_no_shuffle_parity(
         err_msg="obs_names_n mismatch between AnnData and Arrow loaders",
     )
 
-    # Expression values agree within float16 round-trip tolerance.
-    # After NormalizeTotal(1e4) + Log1p, values are in [0, log(10001)] ≈ [0, 9.2].
-    # Float16 absolute error at that magnitude ≈ 9.2 × 2⁻¹⁰ ≈ 0.009, so atol=1e-2.
+    # Expression values agree within float32 precision.
+    # After NormalizeTotal(1e4) + Log1p, values are stored as float32 in both paths.
     np.testing.assert_allclose(
         adata_x[adata_sort],
         arrow_x[arrow_sort],
-        atol=1e-2,
+        atol=1e-5,
         err_msg="x_ng mismatch between AnnData and Arrow loaders",
     )
 

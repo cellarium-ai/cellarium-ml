@@ -1,0 +1,38 @@
+model:
+  transforms:
+    - class_path: cellarium.ml.transforms.NormalizeTotal
+      init_args:
+        target_count: 10_000
+    - cellarium.ml.transforms.Log1p
+  model:
+    class_path: cellarium.ml.models.DataPreformatter
+
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      filenames: gs://bucket/adata_{0..99}.h5ad
+      shard_size: 1800
+      max_cache_size: 2
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
+    var_names_g:
+      attr: var_names
+    obs_names_n:
+      attr: obs_names
+  batch_size: 10000
+  num_workers: 4
+
+trainer:
+  accelerator: cpu
+  devices: 1
+  callbacks:
+    - class_path: cellarium.ml.callbacks.PredictionWriterArrow
+      init_args:
+        output_dir: ./arrow_output
+        compression: lz4
+        num_write_workers: 8
+
+return_predictions: false

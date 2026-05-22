@@ -3,6 +3,8 @@
 
 import json
 import os
+import threading
+import warnings
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from queue import Queue
@@ -54,8 +56,8 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
 
     **Per-cell column encoding:**
 
-    * 2-D numeric arrays (e.g. ``x_ng``) → ``FixedSizeBinary(n_cols × 2)``,
-      each row packed as ``float16``.
+    * 2-D numeric arrays (e.g. ``x_ng``) → ``FixedSizeBinary(n_cols × itemsize)``,
+      each row packed as the dtype given by *matrix_dtype*.
     * String / object arrays → ``large_utf8``.
     * Integer arrays → ``int32``.
     * All other numerics → ``float32``.
@@ -87,8 +89,16 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
         num_write_workers:
             Number of threads encoding and writing Arrow shards in parallel.
             Submission blocks when all workers are busy, bounding peak extra
-            memory to roughly ``num_write_workers × shard_size × n_genes × 2``
-            bytes.
+            memory to roughly
+            ``num_write_workers × shard_size × n_genes × itemsize`` bytes.
+        matrix_dtype:
+            NumPy dtype name for storing 2-D matrix fields (e.g. ``x_ng``).
+            ``"float32"`` (default) preserves full single-precision range.
+            ``"float16"`` halves file size but has a maximum representable
+            value of 65504 — values outside ``[−65504, 65504]`` are silently
+            **clamped** to ``±65504`` and a :class:`RuntimeWarning` with
+            per-gene overflow counts is emitted by :meth:`flush` at the end
+            of prediction.
     """
 
     def __init__(
@@ -96,16 +106,26 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
         output_dir: str,
         compression: str | None = "zstd",
         num_write_workers: int = 8,
+        matrix_dtype: str = "float32",
     ) -> None:
         super().__init__(write_interval="batch")
+        _allowed_dtypes = {"float32", "float16"}
+        if matrix_dtype not in _allowed_dtypes:
+            raise ValueError(f"matrix_dtype must be one of {sorted(_allowed_dtypes)!r}, got {matrix_dtype!r}")
         self.output_dir = output_dir
         self.compression = compression
         self.num_write_workers = num_write_workers
+        self.matrix_dtype = matrix_dtype
+        self._matrix_np_dtype = np.dtype(matrix_dtype)
         self._shard_counter: int = 0
         self._executor: _BoundedThreadPoolExecutor = _BoundedThreadPoolExecutor(
             max_workers=num_write_workers, max_queue_size=num_write_workers
         )
         self._futures: list[Future] = []
+        # Overflow tracking — only populated when matrix_dtype="float16"
+        self._overflow_lock = threading.Lock()
+        self._overflow_counts: dict[str, np.ndarray] = {}  # field → per-gene int64 overflow count
+        self._var_names_g: np.ndarray | None = None  # captured for overflow reporting
 
     def __del__(self) -> None:
         """Ensure the executor shuts down on object deletion."""
@@ -180,12 +200,28 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
 
         for key, val in per_row.items():
             if val.ndim == 2:
-                # Matrix field (e.g., x_ng): pack each row as float16 bytes
-                val_f16 = val.astype(np.float16)
-                n, d = val_f16.shape
-                byte_width = d * 2
+                n, d = val.shape
+                if self._matrix_np_dtype == np.dtype("float16"):
+                    with np.errstate(over="ignore"):
+                        val_cast = val.astype(np.float16)
+                    overflow_mask = np.isinf(val_cast)  # True where overflow occurred
+                    if np.any(overflow_mask):
+                        f16_max = np.finfo(np.float16).max
+                        val_cast = val_cast.copy()
+                        val_cast[val_cast == np.float16(np.inf)] = np.float16(f16_max)
+                        val_cast[val_cast == np.float16(-np.inf)] = np.float16(-f16_max)
+                        per_gene_counts = overflow_mask.sum(axis=0).astype(np.int64)
+                        with self._overflow_lock:
+                            if key not in self._overflow_counts:
+                                self._overflow_counts[key] = np.zeros(d, dtype=np.int64)
+                            self._overflow_counts[key] += per_gene_counts
+                            if self._var_names_g is None and "var_names_g" in metadata_arrays:
+                                self._var_names_g = metadata_arrays["var_names_g"].copy()
+                else:
+                    val_cast = val.astype(self._matrix_np_dtype)
+                byte_width = d * self._matrix_np_dtype.itemsize
                 col = pa.array(
-                    [val_f16[i].tobytes() for i in range(n)],
+                    [val_cast[i].tobytes() for i in range(n)],
                     type=pa.binary(byte_width),
                 )
                 arrow_fields.append(pa.field(key, pa.binary(byte_width)))
@@ -204,6 +240,7 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
         schema_meta: dict[bytes, bytes] = {
             b"cellarium_arrow_version": b"1",
             b"n_obs": str(n_obs).encode(),
+            b"matrix_dtype": self._matrix_np_dtype.name.encode(),
         }
         for key, val in metadata_arrays.items():
             if key == "var_names_g" or (key.endswith("_g") and val.dtype.kind in ("U", "O")):
@@ -245,11 +282,39 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
         self._futures = live
 
     def flush(self) -> None:
-        """Drain all pending write threads and re-raise any write exceptions."""
+        """Drain all pending write threads, report float16 overflow warnings, and re-raise write errors."""
         self._executor.shutdown(wait=True)
         for f in self._futures:
             f.result()
         self._futures.clear()
+
+        # Collect overflow state and reset under lock so worker threads see a clean slate next run.
+        with self._overflow_lock:
+            overflow_snapshot = {k: v.copy() for k, v in self._overflow_counts.items()}
+            var_names = self._var_names_g.copy() if self._var_names_g is not None else None
+            self._overflow_counts.clear()
+            self._var_names_g = None
+
+        for field, counts in overflow_snapshot.items():
+            total = int(counts.sum())
+            if total == 0:
+                continue
+            affected_indices = np.where(counts > 0)[0]
+            n_affected = len(affected_indices)
+            top_idx = affected_indices[np.argsort(counts[affected_indices])[::-1][:10]]
+            if var_names is not None and len(var_names) == len(counts):
+                gene_str = ", ".join(f"{var_names[i]} ({counts[i]})" for i in top_idx)
+            else:
+                gene_str = ", ".join(f"idx={i} ({counts[i]})" for i in top_idx)
+            warnings.warn(
+                f"PredictionWriterArrow: {total} value(s) in field '{field}' overflowed float16 "
+                f"and were clamped to \u00b1{np.finfo(np.float16).max}. "
+                f"Affected genes: {n_affected}. Top genes (up to 10): {gene_str}. "
+                f"Consider using matrix_dtype='float32' to avoid precision loss.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
         # Recreate the executor so the callback can be reused across multiple predict runs.
         self._executor = _BoundedThreadPoolExecutor(
             max_workers=self.num_write_workers, max_queue_size=self.num_write_workers

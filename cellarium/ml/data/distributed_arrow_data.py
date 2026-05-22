@@ -230,18 +230,23 @@ class DistributedArrowDataCollection:
             local_idx = (global_idx - shard_start).tolist()
 
             part: dict[str, np.ndarray] = {}
+
+            # Read matrix dtype from schema metadata; default to float16 for backward compat.
+            shard_meta = batch.schema.metadata or {}
+            _mat_dtype = np.dtype(shard_meta.get(b"matrix_dtype", b"float16").decode())
+
             for col_name in batch.schema.names:
                 col_taken = batch.column(col_name).take(local_idx)
                 col_type = col_taken.type
 
                 if pa.types.is_fixed_size_binary(col_type):
-                    # x_ng: packed float16 – one fixed-size binary row per cell
+                    # Matrix field: packed as matrix_dtype bytes, one fixed-size binary row per cell.
                     byte_width: int = col_type.byte_width
-                    n_genes = byte_width // 2
+                    n_genes = byte_width // _mat_dtype.itemsize
                     offset = col_taken.offset
                     values_buf = col_taken.buffers()[1]
                     arr_bytes = values_buf[offset * byte_width : (offset + len(col_taken)) * byte_width]
-                    part[col_name] = np.frombuffer(arr_bytes, dtype=np.float16).reshape(len(local_idx), n_genes).copy()
+                    part[col_name] = np.frombuffer(arr_bytes, dtype=_mat_dtype).reshape(len(local_idx), n_genes).copy()
                 elif pa.types.is_dictionary(col_type):
                     part[col_name] = np.array(col_taken.to_pylist())
                 elif pa.types.is_large_string(col_type) or pa.types.is_string(col_type):

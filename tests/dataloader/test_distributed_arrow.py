@@ -126,7 +126,7 @@ def test_preformatter_field_classification(tmp_path: Path) -> None:
     # --- Per-row columns ---
     assert "x_ng" in batch.schema.names
     assert pa.types.is_fixed_size_binary(batch.schema.field("x_ng").type)
-    assert batch.schema.field("x_ng").type.byte_width == N_GENE * 2
+    assert batch.schema.field("x_ng").type.byte_width == N_GENE * 4  # float32 default
 
     assert "obs_names_n" in batch.schema.names
     assert pa.types.is_large_string(batch.schema.field("obs_names_n").type)
@@ -145,6 +145,7 @@ def test_preformatter_field_classification(tmp_path: Path) -> None:
 
     # Check metadata contents
     assert meta[b"cellarium_arrow_version"] == b"1"
+    assert meta[b"matrix_dtype"] == b"float32"
     assert int(meta[b"n_genes"]) == N_GENE
     assert meta[b"var_names_g"].decode().split("\n") == list(VAR_NAMES)
     assert json.loads(meta[b"y_categories"].decode()) == list(Y_CATEGORIES)
@@ -186,11 +187,11 @@ def test_preformatter_tensor_input(tmp_path: Path) -> None:
         shard_size=3,
     )
     batch = dadc[list(range(3))]
-    # float16 round-trip; compare with float32-cast original
+    # float32 round-trip: exact to float32 precision
     np.testing.assert_allclose(
-        batch["x_ng"].astype(np.float32),
-        x_tensor.numpy().astype(np.float16).astype(np.float32),
-        atol=1e-3,
+        batch["x_ng"],
+        x_tensor.numpy().astype(np.float32),
+        atol=1e-6,
     )
 
 
@@ -234,9 +235,9 @@ def test_preformatter_compression(tmp_path: Path, compression: str | None) -> No
     assert isinstance(x_ng, np.ndarray)
     assert isinstance(obs_names_n, np.ndarray)
     np.testing.assert_allclose(
-        x_ng.astype(np.float32),
-        x.astype(np.float16).astype(np.float32),
-        atol=1e-3,
+        x_ng,
+        x.astype(np.float32),
+        atol=1e-6,
     )
     np.testing.assert_array_equal(obs_names_n, obs)
 
@@ -273,10 +274,86 @@ def test_preformatter_async_writes(tmp_path: Path) -> None:
     dadc = DistributedArrowDataCollection([str(tmp_path / "rank00_shard000000.arrow")], shard_size=n_cells)
     result = dadc[list(range(n_cells))]
     np.testing.assert_allclose(
+        result["x_ng"],
+        batches[0]["x_ng"].astype(np.float32),
+        atol=1e-6,
+    )
+
+
+def test_preformatter_matrix_dtype_float16(tmp_path: Path) -> None:
+    """Explicit matrix_dtype='float16' stores float16 and round-trips with float16 tolerance."""
+    import pyarrow as pa
+
+    dp = PredictionWriterArrow(output_dir=str(tmp_path), matrix_dtype="float16")
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal((3, N_GENE)).astype(np.float32)
+    obs = np.array(["a", "b", "c"], dtype=object)
+    y = np.array([0, 1, 2], dtype=np.int32)
+    dp._write_arrow({"x_ng": x, "obs_names_n": obs, "y_n": y, "var_names_g": VAR_NAMES})
+
+    # Schema metadata should record float16
+    arrow_file = str(tmp_path / "rank00_shard000000.arrow")
+    with pa.memory_map(arrow_file, "r") as src:
+        schema_meta = pa.ipc.open_file(src).schema.metadata
+    assert schema_meta[b"matrix_dtype"] == b"float16"
+    assert schema_meta.get(b"matrix_dtype") != b"float32"
+    # byte_width should be N_GENE * 2 for float16
+    with pa.memory_map(arrow_file, "r") as src:
+        batch = pa.ipc.open_file(src).get_batch(0)
+    assert batch.schema.field("x_ng").type.byte_width == N_GENE * 2
+
+    dadc = DistributedArrowDataCollection([arrow_file], shard_size=3)
+    result = dadc[list(range(3))]
+    assert result["x_ng"].dtype == np.float16
+    np.testing.assert_allclose(
         result["x_ng"].astype(np.float32),
-        batches[0]["x_ng"].astype(np.float16).astype(np.float32),
+        x.astype(np.float16).astype(np.float32),
         atol=1e-3,
     )
+
+
+def test_preformatter_float16_overflow(tmp_path: Path) -> None:
+    """Overflow values are clamped to ±65504, counts are tracked, and flush() warns."""
+    import warnings
+
+    dp = PredictionWriterArrow(output_dir=str(tmp_path), matrix_dtype="float16")
+    n_cells = 4
+    x = np.zeros((n_cells, N_GENE), dtype=np.float32)
+    # Gene index 1: all cells overflow (positive)
+    x[:, 1] = 70000.0
+    # Gene index 3: one cell overflows (negative)
+    x[0, 3] = -70000.0
+
+    obs = np.array([f"c{i}" for i in range(n_cells)], dtype=object)
+    y = np.zeros(n_cells, dtype=np.int32)
+
+    dp._write_arrow({"x_ng": x, "obs_names_n": obs, "y_n": y, "var_names_g": VAR_NAMES})
+
+    # Overflow counts are populated before flush clears them
+    assert "x_ng" in dp._overflow_counts
+    assert dp._overflow_counts["x_ng"][1] == n_cells  # all 4 cells at gene 1
+    assert dp._overflow_counts["x_ng"][3] == 1  # 1 cell at gene 3
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        dp.flush()
+
+    overflow_warnings = [warning for warning in w if issubclass(warning.category, RuntimeWarning)]
+    assert len(overflow_warnings) == 1
+    msg = str(overflow_warnings[0].message)
+    assert "overflow" in msg.lower()
+    assert "x_ng" in msg
+
+    # After flush, counts are reset
+    assert len(dp._overflow_counts) == 0
+
+    # Read back: all values must be finite and clamped
+    f16_max = np.finfo(np.float16).max
+    dadc = DistributedArrowDataCollection([str(tmp_path / "rank00_shard000000.arrow")], shard_size=n_cells)
+    result = dadc[list(range(n_cells))]
+    assert np.all(np.isfinite(result["x_ng"])), "No infinities should remain after clamping"
+    assert np.all(result["x_ng"][:, 1] == np.float16(f16_max)), "Positive overflow clamped to +max"
+    assert result["x_ng"][0, 3] == np.float16(-f16_max), "Negative overflow clamped to -max"
 
 
 # ---------------------------------------------------------------------------
@@ -372,21 +449,21 @@ def test_indexing(
     else:
         idx_list = list(oidx)
 
-    # x_ng: float16 round-trip tolerance
+    # x_ng: float32 round-trip is exact
     np.testing.assert_allclose(
-        result["x_ng"].astype(np.float32),
-        source_arrays["x"][idx_list].astype(np.float16).astype(np.float32),
-        atol=1e-3,
+        result["x_ng"],
+        source_arrays["x"][idx_list].astype(np.float32),
+        atol=1e-6,
     )
     # obs_names_n: exact
     np.testing.assert_array_equal(result["obs_names_n"], source_arrays["obs_names"][idx_list])
     # y_n: exact integer codes
     np.testing.assert_array_equal(result["y_n"], source_arrays["y"][idx_list])
-    # total_mrna_umis_n: derived from float16 x, so compare to recomputed value
+    # total_mrna_umis_n: stored as float32 from float32 source, exact
     np.testing.assert_allclose(
         result["total_mrna_umis_n"],
-        source_arrays["x"][idx_list].astype(np.float16).sum(axis=1).astype(np.float32),
-        atol=1e-2,
+        source_arrays["x"][idx_list].sum(axis=1).astype(np.float32),
+        atol=1e-5,
     )
     # Metadata fields present in every response
     np.testing.assert_array_equal(result["var_names_g"], VAR_NAMES)
@@ -417,9 +494,9 @@ def test_pickle_reads_correctly_after_unpickle(dat: DistributedArrowDataCollecti
 
     result = new_dat[list(range(2))]
     np.testing.assert_allclose(
-        result["x_ng"].astype(np.float32),
-        source_arrays["x"][:2].astype(np.float16).astype(np.float32),
-        atol=1e-3,
+        result["x_ng"],
+        source_arrays["x"][:2].astype(np.float32),
+        atol=1e-6,
     )
     np.testing.assert_array_equal(result["obs_names_n"], source_arrays["obs_names"][:2])
 
@@ -465,8 +542,8 @@ def test_indexing_dataset(
     assert x_ng.shape == (len(idx_list), N_GENE)
     np.testing.assert_allclose(
         x_ng.astype(np.float32),
-        source_arrays["x"][idx_list].astype(np.float16).astype(np.float32),
-        atol=1e-3,
+        source_arrays["x"][idx_list].astype(np.float32),
+        atol=1e-6,
     )
     np.testing.assert_array_equal(obs_names_n, source_arrays["obs_names"][idx_list])
 
@@ -485,7 +562,7 @@ def test_pickle_dataset(dat: DistributedArrowDataCollection, source_arrays: dict
     assert isinstance(obs_names_n, np.ndarray)
     np.testing.assert_allclose(
         x_ng.astype(np.float32),
-        source_arrays["x"][:2].astype(np.float16).astype(np.float32),
-        atol=1e-3,
+        source_arrays["x"][:2].astype(np.float32),
+        atol=1e-6,
     )
     np.testing.assert_array_equal(obs_names_n, source_arrays["obs_names"][:2])
