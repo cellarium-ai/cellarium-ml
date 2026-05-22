@@ -9,8 +9,11 @@ import lightning.pytorch as pl
 import torch
 from anndata import AnnData
 
-from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.data.distributed_arrow_data import DistributedArrowDataCollection
+from cellarium.ml.data import (
+    DistributedAnnDataCollection,
+    DistributedArrowDataCollection,
+    IterableDistributedAnnDataCollectionDataset,
+)
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 

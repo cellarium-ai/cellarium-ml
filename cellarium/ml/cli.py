@@ -26,7 +26,7 @@ from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
-from cellarium.ml.data.distributed_arrow_data import DistributedArrowDataCollection
+from cellarium.ml.data import DistributedArrowDataCollection
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 cached_loaders: dict[Callable[[str], Any] | str, Callable[[str], Any]] = {}
