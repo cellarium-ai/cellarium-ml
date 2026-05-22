@@ -3,6 +3,7 @@
 
 from cellarium.ml.models.cellarium_gpt import CellariumGPT
 from cellarium.ml.models.contrastive_mlp import ContrastiveMLP
+from cellarium.ml.models.data_preformatter import DataPreformatter
 from cellarium.ml.models.geneformer import Geneformer
 from cellarium.ml.models.hvg_seurat_v3 import HVGSeuratV3
 from cellarium.ml.models.incremental_pca import IncrementalPCA
@@ -16,6 +17,7 @@ __all__ = [
     "CellariumGPT",
     "CellariumModel",
     "ContrastiveMLP",
+    "DataPreformatter",
     "Geneformer",
     "HVGSeuratV3",
     "IncrementalPCA",

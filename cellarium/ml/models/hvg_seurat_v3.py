@@ -15,6 +15,7 @@ import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
+from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
 from cellarium.ml.models.model import CellariumModel
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -327,7 +328,9 @@ class HVGSeuratV3(CellariumModel):
             # Retrieve adata.var annotation columns to enrich the output DataFrame.
             var_df: pd.DataFrame | None = None
             datamodule = getattr(trainer, "datamodule", None)
-            if isinstance(datamodule, CellariumAnnDataDataModule):
+            if isinstance(datamodule, CellariumAnnDataDataModule) and isinstance(
+                datamodule.dadc, DistributedAnnDataCollection
+            ):
                 var_df = datamodule.dadc.schema.attr_values["var"]
             else:
                 warnings.warn(

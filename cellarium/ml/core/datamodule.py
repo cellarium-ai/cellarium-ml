@@ -10,6 +10,7 @@ import torch
 from anndata import AnnData
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.data.distributed_arrow_data import DistributedArrowDataCollection
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
@@ -102,7 +103,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        dadc: DistributedAnnDataCollection | AnnData,
+        dadc: DistributedAnnDataCollection | DistributedArrowDataCollection | AnnData,
         # IterableDistributedAnnDataCollectionDataset args
         batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField] | None = None,
         batch_size: int = 1,
@@ -120,6 +121,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         num_workers: int = 0,
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
+        pin_memory: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -128,7 +130,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
         self.dadc = dadc
         # IterableDistributedAnnDataCollectionDataset args
-        self.batch_keys = batch_keys or {}
+        self.batch_keys = batch_keys
         self.batch_size = batch_size
         self.iteration_strategy = iteration_strategy
         self.shuffle = shuffle
@@ -147,6 +149,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.drop_incomplete_batch = drop_incomplete_batch
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
+        self.pin_memory = pin_memory
 
     def setup(self, stage: str | None = None) -> None:
         """
@@ -227,6 +230,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
         )
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -237,6 +241,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
@@ -247,6 +252,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
         )
 
     def test_dataloader(self) -> torch.utils.data.DataLoader:
@@ -257,6 +263,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
         )
 
     def state_dict(self) -> dict[str, Any]:
@@ -344,3 +351,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 )
 
             self.train_dataset.load_state_dict(state_dict)
+
+
+#: Alias for :class:`CellariumAnnDataDataModule` that also accepts Arrow shards.
+CellariumDataModule = CellariumAnnDataDataModule

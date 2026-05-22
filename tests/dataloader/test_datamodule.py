@@ -193,6 +193,7 @@ def test_datamodule(tmp_path: Path, batch_size: int | None, accelerator: str) ->
     trainer.fit(module, datamodule)
 
     ckpt_path = str(tmp_path / "lightning_logs/version_0/checkpoints/epoch=0-step=1.ckpt")
+    assert isinstance(datamodule.dadc, DistributedAnnDataCollection)
     adata = datamodule.dadc.adatas[0].adata
     kwargs = {"dadc": adata}
     if batch_size is not None:

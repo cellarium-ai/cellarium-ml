@@ -14,6 +14,7 @@ from torch.utils._pytree import tree_map
 from torch.utils.data import IterableDataset
 
 from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
+from cellarium.ml.data.distributed_arrow_data import DistributedArrowDataCollection
 from cellarium.ml.utilities.data import AnnDataField
 from cellarium.ml.utilities.distributed import get_rank_and_num_replicas, get_worker_info
 
@@ -102,8 +103,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __init__(
         self,
-        dadc: DistributedAnnDataCollection | AnnData,
-        batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField],
+        dadc: DistributedAnnDataCollection | DistributedArrowDataCollection | AnnData,
+        batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField] | None = None,
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
         shuffle: bool = False,
@@ -169,13 +170,19 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     def __getitem__(self, idx: int | list[int] | slice) -> dict[str, dict[str, np.ndarray] | np.ndarray]:
         r"""
-        Returns a dictionary containing the data from the :attr:`dadc` with keys specified by the :attr:`batch_keys`
-        at the given index ``idx``.
-        """
+        Returns a dictionary containing the data from the :attr:`dadc` at the given index ``idx``.
 
-        data = {}
-        adata = self.dadc[idx]
-        data = tree_map(lambda field: field(adata), self.batch_keys)
+        When :attr:`batch_keys` is ``None`` (Arrow mode), :attr:`dadc` is called directly and
+        is expected to return a ``dict``.  When :attr:`batch_keys` is provided (AnnData mode),
+        each :class:`~cellarium.ml.utilities.data.AnnDataField` is applied to the materialised
+        AnnData shard.
+        """
+        if self.batch_keys is not None:
+            adata = self.dadc[idx]
+            data = tree_map(lambda field: field(adata), self.batch_keys)
+        else:
+            # Arrow mode: dadc.__getitem__ returns a dict directly
+            data = self.dadc[idx]
 
         # for testing purposes
         if self.test_mode:
@@ -568,3 +575,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.resume_step = state_dict["resume_step"]
         # trainer.accumulate_grad_batches
         self.accumulate_grad_batches = state_dict["accumulate_grad_batches"]
+
+
+# Backward-compatible alias
+IterableDistributedDataset = IterableDistributedAnnDataCollectionDataset

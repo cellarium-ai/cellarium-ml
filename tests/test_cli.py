@@ -889,3 +889,70 @@ def test_return_predictions_userwarning(tmp_path: Path):
             print(warning_message)
             n += 1
     assert n < 2, "Unexpected UserWarning when running predict with return_predictions=false"
+
+
+def test_data_preformatter(tmp_path: Path) -> None:
+    """Run data_preformatter predict via YAML config and verify Arrow shards are written."""
+    from cellarium.ml.data import DistributedArrowDataCollection
+
+    arrow_output = tmp_path / "arrow_output"
+
+    dp_config = f"""
+    model:
+      transforms:
+        - class_path: cellarium.ml.transforms.NormalizeTotal
+          init_args:
+            target_count: 10_000
+        - cellarium.ml.transforms.Log1p
+      model:
+        class_path: cellarium.ml.models.DataPreformatter
+        init_args:
+          output_dir: {arrow_output}
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
+          shard_size: 100
+          max_cache_size: 2
+          obs_columns_to_validate: [total_mrna_umis]
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+        obs_names_n:
+          attr: obs_names
+        total_mrna_umis_n:
+          attr: obs
+          key: total_mrna_umis
+      batch_size: 5
+      num_workers: 1
+    trainer:
+      accelerator: cpu
+      devices: 1
+      limit_predict_batches: 2
+    return_predictions: false
+    """
+    with open(dp_config_path := str(tmp_path / "dp_config.yaml"), "w") as f:
+        f.write(dp_config)
+    main(["data_preformatter", "predict", "--config", dp_config_path])
+
+    # Arrow output directory must exist and contain at least one shard
+    assert arrow_output.exists(), "Arrow output directory was not created"
+    arrow_files = sorted(arrow_output.glob("*.arrow"))
+    assert len(arrow_files) >= 1, "No Arrow shard files were written"
+
+    # Load the first shard and verify schema metadata and column presence
+    dadc = DistributedArrowDataCollection(
+        [str(f) for f in arrow_files],
+        shard_size=5,
+    )
+    meta = dadc.get_schema_metadata()
+    assert "var_names_g" in meta, "var_names_g missing from Arrow schema metadata"
+    assert meta["n_vars"] >= 1, "n_vars should be at least 1"
+
+    batch = dadc[list(range(min(5, dadc.n_obs)))]
+    assert "x_ng" in batch, "x_ng column missing from Arrow batch"
+    assert "obs_names_n" in batch, "obs_names_n column missing from Arrow batch"

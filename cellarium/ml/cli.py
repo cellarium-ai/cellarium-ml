@@ -26,6 +26,7 @@ from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
+from cellarium.ml.data.distributed_arrow_data import DistributedArrowDataCollection
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 cached_loaders: dict[Callable[[str], Any] | str, Callable[[str], Any]] = {}
@@ -276,13 +277,19 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
 
         >>> np.asarray(data.dadc[0].obs["cell_type"].cat.categories)
 
+    For Arrow-format data the categories are read directly from the Arrow schema
+    metadata (written by :class:`~cellarium.ml.models.DataPreformatter`).
+
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
 
     Returns:
         The categories in the target variable.
     """
+    if isinstance(data.dadc, DistributedArrowDataCollection):
+        return data.dadc.get_schema_metadata()["y_categories"]
     adata = data.dadc[0]
+    assert data.batch_keys is not None
     field = data.batch_keys["y_categories"]
     assert isinstance(field, AnnDataField)
     return field(adata)
@@ -296,6 +303,10 @@ def compute_var_names_g(
     """
     Compute variable names from the data by applying the transforms.
 
+    For Arrow-format data (:class:`~cellarium.ml.data.DistributedArrowDataCollection`),
+    ``var_names_g`` is read directly from the Arrow schema metadata (already post-filter)
+    and the FakeTensor pipeline simulation is skipped.
+
     Args:
         cpu_transforms:
             A list of of CPU transforms applied by the dataloader.
@@ -307,6 +318,8 @@ def compute_var_names_g(
     Returns:
         The variable names.
     """
+    if isinstance(data.dadc, DistributedArrowDataCollection):
+        return data.dadc.get_schema_metadata()["var_names_g"]
     adata = data.dadc[0]
     batch = tree_map(lambda field: field(adata), data.batch_keys)
     pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
@@ -327,13 +340,25 @@ def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
             If batch_index_n is comprised of multiple keys, the number of categories is computed
             as the product of the number of categories in each key.
 
+    For Arrow-format data the category counts are read from the Arrow schema metadata
+    (keys matching ``batch_index_n*_categories``).
+
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
 
     Returns:
         The number of categories in batch_index_n.
     """
-    if "batch_index_n" not in data.batch_keys:
+    if isinstance(data.dadc, DistributedArrowDataCollection):
+        import math
+
+        meta = data.dadc.get_schema_metadata()
+        result = 1
+        for k, v in meta.items():
+            if k.startswith("batch_index_n") and k.endswith("_categories"):
+                result = math.prod([result, len(v)])
+        return result if result > 1 else 1
+    if not data.batch_keys or "batch_index_n" not in data.batch_keys:
         return 1  # for hvg selection when no batch key is given, treat all cells as a single batch
     field = data.batch_keys["batch_index_n"]
     assert isinstance(field, AnnDataField)
@@ -823,6 +848,40 @@ def contrastive_mlp(args: ArgsType = None) -> None:
             "max_epochs": 20,
         },
     )
+    cli(args=args)
+
+
+@register_model
+def data_preformatter(args: ArgsType = None) -> None:
+    r"""
+    CLI for converting AnnData h5ad shards to Arrow IPC (Feather v2) shards via
+    :class:`~cellarium.ml.models.DataPreformatter`.
+
+    Runs in ``predict`` mode: each batch produced by the dataloader (after all
+    ``cpu_transforms`` and ``transforms`` have been applied) is written as one Arrow
+    IPC file to ``output_dir``.
+
+    Example run::
+
+        cellarium-ml data_preformatter predict \\
+            --model.model.init_args.output_dir ./arrow_output \\
+            --data.dadc.class_path cellarium.ml.data.DistributedAnnDataCollection \\
+            --data.dadc.init_args.filenames "gs://bucket/adata_{0..3}.h5ad" \\
+            --data.dadc.init_args.shard_size 1800 \\
+            --data.batch_keys.x_ng.attr X \\
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \\
+            --data.batch_keys.var_names_g.attr var_names \\
+            --data.batch_keys.obs_names_n.attr obs_names \\
+            --data.batch_size 1800 \\
+            --data.num_workers 4 \\
+            --trainer.accelerator cpu \\
+            --trainer.devices 1 \\
+            --return_predictions false
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory("cellarium.ml.models.DataPreformatter")
     cli(args=args)
 
 

@@ -268,6 +268,35 @@ class DistributedAnnDataCollection(AnnCollection):
                 adatas[i] = self.adatas[adata_idx].adata[oidx, vidx]
         return adatas
 
+    def get_schema_metadata(self) -> dict:
+        """
+        Return schema-level metadata without loading any cell data.
+
+        Reads from :attr:`schema` which is populated at construction time from the
+        first shard.
+
+        Returns:
+            A dict containing:
+
+            * ``"n_obs"`` – total observation count (:class:`int`)
+            * ``"n_vars"`` – number of variables (:class:`int`)
+            * ``"var_names_g"`` – :class:`numpy.ndarray` of variable names
+            * ``"<col>_categories"`` – :class:`numpy.ndarray` of category strings for
+              every categorical ``obs`` column in the schema
+        """
+        import numpy as np
+
+        result: dict = {
+            "n_obs": self.n_obs,
+            "n_vars": self.n_vars,
+            "var_names_g": np.asarray(self.schema.attr_values["var_names"]),
+        }
+        obs_df = self.schema.attr_values["obs"]
+        for col in obs_df.columns:
+            if hasattr(obs_df[col], "cat"):
+                result[f"{col}_categories"] = np.asarray(obs_df[col].cat.categories)
+        return result
+
     def __repr__(self) -> str:
         n_obs, n_vars = self.shape
         descr = f"DistributedAnnDataCollection object with n_obs × n_vars = {self.n_obs} × {self.n_vars}"
