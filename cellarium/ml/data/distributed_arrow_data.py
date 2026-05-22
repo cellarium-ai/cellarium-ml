@@ -60,6 +60,13 @@ class DistributedArrowDataCollection:
         cache_size_strictly_enforced:
             If ``True``, raise an error when a single ``__getitem__`` call would
             require more shards than ``max_cache_size``.
+        include_fields:
+            Optional list of per-row Arrow column names to include in the dict
+            returned by :meth:`__getitem__`.  Schema-metadata fields
+            (``var_names_g``, ``*_categories``) are **always** returned and are
+            not affected by this parameter.  ``None`` (default) returns every
+            per-row column.  A :class:`ValueError` is raised on the first read
+            if any requested field is absent from the shard schema.
     """
 
     def __init__(
@@ -70,6 +77,7 @@ class DistributedArrowDataCollection:
         last_shard_size: int | None = None,
         max_cache_size: int = 1,
         cache_size_strictly_enforced: bool = True,
+        include_fields: list[str] | None = None,
     ) -> None:
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
 
@@ -92,6 +100,7 @@ class DistributedArrowDataCollection:
         self.limits = limits
         self.max_cache_size = max_cache_size
         self.cache_size_strictly_enforced = cache_size_strictly_enforced
+        self.include_fields = include_fields
         self.cache: LRU = LRU(max_cache_size)
 
     # ------------------------------------------------------------------
@@ -276,6 +285,19 @@ class DistributedArrowDataCollection:
             for key in parts[0]:
                 per_row[key] = np.concatenate([p[key] for p in parts], axis=0)
 
+        # Validate and apply include_fields filter
+        if self.include_fields is not None:
+            available_columns = set(per_row.keys())
+            requested = set(self.include_fields)
+            missing = requested - available_columns
+            if missing:
+                raise ValueError(
+                    f"include_fields contains column(s) not found in the Arrow shard schema: "
+                    f"{sorted(missing)}. "
+                    f"Available per-row columns are: {sorted(available_columns)}."
+                )
+            per_row = {k: v for k, v in per_row.items() if k in requested}
+
         # Restore the caller's original request order via inverse permutation
         inv_perm = np.argsort(perm, kind="stable")
         result = {key: val[inv_perm] for key, val in per_row.items()}
@@ -305,4 +327,7 @@ class DistributedArrowDataCollection:
     # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
-        return f"DistributedArrowDataCollection with n_obs={self.n_obs}, n_shards={len(self.filenames)}"
+        base = f"DistributedArrowDataCollection with n_obs={self.n_obs}, n_shards={len(self.filenames)}"
+        if self.include_fields is not None:
+            base += f", include_fields={self.include_fields!r}"
+        return base

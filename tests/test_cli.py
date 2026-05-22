@@ -958,3 +958,220 @@ def test_data_preformatter(tmp_path: Path) -> None:
     batch = dadc[list(range(min(5, dadc.n_obs)))]
     assert "x_ng" in batch, "x_ng column missing from Arrow batch"
     assert "obs_names_n" in batch, "obs_names_n column missing from Arrow batch"
+
+
+def test_arrow_onepass_end_to_end(tmp_path: Path) -> None:
+    """Full Arrow round-trip: h5ad → Arrow → OnePassMeanVarStd.
+
+    Stages:
+    1. Convert h5ad to Arrow shards via ``data_preformatter predict``, writing
+       ``batch_index_n`` (sourced from ``total_mrna_umis``) to exercise the
+       scatter-add OOB regression.
+    2. Run ``onepass_mean_var_std fit`` on Arrow shards *with*
+       ``include_fields=["x_ng", "obs_names_n"]`` — excludes ``batch_index_n``
+       so ``n_batch=1`` works correctly.
+    3. Same run *without* ``include_fields`` — ``batch_index_n`` flows into the
+       model with values >> 1 and must trigger ``RuntimeError("out of bounds")``.
+    4. Run ``onepass_mean_var_std fit`` directly on h5ad as a reference baseline.
+    5. Compare per-gene means from Stage 2 and Stage 4 to float32 precision.
+    """
+    import pandas as pd
+
+    from cellarium.ml.data import DistributedArrowDataCollection
+
+    GCS_H5AD = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad"
+    arrow_output = tmp_path / "arrow_output"
+    stats_arrow = tmp_path / "stats_arrow.csv"
+    stats_arrow_no_filter = tmp_path / "stats_arrow_no_filter.csv"
+    stats_h5ad = tmp_path / "stats_h5ad.csv"
+
+    # ------------------------------------------------------------------
+    # Stage 1 — h5ad → Arrow (with batch_index_n to reproduce the bug)
+    # ------------------------------------------------------------------
+    dp_config = f"""
+    model:
+      transforms:
+        - class_path: cellarium.ml.transforms.NormalizeTotal
+          init_args:
+            target_count: 10_000
+        - cellarium.ml.transforms.Log1p
+      model:
+        class_path: cellarium.ml.models.DataPreformatter
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: {GCS_H5AD}
+          shard_size: 100
+          max_cache_size: 2
+          obs_columns_to_validate: [total_mrna_umis]
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+        obs_names_n:
+          attr: obs_names
+        batch_index_n:
+          attr: obs
+          key: total_mrna_umis
+      batch_size: 5
+      num_workers: 0
+    trainer:
+      accelerator: cpu
+      devices: 1
+      limit_predict_batches: 2
+      callbacks:
+        - class_path: cellarium.ml.callbacks.PredictionWriterArrow
+          init_args:
+            output_dir: {arrow_output}
+            compression: lz4
+    return_predictions: false
+    """
+    with open(dp_cfg := str(tmp_path / "dp_config.yaml"), "w") as f:
+        f.write(dp_config)
+    main(["data_preformatter", "predict", "--config", dp_cfg])
+
+    arrow_files = sorted(arrow_output.glob("*.arrow"))
+    assert len(arrow_files) >= 1, "No Arrow shards were written"
+
+    # Verify batch_index_n is present in the Arrow shards (confirms bug scenario)
+    dadc_check = DistributedArrowDataCollection([str(f) for f in arrow_files], shard_size=5)
+    sample = dadc_check[list(range(min(5, dadc_check.n_obs)))]
+    assert "batch_index_n" in sample, "batch_index_n must be in Arrow shards for regression test"
+    assert "x_ng" in sample
+
+    n_vars = dadc_check.n_vars
+    # Filenames as a brace-expand-compatible list for the YAML configs below
+    arrow_filenames = [str(f) for f in arrow_files]
+    arrow_shard_size = 5  # matches limit_predict_batches=2 × batch_size=5
+
+    # ------------------------------------------------------------------
+    # Stage 2 — Arrow → onepass WITH include_fields (the fix)
+    # ------------------------------------------------------------------
+    op_arrow_config = f"""
+    model:
+      model:
+        class_path: cellarium.ml.models.OnePassMeanVarStd
+        init_args:
+          n_batch: 1
+          output_path: {stats_arrow}
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedArrowDataCollection
+        init_args:
+          filenames: {arrow_filenames}
+          shard_size: {arrow_shard_size}
+          include_fields:
+            - x_ng
+            - obs_names_n
+      batch_keys: null
+      batch_size: 5
+      num_workers: 0
+    trainer:
+      accelerator: cpu
+      devices: 1
+      max_epochs: 1
+    """
+    with open(op_arrow_cfg := str(tmp_path / "op_arrow_config.yaml"), "w") as f:
+        f.write(op_arrow_config)
+    main(["onepass_mean_var_std", "fit", "--config", op_arrow_cfg])
+
+    assert stats_arrow.exists(), "Arrow-based onepass CSV was not written"
+    df_arrow = pd.read_csv(stats_arrow)
+    assert len(df_arrow) == n_vars, "Row count in CSV must match n_vars"
+    assert not df_arrow["mean_g"].isna().any(), "mean_g must not contain NaN"
+
+    # ------------------------------------------------------------------
+    # Stage 3 — Arrow → onepass WITHOUT include_fields (regression: must fail)
+    #
+    # batch_index_n values are UMI counts (e.g. 2 000–3 500), which are far
+    # outside [0, n_batch=1) and trigger scatter_add_ index OOB.
+    # ------------------------------------------------------------------
+    op_arrow_no_filter_config = f"""
+    model:
+      model:
+        class_path: cellarium.ml.models.OnePassMeanVarStd
+        init_args:
+          n_batch: 1
+          output_path: {stats_arrow_no_filter}
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedArrowDataCollection
+        init_args:
+          filenames: {arrow_filenames}
+          shard_size: {arrow_shard_size}
+      batch_keys: null
+      batch_size: 5
+      num_workers: 0
+    trainer:
+      accelerator: cpu
+      devices: 1
+      max_epochs: 1
+    """
+    with open(op_arrow_no_filter_cfg := str(tmp_path / "op_arrow_no_filter_config.yaml"), "w") as f:
+        f.write(op_arrow_no_filter_config)
+    with pytest.raises(ValueError, match="batch_index_n values were supplied"):
+        main(["onepass_mean_var_std", "fit", "--config", op_arrow_no_filter_cfg])
+
+    # ------------------------------------------------------------------
+    # Stage 4 — h5ad → onepass directly (reference baseline)
+    # ------------------------------------------------------------------
+    op_h5ad_config = f"""
+    model:
+      transforms:
+        - class_path: cellarium.ml.transforms.NormalizeTotal
+          init_args:
+            target_count: 10_000
+        - cellarium.ml.transforms.Log1p
+      model:
+        class_path: cellarium.ml.models.OnePassMeanVarStd
+        init_args:
+          n_batch: 1
+          output_path: {stats_h5ad}
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: {GCS_H5AD}
+          shard_size: 100
+          max_cache_size: 2
+          obs_columns_to_validate: [total_mrna_umis]
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+      batch_size: 5
+      num_workers: 0
+    trainer:
+      accelerator: cpu
+      devices: 1
+      max_epochs: 1
+      limit_train_batches: 2
+    """
+    with open(op_h5ad_cfg := str(tmp_path / "op_h5ad_config.yaml"), "w") as f:
+        f.write(op_h5ad_config)
+    main(["onepass_mean_var_std", "fit", "--config", op_h5ad_cfg])
+
+    assert stats_h5ad.exists(), "h5ad-based onepass CSV was not written"
+
+    # ------------------------------------------------------------------
+    # Stage 5 — Numeric comparison: Arrow-based vs h5ad-based means
+    # ------------------------------------------------------------------
+    df_h5ad = pd.read_csv(stats_h5ad)
+
+    # Align on gene names (order may differ if iteration orders differ)
+    df_arrow_sorted = df_arrow.set_index("var_names_g").sort_index()
+    df_h5ad_sorted = df_h5ad.set_index("var_names_g").sort_index()
+
+    import numpy as np
+
+    np.testing.assert_allclose(
+        df_arrow_sorted["mean_g"].values,
+        df_h5ad_sorted["mean_g"].values,
+        atol=1e-5,
+        err_msg="Per-gene means from Arrow-based and h5ad-based onepass must match to float32 precision",
+    )

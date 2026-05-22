@@ -566,3 +566,85 @@ def test_pickle_dataset(dat: DistributedArrowDataCollection, source_arrays: dict
         atol=1e-6,
     )
     np.testing.assert_array_equal(obs_names_n, source_arrays["obs_names"][:2])
+
+
+# ---------------------------------------------------------------------------
+# DistributedArrowDataCollection: include_fields
+# ---------------------------------------------------------------------------
+
+
+def test_include_fields_filters_per_row_columns(tmp_path: Path, source_arrays: dict) -> None:
+    """include_fields=["x_ng"] keeps x_ng, drops other per-row columns, keeps metadata."""
+    # Write a shard that includes x_ng, obs_names_n, and a batch_index_n column.
+    batch_index = np.arange(N_CELL, dtype=np.int32)
+    dp = PredictionWriterArrow(output_dir=str(tmp_path))
+    dp._write_arrow(
+        {
+            "x_ng": source_arrays["x"],
+            "obs_names_n": source_arrays["obs_names"],
+            "batch_index_n": batch_index,
+            "var_names_g": VAR_NAMES,
+        }
+    )
+
+    dadc = DistributedArrowDataCollection(
+        [str(tmp_path / "rank00_shard000000.arrow")],
+        shard_size=N_CELL,
+        include_fields=["x_ng"],
+    )
+    result = dadc[list(range(N_CELL))]
+
+    assert "x_ng" in result, "x_ng must be present when included in include_fields"
+    assert "batch_index_n" not in result, "batch_index_n must be filtered out"
+    assert "obs_names_n" not in result, "obs_names_n must be filtered out"
+    # Schema metadata fields are never filtered
+    assert "var_names_g" in result, "var_names_g (schema metadata) must always be present"
+
+
+def test_include_fields_none_returns_all_columns(tmp_path: Path, source_arrays: dict) -> None:
+    """include_fields=None (default) returns every per-row column — backward compatible."""
+    batch_index = np.arange(N_CELL, dtype=np.int32)
+    dp = PredictionWriterArrow(output_dir=str(tmp_path))
+    dp._write_arrow(
+        {
+            "x_ng": source_arrays["x"],
+            "obs_names_n": source_arrays["obs_names"],
+            "batch_index_n": batch_index,
+            "var_names_g": VAR_NAMES,
+        }
+    )
+
+    dadc = DistributedArrowDataCollection(
+        [str(tmp_path / "rank00_shard000000.arrow")],
+        shard_size=N_CELL,
+        include_fields=None,
+    )
+    result = dadc[list(range(N_CELL))]
+
+    for col in ("x_ng", "obs_names_n", "batch_index_n", "var_names_g"):
+        assert col in result, f"{col} should be present when include_fields is None"
+
+
+def test_include_fields_missing_column_raises(tmp_path: Path, source_arrays: dict) -> None:
+    """Requesting a column that doesn't exist raises ValueError with a clear message."""
+    dp = PredictionWriterArrow(output_dir=str(tmp_path))
+    dp._write_arrow(
+        {
+            "x_ng": source_arrays["x"],
+            "obs_names_n": source_arrays["obs_names"],
+            "var_names_g": VAR_NAMES,
+        }
+    )
+
+    dadc = DistributedArrowDataCollection(
+        [str(tmp_path / "rank00_shard000000.arrow")],
+        shard_size=N_CELL,
+        include_fields=["x_ng", "nonexistent_column_n"],
+    )
+
+    with pytest.raises(ValueError, match="nonexistent_column_n") as exc_info:
+        dadc[list(range(N_CELL))]
+
+    msg = str(exc_info.value)
+    assert "not found in the Arrow shard schema" in msg
+    assert "Available per-row columns" in msg
