@@ -52,11 +52,27 @@ class DataPreformatter(CellariumModel, PredictMixin):
         output_dir:
             Directory in which Arrow IPC files will be written.  Created
             automatically if it does not exist.
+        compression:
+            Compression codec to use when writing Arrow IPC files.  Accepted
+            values:
+
+            * ``"zstd"`` *(default)* — best compression ratio; recommended for
+              raw integer count data (sparse) where 5–20× size reduction is
+              typical.  Decompresses at ~2 GB/s.
+            * ``"lz4"`` — lower compression ratio than ZSTD but decompresses at
+              ~4 GB/s; useful when CPU is the bottleneck.
+            * ``None`` — no compression; useful for local NVMe storage where I/O
+              bandwidth exceeds decompression throughput.
+
+            Decompression is handled automatically by
+            :class:`~cellarium.ml.data.DistributedArrowDataCollection` — no
+            reader-side configuration is required.
     """
 
-    def __init__(self, output_dir: str) -> None:
+    def __init__(self, output_dir: str, compression: str | None = "zstd") -> None:
         super().__init__()
         self.output_dir = output_dir
+        self.compression = compression
         self._shard_counter: int = 0
 
     def reset_parameters(self) -> None:
@@ -163,8 +179,9 @@ class DataPreformatter(CellariumModel, PredictMixin):
 
         rank = self._get_rank()
         filename = os.path.join(self.output_dir, f"rank{rank:02d}_shard{self._shard_counter:06d}.arrow")
+        options = pa.ipc.IpcWriteOptions(compression=self.compression)
         with pa.OSFile(filename, "wb") as sink:
-            with pa.ipc.new_file(sink, schema) as writer:
+            with pa.ipc.new_file(sink, schema, options=options) as writer:
                 writer.write_batch(record_batch)
 
         self._shard_counter += 1

@@ -194,6 +194,53 @@ def test_preformatter_tensor_input(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("compression", ["zstd", "lz4", None])
+def test_preformatter_compression(tmp_path: Path, compression: str | None) -> None:
+    """Compressed shards are smaller than uncompressed and round-trip values identically."""
+    rng = np.random.default_rng(77)
+    # Use sparse-ish integer counts (realistic UMI data) so compression has something to work with
+    n_cells, n_genes = 50, 200
+    x = rng.integers(0, 5, size=(n_cells, n_genes)).astype(np.float32)
+    x[x < 3] = 0  # ~60 % sparsity
+    obs = np.array([f"c{i:03d}" for i in range(n_cells)], dtype=object)
+    y = np.zeros(n_cells, dtype=np.int32)
+    var_names = np.array([f"gene{i:04d}" for i in range(n_genes)])
+
+    compressed_dir = tmp_path / f"compressed_{compression}"
+    uncompressed_dir = tmp_path / "uncompressed"
+
+    dp_compressed = DataPreformatter(output_dir=str(compressed_dir), compression=compression)
+    dp_uncompressed = DataPreformatter(output_dir=str(uncompressed_dir), compression=None)
+
+    batch = {"x_ng": x, "obs_names_n": obs, "y_n": y, "var_names_g": var_names}
+    dp_compressed._write_arrow(batch)
+    dp_uncompressed._write_arrow(batch)
+
+    compressed_file = compressed_dir / "rank00_shard000000.arrow"
+    uncompressed_file = uncompressed_dir / "rank00_shard000000.arrow"
+    assert compressed_file.exists()
+    assert uncompressed_file.exists()
+
+    if compression is not None:
+        assert compressed_file.stat().st_size < uncompressed_file.stat().st_size, (
+            f"{compression} compressed file should be smaller than uncompressed"
+        )
+
+    # Values must be identical regardless of compression
+    dadc = DistributedArrowDataCollection([str(compressed_file)], shard_size=n_cells)
+    result = dadc[list(range(n_cells))]
+    x_ng = result["x_ng"]
+    obs_names_n = result["obs_names_n"]
+    assert isinstance(x_ng, np.ndarray)
+    assert isinstance(obs_names_n, np.ndarray)
+    np.testing.assert_allclose(
+        x_ng.astype(np.float32),
+        x.astype(np.float16).astype(np.float32),
+        atol=1e-3,
+    )
+    np.testing.assert_array_equal(obs_names_n, obs)
+
+
 # ---------------------------------------------------------------------------
 # DistributedArrowDataCollection: init
 # ---------------------------------------------------------------------------
