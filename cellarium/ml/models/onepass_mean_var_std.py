@@ -103,6 +103,19 @@ class OnePassMeanVarStd(CellariumModel):
             batch_index_n = torch.zeros(x_ng.shape[0], dtype=torch.long, device=x_ng.device)
         else:
             batch_index_n = batch_index_n.long()  # needed for scatter_add_
+            if batch_index_n.numel() > 0:
+                lo = int(batch_index_n.min())
+                hi = int(batch_index_n.max())
+                if lo < 0 or hi >= self.n_batch:
+                    raise ValueError(
+                        f"batch_index_n values were supplied to model, and must be in [0, n_batch={self.n_batch}), "
+                        f"but got min={lo}, max={hi}. "
+                        f"If the data contains more unique batches than n_batch, set n_batch "
+                        f"to the correct number of unique batch labels. "
+                        f"If batch_index_n should not be used (e.g. computing global statistics "
+                        f"with n_batch=1), exclude it from the batch dict before it reaches this "
+                        f"model (e.g. via DistributedArrowDataCollection(include_fields=[...]))."
+                    )
 
         if self.algorithm == "naive":
             x_for_sum = x_ng
