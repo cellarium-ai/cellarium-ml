@@ -89,8 +89,10 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
         num_write_workers:
             Number of threads encoding and writing Arrow shards in parallel.
             Submission blocks when all workers are busy, bounding peak extra
-            memory to roughly
-            ``num_write_workers × shard_size × n_genes × itemsize`` bytes.
+            memory to roughly ``num_write_workers × shard_size × n_genes ×
+            itemsize`` bytes.  Defaults to ``2``; Arrow writes are I/O-bound
+            so additional threads rarely improve throughput but do increase
+            peak memory proportionally.
         matrix_dtype:
             NumPy dtype name for storing 2-D matrix fields (e.g. ``x_ng``).
             ``"float32"`` (default) preserves full single-precision range.
@@ -105,7 +107,7 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
         self,
         output_dir: str,
         compression: str | None = "zstd",
-        num_write_workers: int = 8,
+        num_write_workers: int = 2,
         matrix_dtype: str = "float32",
     ) -> None:
         super().__init__(write_interval="batch")
@@ -172,6 +174,11 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
             if arr is not None:
                 np_batch[key] = arr
 
+        # Release the original batch reference now that all arrays are in np_batch.
+        # The work-queue entry has already been dropped by the executor at this point,
+        # so this is the last external reference to the prediction dict.
+        del batch
+
         if not np_batch:
             return
 
@@ -229,10 +236,10 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
                 col = pa.array(val.tolist(), type=pa.large_utf8())
                 arrow_fields.append(pa.field(key, pa.large_utf8()))
             elif val.dtype.kind in ("i", "u"):
-                col = pa.array(val.astype(np.int32), type=pa.int32())
+                col = pa.array(val.astype(np.int32, copy=False), type=pa.int32())
                 arrow_fields.append(pa.field(key, pa.int32()))
             else:
-                col = pa.array(val.astype(np.float32), type=pa.float32())
+                col = pa.array(val.astype(np.float32, copy=False), type=pa.float32())
                 arrow_fields.append(pa.field(key, pa.float32()))
             arrow_columns.append(col)
 
@@ -340,3 +347,19 @@ class PredictionWriterArrow(pl.callbacks.BasePredictionWriter):
     def on_predict_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         """Drain the write pool and re-raise any write exceptions."""
         self.flush()
+
+    def on_exception(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        exception: BaseException,
+    ) -> None:
+        """On any exception, shut down the write pool immediately without waiting.
+
+        Running writes are allowed to finish (they cannot be cancelled), but no
+        new writes will be accepted and pending batch references are released as
+        soon as each thread completes.  This prevents the thread pool from
+        holding large batch tensors alive after prediction has already failed.
+        """
+        self._executor.shutdown(wait=False)
+        self._futures.clear()
