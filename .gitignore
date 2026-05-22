@@ -1,5 +1,4 @@
 __pycache__/
-data/
 runs/
 .ipynb_checkpoints
 .mypy_cache/
