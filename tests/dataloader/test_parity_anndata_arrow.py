@@ -18,12 +18,12 @@ import torch
 from anndata import AnnData
 from torch.utils.data import DataLoader
 
+from cellarium.ml.callbacks.prediction_writer_arrow import PredictionWriterArrow
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     DistributedArrowDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.models.data_preformatter import DataPreformatter
 from cellarium.ml.transforms import Log1p, NormalizeTotal
 from cellarium.ml.utilities.data import (
     AnnDataField,
@@ -142,7 +142,7 @@ def dadc_arrow(
     #   x_ng               → per-row FixedSizeBinary float16
     #   obs_names_n        → per-row large_utf8
     #   cell_type_n        → per-row int32
-    dp = DataPreformatter(output_dir=str(arrow_dir))
+    dp = PredictionWriterArrow(output_dir=str(arrow_dir))
     dp._write_arrow(
         {
             "x_ng": x_ng,

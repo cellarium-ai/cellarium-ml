@@ -854,17 +854,20 @@ def contrastive_mlp(args: ArgsType = None) -> None:
 @register_model
 def data_preformatter(args: ArgsType = None) -> None:
     r"""
-    CLI for converting AnnData h5ad shards to Arrow IPC (Feather v2) shards via
-    :class:`~cellarium.ml.models.DataPreformatter`.
+    CLI for converting AnnData h5ad shards to Arrow IPC (Feather v2) shards.
 
-    Runs in ``predict`` mode: each batch produced by the dataloader (after all
-    ``cpu_transforms`` and ``transforms`` have been applied) is written as one Arrow
-    IPC file to ``output_dir``.
+    Uses :class:`~cellarium.ml.models.DataPreformatter` (a pass-through model)
+    together with the :class:`~cellarium.ml.callbacks.PredictionWriterArrow`
+    callback.  Each batch produced by the dataloader (after all
+    ``cpu_transforms`` and ``transforms`` have been applied) is written as one
+    Arrow IPC file to ``output_dir`` by the callback.
+
+    ``return_predictions: false`` must be included so that Lightning does not
+    accumulate predictions in memory.
 
     Example run::
 
         cellarium-ml data_preformatter predict \\
-            --model.model.init_args.output_dir ./arrow_output \\
             --data.dadc.class_path cellarium.ml.data.DistributedAnnDataCollection \\
             --data.dadc.init_args.filenames "gs://bucket/adata_{0..3}.h5ad" \\
             --data.dadc.init_args.shard_size 1800 \\
@@ -876,6 +879,8 @@ def data_preformatter(args: ArgsType = None) -> None:
             --data.num_workers 4 \\
             --trainer.accelerator cpu \\
             --trainer.devices 1 \\
+            --trainer.callbacks=[{\"class_path\":\"cellarium.ml.callbacks.PredictionWriterArrow\",
+            \"init_args\":{\"output_dir\":\"./arrow_output\"}}] \\
             --return_predictions false
 
     Args:

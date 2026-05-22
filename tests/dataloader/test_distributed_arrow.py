@@ -10,11 +10,11 @@ import numpy as np
 import pytest
 import torch
 
+from cellarium.ml.callbacks.prediction_writer_arrow import PredictionWriterArrow
 from cellarium.ml.data import (
     DistributedArrowDataCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.models.data_preformatter import DataPreformatter
 
 # ---------------------------------------------------------------------------
 # Shared data dimensions
@@ -29,11 +29,11 @@ Y_CATEGORIES = np.array(["type_a", "type_b", "type_c"])
 
 
 # ---------------------------------------------------------------------------
-# Helper: write a single Arrow shard via DataPreformatter._write_arrow
+# Helper: write a single Arrow shard via PredictionWriterArrow._write_arrow
 # ---------------------------------------------------------------------------
 
 
-def _write_shard(dp: DataPreformatter, x: np.ndarray, obs_names: np.ndarray, y: np.ndarray) -> None:
+def _write_shard(dp: PredictionWriterArrow, x: np.ndarray, obs_names: np.ndarray, y: np.ndarray) -> None:
     """Write one shard for the given slice of cells."""
     dp._write_arrow(
         {
@@ -66,7 +66,7 @@ def source_arrays() -> dict:
 def arrows_path(tmp_path_factory: pytest.TempPathFactory, source_arrays: dict) -> Path:
     """Write three Arrow shards matching SHARD_LIMITS to a temp directory."""
     tmp_path = tmp_path_factory.mktemp("arrows")
-    dp = DataPreformatter(output_dir=str(tmp_path))
+    dp = PredictionWriterArrow(output_dir=str(tmp_path))
     starts = [0] + SHARD_LIMITS[:-1]
     for start, end in zip(starts, SHARD_LIMITS):
         _write_shard(
@@ -92,7 +92,7 @@ def dat(arrows_path: Path, request: pytest.FixtureRequest) -> DistributedArrowDa
 
 
 # ---------------------------------------------------------------------------
-# DataPreformatter: field classification and file writing
+# PredictionWriterArrow: field classification and file writing
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +100,7 @@ def test_preformatter_field_classification(tmp_path: Path) -> None:
     """Check that the right fields land in columns vs schema metadata."""
     import pyarrow as pa
 
-    dp = DataPreformatter(output_dir=str(tmp_path))
+    dp = PredictionWriterArrow(output_dir=str(tmp_path))
     rng = np.random.default_rng(0)
     x = rng.standard_normal((4, N_GENE)).astype(np.float32)
     obs_names = np.array([f"c{i}" for i in range(4)], dtype=object)
@@ -152,7 +152,7 @@ def test_preformatter_field_classification(tmp_path: Path) -> None:
 
 def test_preformatter_shard_counter(tmp_path: Path) -> None:
     """Counter increments and files are named correctly."""
-    dp = DataPreformatter(output_dir=str(tmp_path))
+    dp = PredictionWriterArrow(output_dir=str(tmp_path))
     rng = np.random.default_rng(1)
     x = rng.standard_normal((2, N_GENE)).astype(np.float32)
     obs = np.array(["a", "b"], dtype=object)
@@ -165,8 +165,8 @@ def test_preformatter_shard_counter(tmp_path: Path) -> None:
 
 
 def test_preformatter_tensor_input(tmp_path: Path) -> None:
-    """DataPreformatter accepts torch.Tensor inputs via _to_numpy."""
-    dp = DataPreformatter(output_dir=str(tmp_path))
+    """PredictionWriterArrow accepts torch.Tensor inputs via _to_numpy."""
+    dp = PredictionWriterArrow(output_dir=str(tmp_path))
     x_tensor = torch.randn(3, N_GENE)
     obs = np.array([f"c{i}" for i in range(3)], dtype=object)
     y = np.array([0, 0, 1], dtype=np.int32)
@@ -209,8 +209,8 @@ def test_preformatter_compression(tmp_path: Path, compression: str | None) -> No
     compressed_dir = tmp_path / f"compressed_{compression}"
     uncompressed_dir = tmp_path / "uncompressed"
 
-    dp_compressed = DataPreformatter(output_dir=str(compressed_dir), compression=compression)
-    dp_uncompressed = DataPreformatter(output_dir=str(uncompressed_dir), compression=None)
+    dp_compressed = PredictionWriterArrow(output_dir=str(compressed_dir), compression=compression)
+    dp_uncompressed = PredictionWriterArrow(output_dir=str(uncompressed_dir), compression=None)
 
     batch = {"x_ng": x, "obs_names_n": obs, "y_n": y, "var_names_g": var_names}
     dp_compressed._write_arrow(batch)
@@ -241,6 +241,44 @@ def test_preformatter_compression(tmp_path: Path, compression: str | None) -> No
     np.testing.assert_array_equal(obs_names_n, obs)
 
 
+def test_preformatter_async_writes(tmp_path: Path) -> None:
+    """predict() offloads writes to the thread pool; on_predict_end() flushes and all files are readable."""
+    rng = np.random.default_rng(99)
+    n_cells, n_genes = 20, 10
+    var_names = np.array([f"gene{i:04d}" for i in range(n_genes)])
+
+    # Use 3 workers so we exercise the bounded-queue backpressure path with 12 batches.
+    dp = PredictionWriterArrow(output_dir=str(tmp_path), compression=None, num_write_workers=3)
+
+    n_batches = 12
+    batches = []
+    for i in range(n_batches):
+        x = rng.standard_normal((n_cells, n_genes)).astype(np.float32)
+        obs = np.array([f"b{i}c{j:03d}" for j in range(n_cells)], dtype=object)
+        y = np.zeros(n_cells, dtype=np.int32)
+        batches.append({"x_ng": x, "obs_names_n": obs, "y_n": y, "var_names_g": var_names})
+        # _submit_write is async — files may not exist yet
+        dp._submit_write(batches[-1])
+
+    assert dp._shard_counter == n_batches, "counter must be incremented synchronously in main thread"
+
+    # Flush — blocks until all worker threads finish
+    dp.flush()
+
+    for i in range(n_batches):
+        path = tmp_path / f"rank00_shard{i:06d}.arrow"
+        assert path.exists(), f"shard {i} not written after flush"
+
+    # Verify one shard round-trips correctly
+    dadc = DistributedArrowDataCollection([str(tmp_path / "rank00_shard000000.arrow")], shard_size=n_cells)
+    result = dadc[list(range(n_cells))]
+    np.testing.assert_allclose(
+        result["x_ng"].astype(np.float32),
+        batches[0]["x_ng"].astype(np.float16).astype(np.float32),
+        atol=1e-3,
+    )
+
+
 # ---------------------------------------------------------------------------
 # DistributedArrowDataCollection: init
 # ---------------------------------------------------------------------------
@@ -266,7 +304,7 @@ def test_init_shard_size(tmp_path: Path, num_shards: int, last_shard_size: int |
     shard_size = 3
     rng = np.random.default_rng(99)
     out_dir = tmp_path / f"shards_{num_shards}_{last_shard_size}"
-    dp = DataPreformatter(output_dir=str(out_dir))
+    dp = PredictionWriterArrow(output_dir=str(out_dir))
     filenames = []
     for i in range(num_shards):
         n = last_shard_size if (last_shard_size is not None and i == num_shards - 1) else shard_size

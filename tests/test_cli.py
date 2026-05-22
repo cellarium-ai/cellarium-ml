@@ -906,8 +906,6 @@ def test_data_preformatter(tmp_path: Path) -> None:
         - cellarium.ml.transforms.Log1p
       model:
         class_path: cellarium.ml.models.DataPreformatter
-        init_args:
-          output_dir: {arrow_output}
     data:
       dadc:
         class_path: cellarium.ml.data.DistributedAnnDataCollection
@@ -933,6 +931,10 @@ def test_data_preformatter(tmp_path: Path) -> None:
       accelerator: cpu
       devices: 1
       limit_predict_batches: 2
+      callbacks:
+        - class_path: cellarium.ml.callbacks.PredictionWriterArrow
+          init_args:
+            output_dir: {arrow_output}
     return_predictions: false
     """
     with open(dp_config_path := str(tmp_path / "dp_config.yaml"), "w") as f:
