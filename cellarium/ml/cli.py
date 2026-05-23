@@ -22,7 +22,6 @@ from jsonargparse import Namespace, class_from_function
 from jsonargparse._loaders_dumpers import DefaultLoader
 from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
-from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
@@ -309,12 +308,20 @@ def compute_var_names_g(
     """
     adata = data.dadc[0]
     batch = tree_map(lambda field: field(adata), data.batch_keys)
-    pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
-    with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
-        fake_batch = collate_fn([batch])
-        with FakeCopyMode(fake_mode):
-            fake_pipeline = copy.deepcopy(pipeline)
-        output = fake_pipeline(fake_batch)
+    # Transforms may have been instantiated under torch.device("meta") by Lightning CLI
+    # (see CellariumModule.configure_model).  Deep-copy each transform and materialise
+    # any meta-device parameters to uninitialised CPU tensors so the pipeline can run
+    # with real tensor inputs without calling reset_parameters.
+    all_transforms: list[torch.nn.Module] = []
+    for t in list(cpu_transforms or []) + list(transforms or []):
+        t_copy = copy.deepcopy(t)
+        if any(p.device.type == "meta" for p in t_copy.parameters()) or any(
+            b.device.type == "meta" for b in t_copy.buffers()
+        ):
+            t_copy.to_empty(device="cpu")
+        all_transforms.append(t_copy)
+    pipeline = CellariumPipeline(all_transforms)
+    output = pipeline(collate_fn([batch]))
     return output["var_names_g"]
 
 

@@ -71,6 +71,8 @@ class AnnDataField:
 
 
 def convert_to_tensor(value: np.ndarray) -> np.ndarray | torch.Tensor:
+    if isinstance(value, torch.Tensor) or scipy.sparse.issparse(value):
+        return value
     if np.issubdtype(value.dtype, np.str_) or np.issubdtype(value.dtype, np.object_):
         return value
     return torch.tensor(value, device="cpu")
@@ -111,6 +113,16 @@ def collate_fn(
             if len(batch) > 1 and not all(subkeys == data[key].keys() for data in batch[1:]):  # type: ignore[union-attr]
                 raise ValueError(f"All '{key}' sub-dictionaries in the batch must have the same subkeys.")
             value = {subkey: np.concatenate([data[key][subkey] for data in batch], axis=0) for subkey in subkeys}
+        elif scipy.sparse.issparse(batch[0][key]):
+            value = scipy.sparse.vstack([data[key] for data in batch]) if len(batch) > 1 else batch[0][key]
+        elif isinstance(batch[0][key], torch.Tensor):
+            # Sparse CSR tensors cannot be passed to np.concatenate. Since IterableDataset
+            # always yields complete batches (len == 1 here), a direct passthrough is safe.
+            # For the rare len > 1 dense case, fall back to torch.cat.
+            if len(batch) == 1:
+                value = batch[0][key]
+            else:
+                value = torch.cat([data[key] for data in batch], dim=0)
         else:
             value = np.concatenate([data[key] for data in batch], axis=0)
 
@@ -130,6 +142,53 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
         Dense matrix.
     """
     return x.toarray()
+
+
+def keep_sparse(x: scipy.sparse.spmatrix) -> scipy.sparse.spmatrix:
+    """
+    Identity function for scipy sparse matrices.
+
+    Use as ``convert_fn`` for :class:`~cellarium.ml.utilities.data.AnnDataField` when the
+    sparse matrix should remain sparse inside the dataloader worker. A
+    :class:`~cellarium.ml.transforms.Filter` cpu_transform will then filter the columns and
+    convert to :class:`torch.sparse_csr_tensor` — keeping the transferred data volume small
+    before it reaches the main process and the PCIe bus.
+
+    Args:
+        x: Sparse matrix.
+
+    Returns:
+        The same sparse matrix, unchanged.
+    """
+    return x
+
+
+def to_torch_sparse_csr(x: scipy.sparse.spmatrix) -> torch.Tensor:
+    """
+    Convert a scipy sparse matrix to a :class:`torch.sparse_csr_tensor` (float32, CPU).
+
+    Use as ``convert_fn`` for :class:`~cellarium.ml.utilities.data.AnnDataField` when no
+    :class:`~cellarium.ml.transforms.Filter` cpu_transform is in the pipeline and the full
+    (unfiltered) gene set should still be transferred sparsely.  The resulting
+    :class:`torch.sparse_csr_tensor` is placed in shared memory by dataloader workers
+    for zero-copy transfer to the main process, then moved to GPU and densified by
+    :class:`~cellarium.ml.transforms.Densify`.
+
+    Args:
+        x: Sparse matrix.  Converted to CSR format if not already.
+
+    Returns:
+        A :class:`torch.sparse_csr_tensor` on CPU.
+    """
+    csr = x.tocsr().astype(np.float32, copy=False)
+    return torch.sparse_csr_tensor(
+        torch.from_numpy(csr.indptr.astype(np.int32, copy=False)),
+        torch.from_numpy(csr.indices.astype(np.int32, copy=False)),
+        torch.from_numpy(csr.data),
+        size=csr.shape,
+        dtype=torch.float32,
+        device="cpu",
+    )
 
 
 def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
