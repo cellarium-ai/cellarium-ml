@@ -11,7 +11,7 @@ This module contains helper functions for data loading and processing.
 from collections.abc import Callable
 from dataclasses import dataclass
 from operator import attrgetter
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -70,7 +70,7 @@ class AnnDataField:
         return value
 
 
-def convert_to_tensor(value: np.ndarray) -> np.ndarray | torch.Tensor:
+def convert_to_tensor(value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor) -> np.ndarray | torch.Tensor:
     if isinstance(value, torch.Tensor) or scipy.sparse.issparse(value):
         return value
     if np.issubdtype(value.dtype, np.str_) or np.issubdtype(value.dtype, np.object_):
@@ -122,7 +122,10 @@ def collate_fn(
             if len(batch) == 1:
                 value = batch[0][key]
             else:
-                value = torch.cat([data[key] for data in batch], dim=0)
+                value = torch.cat(  # type: ignore[assignment]
+                    [cast(torch.Tensor, data[key]) for data in batch],
+                    dim=0,
+                )
         else:
             value = np.concatenate([data[key] for data in batch], axis=0)
 
