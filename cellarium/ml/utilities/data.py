@@ -8,11 +8,11 @@ Data utilities
 This module contains helper functions for data loading and processing.
 """
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from operator import attrgetter
 from typing import Any, cast
-import warnings
 
 import numpy as np
 import pandas as pd

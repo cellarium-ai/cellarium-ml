@@ -33,7 +33,7 @@ class Densify(nn.Module):
         try:
             if scipy.sparse.issparse(x_ng):
                 raise TypeError(
-                    "Densify received a scipy sparse matrix, which should have been converted to " \
+                    "Densify received a scipy sparse matrix, which should have been converted to "
                     "torch.sparse_csr_tensor earlier in the pipeline. \n\n"
                     "The convert_fn used for x_ng (sparse mode, where Densify is used) must be either:\n"
                     "    - keep_sparse: ensure Filter is in model.cpu_transforms to convert scipy sparse to "
