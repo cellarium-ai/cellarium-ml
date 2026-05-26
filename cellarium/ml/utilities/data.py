@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from operator import attrgetter
 from typing import Any, cast
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -184,14 +185,22 @@ def to_torch_sparse_csr(x: scipy.sparse.spmatrix) -> torch.Tensor:
         A :class:`torch.sparse_csr_tensor` on CPU.
     """
     csr = x.tocsr().astype(np.float32, copy=False)
-    return torch.sparse_csr_tensor(
-        torch.from_numpy(csr.indptr.astype(np.int32, copy=False)),
-        torch.from_numpy(csr.indices.astype(np.int32, copy=False)),
-        torch.from_numpy(csr.data),
-        size=csr.shape,
-        dtype=torch.float32,
-        device="cpu",
-    )
+    # Suppress two PyTorch warnings that fire on every sparse tensor creation:
+    #   - "Sparse CSR tensor support is in beta state" (from SparseCsrTensorImpl.cpp)
+    #   - "Sparse invariant checks are implicitly disabled" (Mac-specific, Context.cpp)
+    with (
+        warnings.catch_warnings(),
+        torch.sparse.check_sparse_tensor_invariants(False),
+    ):
+        warnings.filterwarnings("ignore", message="Sparse CSR tensor support is in beta state")
+        return torch.sparse_csr_tensor(
+            torch.from_numpy(csr.indptr.astype(np.int32, copy=False)),
+            torch.from_numpy(csr.indices.astype(np.int32, copy=False)),
+            torch.from_numpy(csr.data),
+            size=csr.shape,
+            dtype=torch.float32,
+            device="cpu",
+        )
 
 
 def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
