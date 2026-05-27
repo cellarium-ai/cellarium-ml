@@ -3,11 +3,10 @@
 
 import numpy as np
 import pytest
+import scipy.sparse
 import torch
 
 from cellarium.ml import CellariumPipeline
-import scipy.sparse
-
 from cellarium.ml.transforms import Densify, DivideByScale, Filter, Log1p, NormalizeTotal, ZScore
 from cellarium.ml.utilities.data import to_torch_sparse_csr
 
