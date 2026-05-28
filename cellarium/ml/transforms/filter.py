@@ -6,9 +6,11 @@ from functools import cache
 from typing import Any
 
 import numpy as np
+import scipy.sparse
 import torch
 from torch import nn
 
+from cellarium.ml.utilities.data import to_torch_sparse_csr
 from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
@@ -109,16 +111,24 @@ class Filter(nn.Module):
             return src_indices_ordered, np.array(out_indices, dtype=np.intp)
         return src_indices_ordered
 
-    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | np.ndarray]:
+    def forward(
+        self, x_ng: torch.Tensor | scipy.sparse.spmatrix, var_names_g: np.ndarray
+    ) -> dict[str, torch.Tensor | np.ndarray]:
         """
         .. note::
 
             When used with :class:`~cellarium.ml.core.CellariumModule` or :class:`~cellarium.ml.core.CellariumPipeline`,
             ``x_ng`` and ``var_names_g`` keys in the input dictionary will be overwritten with the filtered values.
 
+            When ``x_ng`` is a :class:`scipy.sparse.spmatrix` (e.g. when this transform is used as a
+            ``cpu_transform`` operating on data from
+            :func:`~cellarium.ml.utilities.data.keep_sparse`), column filtering is performed with
+            scipy and the result is returned as a :class:`torch.sparse_csr_tensor`.  The
+            ``allow_missing=True`` path always returns a dense :class:`torch.Tensor`.
+
         Args:
             x_ng:
-                Gene counts.
+                Gene counts.  Either a dense :class:`torch.Tensor` or a scipy sparse matrix.
             var_names_g:
                 The list of the variable names in the input data.
 
@@ -130,6 +140,9 @@ class Filter(nn.Module):
               otherwise ``(n, num_matched)``.
             - ``var_names_g``: Gene names corresponding to the output columns.
         """
+        if scipy.sparse.issparse(x_ng):
+            return self._forward_sparse(x_ng, var_names_g)
+
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
 
         result = self.filter(tuple(var_names_g.tolist()))
@@ -152,6 +165,50 @@ class Filter(nn.Module):
             var_names_g = var_names_g[result]
 
         return {"x_ng": x_ng, "var_names_g": var_names_g}
+
+    def _forward_sparse(
+        self,
+        x_ng: scipy.sparse.spmatrix,
+        var_names_g: np.ndarray,
+    ) -> dict[str, torch.Tensor | np.ndarray]:
+        """
+        Sparse-input path for :meth:`forward`.
+
+        Filters columns using scipy (no dense allocation for the full gene set), then converts
+        the result to a :class:`torch.sparse_csr_tensor` so that dataloader workers can place
+        it in shared memory for zero-copy transfer to the main process.
+
+        The ``allow_missing=True`` path densifies after filtering because zero-fill semantics
+        require allocating the full output width.
+        """
+        if x_ng.shape[1] != len(var_names_g):
+            raise ValueError(
+                f"The number of `x_ng` columns must match the `var_names_g` length. "
+                f"Got {x_ng.shape[1]} != {len(var_names_g)}"
+            )
+
+        result = self.filter(tuple(var_names_g.tolist()))
+
+        if self.allow_missing:
+            src_indices, out_indices = result
+            assert isinstance(src_indices, np.ndarray) and isinstance(out_indices, np.ndarray)
+            # Column selection with scipy avoids densifying the full gene set.
+            x_filtered = np.asarray(x_ng[:, src_indices].todense(), dtype=np.float32)
+            x_out = torch.zeros(x_ng.shape[0], len(self.filter_list), dtype=torch.float32)
+            x_out[:, out_indices] = torch.from_numpy(x_filtered)
+            return {"x_ng": x_out, "var_names_g": self.filter_list.copy()}
+        elif self.ordering:
+            assert isinstance(result, np.ndarray)
+            return {
+                "x_ng": to_torch_sparse_csr(x_ng[:, result]),
+                "var_names_g": self.filter_list.copy(),
+            }
+        else:
+            assert isinstance(result, np.ndarray)
+            return {
+                "x_ng": to_torch_sparse_csr(x_ng[:, result]),
+                "var_names_g": var_names_g[result],
+            }
 
     def __repr__(self) -> str:
         return (
