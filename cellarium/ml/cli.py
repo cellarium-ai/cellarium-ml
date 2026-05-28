@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from operator import attrgetter
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -22,7 +22,6 @@ from jsonargparse import Namespace, class_from_function
 from jsonargparse._loaders_dumpers import DefaultLoader
 from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
-from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
@@ -307,14 +306,89 @@ def compute_var_names_g(
     Returns:
         The variable names.
     """
+    import scipy.sparse
+
+    from cellarium.ml.transforms.densify import Densify
+
     adata = data.dadc[0]
     batch = tree_map(lambda field: field(adata), data.batch_keys)
-    pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
-    with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
-        fake_batch = collate_fn([batch])
-        with FakeCopyMode(fake_mode):
-            fake_pipeline = copy.deepcopy(pipeline)
-        output = fake_pipeline(fake_batch)
+    # Transforms may have been instantiated under torch.device("meta") by Lightning CLI
+    # (see CellariumModule.configure_model).  Deep-copy each transform and materialise
+    # any meta-device parameters to uninitialised CPU tensors so the pipeline can run
+    # with real tensor inputs without calling reset_parameters.
+    all_transforms: list[torch.nn.Module] = []
+    for t in list(cpu_transforms or []) + list(transforms or []):
+        t_copy = copy.deepcopy(t)
+        if any(p.device.type == "meta" for p in t_copy.parameters()) or any(
+            b.device.type == "meta" for b in t_copy.buffers()
+        ):
+            t_copy.to_empty(device="cpu")
+        all_transforms.append(t_copy)
+
+    # Pre-flight sparse configuration checks: inspect x_ng before running the
+    # pipeline to give actionable errors instead of confusing mid-pipeline failures.
+    # These checks also fire when compute_var_names_g is called directly from Python
+    # (without going through the CLI config validator in before_instantiate_classes).
+    collated = collate_fn([batch])
+    x_ng = collated.get("x_ng")
+    if x_ng is not None:
+        if scipy.sparse.issparse(x_ng):
+            # scipy sparse x_ng is valid only if Filter is in the transform pipeline
+            # (Filter converts scipy sparse → torch.sparse_csr_tensor).
+            # If there's no Filter, keep_sparse was used without a required cpu_transform.
+            has_filter = any(type(t).__name__ == "Filter" for t in all_transforms)
+            if not has_filter:
+                raise ValueError(
+                    "Configuration Error: x_ng is a scipy sparse matrix in compute_var_names_g. "
+                    "The `keep_sparse` convert_fn requires a Filter in `model.cpu_transforms` to convert "
+                    "scipy sparse to torch.sparse_csr_tensor before this point.\n\n"
+                    "Either:\n"
+                    "  (1) Add Filter to `model.cpu_transforms` with your gene filter_list, OR\n"
+                    "  (2) Switch to `convert_fn: cellarium.ml.utilities.data.to_torch_sparse_csr` and add "
+                    "`Densify` as the first entry in `model.transforms`.\n"
+                )
+        if isinstance(x_ng, torch.Tensor) and x_ng.is_sparse_csr:
+            has_densify = any(isinstance(t, Densify) for t in all_transforms)
+            if not has_densify:
+                raise ValueError(
+                    "Configuration Error: x_ng is a torch.sparse_csr_tensor but no `Densify` transform "
+                    "was found in the combined cpu_transforms + transforms list.\n"
+                    "`Densify` must be the first entry in `model.transforms` to convert "
+                    "torch.sparse_csr_tensor to dense before any dense-only transforms run.\n\n"
+                    "Add to model.transforms (as first item):\n"
+                    "  - cellarium.ml.transforms.Densify\n"
+                )
+
+    pipeline = CellariumPipeline(all_transforms)
+    try:
+        output = pipeline(collated)
+    except (RuntimeError, ValueError, TypeError) as e:
+        error_msg = str(e)
+        if "stride" in error_msg or "sparse" in error_msg.lower() or "csr_matrix" in error_msg:
+            raise ValueError(
+                f"compute_var_names_g pipeline failed: {error_msg}\n\n"
+                "This typically occurs when using the sparse data path (keep_sparse or to_torch_sparse_csr) "
+                "and Filter is incorrectly placed in model.transforms (GPU transforms) instead of "
+                "model.cpu_transforms (CPU transforms). When using sparse data, Filter MUST be in "
+                "model.cpu_transforms to filter and convert to torch.sparse_csr_tensor before GPU transfer. "
+                "Can also occur if Densify is not included as the first transform.\n"
+                "\n\nCorrect configuration:\n"
+                "  model:\n"
+                "    cpu_transforms:\n"
+                "      - class_path: cellarium.ml.transforms.Filter\n"
+                "        init_args:\n"
+                "          filter_list: [...]\n"
+                "    transforms:\n"
+                "      - cellarium.ml.transforms.Densify\n"
+                "      - cellarium.ml.transforms.NormalizeTotal\n"
+                "      - ...\n"
+                "  data:\n"
+                "    batch_keys:\n"
+                "      x_ng:\n"
+                "        attr: X\n"
+                "        convert_fn: cellarium.ml.utilities.data.keep_sparse"
+            ) from e
+        raise
     return output["var_names_g"]
 
 
@@ -343,6 +417,136 @@ def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
         return int(x.apply(lambda col: len(col.cat.categories)).product())
     else:
         return len(x.cat.categories)
+
+
+def _get_transform_name(transform_spec: Any) -> str | None:
+    """
+    Extract a canonical transform class name from a transform specification.
+    Handles both string paths, short names, class_path dicts, and instantiated modules.
+    Returns None if unable to extract.
+    """
+    if isinstance(transform_spec, str):
+        # Already a string path like "cellarium.ml.transforms.Filter" or short name like "Filter"
+        return transform_spec.split(".")[-1] if "." in transform_spec else transform_spec
+    elif isinstance(transform_spec, dict):
+        # YAML class_path format: {"class_path": "cellarium.ml.transforms.Filter", "init_args": {...}}
+        if "class_path" in transform_spec:
+            class_path = transform_spec["class_path"]
+            return class_path.split(".")[-1]
+    elif isinstance(transform_spec, torch.nn.Module):
+        # Instantiated module
+        return transform_spec.__class__.__name__
+    return None
+
+
+def _validate_sparse_config(config: dict[Any, Any] | Namespace) -> list[str]:
+    """
+    Validate sparse data path configuration.
+    Raises ValueError for fatal misconfigurations, returns list of advisory warnings.
+    Checks for common misconfigurations like Filter in wrong transform list.
+    """
+    warnings_list: list[str] = []
+
+    try:
+        # Convert Namespace to dict if needed
+        if isinstance(config, Namespace):
+            config = vars(config)
+
+        # Try to access model and data config; skip if not present (e.g., during --help)
+        if "model" not in config or "data" not in config:
+            return warnings_list
+
+        model_config = config.get("model", {})
+        data_config = config.get("data", {})
+
+        # Extract batch_keys and x_ng convert_fn
+        batch_keys = data_config.get("batch_keys", {})
+        x_ng_config = batch_keys.get("x_ng", {})
+        convert_fn = x_ng_config.get("convert_fn", "")
+        if isinstance(convert_fn, str):
+            convert_fn_name = convert_fn.split(".")[-1]
+        else:
+            convert_fn_name = ""
+
+        # Only validate if using sparse convert_fn
+        if convert_fn_name not in ("keep_sparse", "to_torch_sparse_csr"):
+            return warnings_list
+
+        # Extract cpu_transforms and transforms
+        cpu_transforms = model_config.get("cpu_transforms", [])
+        if cpu_transforms is None:
+            cpu_transforms = []
+        transforms = model_config.get("transforms", [])
+        if transforms is None:
+            transforms = []
+
+        # Extract transform names from both lists
+        cpu_transform_names = [_get_transform_name(t) for t in cpu_transforms]
+        cpu_transform_names = [n for n in cpu_transform_names if n]  # filter None
+        transform_names = [_get_transform_name(t) for t in transforms]
+        transform_names = [n for n in transform_names if n]  # filter None
+
+        # error: keep_sparse without Filter in cpu_transforms
+        if convert_fn_name == "keep_sparse" and "Filter" not in cpu_transform_names:
+            raise ValueError(
+                "Configuration Error: Using `keep_sparse` but Filter not found in `model.cpu_transforms`.\n"
+                "The `keep_sparse` convert_fn requires a Filter cpu_transform to filter sparse data and convert to "
+                "torch.sparse_csr_tensor BEFORE GPU transfer.\n\n"
+                "Either:\n"
+                "  (1) Add Filter to `model.cpu_transforms` with your gene filter_list, OR\n"
+                "  (2) Switch to `convert_fn: cellarium.ml.utilities.data.to_torch_sparse_csr` and ensure "
+                "`Densify` is the first entry in `model.transforms`.\n"
+            )
+
+        # error: Sparse path without Densify
+        if convert_fn_name in ("keep_sparse", "to_torch_sparse_csr") and "Densify" not in transform_names:
+            raise ValueError(
+                f"Configuration Error: Using sparse data path ({convert_fn_name}) but `Densify` not found in "
+                f"`model.transforms`.\n"
+                f"`Densify` must be the first entry in `model.transforms` to convert torch.sparse_csr_tensor to dense "
+                f"on GPU before any dense-only transforms run.\n\n"
+                f"Add to model.transforms (as first item):\n"
+                f"  - cellarium.ml.transforms.Densify\n"
+            )
+
+        # warning: keep_sparse with Filter in wrong transform list
+        if convert_fn_name == "keep_sparse":
+            if "Filter" in transform_names and "Filter" not in cpu_transform_names:
+                warnings_list.append(
+                    "Configuration Issue: Using `keep_sparse` with Filter in `model.transforms` (GPU transforms) "
+                    "instead of `model.cpu_transforms` (CPU transforms). \n"
+                    "When using `keep_sparse`, Filter MUST be in `model.cpu_transforms` to filter and convert to "
+                    "torch.sparse_csr_tensor BEFORE GPU transfer. Placing Filter in GPU transforms defeats the "
+                    "purpose of sparse transfer.\n\n"
+                    "Correct configuration:\n"
+                    "  model:\n"
+                    "    cpu_transforms:\n"
+                    "      - class_path: cellarium.ml.transforms.Filter\n"
+                    "        init_args:\n"
+                    "          filter_list: [...]\n"
+                    "    transforms:\n"
+                    "      - cellarium.ml.transforms.Densify\n"
+                    "      - ...\n"
+                )
+
+        # warning: Densify not first in transforms
+        if convert_fn_name in ("keep_sparse", "to_torch_sparse_csr"):
+            if transform_names and transform_names[0] != "Densify" and "Densify" in transform_names:
+                densify_idx = transform_names.index("Densify")
+                warnings_list.append(
+                    f"Configuration Issue: `Densify` found at position {densify_idx} in `model.transforms` but should "
+                    f"be first (position 0). Dense-only transforms must run AFTER densification.\n"
+                    f"Move `Densify` to the first entry in `model.transforms`.\n"
+                )
+
+    except ValueError:
+        # Re-raise ValueError (fatal configuration errors)
+        raise
+    except Exception:
+        # Silently skip validation if config structure is unexpected
+        pass
+
+    return warnings_list
 
 
 def lightning_cli_factory(
@@ -412,6 +616,11 @@ def lightning_cli_factory(
                         "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
                         UserWarning,
                     )
+            # Validate sparse data path configuration (pass subcommand-scoped config)
+            subcommand_config = self.config.get(cast(str, self.subcommand), {})
+            sparse_config_warnings = _validate_sparse_config(subcommand_config)
+            for warning_msg in sparse_config_warnings:
+                warnings.warn(warning_msg, UserWarning)
             return super().before_instantiate_classes()
 
         def instantiate_classes(self) -> None:
