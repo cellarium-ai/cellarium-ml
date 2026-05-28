@@ -3,10 +3,12 @@
 
 import numpy as np
 import pytest
+import scipy.sparse
 import torch
 
 from cellarium.ml import CellariumPipeline
-from cellarium.ml.transforms import DivideByScale, Filter, Log1p, NormalizeTotal, ZScore
+from cellarium.ml.transforms import Densify, DivideByScale, Filter, Log1p, NormalizeTotal, ZScore
+from cellarium.ml.utilities.data import to_torch_sparse_csr
 
 n, g, target_count = 100, 3, 10_000
 
@@ -197,6 +199,36 @@ def test_zscore_unknown_gene_raises(zscore_full: ZScore):
     x = torch.ones(2, 2)
     with pytest.raises(ValueError, match="gene_unknown"):
         zscore_full(x, bad_names)
+
+
+# ---------------------------------------------------------------------------
+# Densify tests
+# ---------------------------------------------------------------------------
+
+
+def test_densify_dense_passthrough():
+    """Dense tensor passes through unchanged (values and shape preserved)."""
+    x = torch.tensor([[1.0, 2.0, 0.0], [0.0, 3.0, 4.0]])
+    out = Densify()(x)["x_ng"]
+    assert not out.is_sparse
+    torch.testing.assert_close(out, x)
+
+
+def test_densify_sparse_csr_to_dense():
+    """torch.sparse_csr_tensor is converted to a dense tensor with identical values."""
+    dense = torch.tensor([[0.0, 2.0, 0.0], [1.0, 0.0, 3.0]], dtype=torch.float32)
+    x_sparse = to_torch_sparse_csr(scipy.sparse.csr_matrix(dense.numpy()))
+    assert x_sparse.is_sparse_csr
+    out = Densify()(x_sparse)["x_ng"]
+    assert not out.is_sparse
+    torch.testing.assert_close(out, dense)
+
+
+def test_densify_scipy_sparse_raises():
+    """scipy sparse matrices must have been converted before reaching Densify."""
+    x = scipy.sparse.csr_matrix(np.eye(3, dtype=np.float32))
+    with pytest.raises(TypeError, match="scipy sparse matrix"):
+        Densify()(x)
 
 
 # ---------------------------------------------------------------------------
