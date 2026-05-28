@@ -72,7 +72,7 @@ class AnnDataField:
 
 
 def convert_to_tensor_or_array(
-    value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor | pd.Series
+    value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor | pd.Series,
 ) -> np.ndarray | torch.Tensor:
     if isinstance(value, pd.Series):
         value = value.to_numpy()  # oom without this potentially because copying clears the reference
