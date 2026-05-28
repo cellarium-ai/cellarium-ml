@@ -71,7 +71,11 @@ class AnnDataField:
         return value
 
 
-def convert_to_tensor(value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor) -> np.ndarray | torch.Tensor:
+def convert_to_tensor_or_array(
+    value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor | pd.Series
+) -> np.ndarray | torch.Tensor:
+    if isinstance(value, pd.Series):
+        value = value.to_numpy()  # oom without this potentially because copying clears the reference
     if isinstance(value, torch.Tensor) or scipy.sparse.issparse(value):
         return value
     if np.issubdtype(value.dtype, np.str_) or np.issubdtype(value.dtype, np.object_):
@@ -132,7 +136,7 @@ def collate_fn(
 
         collated_batch[key] = value
 
-    return tree_map(convert_to_tensor, collated_batch)
+    return tree_map(convert_to_tensor_or_array, collated_batch)
 
 
 def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
