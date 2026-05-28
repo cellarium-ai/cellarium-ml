@@ -644,6 +644,9 @@ CONFIGS = [
                         },
                     }
                 ],
+                "transforms": [
+                    "cellarium.ml.transforms.Densify",
+                ],
                 "model": {
                     "class_path": "cellarium.ml.models.SOCAM",
                     "init_args": {
@@ -919,7 +922,7 @@ CONFIGS = [
                 "batch_keys": {
                     "x_ng": {
                         "attr": "X",
-                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                        "convert_fn": "cellarium.ml.utilities.data.keep_sparse",
                     },
                     "var_names_g": {
                         "attr": "var_names",
