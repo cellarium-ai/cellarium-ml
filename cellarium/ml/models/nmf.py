@@ -59,6 +59,25 @@ def nmf_frobenius_loss(x_ng: torch.Tensor, loadings_nk: torch.Tensor, factors_kg
     return F.mse_loss(torch.matmul(loadings_nk, factors_kg), x_ng, reduction="sum")
 
 
+@torch.compile()
+@torch.no_grad()
+def compute_reconstruction_error_compiled(
+    x_ng: torch.Tensor, loadings_rnk: torch.Tensor, factors_rkg: torch.Tensor
+) -> torch.Tensor:
+    # Compute reconstruction: WH for current batch using einsum
+    # loadings_rnk: (r, batch_size, k), factors_rkg: (r, k, g)
+    # -> reconstruction_rng: (r, batch_size, g)
+    reconstruction_rng = torch.einsum("rnk,rkg->rng", loadings_rnk, factors_rkg)
+
+    # Compute squared reconstruction error using einsum
+    # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
+    x_expanded_rng = x_ng.unsqueeze(0).expand(loadings_rnk.shape[0], -1, -1)  # (r, batch_size, g)
+
+    # Compute squared Frobenius norm for each replicate
+    squared_error_r = F.mse_loss(x_expanded_rng, reconstruction_rng, reduction="none").sum(dim=[1, 2])
+    return squared_error_r
+
+
 def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
     """
     FISTA algorithm for NNLS solving Ax = B for x >= 0
@@ -176,7 +195,7 @@ def nmf_torch_update_loadings_hals(
         print("NMF HALS loadings update reached max iterations without convergence.")
 
 
-@torch.compile
+@torch.compile()
 @torch.no_grad()
 def nmf_torch_update_loadings_hals_compiled(
     x_ng: torch.Tensor,
@@ -301,7 +320,7 @@ def nmf_torch_update_factors_hals(
         print("NMF HALS factors update reached max iterations without convergence.")
 
 
-@torch.compile
+@torch.compile()
 @torch.no_grad()
 def nmf_torch_update_factors_hals_compiled(
     w_rkg: torch.Tensor,
@@ -1063,36 +1082,28 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
         return {}
 
-    @torch.compile
+    # @torch.compile()
     @torch.no_grad()
     def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
         """
         Simple and efficient NMF reconstruction loss computation.
         Computes ||X - WH||_F^2 for the current batch.
         """
-        with torch.no_grad():
-            for i, k in enumerate(self.k_values):
-                factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
-                loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
+        for i, k in enumerate(self.k_values):
+            factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
+            loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
 
-                # Compute reconstruction: WH for current batch using einsum
-                # loadings_rnk: (r, batch_size, k), factors_rkg: (r, k, g)
-                # -> reconstruction_rng: (r, batch_size, g)
-                reconstruction_rng = torch.einsum("rnk,rkg->rng", loadings_rnk, factors_rkg)
+            squared_error_r = compute_reconstruction_error_compiled(
+                x_ng=x_ng, 
+                loadings_rnk=loadings_rnk, 
+                factors_rkg=factors_rkg,
+            )  # (r,)
 
-                # Compute squared reconstruction error using einsum
-                # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
-                x_expanded_rng = x_ng.unsqueeze(0).expand(self.r, -1, -1)  # (r, batch_size, g)
+            # Accumulate the squared error
+            self._err_running_sum_rk[:, i] += squared_error_r
 
-                # Compute squared Frobenius norm for each replicate
-                squared_error_r = F.mse_loss(x_expanded_rng, reconstruction_rng, reduction="none").sum(dim=[1, 2])
-                # print(f"squared_error_r: {squared_error_r[:5]}")
-
-                # Accumulate the squared error
-                self._err_running_sum_rk[:, i] += squared_error_r
-
-            # Track cells seen in this epoch
-            self._cells_seen_in_epoch += x_ng.shape[0]
+        # Track cells seen in this epoch
+        self._cells_seen_in_epoch += x_ng.shape[0]
 
     # def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
     #     with torch.no_grad():
