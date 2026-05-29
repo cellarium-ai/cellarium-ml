@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import gc
 import logging
 import sys
 import warnings
@@ -22,7 +23,7 @@ from sklearn.metrics import silhouette_score
 from tqdm.auto import tqdm
 
 from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.transforms import Filter, NormalizeTotal
+from cellarium.ml.transforms import DivideByScale, Filter, NormalizeTotal
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -815,8 +816,6 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.k_values = k_values
-        # Create the HVG filter transform that all implementations will need
-        self.transform__filter_to_hvgs = Filter([str(s) for s in self.var_names_g])
 
     @property
     @abstractmethod
@@ -1167,21 +1166,20 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         Infer the loadings of each program for the input count matrix.
         To be run after the model has been trained.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        x_filtered_ng = self.transform__filter_to_hvgs(x_ng, var_names_g)["x_ng"]
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         D_kg = consensus_factors[k]["consensus_D_kg"]
         assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
 
         # compute loadings, Mairal Algorithm 1 step 4
         # alpha_nk = compute_loadings(
-        #     x_ng=x_filtered_ng,
-        #     factors_rkg=D_kg.to(x_filtered_ng.device).unsqueeze(0),
+        #     x_ng=x_ng,
+        #     factors_rkg=D_kg.to(x_ng.device).unsqueeze(0),
         #     n_iterations=1000,
         #     alpha_tol=self._alpha_tol,
         # ).squeeze(0)
         alpha_nk = (
             solve_nnls_fista(
-                D_kg.to(x_filtered_ng.device).unsqueeze(0).transpose(1, 2),
+                D_kg.to(x_ng.device).unsqueeze(0).transpose(1, 2),
                 x_ng.t(),
                 tol=self._alpha_tol * 0.1,
                 max_iter=1000,
@@ -1213,8 +1211,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         Returns:
             A dictionary mapping each k_value to its reconstruction error.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        x_filtered_ng = self.transform__filter_to_hvgs(x_ng, var_names_g)["x_ng"]
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         rec_error = {}
         for k in consensus_factors.keys():
@@ -1224,7 +1221,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 raise ValueError("D_kg is all zeros, please train the model and run compute_consensus_factors() first")
 
             alpha_nk = self.infer_loadings(
-                x_ng=x_filtered_ng,
+                x_ng=x_ng,
                 var_names_g=var_names_g,
                 consensus_factors=consensus_factors,
                 k=k,
@@ -1233,9 +1230,9 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
             rec_error[k] = (
                 nmf_frobenius_loss(
-                    x_ng=x_filtered_ng,
-                    loadings_nk=alpha_nk.to(x_filtered_ng.device),
-                    factors_kg=D_kg.to(x_filtered_ng.device),
+                    x_ng=x_ng,
+                    loadings_nk=alpha_nk.to(x_ng.device),
+                    factors_kg=D_kg.to(x_ng.device),
                 )
                 .sum()
                 .item()
@@ -1515,6 +1512,123 @@ class NMFOutput:
         combined_module = cellarium.ml.CellariumModule(model=combined_model, datamodule=base_module.datamodule)
         return combined_module
 
+    @classmethod
+    def from_checkpoints(
+        cls,
+        checkpoint_paths: list[str],
+        datamodule: "cellarium.ml.CellariumAnnDataDataModule",
+        map_location: str | torch.device = "cpu",
+    ) -> "NMFOutput":
+        """
+        Construct an :class:`NMFOutput` from a list of checkpoint files, loading one checkpoint
+        at a time to avoid holding all model weights in memory simultaneously.
+
+        Two checkpoint splitting strategies are supported (and may be freely mixed):
+
+        - **Split-by-k**: each checkpoint was trained on a disjoint set of k values.  The
+          ``D_{k}_rkg`` tensors are placed directly into the combined model.
+        - **Split-by-r**: each checkpoint was trained on the same k values but with a different
+          (possibly smaller) number of replicates.  The ``D_{k}_rkg`` tensors are concatenated
+          along the replicate dimension (dim 0).
+
+        .. note::
+            All checkpoints are assumed to have been trained with identical transforms and the
+            same set of HVGs (``var_names_g``).  Only ``var_names_g`` is validated for
+            consistency across checkpoints; transform agreement is not checked.
+
+        Args:
+            checkpoint_paths: Ordered list of paths to ``.ckpt`` files produced by training an
+                :class:`OnlineNonNegativeMatrixFactorization` model.
+            datamodule: The datamodule to use for consensus and downstream analyses.
+            map_location: Device onto which checkpoint tensors are loaded.  Defaults to
+                ``"cpu"`` to keep peak memory low regardless of GPU availability.
+
+        Returns:
+            A fully constructed :class:`NMFOutput` instance whose ``nmf_module.model`` carries
+            the union of all ``D_{k}_rkg`` factor tensors from every checkpoint.
+        """
+        import cellarium.ml
+
+        if not checkpoint_paths:
+            raise ValueError("checkpoint_paths must not be empty")
+
+        # d_tensors_per_k accumulates a list of (r_i, k, g) tensors for each k value seen.
+        # Multiple checkpoints may contribute tensors for the same k (split-by-r scenario);
+        # they will be concatenated along dim 0.
+        d_tensors_per_k: dict[int, list[torch.Tensor]] = {}
+        reference_var_names_g: np.ndarray | None = None
+        saved_transforms: list | None = None
+
+        for i, path in tqdm(enumerate(checkpoint_paths), total=len(checkpoint_paths)):
+            module = cellarium.ml.CellariumModule.load_from_checkpoint(path, map_location=map_location, strict=False)
+
+            model = module.model
+            if not isinstance(model, OnlineNonNegativeMatrixFactorization):
+                raise ValueError(
+                    f"Checkpoint {path!r} model must be OnlineNonNegativeMatrixFactorization, "
+                    f"got {type(model).__name__}"
+                )
+
+            if reference_var_names_g is None:
+                reference_var_names_g = model.var_names_g.copy()
+                # Fold cpu_transforms in front of transforms so the combined module
+                # needs no cpu_transforms machinery.
+                saved_transforms = list(module.cpu_transforms) + list(module.transforms)
+            else:
+                if not np.array_equal(model.var_names_g, reference_var_names_g):
+                    raise ValueError(
+                        f"var_names_g mismatch between checkpoint 0 and checkpoint {i} ({path!r}). "
+                        "All checkpoints must have been trained on the same set of HVGs."
+                    )
+
+            for k in model.k_values:
+                d_tensor = model.factors_dict[k].cpu().clone()  # shape (r_i, k, g)
+                if k not in d_tensors_per_k:
+                    d_tensors_per_k[k] = []
+                d_tensors_per_k[k].append(d_tensor)
+
+            del module
+            gc.collect()
+
+        assert reference_var_names_g is not None
+        assert saved_transforms is not None
+
+        # For split-by-r: concatenate tensors along the replicate dimension.
+        final_d_per_k: dict[int, torch.Tensor] = {
+            k: torch.cat(tensors, dim=0) for k, tensors in d_tensors_per_k.items()
+        }
+        all_k_values = sorted(final_d_per_k.keys())
+
+        # Build a shell model.  algorithm="mairal" avoids allocating loadings_{k}_rnk buffers
+        # (which would be (r, n_cells_total, k) and are the root cause of the memory problem).
+        # r=1 is a placeholder; every D buffer is overwritten immediately below.
+        combined_model = OnlineNonNegativeMatrixFactorization(
+            var_names_g=list(reference_var_names_g),
+            k_values=all_k_values,
+            r=1,
+            algorithm="mairal",
+            init="uniform_random",
+        )
+        for k, d_tensor in final_d_per_k.items():
+            # PyTorch routes setattr through _buffers when the name is a registered buffer,
+            # so this correctly replaces the (1, k, g) placeholder with (r_combined, k, g).
+            setattr(combined_model, f"D_{k}_rkg", d_tensor)
+
+        # is_initialized=True prevents configure_model() from calling reset_parameters(),
+        # which would overwrite the D tensors we just set.
+        # cpu_transforms are folded into transforms to avoid the cpu_transforms machinery.
+        combined_module = cellarium.ml.CellariumModule(
+            cpu_transforms=None,
+            transforms=saved_transforms if saved_transforms else None,
+            model=combined_model,
+            is_initialized=True,
+        )
+        # configure_model() sets up the pipeline so that nmf_module.model is accessible.
+        # With is_initialized=True it is a no-op with respect to parameter initialisation.
+        combined_module.configure_model()
+
+        return cls(nmf_module=combined_module, datamodule=datamodule)
+
     def __init__(
         self,
         nmf_module: "cellarium.ml.CellariumModule",
@@ -1538,6 +1652,14 @@ class NMFOutput:
         self._tpm_B_kg: torch.Tensor | None = None
         if not isinstance(self.nmf_module.model, NonNegativeMatrixFactorization):
             raise ValueError("NMFOutput requires nmf_module with a NonNegativeMatrixFactorization in nmf_module.model")
+        # Extract Filter and DivideByScale from the full transform list (cpu + gpu).
+        # These are used by _refit, which receives raw data and must filter and normalize
+        # internally (because it also needs the raw all-gene data for the TPM branch).
+        _all_transforms = list(nmf_module.cpu_transforms) + list(nmf_module.transforms)
+        self._hvg_filter: Filter | None = next((t for t in _all_transforms if isinstance(t, Filter)), None)
+        self._scale_normalizer: DivideByScale | None = next(
+            (t for t in _all_transforms if isinstance(t, DivideByScale)), None
+        )
 
     def __repr__(self) -> str:
         indent = "    "
@@ -1612,6 +1734,8 @@ class NMFOutput:
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
         rec_error = {k: 0.0 for k in self.nmf_module.model.k_values}
         for batch in tqdm(self.datamodule.train_dataloader()):
+            for transform in self.nmf_module.transforms:
+                batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
             errors_keyed_by_k = self.nmf_module.model.reconstruction_error(
                 x_ng=batch["x_ng"],
                 var_names_g=batch["var_names_g"],
@@ -1651,7 +1775,7 @@ class NMFOutput:
         else:
             datamodule.setup(stage="predict")  # as this may not have been called... cpu_transforms are tricky here
 
-        # TODO fix this hacky manual stuff
+        # TODO fix this hacky manual stuff (appropriate fix would be to call predict on the module and have model predict be infer_loadings)
         # grab the transforms
         transforms = []
         # for transform in self.nmf_module.cpu_transforms:
@@ -1699,9 +1823,7 @@ class NMFOutput:
             self._tpm_B_kg = torch.zeros(k, consensus_D_kg.shape[1], device=consensus_D_kg.device)
 
         for batch in tqdm(self.datamodule.predict_dataloader()):
-            # Get std_g for normalization
             x_ng = batch["x_ng"]
-            std_g = torch.std(x_ng, dim=0) + 1e-4
 
             consensus_D_kg = self.consensus[k]["consensus_D_kg"]
             assert isinstance(consensus_D_kg, torch.Tensor)
@@ -1712,7 +1834,6 @@ class NMFOutput:
             refit = self._refit(
                 x_ng=x_ng,
                 var_names_g=batch["var_names_g"],
-                std_g=std_g.numpy(),
                 consensus_D_kg=consensus_D_kg,
                 refit_D_kg=self._tpm_D_kg,
                 A_kk=self._tpm_A_kk,
@@ -1733,25 +1854,29 @@ class NMFOutput:
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
-        std_g: np.ndarray,
         consensus_D_kg: torch.Tensor,
         refit_D_kg: torch.Tensor,
         A_kk: torch.Tensor,
         B_kg: torch.Tensor,
         normalize_tpm_spectra: bool,
     ) -> dict[str, torch.Tensor]:
-        # filter to HVGs to compute the loadings according to the model
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
-        x_filtered_ng = self.nmf_module.model.transform__filter_to_hvgs(x_ng, var_names_g)["x_ng"]
-
-        # get the final alpha_nk - no log_variational attribute, use std normalization
-        x_ = x_filtered_ng / torch.from_numpy(std_g).to(x_filtered_ng.device)
+        # Filter to HVGs and normalize using the pre-computed scale from the checkpoint's
+        # DivideByScale transform (correct dataset-wide std), not a per-batch approximation.
+        assert self._hvg_filter is not None, "NMFOutput._hvg_filter is None; no Filter found in module transforms"
+        filter_result = self._hvg_filter(x_ng, var_names_g)
+        x_filtered_ng = filter_result["x_ng"]
+        filtered_var_names_g = filter_result["var_names_g"]
+        if self._scale_normalizer is not None:
+            x_normalized_ng = self._scale_normalizer(x_filtered_ng, filtered_var_names_g)["x_ng"]
+        else:
+            x_normalized_ng = x_filtered_ng
 
         # compute loadings, called "norm_usages" in Kotliar, based on consensus factors
         k = consensus_D_kg.shape[0]
         alpha_rnk = self.nmf_module.model.infer_loadings(
-            x_ng=x_,
-            var_names_g=var_names_g,
+            x_ng=x_normalized_ng,
+            var_names_g=filtered_var_names_g,
             consensus_factors={k: {"consensus_D_kg": consensus_D_kg}},
             k=k,
             normalize=False,

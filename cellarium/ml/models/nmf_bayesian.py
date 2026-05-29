@@ -630,9 +630,6 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             case _:
                 raise ValueError("likelihood_dist must be 'poisson' or 'normal'")
 
-        # Initialize the filter transform for HVGs
-        self.transform__filter_to_hvgs = Filter([str(s) for s in var_names_g])
-
         # properties
         self.initial_factors_kg: torch.Tensor
         self.null_concordance_loc: torch.Tensor
@@ -965,8 +962,8 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         """
         assert obs_names_n is not None, "Must provide obs_names_n"
 
-        # Use the transform to filter to the right genes
-        x_filtered_ng = self.transform__filter_to_hvgs(x_ng, var_names_g)["x_ng"]
+        from cellarium.ml.utilities.testing import assert_arrays_equal
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         # Get the consensus factors
         D_kg = consensus_factors[k]["consensus_D_kg"]
@@ -978,10 +975,7 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             device=x_ng.device,
         )
 
-        # # Create a batch with the filtered data
-        # batch = {"x_ng": x_filtered_ng}
-
-        loading_matrix_nk = self.get_loadings_fn(x_filtered_ng, minibatch_indices_n, self)
+        loading_matrix_nk = self.get_loadings_fn(x_ng, minibatch_indices_n, self)
 
         if normalize:
             loading_matrix_nk = loading_matrix_nk / loading_matrix_nk.sum(dim=-1, keepdim=True)
@@ -1005,7 +999,8 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         Returns:
             Dictionary mapping k -> reconstruction error
         """
-        x_filtered_ng = self.transform__filter_to_hvgs(x_ng, var_names_g)["x_ng"]
+        from cellarium.ml.utilities.testing import assert_arrays_equal
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         rec_error = {}
         for k in consensus_factors.keys():
@@ -1023,7 +1018,7 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
             # Compute reconstruction error
             reconstruction_ng = torch.matmul(loadings_nk, D_kg)
-            error = torch.nn.functional.mse_loss(x_filtered_ng, reconstruction_ng, reduction="sum")
+            error = torch.nn.functional.mse_loss(x_ng, reconstruction_ng, reduction="sum")
             rec_error[k] = error.item()
 
         return rec_error
