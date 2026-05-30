@@ -9,6 +9,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal, Optional
 
+from cellarium.ml.models.onepass_mean_var_std import OnePassMeanVarStd
+
 if TYPE_CHECKING:
     import cellarium.ml
 
@@ -2078,3 +2080,117 @@ class NMFOutput:
                 consensus_output=self.consensus,
                 k=k_val,
             )
+
+
+def kotliar_compute_hvgs(
+    mean_g: np.array,
+    var_g: np.array,
+    var_names_g: np.array,
+    num_genes: int | None = 2000,
+    expected_fano_threshold: float | None = None,
+    minimal_mean: float = 0.5,
+    plot: bool = False,
+):
+    """
+    Helper function to run the highly variable gene selection procedure from Kotliar et al. 2019,
+    implemented in the function ``get_highvar_genes_sparse`` in the dylkot/cNMF repository.
+    Modified to work in cellarium based on a run of a onepass_mean_var_std model on the data.
+
+    NOTE: taken from
+    https://github.com/dylkot/cNMF/blob/5dbc5baaa0b9079b55bce554d801caa235a50457/src/cnmf/cnmf.py#L136-L188
+
+    Args:
+        mean_g: The mean expression levels of genes
+        var_g: The variance of expression levels of genes
+        var_names_g: The names of the genes
+        num_genes: The number of highly variable genes to select. If None, uses a threshold-based approach
+        expected_fano_threshold: If num_genes is None, this threshold is used to select highly variable genes
+            based on their Fano factor relative to the expected Fano factor. If None, a default threshold is
+            computed based on the standard deviation of the Fano factors of genes that pass a winsorized box filter.
+        minimal_mean: The minimum mean expression level for a gene to be considered highly variable.
+            This is used only in the threshold-based approach (i.e. when num_genes is None)
+        plot: Whether to plot the mean-variance relationship and the Fano factor distribution. Useful for debugging.
+
+    Returns:
+        A DataFrame with columns
+        - mean: The mean expression level of each gene
+        - var: The variance of each gene
+        - fano: The Fano factor of each gene (variance / mean)
+        - fano_fit: The expected Fano factor of each gene based on the fitted line
+        - fano_ratio: The ratio of the observed Fano factor to the expected Fano factor
+        - highly_variable: A boolean indicating whether the gene is selected as highly variable
+    """
+
+    df = pd.DataFrame({"mean_g": mean_g, "var_g": var_g, "fano_g": var_g / mean_g}, index=var_names_g)
+
+    # Find parameters for expected fano line
+    top_genes = df["mean_g"].sort_values(ascending=False)[:20].index
+    A = (np.sqrt(df["var_g"]) / df["mean_g"])[top_genes].min()
+    
+    w_mean_low, w_mean_high = df["mean_g"].quantile([0.10, 0.90])
+    w_fano_low, w_fano_high = df["fano_g"].quantile([0.10, 0.90])
+    winsor_box_logic = (
+        (df["fano_g"] > w_fano_low)
+        & (df["fano_g"] < w_fano_high)
+        & (df["mean_g"] > w_mean_low)
+        & (df["mean_g"] < w_mean_high)
+    )
+    fano_median = df["fano_g"][winsor_box_logic].median()
+    B = np.sqrt(fano_median)
+    
+    df["fano_fit_g"] = (A**2) * df["mean_g"] + (B**2)
+    df["fano_ratio_g"] = df["fano_g"] / df["fano_fit_g"]
+
+    # Identify high var genes
+    if num_genes is not None:
+        hvg_var_names = df["fano_ratio_g"].sort_values(ascending=False).index[:num_genes]
+        hvg_logic_g = df.index.isin(hvg_var_names)
+        T = None
+    else:
+        if not expected_fano_threshold:
+            T = (1. + df["fano_g"][winsor_box_logic].std())
+        else:
+            T = expected_fano_threshold
+        hvg_logic_g = (df["fano_ratio_g"] > T) & (df["mean_g"] > minimal_mean)
+
+    df["highly_variable_g"] = hvg_logic_g
+
+    if plot:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(12, 3.5))
+        plt.subplot(1, 3, 1)
+        plt.scatter(df["mean_g"], df["var_g"], s=2, alpha=1, color='lightgray', label='All genes')
+        plt.scatter(df["mean_g"][hvg_logic_g], df["var_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Mean expression")
+        plt.ylabel("Variance of expression")
+        plt.title("Gene mean vs. variance")
+        plt.legend()
+
+        plt.subplot(1, 3, 2)
+        plt.scatter(df["mean_g"], df["fano_g"], s=2, alpha=1, color='lightgray', label='All genes')
+        plt.scatter(df["mean_g"][hvg_logic_g], df["fano_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        order = np.argsort(df["mean_g"])
+        plt.plot(df["mean_g"][order], df["fano_fit_g"][order], color="k", linestyle="--")
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Mean expression")
+        plt.ylabel("Fano factor")
+        plt.title("Gene mean vs. Fano factor")
+        plt.legend()
+
+        plt.subplot(1, 3, 3)
+        plt.scatter(df["mean_g"], df["fano_ratio_g"], s=2, alpha=1, color='lightgray', label='All genes')
+        plt.scatter(df["mean_g"][hvg_logic_g], df["fano_ratio_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Mean expression")
+        plt.ylabel("Fano ratio")
+        plt.title("Gene mean vs. Fano ratio")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    df = df.rename(columns={c: c.split("_g")[0] for c in df.columns})
+    return df
