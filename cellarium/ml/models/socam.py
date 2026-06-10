@@ -342,14 +342,11 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             probs_nc = propagate_probs(probs_nc, self.active_descendant_tensor_cc)
         return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
 
-    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
+    def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:
             return
 
         if not self.log_metrics:
-            return
-
-        if (trainer.global_step + 1) % trainer.log_every_n_steps != 0:  # type: ignore[attr-defined]
             return
 
         for logger in trainer.loggers:
