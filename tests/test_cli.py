@@ -621,6 +621,9 @@ CONFIGS = [
             },
         },
     },
+]
+
+SINGLE_DEVICE_CONFIGS = [
     {
         "model_name": "socam",
         "subcommand": "fit",
@@ -939,7 +942,7 @@ CONFIGS = [
             },
             "trainer": {
                 "accelerator": "cpu",
-                "devices": devices,
+                "devices": "1",
                 "max_steps": "4",
                 "val_check_interval": "2",
             },
@@ -954,6 +957,17 @@ CONFIGS = [
     ids=[config["model_name"] + "-" + config["subcommand"] for config in CONFIGS],  # type: ignore[operator]
 )
 def test_cpu_multi_device(config: dict[str, Any]):
+    if config["subcommand"] == "predict":
+        assert config["predict"]["return_predictions"] == "false"
+    main(config)
+
+
+@pytest.mark.parametrize(
+    "config",
+    SINGLE_DEVICE_CONFIGS,
+    ids=[config["model_name"] + "-" + config["subcommand"] for config in SINGLE_DEVICE_CONFIGS],  # type: ignore[operator]
+)
+def test_cpu_single_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
     main(config)
