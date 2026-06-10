@@ -316,6 +316,29 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
     def _compute_regression(self, x_ng: torch.Tensor, W_gc: torch.Tensor, b_c: torch.Tensor) -> torch.Tensor:
         return x_ng @ W_gc + b_c
 
+    def validate(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        batch_idx: int,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        cl_names_n: np.ndarray,
+    ) -> None:
+        """
+        Default validation method for models. This method logs the validation loss to TensorBoard.
+        Override this method to customize the validation behavior.
+        """
+        output = self(
+            x_ng=x_ng,
+            var_names_g=var_names_g,
+            cl_names_n=cl_names_n,
+        )
+        loss = output.get("loss")
+        if loss is not None:
+            # Logging to TensorBoard by default
+            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
+
     def predict(
         self,
         x_ng: torch.Tensor,
