@@ -264,9 +264,9 @@ def _get_highly_variable_genes_batched(
 
 
 def kotliar_compute_highly_variable_genes(
-    mean_g: np.array,
-    var_g: np.array,
-    var_names_g: np.array,
+    mean_g: np.ndarray,
+    var_g: np.ndarray,
+    var_names_g: list | np.ndarray,
     num_genes: int | None = 2000,
     expected_fano_threshold: float | None = None,
     minimal_mean: float = 0.5,
@@ -307,7 +307,7 @@ def kotliar_compute_highly_variable_genes(
     # Find parameters for expected fano line
     top_genes = df["mean_g"].sort_values(ascending=False)[:20].index
     A = (np.sqrt(df["var_g"]) / df["mean_g"])[top_genes].min()
-    
+
     w_mean_low, w_mean_high = df["mean_g"].quantile([0.10, 0.90])
     w_fano_low, w_fano_high = df["fano_g"].quantile([0.10, 0.90])
     winsor_box_logic = (
@@ -318,7 +318,7 @@ def kotliar_compute_highly_variable_genes(
     )
     fano_median = df["fano_g"][winsor_box_logic].median()
     B = np.sqrt(fano_median)
-    
+
     df["fano_fit_g"] = (A**2) * df["mean_g"] + (B**2)
     df["fano_ratio_g"] = df["fano_g"] / df["fano_fit_g"]
 
@@ -329,7 +329,7 @@ def kotliar_compute_highly_variable_genes(
         T = None
     else:
         if not expected_fano_threshold:
-            T = (1. + df["fano_g"][winsor_box_logic].std())
+            T = 1.0 + df["fano_g"][winsor_box_logic].std()
         else:
             T = expected_fano_threshold
         hvg_logic_g = (df["fano_ratio_g"] > T) & (df["mean_g"] > minimal_mean)
@@ -338,10 +338,18 @@ def kotliar_compute_highly_variable_genes(
 
     if plot:
         import matplotlib.pyplot as plt
+
         plt.figure(figsize=(12, 3.5))
         plt.subplot(1, 3, 1)
-        plt.scatter(df["mean_g"], df["var_g"], s=2, alpha=1, color='lightgray', label='All genes')
-        plt.scatter(df["mean_g"][hvg_logic_g], df["var_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        plt.scatter(df["mean_g"], df["var_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["var_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
         plt.xscale("log")
         plt.yscale("log")
         plt.xlabel("Mean expression")
@@ -350,8 +358,15 @@ def kotliar_compute_highly_variable_genes(
         plt.legend()
 
         plt.subplot(1, 3, 2)
-        plt.scatter(df["mean_g"], df["fano_g"], s=2, alpha=1, color='lightgray', label='All genes')
-        plt.scatter(df["mean_g"][hvg_logic_g], df["fano_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        plt.scatter(df["mean_g"], df["fano_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["fano_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
         order = np.argsort(df["mean_g"])
         plt.plot(df["mean_g"][order], df["fano_fit_g"][order], color="k", linestyle="--")
         plt.xscale("log")
@@ -362,8 +377,15 @@ def kotliar_compute_highly_variable_genes(
         plt.legend()
 
         plt.subplot(1, 3, 3)
-        plt.scatter(df["mean_g"], df["fano_ratio_g"], s=2, alpha=1, color='lightgray', label='All genes')
-        plt.scatter(df["mean_g"][hvg_logic_g], df["fano_ratio_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        plt.scatter(df["mean_g"], df["fano_ratio_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["fano_ratio_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
         plt.xscale("log")
         plt.yscale("log")
         plt.xlabel("Mean expression")

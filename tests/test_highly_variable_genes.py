@@ -221,7 +221,7 @@ _KOTLIAR_GENE_NAMES = [f"gene_{i}" for i in range(50)]
 # higher variance than the rest.
 _rng = np.random.default_rng(42)
 _KOTLIAR_MEAN = np.abs(_rng.normal(loc=5.0, scale=2.0, size=50)) + 0.1
-_KOTLIAR_VAR = _KOTLIAR_MEAN * 1.1          # Fano ≈ 1 baseline
+_KOTLIAR_VAR = _KOTLIAR_MEAN * 1.1  # Fano ≈ 1 baseline
 _KOTLIAR_VAR[:5] = _KOTLIAR_MEAN[:5] * 50  # very high Fano for first 5 genes
 
 
@@ -271,7 +271,7 @@ def test_kotliar_threshold_mode_selects_outliers():
         var_g=_KOTLIAR_VAR,
         var_names_g=_KOTLIAR_GENE_NAMES,
         num_genes=None,
-        expected_fano_threshold=20.0,   # only fano_ratio > 20 pass
+        expected_fano_threshold=20.0,  # only fano_ratio > 20 pass
         minimal_mean=0.0,
     )
     # All selected genes must have fano_ratio > 20
