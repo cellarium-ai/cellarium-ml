@@ -109,7 +109,13 @@ class ValidateMixin:
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
-            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
+            pl_module.log(
+                "val_loss",
+                loss,
+                sync_dist=True,
+                on_epoch=True,
+                batch_size=None if "x_ng" not in kwargs else kwargs["x_ng"].shape[0],
+            )
 
 
 class TestMixin(metaclass=ABCMeta):
