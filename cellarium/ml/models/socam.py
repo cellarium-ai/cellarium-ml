@@ -285,7 +285,6 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         cl_names_n: np.ndarray,
-        **kwargs,
     ) -> dict[str, torch.Tensor | None]:
         """
         Args:
