@@ -60,6 +60,7 @@ model:
     init_args:
       n_obs: null
       var_names_g: null
+      W_prior_scale: 1e-2
       descendant_tensor:
         !FileLoader
         file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2025-07-30/cl-basic.owl
