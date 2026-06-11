@@ -906,7 +906,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
     **References:**
 
-    1. `Online learning for matrix factorization and sparse coding. Mairal, Bach, Ponce, Sapiro. JMLR 2009.
+    1. `Online learning for matrix factorization and sparse coding. Mairal, Bach, Ponce, Sapiro. JMLR 2009.`
 
     Args:
         var_names_g: The variable names schema for the input data: should be highly variable genes.
@@ -916,6 +916,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         init: The initialization method to use for the NMF factors, in ["sklearn_random", "uniform_random"].
         transformed_data_mean: The mean of the transformed data, used for initialization if an only if
             `init` is "sklearn_random".
+        n_cells_total: The total number of cells in the dataset, used for initialization if and only if
+            `algorithm` is "nmf_torch_hals".
     """
 
     def __init__(
