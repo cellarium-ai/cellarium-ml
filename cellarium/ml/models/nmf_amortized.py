@@ -145,6 +145,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         k_values: list[int],
         r: int,
         encoder_hidden_dims: list[int],
+        total_n_cells: int,
+        batch_size: int,
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
     ) -> None:
@@ -153,6 +155,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self.obs_names_to_index_map: dict[str, int] = {}  # used for local latents
         self.r = r
         self.transformed_data_mean = transformed_data_mean
+        self.exponential_decay_rho = 1.0 - (batch_size / total_n_cells)  # decay factor for A and B updates, tuned
+        self.n_batches_for_forgetting_momentum = int(np.ceil(min(total_n_cells, 1e6) / batch_size))
         self.init = init
         if init == "sklearn_random":
             if transformed_data_mean is None:
@@ -241,6 +245,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             # n_iterations=100,
             # alpha_tol=self._alpha_tol,
             # D_tol=self._D_tol,
+            # exponential_decay_rho=self.exponential_decay_rho,
         )
 
         # update running values
@@ -341,10 +346,17 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self._err_running_sum_rk.zero_()
         self._cells_seen_in_epoch = 0  # Reset for next epoch
 
-        # this hard reset to zero is equivalent to forgetting momentum each epoch
-        for i in self.k_values:
-            getattr(self, f"A_{i}_rkk").zero_()
-            getattr(self, f"B_{i}_rkg").zero_()
+        # # this hard reset to zero is equivalent to forgetting momentum
+        # for i in self.k_values:
+        #     getattr(self, f"A_{i}_rkk").zero_()
+        #     getattr(self, f"B_{i}_rkg").zero_()
+
+    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
+        if trainer.global_step % self.n_batches_for_forgetting_momentum == 0:
+            # this hard reset to zero is equivalent to forgetting momentum
+            for i in self.k_values:
+                getattr(self, f"A_{i}_rkk").zero_()
+                getattr(self, f"B_{i}_rkg").zero_()
 
     def on_end(self, trainer: pl.Trainer) -> None:
         trainer.save_checkpoint(trainer.default_root_dir + "/NMF.ckpt")

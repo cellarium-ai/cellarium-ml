@@ -253,6 +253,19 @@ def compute_n_obs(data: CellariumAnnDataDataModule) -> int:
     return data.dadc.n_obs
 
 
+def compute_batch_size(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the batch size from the data.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        Number of cells in a minibatch.
+    """
+    return data.batch_size
+
+
 def compute_n_vars(data: CellariumAnnDataDataModule) -> int:
     """
     Compute the number of observations in the data.
@@ -882,7 +895,9 @@ def amortized_nmf(args: ArgsType = None) -> None:
                 ("model.cpu_transforms", "model.transforms", "data"),
                 "model.model.init_args.var_names_g",
                 compute_var_names_g,
-            )
+            ),
+            LinkArguments("data", "model.model.init_args.total_n_cells", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.batch_size", compute_batch_size),
         ],
     )
     cli(args=args)

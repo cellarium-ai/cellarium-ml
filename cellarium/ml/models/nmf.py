@@ -668,6 +668,7 @@ def online_dictionary_update_nmf_torch_hals(
     n_iterations: int = 200,
     alpha_tol: float = 0.05,
     D_tol: float = 0.05,
+    exponential_decay_rho: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     """
     Algorithm adapted from the nmf-torch github library.
@@ -681,6 +682,7 @@ def online_dictionary_update_nmf_torch_hals(
         n_iterations: The number of iterations to perform.
         alpha_tol: The tolerance for the change in alpha for stopping.
         D_tol: The tolerance for the change in D for stopping.
+        exponential_decay_rho: The exponential decay factor for A and B updates (default: 1, no decay).
 
     Returns:
         dict with keys:
@@ -691,8 +693,6 @@ def online_dictionary_update_nmf_torch_hals(
 
     n, g = x_ng.shape
     r, _, _ = factors_rkg.shape
-
-    # TODO: need access to local latent loadings_rnk for nmf-torch hals update
 
     # inplace update loadings_rnk
     nmf_torch_update_loadings_hals_with_compile(
@@ -705,8 +705,8 @@ def online_dictionary_update_nmf_torch_hals(
 
     with torch.no_grad():
         # update A and B, Mairal Algorithm 1 step 5 and 6
-        A_rkk = A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
-        B_rkg = B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+        A_rkk = exponential_decay_rho * A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
+        B_rkg = exponential_decay_rho * B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
 
     # inplace update factors_rkg
     nmf_torch_update_factors_hals_with_compile(
