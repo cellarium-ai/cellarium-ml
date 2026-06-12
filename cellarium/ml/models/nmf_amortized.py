@@ -32,6 +32,9 @@ class FiLMBlock(torch.nn.Module):
         
         # shared linear layer
         self.linear = torch.nn.Linear(input_dim, output_dim)
+
+        # batch norm without affine
+        self.batch_norm = torch.nn.BatchNorm1d(output_dim, affine=False)
         
         # replicate-specific FiLM parameters: gamma and beta for each replicate
         self.gamma_rh = torch.nn.Parameter(torch.ones(num_replicates, output_dim))
@@ -40,18 +43,23 @@ class FiLMBlock(torch.nn.Module):
         self.relu = torch.nn.ReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        # linear layer
         h = self.linear(x)
+
+        # batch norm
+        if h.dim() == 3:
+            # collapse first two dimensions r and n to apply batch norm, then un-collapse
+            r, n, h_dim = h.shape
+            h = h.view(r * n, h_dim)
+            h_rnh = self.batch_norm(h.view(r * n, h_dim)).view(r, n, h_dim)
+        else:
+            h_rnh = self.batch_norm(h).unsqueeze(0)  # expand to (1, N, H)
         
         # expand gamma and beta to broadcast across the batch dimension (n)
         # from (r, output_dim) -> (r, 1, output_dim)
         gamma_r1h = self.gamma_rh.unsqueeze(1)
-        beta_r1h = self.beta_rh.unsqueeze(1)
-        
-        # If this is the first layer, h is 2D: (n, output_dim). 
-        # We unsqueeze it to (1, n, output_dim) so broadcasting creates the R dimension.
-        if h.dim() == 2:
-            h = h.unsqueeze(0)
-        h_rnh = h  # shape here is (1 or r, n, output_dim)
+        beta_r1h = self.beta_rh.unsqueeze(1)  
         
         # apply FiLM modulation
         h_modulated_rnh = gamma_r1h * h_rnh + beta_r1h
