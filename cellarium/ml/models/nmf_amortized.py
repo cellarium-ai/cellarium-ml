@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from typing import Literal
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -208,13 +209,16 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self._init_err_rk: torch.Tensor | None = None
         self._err_running_sum_rk = torch.zeros((self.r, len(self.k_values)), device=self._dummy_param.device)
         self._cells_seen_in_epoch = 0  # Track cells seen in current epoch
+        self._previous_D_rkg: dict[int, torch.Tensor] = {k: getattr(self, f"D_{k}_rkg").clone() for k in self.k_values}
+        self._current_nmf_loss: torch.Tensor | None = None
+        self._current_encoder_nmf_loss: torch.Tensor | None = None
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
         """Return the learned factors for each k value."""
         return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
 
-    def online_dictionary_update(self, x_ng: torch.Tensor, k: int) -> torch.Tensor:
+    def online_dictionary_update(self, x_ng: torch.Tensor, k: int) -> dict[str, torch.Tensor]:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
@@ -224,7 +228,9 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             minibatch_indices_n: The indices of the cells in the current minibatch.
 
         Returns:
-            Loss for the encoder based on HALS targets.
+            loss: Loss for the encoder based on HALS targets.
+            hals_loadings_rnk: The loadings after the HALS update, which are the targets for the encoder.
+            encoder_loadings_rnk: The loadings predicted by the encoder before the update, which
         """
         # get running values
         A_rkk = getattr(self, f"A_{k}_rkk")
@@ -242,21 +248,35 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             loadings_rnk=hals_loadings_rnk,
             A_rkk=A_rkk,
             B_rkg=B_rkg,
-            # n_iterations=100,
-            # alpha_tol=self._alpha_tol,
-            # D_tol=self._D_tol,
+            n_iterations=500,
+            alpha_tol=0.01,
+            D_tol=0.05,
             # exponential_decay_rho=self.exponential_decay_rho,
         )
+
+        # further L1 normalize D
+        D_rkg = updated_values["factors_rkg"]
+        D_rkg = F.normalize(D_rkg.view(-1, D_rkg.shape[-1]), p=1, dim=-1, eps=1e-8).view_as(D_rkg)
 
         # update running values
         setattr(self, f"A_{k}_rkk", updated_values["A_rkk"])
         setattr(self, f"B_{k}_rkg", updated_values["B_rkg"])
-        setattr(self, f"D_{k}_rkg", updated_values["factors_rkg"])
+        setattr(self, f"D_{k}_rkg", D_rkg)
 
         # hals_loadings_rnk gets updated in-place by online_dictionary_update_nmf_torch_hals
         # this is now the encoder's target
-        target_loadings_rnk = F.normalize(hals_loadings_rnk, p=1, dim=-1, eps=1e-8)
-        return self.encoder_loss_fn(encoder_loadings_rnk, target_loadings_rnk)
+
+        # # when we were not normalizing D
+        # target_loadings_rnk = F.normalize(hals_loadings_rnk.detach(), p=1, dim=-1, eps=1e-8)
+
+        # now that we are normalizing D
+        target_loadings_rnk = hals_loadings_rnk.detach()
+
+        return {
+            "loss": self.encoder_loss_fn(encoder_loadings_rnk, target_loadings_rnk),
+            "hals_loadings_rnk": hals_loadings_rnk.detach(),
+            "encoder_loadings_rnk": encoder_loadings_rnk.detach(),
+        }
 
     def forward(
         self,
@@ -285,18 +305,67 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             self._err_running_sum_rk.zero_()  # Reset after initialization
             self._cells_seen_in_epoch = 0  # Reset counter
 
-        losses = []
+        encoder_losses = []
+        nmf_reconstruction_errors = []
+        nmf_encoder_reconstruction_errors = []
         for k in self.k_values:
-            losses.append(self.online_dictionary_update(x_ng=x_ng, k=k))
+            out = self.online_dictionary_update(x_ng=x_ng, k=k)
+            encoder_loss = out["loss"]
+            hals_loadings_rnk = out["hals_loadings_rnk"]
+            encoder_loadings_rnk = out["encoder_loadings_rnk"]
+            encoder_losses.append(encoder_loss)
+
+            # if we want to track the NMF loss
+            factors_rkg = getattr(self, f"D_{k}_rkg")
+            squared_error_r = compute_reconstruction_error_compiled(
+                x_ng=x_ng, 
+                loadings_rnk=hals_loadings_rnk, 
+                factors_rkg=factors_rkg,
+            )
+            nmf_reconstruction_error = squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
+            nmf_reconstruction_errors.append(nmf_reconstruction_error)
+
+            # if we want to track the encoder
+            encoder_squared_error_r = compute_reconstruction_error_compiled(
+                x_ng=x_ng, 
+                loadings_rnk=encoder_loadings_rnk, 
+                factors_rkg=factors_rkg,
+            )
+            encoder_reconstruction_error = encoder_squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
+            nmf_encoder_reconstruction_errors.append(encoder_reconstruction_error)
 
         # for error computation to assess convergence
-        self._loss(x_ng=x_ng)
+        minibatch_nmf_loss = (
+            sum(nmf_reconstruction_errors) / len(nmf_reconstruction_errors) 
+            if nmf_reconstruction_errors else None
+        )
+        beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)  # momentum term for exponential moving average
+        self._current_nmf_loss = (
+            beta * self._current_nmf_loss + (1 - beta) * minibatch_nmf_loss 
+            if self._current_nmf_loss is not None 
+            else minibatch_nmf_loss
+        )
 
-        return {"loss": sum(losses) / len(losses) if losses else None}
+        minibatch_encoder_nmf_loss = (
+            sum(nmf_encoder_reconstruction_errors) / len(nmf_encoder_reconstruction_errors) 
+            if nmf_encoder_reconstruction_errors else None
+        )
+        beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)  # momentum term for exponential moving average
+        self._current_encoder_nmf_loss = (
+            beta * self._current_encoder_nmf_loss + (1 - beta) * minibatch_encoder_nmf_loss 
+            if self._current_encoder_nmf_loss is not None 
+            else minibatch_encoder_nmf_loss
+        )
+
+        return {
+            "loss": sum(encoder_losses) / len(encoder_losses) if encoder_losses else None,
+            "nmf_reconstruction_error": minibatch_nmf_loss,
+            "nmf_encoder_reconstruction_error": minibatch_encoder_nmf_loss,
+        }
 
     # @torch.compile()
     @torch.no_grad()
-    def _loss(self, x_ng: torch.Tensor) -> None:
+    def _loss(self, x_ng: torch.Tensor) -> torch.Tensor:
         """
         Simple and efficient NMF reconstruction loss computation.
         Computes ||X - WH||_F^2 for the current batch.
@@ -316,6 +385,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
 
         # Track cells seen in this epoch
         self._cells_seen_in_epoch += x_ng.shape[0]
+
+        return squared_error_r
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -352,6 +423,77 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         #     getattr(self, f"B_{i}_rkg").zero_()
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
+
+        # check for convergence by looking at the change in D_rkg
+        mean_max_diff_D = 0.0
+        for k in self.k_values:
+            D_rkg = getattr(self, f"D_{k}_rkg")
+            prev_D_rkg = self._previous_D_rkg[k]
+            max_diff_D_r = torch.quantile(torch.abs(D_rkg - prev_D_rkg).view(D_rkg.shape[0], -1), q=0.95, dim=1)
+            mean_max_diff_D += max_diff_D_r.mean().item()
+            self._previous_D_rkg[k] = D_rkg.clone()
+        mean_max_diff_D /= len(self.k_values)
+        trainer.model.log("mean_max_diff_D", mean_max_diff_D, prog_bar=False)
+        # if mean_max_diff_D < self._hals_tol:
+        #     trainer.should_stop = True
+        #     print(f"Stopping early: converged, mean_max_diff_D={mean_max_diff_D:.6f}")
+
+        nmf_loss_ema = self._current_nmf_loss
+        beta_pow_t = np.exp(-trainer.global_step / self.n_batches_for_forgetting_momentum)
+        nmf_loss_ema_unbiased = nmf_loss_ema / (1 - beta_pow_t)
+        trainer.model.log("reconstruction_error", nmf_loss_ema_unbiased, prog_bar=True)
+
+        nmf_encoder_loss_ema = self._current_encoder_nmf_loss
+        nmf_encoder_loss_ema_unbiased = nmf_encoder_loss_ema / (1 - beta_pow_t)
+        trainer.model.log("encoder_reconstruction_error", nmf_encoder_loss_ema_unbiased, prog_bar=False)
+
+        trainer.model.log("learning_rate", trainer.optimizers[0].param_groups[0]["lr"], prog_bar=False)
+
+        # look at the actual consensus procedure histogram
+        local_neighborhood_size = 0.3
+        for k in self.k_values:
+            D_rkg = getattr(self, f"D_{k}_rkg")
+            r, num_component, g = D_rkg.shape
+            d_norm_rkg = F.normalize(D_rkg, dim=-1, p=2)
+            d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
+
+            if r > 1:
+                n_neighbors = int(r * local_neighborhood_size)
+                if n_neighbors < 2:
+                    warnings.warn(
+                        f"during convergence check, "
+                        f"local_neighborhood_size {local_neighborhood_size} is too small for k={num_component}. "
+                        f"n_neighbors = int(replicates * local_neighborhood_size) = {n_neighbors}. "
+                        "We want n_neighbors >= 2. Increase local_neighborhood_size."
+                    )
+
+                # euclidean distance to every other run
+                euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+                euclidean_dist_mm.fill_diagonal_(0)  # correct for roundoff errors that may be present
+
+                # top n_neighbors plus self (distance 0)
+                n_nearest_dist_including_self_mL, _ = torch.topk(euclidean_dist_mm, n_neighbors + 1, largest=False)
+
+                # distances to top n_neighbors
+                n_nearest_dist_ml = n_nearest_dist_including_self_mL[:, 1:]
+
+                # mean distance to top n_neighbors
+                mean_neighbor_distance_m = n_nearest_dist_ml.mean(dim=1)
+
+                # log historgram
+                for logger in trainer.loggers:
+                    if isinstance(logger, pl.loggers.TensorBoardLogger):
+                        logger.experiment.add_histogram(
+                            f"k={k}__consensus_histogram",
+                            mean_neighbor_distance_m,
+                            global_step=trainer.global_step,
+                            bins=np.linspace(0, 1, 75),
+                        )
+
+                trainer.model.log("consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
+                trainer.model.log("consensus_L2", mean_neighbor_distance_m.pow(2).mean(), prog_bar=False)
+                trainer.model.log("consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
+
         if trainer.global_step % self.n_batches_for_forgetting_momentum == 0:
             # this hard reset to zero is equivalent to forgetting momentum
             for i in self.k_values:
