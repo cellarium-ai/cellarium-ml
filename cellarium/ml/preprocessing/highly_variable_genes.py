@@ -264,10 +264,10 @@ def _get_highly_variable_genes_batched(
 
 
 def kotliar_compute_highly_variable_genes(
+    var_names_g: list | np.ndarray,
     mean_g: np.ndarray,
     var_g: np.ndarray,
-    var_names_g: list | np.ndarray,
-    num_genes: int | None = 2000,
+    n_top_genes: int | None = 2000,
     expected_fano_threshold: float | None = None,
     minimal_mean: float = 0.5,
     plot: bool = False,
@@ -284,12 +284,12 @@ def kotliar_compute_highly_variable_genes(
         mean_g: The mean expression levels of genes
         var_g: The variance of expression levels of genes
         var_names_g: The names of the genes
-        num_genes: The number of highly variable genes to select. If None, uses a threshold-based approach
-        expected_fano_threshold: If num_genes is None, this threshold is used to select highly variable genes
+        n_top_genes: The number of highly variable genes to select. If None, uses a threshold-based approach
+        expected_fano_threshold: If n_top_genes is None, this threshold is used to select highly variable genes
             based on their Fano factor relative to the expected Fano factor. If None, a default threshold is
             computed based on the standard deviation of the Fano factors of genes that pass a winsorized box filter.
         minimal_mean: The minimum mean expression level for a gene to be considered highly variable.
-            This is used only in the threshold-based approach (i.e. when num_genes is None)
+            This is used only in the threshold-based approach (i.e. when n_top_genes is None)
         plot: Whether to plot the mean-variance relationship and the Fano factor distribution. Useful for debugging.
 
     Returns:
@@ -323,8 +323,8 @@ def kotliar_compute_highly_variable_genes(
     df["fano_ratio_g"] = df["fano_g"] / df["fano_fit_g"]
 
     # Identify high var genes
-    if num_genes is not None:
-        hvg_var_names = df["fano_ratio_g"].sort_values(ascending=False).index[:num_genes]
+    if n_top_genes is not None:
+        hvg_var_names = df["fano_ratio_g"].sort_values(ascending=False).index[:n_top_genes]
         hvg_logic_g = df.index.isin(hvg_var_names)
         T = None
     else:
