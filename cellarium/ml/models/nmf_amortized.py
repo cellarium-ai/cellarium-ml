@@ -160,6 +160,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self.r = r
         self.transformed_data_mean = transformed_data_mean
         self.exponential_decay_rho = 1.0 - (batch_size / total_n_cells)  # decay factor for A and B updates, tuned
+        self.n_batches_per_epoch = int(np.ceil(total_n_cells / batch_size))
         self.n_batches_for_forgetting_momentum = int(np.ceil(min(total_n_cells, 1e6) / batch_size))
         self.init = init
         if init == "sklearn_random":
@@ -505,8 +506,14 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                 trainer.model.log(f"k={k}__consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
 
         # implement convergence check: reconstruction error plateaued and consensus_q75 is below the threshold
+        # at least one epoch
+        # do not stop near an A, B reset
+        # look for loss convergence
+        # and look for consensus convergence (q75 of mean distance to neighbors below threshold)
         converged = (
             (trainer.global_step > self.n_batches_for_forgetting_momentum)
+            and (trainer.global_step % self.n_batches_for_forgetting_momentum 
+                 >= min(100, self.n_batches_for_forgetting_momentum * 0.75))
             and nmf_loss_converged
             and (np.percentile(
                 [trainer.callback_metrics.get(f"k={k}__consensus_q75", float("inf")) for k in self.k_values], 
