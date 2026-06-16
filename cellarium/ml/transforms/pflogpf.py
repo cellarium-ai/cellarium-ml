@@ -19,9 +19,9 @@ class PFlogPF(torch.nn.Module):
         bioRxiv (2026). https://www.biorxiv.org/content/10.1101/2022.05.06.490859v3
     """
 
-    def __init__(self, target_count: int = 1):
+    def __init__(self, target_count: int = 1, eps: float = 1e-6):
         super().__init__()
-        self.normalize_total = NormalizeTotal(target_count=target_count)
+        self.normalize_total = NormalizeTotal(target_count=target_count, eps=eps)
         self.log1p = Log1p()
         self.center_per_cell = CenterPerCell()
 
