@@ -57,7 +57,7 @@ def _hvg_seurat_single_batch(
 
 
 def seurat_compute_highly_variable_genes(
-    var_names_g: list,
+    var_names_g: list | np.ndarray,
     mean_g: torch.Tensor,
     var_g: torch.Tensor,
     n_top_genes: int | None = None,
@@ -181,7 +181,7 @@ def seurat_compute_highly_variable_genes(
 
 
 def _get_highly_variable_genes_batched(
-    var_names_g: list,
+    var_names_g: list | np.ndarray,
     mean_g: torch.Tensor,
     var_g: torch.Tensor,
     batch_mean_bg: torch.Tensor,
@@ -265,8 +265,8 @@ def _get_highly_variable_genes_batched(
 
 def kotliar_compute_highly_variable_genes(
     var_names_g: list | np.ndarray,
-    mean_g: np.ndarray,
-    var_g: np.ndarray,
+    mean_g: np.ndarray | torch.Tensor,
+    var_g: np.ndarray | torch.Tensor,
     n_top_genes: int | None = 2000,
     expected_fano_threshold: float | None = None,
     minimal_mean: float = 0.5,
