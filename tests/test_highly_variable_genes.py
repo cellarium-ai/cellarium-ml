@@ -225,16 +225,16 @@ _KOTLIAR_VAR = _KOTLIAR_MEAN * 1.1  # Fano ≈ 1 baseline
 _KOTLIAR_VAR[:5] = _KOTLIAR_MEAN[:5] * 50  # very high Fano for first 5 genes
 
 
-@pytest.mark.parametrize("num_genes", [5, 10, 20])
-def test_kotliar_num_genes_exact(num_genes: int):
-    """num_genes selected genes are returned when num_genes is specified."""
+@pytest.mark.parametrize("n_top_genes", [5, 10, 20])
+def test_kotliar_num_genes_exact(n_top_genes: int):
+    """n_top_genes selected genes are returned when n_top_genes is specified."""
     df = kotliar_compute_highly_variable_genes(
         mean_g=_KOTLIAR_MEAN,
         var_g=_KOTLIAR_VAR,
         var_names_g=_KOTLIAR_GENE_NAMES,
-        num_genes=num_genes,
+        n_top_genes=n_top_genes,
     )
-    assert df["highly_variable"].sum() == num_genes
+    assert df["highly_variable"].sum() == n_top_genes
 
 
 def test_kotliar_output_schema():
@@ -243,7 +243,7 @@ def test_kotliar_output_schema():
         mean_g=_KOTLIAR_MEAN,
         var_g=_KOTLIAR_VAR,
         var_names_g=_KOTLIAR_GENE_NAMES,
-        num_genes=10,
+        n_top_genes=10,
     )
     expected_cols = {"mean", "var", "fano", "fano_fit", "fano_ratio", "highly_variable"}
     assert expected_cols.issubset(set(df.columns)), f"Missing columns: {expected_cols - set(df.columns)}"
@@ -252,14 +252,14 @@ def test_kotliar_output_schema():
 
 def test_kotliar_top_genes_have_highest_fano_ratio():
     """Genes selected by num_genes should be exactly those with the highest fano_ratio."""
-    num_genes = 10
+    n_top_genes = 10
     df = kotliar_compute_highly_variable_genes(
         mean_g=_KOTLIAR_MEAN,
         var_g=_KOTLIAR_VAR,
         var_names_g=_KOTLIAR_GENE_NAMES,
-        num_genes=num_genes,
+        n_top_genes=n_top_genes,
     )
-    top_by_ratio = df["fano_ratio"].nlargest(num_genes).index
+    top_by_ratio = df["fano_ratio"].nlargest(n_top_genes).index
     selected = df[df["highly_variable"]].index
     assert set(selected) == set(top_by_ratio)
 
@@ -270,7 +270,7 @@ def test_kotliar_threshold_mode_selects_outliers():
         mean_g=_KOTLIAR_MEAN,
         var_g=_KOTLIAR_VAR,
         var_names_g=_KOTLIAR_GENE_NAMES,
-        num_genes=None,
+        n_top_genes=None,
         expected_fano_threshold=20.0,  # only fano_ratio > 20 pass
         minimal_mean=0.0,
     )
