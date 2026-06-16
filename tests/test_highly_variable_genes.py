@@ -6,7 +6,10 @@ import pytest
 import scipy.sparse
 import torch
 
-from cellarium.ml.preprocessing.highly_variable_genes import get_highly_variable_genes
+from cellarium.ml.preprocessing.highly_variable_genes import (
+    kotliar_compute_highly_variable_genes,
+    seurat_compute_highly_variable_genes,
+)
 
 # ---------------------------------------------------------------------------
 # Original smoke tests (preserved exactly)
@@ -18,8 +21,8 @@ def test_highly_variable_genes_top_n(num_genes_to_check: int):
     gene_names = ["gene_0", "gene_1", "gene_2", "gene_3", "gene_4", "gene_5"]
     mean = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.float32)
     var = torch.tensor([1.6086e00, 2.2582e02, 9.8922e-02, 1.4379e01, 4.0901e-02, 9.9200e-01], dtype=torch.float32)
-    result = get_highly_variable_genes(
-        gene_names=gene_names, mean=mean, var=var, n_top_genes=num_genes_to_check, n_bins=1
+    result = seurat_compute_highly_variable_genes(
+        var_names_g=gene_names, mean_g=mean, var_g=var, n_top_genes=num_genes_to_check, n_bins=1
     )
     assert result[result.highly_variable].shape[0] == num_genes_to_check
 
@@ -28,7 +31,7 @@ def test_highly_variable_genes_cutoffs():
     gene_names = ["gene_0", "gene_1", "gene_2", "gene_3", "gene_4", "gene_5"]
     mean = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.float32)
     var = torch.tensor([1.6086e00, 2.2582e02, 9.8922e-02, 1.4379e01, 4.0901e-02, 9.9200e-01], dtype=torch.float32)
-    result = get_highly_variable_genes(
+    result = seurat_compute_highly_variable_genes(
         gene_names, mean, var, min_disp=0.2, max_disp=10, min_mean=0, max_mean=5, n_bins=1
     )
     assert result[result.highly_variable].shape[0] != 0
@@ -39,7 +42,7 @@ def test_highly_variable_genes_wrong_sizes():
     mean = torch.tensor([1, 2, 3])
     var = torch.tensor([0.1, 0.2, 0.3, 0.4])
     with pytest.raises(ValueError):
-        get_highly_variable_genes(gene_names, mean, var)
+        seurat_compute_highly_variable_genes(gene_names, mean, var)
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +100,7 @@ def test_hvg_matches_scanpy_n_top_genes(n_top_genes: int):
     mean_t = torch.tensor(mean_np, dtype=torch.float32)
     var_t = torch.tensor(var_np, dtype=torch.float32)
 
-    our_df = get_highly_variable_genes(list(adata_norm.var_names), mean_t, var_t, n_top_genes=n_top_genes)
+    our_df = seurat_compute_highly_variable_genes(list(adata_norm.var_names), mean_t, var_t, n_top_genes=n_top_genes)
     sc_df = sc.pp.highly_variable_genes(adata_norm, flavor="seurat", n_top_genes=n_top_genes, inplace=False)
 
     our_hvg = set(our_df[our_df.highly_variable].index)
@@ -126,7 +129,7 @@ def test_hvg_matches_scanpy_cutoffs():
     mean_t = torch.tensor(mean_np, dtype=torch.float32)
     var_t = torch.tensor(var_np, dtype=torch.float32)
 
-    our_df = get_highly_variable_genes(
+    our_df = seurat_compute_highly_variable_genes(
         list(adata_norm.var_names), mean_t, var_t, min_disp=0.5, max_disp=np.inf, min_mean=0.0125, max_mean=3.0
     )
     sc_df = sc.pp.highly_variable_genes(
@@ -168,7 +171,7 @@ def test_hvg_batch_matches_scanpy(n_top_genes: int):
         batch_mean_bg[i] = torch.tensor(bm, dtype=torch.float32)
         batch_var_bg[i] = torch.tensor(bv, dtype=torch.float32)
 
-    our_df = get_highly_variable_genes(
+    our_df = seurat_compute_highly_variable_genes(
         list(adata_norm.var_names),
         mean_t,
         var_t,
@@ -194,12 +197,12 @@ def test_hvg_batch_matches_scanpy(n_top_genes: int):
 
 def test_hvg_batch_partial_args_raises():
     with pytest.raises(ValueError, match="must all be provided together"):
-        get_highly_variable_genes(["g0", "g1"], torch.ones(2), torch.ones(2), batch_mean_bg=torch.ones(2, 2))
+        seurat_compute_highly_variable_genes(["g0", "g1"], torch.ones(2), torch.ones(2), batch_mean_bg=torch.ones(2, 2))
 
 
 def test_hvg_batch_shape_mismatch_raises():
     with pytest.raises(ValueError):
-        get_highly_variable_genes(
+        seurat_compute_highly_variable_genes(
             ["g0", "g1", "g2"],
             torch.ones(3),
             torch.ones(3),
@@ -207,3 +210,72 @@ def test_hvg_batch_shape_mismatch_raises():
             batch_var_bg=torch.ones(2, 4),
             batch_ids=["a", "b"],
         )
+
+
+# ---------------------------------------------------------------------------
+# Kotliar HVG tests
+# ---------------------------------------------------------------------------
+
+_KOTLIAR_GENE_NAMES = [f"gene_{i}" for i in range(50)]
+# Construct data with clear high-variance outliers: first 5 genes have much
+# higher variance than the rest.
+_rng = np.random.default_rng(42)
+_KOTLIAR_MEAN = np.abs(_rng.normal(loc=5.0, scale=2.0, size=50)) + 0.1
+_KOTLIAR_VAR = _KOTLIAR_MEAN * 1.1  # Fano ≈ 1 baseline
+_KOTLIAR_VAR[:5] = _KOTLIAR_MEAN[:5] * 50  # very high Fano for first 5 genes
+
+
+@pytest.mark.parametrize("n_top_genes", [5, 10, 20])
+def test_kotliar_num_genes_exact(n_top_genes: int):
+    """n_top_genes selected genes are returned when n_top_genes is specified."""
+    df = kotliar_compute_highly_variable_genes(
+        mean_g=_KOTLIAR_MEAN,
+        var_g=_KOTLIAR_VAR,
+        var_names_g=_KOTLIAR_GENE_NAMES,
+        n_top_genes=n_top_genes,
+    )
+    assert df["highly_variable"].sum() == n_top_genes
+
+
+def test_kotliar_output_schema():
+    """Output DataFrame has the required columns and is indexed by var_names_g."""
+    df = kotliar_compute_highly_variable_genes(
+        mean_g=_KOTLIAR_MEAN,
+        var_g=_KOTLIAR_VAR,
+        var_names_g=_KOTLIAR_GENE_NAMES,
+        n_top_genes=10,
+    )
+    expected_cols = {"mean", "var", "fano", "fano_fit", "fano_ratio", "highly_variable"}
+    assert expected_cols.issubset(set(df.columns)), f"Missing columns: {expected_cols - set(df.columns)}"
+    assert list(df.index) == _KOTLIAR_GENE_NAMES
+
+
+def test_kotliar_top_genes_have_highest_fano_ratio():
+    """Genes selected by num_genes should be exactly those with the highest fano_ratio."""
+    n_top_genes = 10
+    df = kotliar_compute_highly_variable_genes(
+        mean_g=_KOTLIAR_MEAN,
+        var_g=_KOTLIAR_VAR,
+        var_names_g=_KOTLIAR_GENE_NAMES,
+        n_top_genes=n_top_genes,
+    )
+    top_by_ratio = df["fano_ratio"].nlargest(n_top_genes).index
+    selected = df[df["highly_variable"]].index
+    assert set(selected) == set(top_by_ratio)
+
+
+def test_kotliar_threshold_mode_selects_outliers():
+    """With a high threshold, only the obvious high-Fano genes are selected."""
+    df = kotliar_compute_highly_variable_genes(
+        mean_g=_KOTLIAR_MEAN,
+        var_g=_KOTLIAR_VAR,
+        var_names_g=_KOTLIAR_GENE_NAMES,
+        n_top_genes=None,
+        expected_fano_threshold=20.0,  # only fano_ratio > 20 pass
+        minimal_mean=0.0,
+    )
+    # All selected genes must have fano_ratio > 20
+    selected = df[df["highly_variable"]]
+    assert (selected["fano_ratio"] > 20.0).all()
+    # The 5 genes we engineered to have Fano ≈ 50× the fit should all be selected
+    assert set(_KOTLIAR_GENE_NAMES[:5]).issubset(set(selected.index))
