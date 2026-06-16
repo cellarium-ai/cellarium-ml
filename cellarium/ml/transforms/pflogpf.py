@@ -19,7 +19,7 @@ class PFlogPF(torch.nn.Module):
         bioRxiv (2026). https://www.biorxiv.org/content/10.1101/2022.05.06.490859v3
     """
 
-    def __init__(self, target_count: int = 10_000):
+    def __init__(self, target_count: int = 1):
         super().__init__()
         self.normalize_total = NormalizeTotal(target_count=target_count)
         self.log1p = Log1p()

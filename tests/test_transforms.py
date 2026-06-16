@@ -451,7 +451,7 @@ def test_pflogpf_output_has_zero_row_mean():
 def test_pflogpf_matches_manual_pipeline():
     """PFlogPF result must equal NormalizeTotal → Log1p → CenterPerCell applied manually."""
     x_ng = torch.tensor([[1.0, 3.0, 6.0], [2.0, 2.0, 6.0]])
-    target: int = 10_000
+    target: int = 1
 
     out_wrapper = PFlogPF(target_count=target)(x_ng)["x_ng"]
 
