@@ -22,6 +22,8 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+from cellarium.ml.utilities.convergence import NoisyConvergenceTracker
+from cellarium.ml.models import ValidateMixin
 
 
 class FiLMBlock(torch.nn.Module):
@@ -124,7 +126,7 @@ def weights_init(m):
         torch.nn.init.zeros_(m.linear.bias)
 
 
-class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
+class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization, ValidateMixin):
     """
     Amortized version of OnlineNonNegativeMatrixFactorization.
 
@@ -148,6 +150,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         encoder_hidden_dims: list[int],
         total_n_cells: int,
         batch_size: int,
+        q75_convergence_threshold: float = 0.15,
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
     ) -> None:
@@ -181,11 +184,13 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         # for training the encoder
         self.encoder_loss_fn = torch.nn.SmoothL1Loss(reduction="mean")
 
-        self._D_tol = 1e-5
+        # self._D_tol = 1e-5
         self._alpha_tol = 1e-5
-        self._hals_tol = 1e-4
+        # self._hals_tol = 1e-4
         # Sentinel parameter used to track the current device (mirrors OnlineNMF pattern)
-        self._dummy_param = torch.nn.Parameter(torch.empty(()))
+        # self._dummy_param = torch.nn.Parameter(torch.empty(()))
+        self.q75_convergence_threshold = q75_convergence_threshold
+        self.convergence_tracker = NoisyConvergenceTracker(window_size=25, patience=20, min_delta=1e-4)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -205,13 +210,15 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             getattr(self, f"B_{i}_rkg").zero_()
             init_fn(getattr(self, f"D_{i}_rkg"), k=i, transformed_data_mean=self.transformed_data_mean)
 
-        self._prev_err_rk: torch.Tensor | None = None
-        self._init_err_rk: torch.Tensor | None = None
-        self._err_running_sum_rk = torch.zeros((self.r, len(self.k_values)), device=self._dummy_param.device)
-        self._cells_seen_in_epoch = 0  # Track cells seen in current epoch
-        self._previous_D_rkg: dict[int, torch.Tensor] = {k: getattr(self, f"D_{k}_rkg").clone() for k in self.k_values}
-        self._current_nmf_loss: torch.Tensor | None = None
-        self._current_encoder_nmf_loss: torch.Tensor | None = None
+        # self._prev_err_rk: torch.Tensor | None = None
+        # self._init_err_rk: torch.Tensor | None = None
+        # self._err_running_sum_rk = torch.zeros((self.r, len(self.k_values)), device=self._dummy_param.device)
+        # self._cells_seen_in_epoch = 0  # Track cells seen in current epoch
+        # self._previous_D_rkg: dict[int, torch.Tensor] = {k: getattr(self, f"D_{k}_rkg").clone() for k in self.k_values}
+        self._train_nmf_loss_ema: torch.Tensor | None = None
+        self._val_nmf_loss_ema: torch.Tensor | None = None
+        self.convergence_tracker.reset()
+        # self._current_encoder_nmf_loss: torch.Tensor | None = None
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
@@ -295,19 +302,19 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
-        # for error computation to assess convergence
-        if self._init_err_rk is None:
-            self._loss(x_ng=x_ng)
-            # Take sqrt and normalize by number of cells in this batch
-            self._init_err_rk = self._err_running_sum_rk.clone() / x_ng.shape[0]
-            assert isinstance(self._init_err_rk, torch.Tensor)
-            self._prev_err_rk = self._init_err_rk.clone()
-            self._err_running_sum_rk.zero_()  # Reset after initialization
-            self._cells_seen_in_epoch = 0  # Reset counter
+        # # for error computation to assess convergence
+        # if self._init_err_rk is None:
+        #     self._loss(x_ng=x_ng)
+        #     # Take sqrt and normalize by number of cells in this batch
+        #     self._init_err_rk = self._err_running_sum_rk.clone() / x_ng.shape[0]
+        #     assert isinstance(self._init_err_rk, torch.Tensor)
+        #     self._prev_err_rk = self._init_err_rk.clone()
+        #     self._err_running_sum_rk.zero_()  # Reset after initialization
+        #     self._cells_seen_in_epoch = 0  # Reset counter
 
         encoder_losses = []
         nmf_reconstruction_errors = []
-        nmf_encoder_reconstruction_errors = []
+        # nmf_encoder_reconstruction_errors = []
         for k in self.k_values:
             out = self.online_dictionary_update(x_ng=x_ng, k=k)
             encoder_loss = out["loss"]
@@ -325,14 +332,14 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             nmf_reconstruction_error = squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
             nmf_reconstruction_errors.append(nmf_reconstruction_error)
 
-            # if we want to track the encoder
-            encoder_squared_error_r = compute_reconstruction_error_compiled(
-                x_ng=x_ng, 
-                loadings_rnk=encoder_loadings_rnk, 
-                factors_rkg=factors_rkg,
-            )
-            encoder_reconstruction_error = encoder_squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
-            nmf_encoder_reconstruction_errors.append(encoder_reconstruction_error)
+            # # if we want to track the encoder
+            # encoder_squared_error_r = compute_reconstruction_error_compiled(
+            #     x_ng=x_ng, 
+            #     loadings_rnk=encoder_loadings_rnk, 
+            #     factors_rkg=factors_rkg,
+            # )
+            # encoder_reconstruction_error = encoder_squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
+            # nmf_encoder_reconstruction_errors.append(encoder_reconstruction_error)
 
         # for error computation to assess convergence
         minibatch_nmf_loss = (
@@ -340,53 +347,53 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             if nmf_reconstruction_errors else None
         )
         beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)  # momentum term for exponential moving average
-        self._current_nmf_loss = (
-            beta * self._current_nmf_loss + (1 - beta) * minibatch_nmf_loss 
-            if self._current_nmf_loss is not None 
+        self._train_nmf_loss_ema = (
+            beta * self._train_nmf_loss_ema + (1 - beta) * minibatch_nmf_loss 
+            if self._train_nmf_loss_ema is not None 
             else minibatch_nmf_loss
         )
 
-        minibatch_encoder_nmf_loss = (
-            sum(nmf_encoder_reconstruction_errors) / len(nmf_encoder_reconstruction_errors) 
-            if nmf_encoder_reconstruction_errors else None
-        )
-        beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)  # momentum term for exponential moving average
-        self._current_encoder_nmf_loss = (
-            beta * self._current_encoder_nmf_loss + (1 - beta) * minibatch_encoder_nmf_loss 
-            if self._current_encoder_nmf_loss is not None 
-            else minibatch_encoder_nmf_loss
-        )
+        # minibatch_encoder_nmf_loss = (
+        #     sum(nmf_encoder_reconstruction_errors) / len(nmf_encoder_reconstruction_errors) 
+        #     if nmf_encoder_reconstruction_errors else None
+        # )
+        # beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)  # momentum term for exponential moving average
+        # self._current_encoder_nmf_loss = (
+        #     beta * self._current_encoder_nmf_loss + (1 - beta) * minibatch_encoder_nmf_loss 
+        #     if self._current_encoder_nmf_loss is not None 
+        #     else minibatch_encoder_nmf_loss
+        # )
 
         return {
             "loss": sum(encoder_losses) / len(encoder_losses) if encoder_losses else None,
             "nmf_reconstruction_error": minibatch_nmf_loss,
-            "nmf_encoder_reconstruction_error": minibatch_encoder_nmf_loss,
+            # "nmf_encoder_reconstruction_error": minibatch_encoder_nmf_loss,
         }
 
-    # @torch.compile()
-    @torch.no_grad()
-    def _loss(self, x_ng: torch.Tensor) -> torch.Tensor:
-        """
-        Simple and efficient NMF reconstruction loss computation.
-        Computes ||X - WH||_F^2 for the current batch.
-        """
-        for i, k in enumerate(self.k_values):
-            factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
-            loadings_rnk = getattr(self, f"encoder_{k}")(x_ng)  # (r, n, k)
+    # # @torch.compile()
+    # @torch.no_grad()
+    # def _loss(self, x_ng: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Simple and efficient NMF reconstruction loss computation.
+    #     Computes ||X - WH||_F^2 for the current batch.
+    #     """
+    #     for i, k in enumerate(self.k_values):
+    #         factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
+    #         loadings_rnk = getattr(self, f"encoder_{k}")(x_ng)  # (r, n, k)
 
-            squared_error_r = compute_reconstruction_error_compiled(
-                x_ng=x_ng, 
-                loadings_rnk=loadings_rnk, 
-                factors_rkg=factors_rkg,
-            )  # (r,)
+    #         squared_error_r = compute_reconstruction_error_compiled(
+    #             x_ng=x_ng, 
+    #             loadings_rnk=loadings_rnk, 
+    #             factors_rkg=factors_rkg,
+    #         )  # (r,)
 
-            # Accumulate the squared error
-            self._err_running_sum_rk[:, i] += squared_error_r
+    #         # Accumulate the squared error
+    #         self._err_running_sum_rk[:, i] += squared_error_r
 
-        # Track cells seen in this epoch
-        self._cells_seen_in_epoch += x_ng.shape[0]
+    #     # Track cells seen in this epoch
+    #     self._cells_seen_in_epoch += x_ng.shape[0]
 
-        return squared_error_r
+    #     return squared_error_r
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -398,24 +405,24 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                 "lightning.pytorch.strategies.DDPStrategy is set to True"
             )
 
-    def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
-        # Take sqrt of accumulated squared errors and normalize by number of cells seen
-        # cur_err_rk = torch.sqrt(self._err_running_sum_rk / self._cells_seen_in_epoch)
-        cur_err_rk = self._err_running_sum_rk / self._cells_seen_in_epoch
-        assert isinstance(self._prev_err_rk, torch.Tensor)
-        assert isinstance(self._init_err_rk, torch.Tensor)
+    # def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
+    #     # Take sqrt of accumulated squared errors and normalize by number of cells seen
+    #     # cur_err_rk = torch.sqrt(self._err_running_sum_rk / self._cells_seen_in_epoch)
+    #     cur_err_rk = self._err_running_sum_rk / self._cells_seen_in_epoch
+    #     assert isinstance(self._prev_err_rk, torch.Tensor)
+    #     assert isinstance(self._init_err_rk, torch.Tensor)
 
-        current_overall_err_rk = torch.abs((self._prev_err_rk - cur_err_rk) / self._init_err_rk)
-        if current_overall_err_rk.max() < self._hals_tol:
-            trainer.should_stop = True
-            print(f"Stopping early: converged, loss={cur_err_rk}")
+    #     current_overall_err_rk = torch.abs((self._prev_err_rk - cur_err_rk) / self._init_err_rk)
+    #     if current_overall_err_rk.max() < self._hals_tol:
+    #         trainer.should_stop = True
+    #         print(f"Stopping early: converged, loss={cur_err_rk}")
 
         # print(f"Epoch {trainer.current_epoch} convergence stat: {current_overall_err_rk.max()}")
         # print(f"Per-cell loss - Current max: {cur_err_rk.max():.6f}, Previous: {self._prev_err_rk.max():.6f}")
         # print(f"Per-cell loss - Current mean: {cur_err_rk.mean():.6f}, Previous: {self._prev_err_rk.mean():.6f}")
-        self._prev_err_rk = cur_err_rk.clone()
-        self._err_running_sum_rk.zero_()
-        self._cells_seen_in_epoch = 0  # Reset for next epoch
+        # self._prev_err_rk = cur_err_rk.clone()
+        # self._err_running_sum_rk.zero_()
+        # self._cells_seen_in_epoch = 0  # Reset for next epoch
 
         # # this hard reset to zero is equivalent to forgetting momentum
         # for i in self.k_values:
@@ -424,28 +431,31 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
 
-        # check for convergence by looking at the change in D_rkg
-        mean_max_diff_D = 0.0
-        for k in self.k_values:
-            D_rkg = getattr(self, f"D_{k}_rkg")
-            prev_D_rkg = self._previous_D_rkg[k]
-            max_diff_D_r = torch.quantile(torch.abs(D_rkg - prev_D_rkg).view(D_rkg.shape[0], -1), q=0.95, dim=1)
-            mean_max_diff_D += max_diff_D_r.mean().item()
-            self._previous_D_rkg[k] = D_rkg.clone()
-        mean_max_diff_D /= len(self.k_values)
-        trainer.model.log("mean_max_diff_D", mean_max_diff_D, prog_bar=False)
+        beta_pow_t = np.exp(-trainer.global_step / self.n_batches_for_forgetting_momentum)
+
+        # # check for convergence by looking at the change in D_rkg
+        # mean_max_diff_D = 0.0
+        # for k in self.k_values:
+        #     D_rkg = getattr(self, f"D_{k}_rkg")
+        #     prev_D_rkg = self._previous_D_rkg[k]
+        #     max_diff_D_r = torch.quantile(torch.abs(D_rkg - prev_D_rkg).view(D_rkg.shape[0], -1), q=0.95, dim=1)
+        #     mean_max_diff_D += max_diff_D_r.mean().item()
+        #     self._previous_D_rkg[k] = D_rkg.clone()
+        # mean_max_diff_D /= len(self.k_values)
+        # trainer.model.log("mean_max_diff_D", mean_max_diff_D / (1 - beta_pow_t), prog_bar=False)
+
         # if mean_max_diff_D < self._hals_tol:
         #     trainer.should_stop = True
         #     print(f"Stopping early: converged, mean_max_diff_D={mean_max_diff_D:.6f}")
 
-        nmf_loss_ema = self._current_nmf_loss
-        beta_pow_t = np.exp(-trainer.global_step / self.n_batches_for_forgetting_momentum)
+        nmf_loss_ema = self._train_nmf_loss_ema
         nmf_loss_ema_unbiased = nmf_loss_ema / (1 - beta_pow_t)
         trainer.model.log("reconstruction_error", nmf_loss_ema_unbiased, prog_bar=True)
+        nmf_loss_converged = self.convergence_tracker.check_convergence(nmf_loss_ema_unbiased.item())
 
-        nmf_encoder_loss_ema = self._current_encoder_nmf_loss
-        nmf_encoder_loss_ema_unbiased = nmf_encoder_loss_ema / (1 - beta_pow_t)
-        trainer.model.log("encoder_reconstruction_error", nmf_encoder_loss_ema_unbiased, prog_bar=False)
+        # nmf_encoder_loss_ema = self._current_encoder_nmf_loss
+        # nmf_encoder_loss_ema_unbiased = nmf_encoder_loss_ema / (1 - beta_pow_t)
+        # trainer.model.log("encoder_reconstruction_error", nmf_encoder_loss_ema_unbiased, prog_bar=False)
 
         trainer.model.log("learning_rate", trainer.optimizers[0].param_groups[0]["lr"], prog_bar=False)
 
@@ -490,9 +500,22 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                             bins=np.linspace(0, 1, 75),
                         )
 
-                trainer.model.log("consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
-                trainer.model.log("consensus_L2", mean_neighbor_distance_m.pow(2).mean(), prog_bar=False)
-                trainer.model.log("consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
+                trainer.model.log(f"k={k}__consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
+                # trainer.model.log(f"k={k}__consensus_L2", mean_neighbor_distance_m.pow(2).mean(), prog_bar=False)
+                trainer.model.log(f"k={k}__consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
+
+        # implement convergence check: reconstruction error plateaued and consensus_q75 is below the threshold
+        converged = (
+            (trainer.global_step > self.n_batches_for_forgetting_momentum)
+            and nmf_loss_converged
+            and (np.percentile(
+                [trainer.callback_metrics.get(f"k={k}__consensus_q75", float("inf")) for k in self.k_values], 
+                q=10
+            ) <= self.q75_convergence_threshold)
+        )
+        if converged:
+            trainer.should_stop = True
+            print("Stopping early: converged")
 
         if trainer.global_step % self.n_batches_for_forgetting_momentum == 0:
             # this hard reset to zero is equivalent to forgetting momentum
@@ -536,6 +559,52 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             alpha_nk = F.normalize(alpha_nk, p=1, dim=-1)
 
         return alpha_nk
+    
+    def validate(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        batch_idx: int,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+    ) -> None:
+        """
+        Args:
+            x_ng: Gene counts matrix.
+            var_names_g: The list of the variable names in the input data.
+
+        Returns:
+            An empty dictionary.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+
+        nmf_reconstruction_errors = []
+        for k in self.k_values:
+            encoder_loadings_rnk = getattr(self, f"encoder_{k}")(x_ng)
+            factors_rkg = getattr(self, f"D_{k}_rkg")
+            squared_error_r = compute_reconstruction_error_compiled(
+                x_ng=x_ng, 
+                loadings_rnk=encoder_loadings_rnk, 
+                factors_rkg=factors_rkg,
+            )
+            nmf_reconstruction_error = squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
+            nmf_reconstruction_errors.append(nmf_reconstruction_error)
+
+        # for error computation to assess convergence
+        minibatch_nmf_loss = (
+            sum(nmf_reconstruction_errors) / len(nmf_reconstruction_errors) 
+            if nmf_reconstruction_errors else None
+        )
+        beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)  # momentum term for exponential moving average
+        self._val_nmf_loss_ema = (
+            beta * self._val_nmf_loss_ema + (1 - beta) * minibatch_nmf_loss 
+            if self._val_nmf_loss_ema is not None 
+            else minibatch_nmf_loss
+        )
+        
+        # Logging to TensorBoard by default
+        pl_module.log("val_nmf_loss", self._val_nmf_loss_ema, sync_dist=True, on_epoch=True)
 
     @torch.no_grad()
     def reconstruction_error(
