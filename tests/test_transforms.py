@@ -7,7 +7,16 @@ import scipy.sparse
 import torch
 
 from cellarium.ml import CellariumPipeline
-from cellarium.ml.transforms import Densify, DivideByScale, Filter, Log1p, NormalizeTotal, ZScore
+from cellarium.ml.transforms import (
+    CenterPerCell,
+    Densify,
+    DivideByScale,
+    Filter,
+    Log1p,
+    NormalizeTotal,
+    PFlogPF,
+    ZScore,
+)
 from cellarium.ml.utilities.data import to_torch_sparse_csr
 
 n, g, target_count = 100, 3, 10_000
@@ -409,3 +418,45 @@ def test_filter_then_zscore_pipeline():
     assert result.shape == (n_cells, len(keep))
     np.testing.assert_allclose(result.mean(dim=0).numpy(), np.zeros(len(keep)), atol=1e-5)
     np.testing.assert_allclose(result.std(dim=0).numpy(), np.ones(len(keep)), atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# CenterPerCell
+# ---------------------------------------------------------------------------
+
+
+def test_center_per_cell():
+    x_ng = torch.tensor([[1.0, 2.0, 3.0], [4.0, 4.0, 4.0]])
+    out = CenterPerCell()(x_ng)["x_ng"]
+    # Each row must have zero mean
+    np.testing.assert_allclose(out.mean(dim=-1).numpy(), np.zeros(2), atol=1e-6)
+    # Values: row0 mean=2 → [-1, 0, 1]; row1 mean=4 → [0, 0, 0]
+    np.testing.assert_allclose(out.numpy(), [[-1.0, 0.0, 1.0], [0.0, 0.0, 0.0]], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# PFlogPF
+# ---------------------------------------------------------------------------
+
+
+def test_pflogpf_output_has_zero_row_mean():
+    """Each cell must have zero mean after PFlogPF (CLR property)."""
+    rng = torch.Generator()
+    rng.manual_seed(42)
+    x_ng = torch.poisson(torch.rand(10, 5, generator=rng) * 50 + 1)
+    out = PFlogPF()(x_ng)["x_ng"]
+    np.testing.assert_allclose(out.mean(dim=-1).numpy(), np.zeros(10), atol=1e-5)
+
+
+def test_pflogpf_matches_manual_pipeline():
+    """PFlogPF result must equal NormalizeTotal → Log1p → CenterPerCell applied manually."""
+    x_ng = torch.tensor([[1.0, 3.0, 6.0], [2.0, 2.0, 6.0]])
+    target: int = 10_000
+
+    out_wrapper = PFlogPF(target_count=target)(x_ng)["x_ng"]
+
+    x = NormalizeTotal(target_count=target)(x_ng)["x_ng"]
+    x = Log1p()(x)["x_ng"]
+    x = CenterPerCell()(x)["x_ng"]
+
+    np.testing.assert_allclose(out_wrapper.numpy(), x.numpy(), atol=1e-6)
