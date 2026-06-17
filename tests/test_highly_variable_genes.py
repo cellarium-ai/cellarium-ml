@@ -6,7 +6,7 @@ import pytest
 import scipy.sparse
 import torch
 
-from cellarium.ml.preprocessing.highly_variable_genes import (
+from cellarium.ml.preprocessing import (
     kotliar_compute_highly_variable_genes,
     seurat_compute_highly_variable_genes,
 )
