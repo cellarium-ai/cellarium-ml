@@ -549,6 +549,22 @@ def _validate_sparse_config(config: dict[Any, Any] | Namespace) -> list[str]:
     return warnings_list
 
 
+def compute_cl_name_subset(data: CellariumAnnDataDataModule) -> list[str]:
+    """
+    Compute the list of category names in cl_names_n.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The sorted list of unique category names in the ``cl_names_n`` batch key.
+    """
+    field = data.batch_keys["cl_names_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    return list(obs[field.key].cat.categories)
+
+
 def lightning_cli_factory(
     model_class_path: str,
     link_arguments: list[LinkArguments] | None = None,
@@ -1031,6 +1047,48 @@ def contrastive_mlp(args: ArgsType = None) -> None:
         trainer_defaults={
             "max_epochs": 20,
         },
+    )
+    cli(args=args)
+
+
+@register_model
+def socam(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SOCAM` model.
+
+    Example run::
+
+        cellarium-ml socam fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
+            --data.batch_keys.var_names_g.attr var_names \
+            --data.batch_keys.y_n.attr obs \
+            --data.batch_keys.y_n.key cell_type \
+            --data.batch_keys.y_n.convert_fn cellarium.ml.utilities.data.categories_to_codes \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.max_steps 1000
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SOCAM",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.cl_name_subset", compute_cl_name_subset),
+        ],
     )
     cli(args=args)
 

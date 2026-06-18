@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+import warnings
+
 import numpy as np
 import torch
 from torch import nn
@@ -33,7 +35,10 @@ class DivideByScale(FilterCompatibilityMixin, nn.Module):
     def __init__(self, scale_g: torch.Tensor, var_names_g: np.ndarray, eps: float = 1e-6) -> None:
         super().__init__()
         self.scale_g: torch.Tensor
-        self.register_buffer("scale_g", scale_g)
+        if torch.isnan(scale_g).any():
+            warnings.warn(f"NaN values found in `scale_g`. These will be replaced with 1/eps = {1 / eps}")
+            scale_g = torch.where(torch.isnan(scale_g), torch.full_like(scale_g, 1 / eps), scale_g)
+        self.register_buffer("scale_g", scale_g.float())
         self.var_names_g = var_names_g
         assert_nonnegative("eps", eps)
         self.eps = eps

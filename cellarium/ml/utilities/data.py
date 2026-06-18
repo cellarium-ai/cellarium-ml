@@ -71,7 +71,11 @@ class AnnDataField:
         return value
 
 
-def convert_to_tensor(value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor) -> np.ndarray | torch.Tensor:
+def convert_to_tensor_or_array(
+    value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor | pd.Series,
+) -> np.ndarray | torch.Tensor:
+    if isinstance(value, pd.Series):
+        value = value.to_numpy()  # oom without this potentially because copying clears the reference
     if isinstance(value, torch.Tensor) or scipy.sparse.issparse(value):
         return value
     if np.issubdtype(value.dtype, np.str_) or np.issubdtype(value.dtype, np.object_):
@@ -132,7 +136,7 @@ def collate_fn(
 
         collated_batch[key] = value
 
-    return tree_map(convert_to_tensor, collated_batch)
+    return tree_map(convert_to_tensor_or_array, collated_batch)
 
 
 def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
@@ -271,3 +275,68 @@ def get_var_names_g_indices(
     if missing:
         raise ValueError(f"The following genes in `var_names_g` are not present in the stored schema: {missing}")
     return np.array(indices, dtype=np.intp)
+
+
+def _get_classes_from_owl(owl_uri: str, prefix: str = "CL_") -> list:
+    """
+    Load an OWL file and return classes with a given prefix and a singleton label.
+    """
+    import owlready2
+
+    cl = owlready2.get_ontology(owl_uri).load()
+
+    # only keep CL classes with a singleton label
+    classes = list(_class for _class in cl.classes() if _class.name.startswith(prefix) and len(_class.label) == 1)
+    return classes
+
+
+def get_cl_classes_from_owl(owl_uri: str) -> list:
+    """
+    Get CL classes from an OWL file: the ontology IDs, e.g. CL_0000123.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns: A list of CL classes
+    """
+    return _get_classes_from_owl(owl_uri, prefix="CL_")
+
+
+def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
+    """
+    Get a descendant tensor from an OWL file. Include "unknown" a new disconnected category at the end.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns:
+        A descendant tensor, where the entry at index (i, j) is True if i=j or cell type j is a descendant of
+        cell type i, and False otherwise.
+    """
+
+    cl_classes = get_cl_classes_from_owl(owl_uri)
+
+    cell_type_to_index = {cell_type: idx for idx, cell_type in enumerate(cl_classes)}
+    descendant_tensor = torch.zeros((len(cl_classes) + 1, len(cl_classes) + 1), dtype=torch.bool)
+    for cl_class in cl_classes:
+        idx = cell_type_to_index[cl_class]
+        descendant_tensor[idx, idx] = True  # identity is included in this tensor
+        for descendant in cl_class.descendants():
+            descendant_idx = cell_type_to_index[descendant]
+            descendant_tensor[idx, descendant_idx] = True
+    descendant_tensor[-1, -1] = True  # "unknown" is a descendant of itself and no other cell types
+    return descendant_tensor
+
+
+def get_cl_names_from_owl(owl_uri: str) -> list[str]:
+    """
+    Get cell type names (e.g., CL:0000123) from an OWL file, with "unknown" appended as a new disconnected category.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns:
+        A list of cell type names, where the name at index i corresponds to the cell type
+        at index i in the descendant tensor.
+    """
+    cl_classes = get_cl_classes_from_owl(owl_uri)
+    underscore_names = [_class.name for _class in cl_classes]
+    colon_names = [name.replace("CL_", "CL:") for name in underscore_names]
+    return colon_names + ["unknown"]
