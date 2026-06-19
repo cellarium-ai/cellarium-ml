@@ -9,12 +9,10 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData, concat
 from anndata._core.index import _normalize_indices
-
 try:
     from anndata.compat import Index, Index1D
 except ImportError:
     from anndata.typing import Index, Index1D
-
     dtype_deprecated = True
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
