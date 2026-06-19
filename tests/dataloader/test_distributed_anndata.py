@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import importlib.util
 import os
 import pickle
 from pathlib import Path
@@ -9,6 +10,12 @@ import numpy as np
 import pandas as pd
 import pytest
 from anndata import AnnData
+
+if importlib.util.find_spec("anndata.compat.Index") is None:
+    # anndata 0.13.x +
+    dtype_deprecated = True
+else:
+    dtype_deprecated = False
 
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
@@ -49,9 +56,10 @@ def adatas_path(tmp_path: Path):
         },
         index=[f"gene{i:03d}" for i in range(n_gene)],
     )
+    dtype_kwargs = {"dtype": X.dtype} if not dtype_deprecated else {}
     adata = AnnData(
         X,
-        dtype=X.dtype,
+        **dtype_kwargs,
         obs=obs,
         var=var,
         layers={"L": L},
