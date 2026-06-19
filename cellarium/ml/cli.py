@@ -28,7 +28,7 @@ from torch.utils._pytree import tree_map
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
-cached_loaders = {}
+cached_loaders: dict[Callable, Callable] = {}
 
 
 @dataclass
@@ -147,7 +147,7 @@ loader.add_constructor("!FileLoader", file_loader_constructor)
 loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
 
 
-REGISTERED_MODELS = {}
+REGISTERED_MODELS: dict[str, Callable[[ArgsType], None]] = {}
 
 
 def register_model(model: Callable[[ArgsType], None]):
