@@ -1303,11 +1303,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             scaled_counts_np = scaled_counts_ng[:, gene_inds]
             return scaled_counts_np
 
-        output_counts_sum_np: int | torch.Tensor = 0
-        importance_weight_means: list = []
+        x_tilde_np: torch.Tensor = torch.zeros(x_ng.shape[0], len(gene_inds), device=x_ng.device)
 
         # go through each output batch projection (just one unless transform_batch == "mean")
         for transformed_batch_index_n in transformed_batch_index_n_list:
+            output_counts_sum_np: int | torch.Tensor = 0
+            importance_weight_means: list = []
+
             local_batch_nb = self.batch_representation_from_batch_index(
                 transformed_batch_index_n,
                 use_mean_though_sampling=True,  # don't sample during reconstruction
@@ -1336,7 +1338,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 )
                 output_counts_sum_np += scaled_counts_np
 
-                x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list))
+                x_tilde_np = x_tilde_np + output_counts_sum_np
 
             else:
                 for _ in range(n_latent_samples):
@@ -1368,7 +1370,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                     )
                     output_counts_sum_np += scaled_counts_np * importance_weight_n1
 
-                x_tilde_np = output_counts_sum_np / (len(transformed_batch_index_n_list) * sum(importance_weight_means))
+                x_tilde_np = x_tilde_np + output_counts_sum_np / sum(importance_weight_means)
+
+        x_tilde_np = x_tilde_np / len(transformed_batch_index_n_list)
 
         return {"x_ng": x_tilde_np}
 
