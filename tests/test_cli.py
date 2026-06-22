@@ -631,6 +631,7 @@ CONFIGS = [
                     "init_args": {
                         "n_batch": None,
                         "use_size_factor_key": False,
+                        "input_gene_dropout_rate": 0.1,
                         "encoder": {
                             "hidden_layers": [],
                             "final_layer": {

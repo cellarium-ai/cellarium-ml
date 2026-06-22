@@ -484,6 +484,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         n_continuous_cov: Number of continuous covariates.
         n_cats_per_cov: A list of integers containing the number of categories for each categorical covariate.
         dropout_rate: Dropout rate for hidden units in the encoder only.
+        input_gene_dropout_rate: Gene dropout rate for input data that goes into the encoder during training.
         dispersion: Flexibility of the dispersion parameter when ``gene_likelihood`` is either ``"nb"`` or
             ``"zinb"``. One of the following:
                 * ``"gene"``: parameter is constant per gene across cells.
@@ -567,6 +568,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         n_latent_batch: int | None = None,
         z_kl_weight_max: float = 1.0,
         batch_kl_weight_max: float = 0.0,
+        input_gene_dropout_rate: float = 0.0,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         kl_warmup_epochs: int | None = 400,
@@ -595,6 +597,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         self.n_batch = n_batch
         self.log_variational = log_variational
         self.gene_likelihood = gene_likelihood
+        self.input_gene_dropout_rate = input_gene_dropout_rate
         self.latent_distribution = latent_distribution
         self.n_cats_per_cov = n_cats_per_cov if n_cats_per_cov is not None else []
         self.use_size_factor_key = use_size_factor_key
@@ -1023,8 +1026,16 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         else:
             library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
 
+        if self.input_gene_dropout_rate > 0.0:
+            # randomly drop out some genes in the input data to the encoder during training
+            with torch.no_grad():
+                dropout_mask_ng = torch.rand_like(x_ng) > self.input_gene_dropout_rate
+                inference_input_x_ng = x_ng * dropout_mask_ng
+        else:
+            inference_input_x_ng = x_ng
+
         inference_outputs = self.inference(
-            x_ng=x_ng,
+            x_ng=inference_input_x_ng,
             batch_nb=batch_nb,
             continuous_covariates_nc=continuous_covariates_nc,
             categorical_covariate_np=categorical_covariate_np,
