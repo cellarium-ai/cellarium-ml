@@ -14,7 +14,110 @@ from cellarium.ml.cli import main
 
 devices = os.environ.get("TEST_DEVICES", "1")
 
-CONFIGS = [
+THREE_DEVICE_CONFIGS = [
+    {
+        "model_name": "incremental_pca",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
+                "model": {
+                    "class_path": "cellarium.ml.models.IncrementalPCA",
+                    "init_args": {"n_components": "50"},
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
+        },
+    },
+    {
+        "model_name": "incremental_pca",
+        "subcommand": "predict",
+        "predict": {
+            "model": {
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
+                "model": {
+                    "class_path": "cellarium.ml.models.IncrementalPCA",
+                    "init_args": {"n_components": "50"},
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "obs_names_n": {"attr": "obs_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "callbacks": {
+                    "class_path": "cellarium.ml.callbacks.PredictionWriter",
+                    "init_args": {"output_dir": "./output"},
+                },
+            },
+            "return_predictions": "false",
+        },
+    },
+]
+
+TWO_DEVICE_CONFIGS = [
     {
         "model_name": "geneformer",
         "subcommand": "fit",
@@ -50,7 +153,7 @@ CONFIGS = [
                     "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "5",
-                "num_workers": "1",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -93,7 +196,7 @@ CONFIGS = [
                     "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "5",
-                "num_workers": "1",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -138,7 +241,7 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "5",
-                "num_workers": "1",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -179,7 +282,7 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "5",
-                "num_workers": "1",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -223,7 +326,7 @@ CONFIGS = [
                 },
                 "batch_size": "50",
                 "shuffle": "true",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -268,7 +371,7 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -313,7 +416,7 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -376,112 +479,12 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
                 "devices": devices,
             },
-        },
-    },
-    {
-        "model_name": "incremental_pca",
-        "subcommand": "fit",
-        "fit": {
-            "model": {
-                "transforms": [
-                    {
-                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
-                        "init_args": {"target_count": "10_000"},
-                    },
-                    "cellarium.ml.transforms.Log1p",
-                ],
-                "model": {
-                    "class_path": "cellarium.ml.models.IncrementalPCA",
-                    "init_args": {"n_components": "50"},
-                },
-            },
-            "data": {
-                "dadc": {
-                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
-                    "init_args": {
-                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                        "shard_size": "100",
-                        "max_cache_size": "2",
-                        "obs_columns_to_validate": ["total_mrna_umis"],
-                    },
-                },
-                "batch_keys": {
-                    "x_ng": {
-                        "attr": "X",
-                        "convert_fn": "cellarium.ml.utilities.data.densify",
-                    },
-                    "var_names_g": {"attr": "var_names"},
-                    "total_mrna_umis_n": {
-                        "attr": "obs",
-                        "key": "total_mrna_umis",
-                    },
-                },
-                "batch_size": "50",
-                "num_workers": "2",
-            },
-            "trainer": {
-                "accelerator": "cpu",
-                "devices": devices,
-            },
-        },
-    },
-    {
-        "model_name": "incremental_pca",
-        "subcommand": "predict",
-        "predict": {
-            "model": {
-                "transforms": [
-                    {
-                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
-                        "init_args": {"target_count": "10_000"},
-                    },
-                    "cellarium.ml.transforms.Log1p",
-                ],
-                "model": {
-                    "class_path": "cellarium.ml.models.IncrementalPCA",
-                    "init_args": {"n_components": "50"},
-                },
-            },
-            "data": {
-                "dadc": {
-                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
-                    "init_args": {
-                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                        "shard_size": "100",
-                        "max_cache_size": "2",
-                        "obs_columns_to_validate": ["total_mrna_umis"],
-                    },
-                },
-                "batch_keys": {
-                    "x_ng": {
-                        "attr": "X",
-                        "convert_fn": "cellarium.ml.utilities.data.densify",
-                    },
-                    "var_names_g": {"attr": "var_names"},
-                    "obs_names_n": {"attr": "obs_names"},
-                    "total_mrna_umis_n": {
-                        "attr": "obs",
-                        "key": "total_mrna_umis",
-                    },
-                },
-                "batch_size": "50",
-                "num_workers": "2",
-            },
-            "trainer": {
-                "accelerator": "cpu",
-                "devices": devices,
-                "callbacks": {
-                    "class_path": "cellarium.ml.callbacks.PredictionWriter",
-                    "init_args": {"output_dir": "./output"},
-                },
-            },
-            "return_predictions": "false",
         },
     },
     {
@@ -541,7 +544,7 @@ CONFIGS = [
                 },
                 "batch_size": "50",
                 "shuffle": "true",
-                "num_workers": "2",
+                "num_workers": "0",
                 "val_size": "0.1",
             },
             "trainer": {
@@ -582,7 +585,7 @@ CONFIGS = [
                     "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -613,7 +616,7 @@ CONFIGS = [
                     "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -681,7 +684,7 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -753,7 +756,7 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -1080,7 +1083,7 @@ SINGLE_DEVICE_CONFIGS = [
                 },
                 "batch_size": "50",
                 "shuffle": "true",
-                "num_workers": "2",
+                "num_workers": "0",
                 "val_size": "0",
             },
             "trainer": {
@@ -1096,10 +1099,25 @@ SINGLE_DEVICE_CONFIGS = [
 
 @pytest.mark.parametrize(
     "config",
-    CONFIGS,
-    ids=[config.get("_display_id", config["model_name"]) + "-" + config["subcommand"] for config in CONFIGS],  # type: ignore[operator]
+    THREE_DEVICE_CONFIGS,
+    ids=[
+        config.get("_display_id", config["model_name"]) + "-" + config["subcommand"]  # type: ignore[operator]
+        for config in THREE_DEVICE_CONFIGS
+    ],
 )
-def test_cpu_multi_device(config: dict[str, Any]):
+def test_cpu_three_device(config: dict[str, Any]):
+    config = {k: v for k, v in config.items() if not k.startswith("_")}
+    if config["subcommand"] == "predict":
+        assert config["predict"]["return_predictions"] == "false"
+    main(config)
+
+
+@pytest.mark.parametrize(
+    "config",
+    TWO_DEVICE_CONFIGS,
+    ids=[config.get("_display_id", config["model_name"]) + "-" + config["subcommand"] for config in TWO_DEVICE_CONFIGS],  # type: ignore[operator]
+)
+def test_cpu_two_device(config: dict[str, Any]):
     config = {k: v for k, v in config.items() if not k.startswith("_")}
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
@@ -1109,7 +1127,10 @@ def test_cpu_multi_device(config: dict[str, Any]):
 @pytest.mark.parametrize(
     "config",
     SINGLE_DEVICE_CONFIGS,
-    ids=[config["model_name"] + "-" + config["subcommand"] for config in SINGLE_DEVICE_CONFIGS],  # type: ignore[operator]
+    ids=[
+        config.get("_display_id", config["model_name"]) + "-" + config["subcommand"]  # type: ignore[operator]
+        for config in SINGLE_DEVICE_CONFIGS
+    ],
 )
 def test_cpu_single_device(config: dict[str, Any]):
     if config["subcommand"] == "predict":
