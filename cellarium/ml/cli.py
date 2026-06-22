@@ -317,7 +317,8 @@ def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
     dataframe = getattr(data.dadc[0], field.attr)
     n_cats_per_cov = []
     if field.key is not None:
-        for key in field.key:
+        keys = [field.key] if isinstance(field.key, str) else field.key
+        for key in keys:
             covariate_series = dataframe[key]
             n_cats_per_cov.append(len(covariate_series.cat.categories))
     return n_cats_per_cov

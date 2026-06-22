@@ -35,15 +35,21 @@ class DressedLayer(torch.nn.Module):
         self,
         layer: torch.nn.Module,
         use_batch_norm: bool = False,
-        batch_norm_kwargs: dict = {"momentum": 0.01, "eps": 0.001},
+        batch_norm_kwargs: dict | None = None,
         use_layer_norm: bool = False,
-        layer_norm_kwargs: dict = {"elementwise_affine": False},
+        layer_norm_kwargs: dict | None = None,
         activation_fn: Type[torch.nn.Module] | None = torch.nn.ReLU,
         dropout_rate: float = 0,
     ):
+        if batch_norm_kwargs is None:
+            batch_norm_kwargs = {"momentum": 0.01, "eps": 0.001}
+        if layer_norm_kwargs is None:
+            layer_norm_kwargs = {"elementwise_affine": False}
         assert not (use_batch_norm and use_layer_norm), "Cannot use both batch and layer normalization."
         super().__init__()
-        out_features = layer.out_features
+        out_features = getattr(layer, "out_features", None)
+        if out_features is None:
+            raise ValueError(f"attempted to use {layer} in DressedLayer, but it does not define out_features")
         assert isinstance(out_features, int), "The layer must have an `out_features` attribute of type `int`."
         batch_norm = torch.nn.BatchNorm1d(out_features, **batch_norm_kwargs) if use_batch_norm else None
         layer_norm = torch.nn.LayerNorm(out_features, **layer_norm_kwargs) if use_layer_norm else None
@@ -78,10 +84,12 @@ class FullyConnectedLinear(torch.nn.Module):
         in_features: int,
         out_features: int,
         n_hidden: list[int],
-        dressing_init_kwargs: dict[str, Any] = {},
+        dressing_init_kwargs: dict[str, Any] | None = None,
         bias: bool = False,
     ):
         super().__init__()
+        if dressing_init_kwargs is None:
+            dressing_init_kwargs = {}
         module_list = torch.nn.ModuleList()
         layer_size = in_features
         if len(n_hidden) > 0:

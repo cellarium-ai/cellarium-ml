@@ -316,9 +316,9 @@ def test_vae_architectures():
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatchAndCovariates",
             "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
-            "final_additive_bias": True,
         },
     ]
+    kwargs5["decoder"]["final_additive_bias"] = True
     print("batch injection in both encoder and decoder with decoder final additive bias")
     print(kwargs5)
     model = SingleCellVariationalInference(**kwargs5)
@@ -338,9 +338,9 @@ def test_vae_architectures():
         {
             "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
             "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
-            "final_additive_bias": True,
         },
     ]
+    kwargs6["decoder"]["final_additive_bias"] = True
     print(
         "batch injection in both encoder and decoder with decoder final additive bias with batch embedded and sampled"
     )

@@ -73,11 +73,15 @@ class LinearWithStructuredBias(torch.nn.Linear):
         out_features: int,
         label_to_bias_hidden_layers: list[int],
         n_batch: int = 0,
-        categorical_covariate_dimensions: list[int] = [],
+        categorical_covariate_dimensions: list[int] | None = None,
         bias: bool = True,
-        label_to_bias_dressing_init_kwargs: dict[str, Any] = {},
+        label_to_bias_dressing_init_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__(in_features, out_features, bias=bias)
+        if categorical_covariate_dimensions is None:
+            categorical_covariate_dimensions = []
+        if label_to_bias_dressing_init_kwargs is None:
+            label_to_bias_dressing_init_kwargs = {}
         if n_batch + sum(categorical_covariate_dimensions) < 1:
             raise ValueError("in_features=0: at least one batch or categorical covariate dimension must be provided.")
         self.bias_decoder = FullyConnectedLinear(
@@ -349,12 +353,13 @@ class DecoderSCVI(torch.nn.Module):
         self.dropout_decoder = (
             torch.nn.Linear(self.fully_connected.out_features, out_features) if (gene_likelihood == "zinb") else None
         )
+        final_layer_init_args = final_layer["init_args"]
         self.normalized_count_decoder = instantiate_from_class_path(
             final_layer["class_path"],
             in_features=self.fully_connected.out_features,
             out_features=out_features,
-            bias=final_layer["init_args"].pop("bias", True),
-            **final_layer["init_args"],
+            bias=final_layer_init_args.get("bias", True),
+            **{k: v for k, v in final_layer_init_args.items() if k != "bias"},
         )
         self.count_decoder_takes_batch = isinstance(self.normalized_count_decoder, LinearWithStructuredBias)
         self.normalized_count_activation = (
@@ -408,17 +413,15 @@ class DecoderSCVI(torch.nn.Module):
         else:
             count_mean_ng = torch.exp(library_size_n1) * chi_ng
 
-        # optional inverse overdispersion per cell
-        if inverse_overdispersion is None:
-            assert self.inverse_overdispersion_decoder is not None, (
-                "inverse_overdispersion must be provided when not using Poisson or gene-cell dispersion"
-            )
-            inverse_overdispersion = self.inverse_overdispersion_decoder(q_nh).exp()
-
         # construct the count distribution
         dist: Distribution
         match self.gene_likelihood:
             case "nb":
+                if inverse_overdispersion is None:
+                    assert self.inverse_overdispersion_decoder is not None, (
+                        "inverse_overdispersion must be provided when not using Poisson or gene-cell dispersion"
+                    )
+                    inverse_overdispersion = self.inverse_overdispersion_decoder(q_nh).exp()
                 dist = NegativeBinomial(count_mean_ng + self.eps, inverse_overdispersion + self.eps)
             case "poisson":
                 dist = Poisson(count_mean_ng + self.eps)
@@ -477,7 +480,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         decoder: Dict specifying the decoder configuration.
         n_latent: Dimension of the latent space.
         n_batch: Number of total batches in the dataset.
-        batch_bais_sampled: True to sample the batch-specific biases from their distributions.
+        batch_representation_sampled: True to sample latent batch from a distribution.
         n_continuous_cov: Number of continuous covariates.
         n_cats_per_cov: A list of integers containing the number of categories for each categorical covariate.
         dropout_rate: Dropout rate for hidden units in the encoder only.
@@ -501,15 +504,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 * ``"encoder"``: use batch norm only in the encoder(s).
                 * ``"decoder"``: use batch norm only in the decoder.
                 * ``"both"``: use batch norm in both encoder(s) and decoder.
-            Note: if ``use_layer_norm`` is also specified, both will be applied (first
-            :class:`~torch.nn.BatchNorm1d`, then :class:`~torch.nn.LayerNorm`).
         use_layer_norm: Specifies where to use :class:`~torch.nn.LayerNorm` in the model. One of the following:
                 * ``"none"``: don't use layer norm in either encoder(s) or decoder.
                 * ``"encoder"``: use layer norm only in the encoder(s).
                 * ``"decoder"``: use layer norm only in the decoder.
                 * ``"both"``: use layer norm in both encoder(s) and decoder.
-            Note: if ``use_batch_norm`` is also specified, both will be applied (first
-            :class:`~torch.nn.BatchNorm1d`, then :class:`~torch.nn.LayerNorm`).
+            Note: only one of use_batch_norm or use_layer_norm should be specified.
         use_size_factor_key: If ``True``, use the :attr:`~anndata.AnnData.obs` column as defined by the
             ``size_factor_key`` parameter in the model's ``setup_anndata`` method as the scaling
             factor in the mean of the conditional distribution. If ``False``, the observed library
@@ -556,7 +556,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         n_batch: int = 0,
         n_latent: int = 10,
         n_continuous_cov: int = 0,
-        n_cats_per_cov: list[int] = [],
+        n_cats_per_cov: list[int] | None = None,
         dropout_rate: float = 0.1,
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
         log_variational: bool = True,
@@ -596,7 +596,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         self.log_variational = log_variational
         self.gene_likelihood = gene_likelihood
         self.latent_distribution = latent_distribution
-        self.n_cats_per_cov = n_cats_per_cov
+        self.n_cats_per_cov = n_cats_per_cov if n_cats_per_cov is not None else []
         self.use_size_factor_key = use_size_factor_key
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
@@ -731,10 +731,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 layer["init_args"]["categorical_covariate_dimensions"] = []
             elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithCovariates":
                 layer["init_args"]["n_batch"] = 0
-                layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+                layer["init_args"]["categorical_covariate_dimensions"] = self.n_cats_per_cov
             elif layer["class_path"] == "cellarium.ml.models.scvi.LinearWithBatchAndCovariates":
                 layer["init_args"]["n_batch"] = self.n_latent_batch
-                layer["init_args"]["categorical_covariate_dimensions"] = n_cats_per_cov
+                layer["init_args"]["categorical_covariate_dimensions"] = self.n_cats_per_cov
 
         def _fill_in_layer_defaults(layer: dict, batch_norm: bool, layer_norm: bool, dropout_p: float):
             if "dressing_init_args" not in layer:
@@ -965,7 +965,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             case "gene-label":
                 inverse_overdispersion = None
                 raise NotImplementedError
-        assert isinstance(inverse_overdispersion, torch.Tensor)
 
         count_distribution = self.decoder(
             z_nk=z_nk,
@@ -1122,12 +1121,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             A dictionary with the following keys:
 
             - ``x_ng``:
-                - If :attr:`self.reconstruct_counts_on_predict` is True:
+                - If :attr:`self.reconstruct_counts_on_predict` is False:
                     - (x_ng is a notational misnomer) Embedding of the input data into the scVI latent space,
                         typically referred to as ``z_nk``.
-                - If :attr:`self.reconstruct_counts_on_predict` is False:
-                    - (the g in x_ng is a notational misnomer) Reconstruction of the input data: ``x_ng'``, which
-                        will have a different number of genes depending on :attr:`self.reconstruction_var_names_g`.
+                - If :attr:`self.reconstruct_counts_on_predict` is True:
+                    - (x_ng is a notational misnomer) Reconstruction of the input data: ``x_ng'``, which
+                        may have a different number of genes depending on :attr:`self.reconstruction_var_names_g`.
         """
 
         if self.reconstruct_counts_on_predict:

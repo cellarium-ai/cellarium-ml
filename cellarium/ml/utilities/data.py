@@ -239,8 +239,8 @@ def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
 def categories_to_product_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
     """
     Convert a pandas Series or DataFrame of categorical data to a numpy array of codes.
-    If the input is a DataFrame, the output is created by first combining .
-    Returned array is always a copy.
+    If the input is a DataFrame, the output is created by first combining the codes of each
+    column into a single code representing the Cartesian product of the categories.
 
     Args:
         x: Pandas Series object or a pandas DataFrame containing multiple categorical Series.
@@ -255,9 +255,9 @@ def categories_to_product_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
         # like the code [1, 1] if there are 3 categories in the first column and 2 in the second
         # would be 1 + 1*3 = 4
         n_cats = n_cats.cumprod().shift(1).fillna(1)
-        return np.asarray((n_cats.values[None, :] * codes).sum(axis=1).values).astype(int)
+        return np.array((n_cats.values[None, :] * codes).sum(axis=1).values).astype(int)
     else:
-        return np.asarray(x.cat.codes)
+        return np.array(x.cat.codes).astype(int)
 
 
 def get_categories(x: pd.Series) -> np.ndarray:
