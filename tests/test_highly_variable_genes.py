@@ -1,8 +1,11 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import time
+
 import numpy as np
 import pytest
+import scanpy as sc
 import scipy.sparse
 import torch
 
@@ -50,12 +53,20 @@ def test_highly_variable_genes_wrong_sizes():
 # ---------------------------------------------------------------------------
 
 
-def _load_adata():
-    import scanpy as sc
-
-    adata, batch_column = sc.datasets.ebi_expression_atlas("E-MTAB-10137"), "Sample Characteristic[individual]"
-    adata.obs[batch_column] = adata.obs[batch_column].astype("category")
-    return adata, batch_column
+@pytest.fixture(scope="module")
+def adata_and_batch_column():
+    batch_column = "Sample Characteristic[individual]"
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            adata = sc.datasets.ebi_expression_atlas("E-MTAB-10137")
+            adata.obs[batch_column] = adata.obs[batch_column].astype("category")
+            return adata, batch_column
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
+    raise RuntimeError("Failed to download E-MTAB-10137 after 3 attempts") from last_exc
 
 
 def _normalize_log1p_adata(adata):
@@ -87,11 +98,11 @@ def _mean_var_ddof1(x: np.ndarray):
 
 
 @pytest.mark.parametrize("n_top_genes", [200, 500])
-def test_hvg_matches_scanpy_n_top_genes(n_top_genes: int):
+def test_hvg_matches_scanpy_n_top_genes(n_top_genes: int, adata_and_batch_column):
     """Verify seurat-flavor HVG output matches scanpy.pp.highly_variable_genes."""
     import scanpy as sc
 
-    adata, _ = _load_adata()
+    adata, _ = adata_and_batch_column
     adata_norm = _normalize_log1p_adata(adata)
     # Scanpy's seurat HVG internally reverses log1p (expm1) before computing
     # mean/var, so we must pass statistics from normalized count space.
@@ -118,11 +129,11 @@ def test_hvg_matches_scanpy_n_top_genes(n_top_genes: int):
     )
 
 
-def test_hvg_matches_scanpy_cutoffs():
+def test_hvg_matches_scanpy_cutoffs(adata_and_batch_column):
     """Verify cutoff-based selection matches Scanpy with default cutoffs."""
     import scanpy as sc
 
-    adata, _ = _load_adata()
+    adata, _ = adata_and_batch_column
     adata_norm = _normalize_log1p_adata(adata)
     x_counts = np.expm1(_to_dense(adata_norm.X))
     mean_np, var_np = _mean_var_ddof1(x_counts)
@@ -148,11 +159,11 @@ def test_hvg_matches_scanpy_cutoffs():
 
 
 @pytest.mark.parametrize("n_top_genes", [200, 500])
-def test_hvg_batch_matches_scanpy(n_top_genes: int):
+def test_hvg_batch_matches_scanpy(n_top_genes: int, adata_and_batch_column):
     """Verify batch HVG selection matches scanpy's batch_key path."""
     import scanpy as sc
 
-    adata, batch_col = _load_adata()
+    adata, batch_col = adata_and_batch_column
     adata_norm = _normalize_log1p_adata(adata)
     x_counts = np.expm1(_to_dense(adata_norm.X))
     batches = list(adata_norm.obs[batch_col].cat.categories)

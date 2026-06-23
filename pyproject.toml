@@ -45,12 +45,12 @@ mypy = ["mypy", "types-PyYAML"]
 ontology = ["networkx", "owlready2"]
 test = [
   "pytest-xdist",
-  "scanpy",
+  "scanpy==1.11.5",
   "tenacity",
   "tensorboard",
   "torchvision",
   "scvi-tools==1.3.3",
-  "zarr",
+  "zarr==2.18.3",
 ]
 docs = [
   "nbsphinx",
