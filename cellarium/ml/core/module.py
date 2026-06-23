@@ -468,6 +468,22 @@ class CellariumModule(pl.LightningModule):
         if callable(on_train_batch_end):
             on_train_batch_end(self.trainer)
 
+    def on_validation_epoch_start(self) -> None:
+        """
+        Calls the ``on_validation_epoch_start`` method on the :attr:`model` attribute.
+        """
+        hook = getattr(self.model, "on_validation_epoch_start", None)
+        if callable(hook):
+            hook(self.trainer)
+
+    def on_validation_epoch_end(self) -> None:
+        """
+        Calls the ``on_validation_epoch_end`` method on the :attr:`model` attribute.
+        """
+        hook = getattr(self.model, "on_validation_epoch_end", None)
+        if callable(hook):
+            hook(self.trainer)
+
     def on_train_end(self) -> None:
         """
         Calls the ``on_train_end`` method on the module.

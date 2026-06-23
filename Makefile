@@ -25,13 +25,24 @@ typecheck: FORCE
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)
-	pytest -v -k multi_device --ignore=tests/dataloader
+	pytest -v -k multi_device --ignore=tests/dataloader --ignore=tests/test_cli.py --ignore=tests/test_mup.py
+else ifeq (${TEST_DEVICES}, 1)
+	# default
+	pytest -v --ignore=tests/dataloader --ignore=tests/test_cli.py --ignore=tests/test_mup.py
+endif
+
+test-cli: FORCE
+ifeq (${TEST_DEVICES}, 2)
+	pytest tests/test_cli.py -v -k "two_device or three_device"
 else ifeq (${TEST_DEVICES}, 3)
-	pytest -v -k multi_device --ignore=tests/dataloader
+	pytest tests/test_cli.py -v -k three_device
 else
 	# default
-	pytest -v --ignore=tests/dataloader
+	pytest tests/test_cli.py -v
 endif
+
+test-mup: FORCE
+	pytest -v tests/test_mup.py
 
 test-dataloader: FORCE
 ifeq (${TEST_DEVICES}, 2)

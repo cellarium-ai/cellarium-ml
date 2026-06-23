@@ -39,6 +39,17 @@ class BoringDataset(torch.utils.data.Dataset):
         return data
 
 
+class BoringDatasetSCVI(BoringDataset):
+    """A simple dataset for testing purposes that includes batch_index_n."""
+
+    def __init__(self, data: np.ndarray, batch_index_n: np.ndarray, var_names: np.ndarray | None = None) -> None:
+        self.batch_index_n = batch_index_n
+        super().__init__(data=data, var_names=var_names)
+
+    def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
+        return super().__getitem__(idx) | {"batch_index_n": self.batch_index_n[idx, None]}
+
+
 class BoringModel(CellariumModel):
     """
     This model appends a batch input to an :attr:`iter_data` list at each iteration.
