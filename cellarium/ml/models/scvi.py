@@ -1602,8 +1602,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         if n_cells > 0:
             val_elbo = (self._val_elbo_sum / self._val_n_cells).item()
             trainer.logger.log_metrics({"val_elbo": val_elbo}, step=step)
-            val_rec = (self._val_rec_sum / self._val_n_cells).item()
-            lightning_module.log(name="val_reconstruction_loss", value=val_rec)
+            val_rec = self._val_rec_sum / self._val_n_cells
+            lightning_module.log(name="val_reconstruction_loss", value=val_rec.detach(), sync_dist=True)
 
         # ontology-weighted Spearman
         if self.num_classes is not None and self.ontology_distance_matrix is not None:
@@ -1666,8 +1666,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             with torch.no_grad():
                 logits_test = X_test @ W.T + b
                 preds = logits_test.argmax(dim=-1)
-                top1 = (preds == y_test).float().mean().item()
-                lightning_module.log(name="val_cell_type_top1_accuracy", value=top1)
+                top1 = (preds == y_test).float().mean().detach()
+                lightning_module.log(name="val_cell_type_top1_accuracy", value=top1, sync_dist=True)
 
                 if self.ontology_distance_matrix is not None:
                     wrong_mask = preds != y_test
