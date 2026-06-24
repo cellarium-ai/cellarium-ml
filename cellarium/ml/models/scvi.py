@@ -1605,7 +1605,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             val_rec = self._val_rec_sum / self._val_n_cells
             lightning_module.log(
                 name="val_reconstruction_loss",
-                value=val_rec.detach().to(lightning_module.device),
+                value=val_rec.detach(),
                 sync_dist=True,
             )
 
@@ -1673,7 +1673,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 top1 = (preds == y_test).float().mean().detach()
                 lightning_module.log(
                     name="val_cell_type_top1_accuracy",
-                    value=top1.to(lightning_module.device),
+                    value=top1,
                     sync_dist=True,
                 )
 
