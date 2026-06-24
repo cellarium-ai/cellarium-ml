@@ -18,6 +18,8 @@ from cellarium.ml.models.nmf import NMFOutput
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField
 
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
 
 @pytest.fixture
 def small_adata():

@@ -1,6 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+
 import anndata
 import lightning.pytorch as pl
 import numpy as np
@@ -14,6 +16,8 @@ from cellarium.ml.models.nmf import NMFOutput
 from cellarium.ml.models.nmf_amortized import ConsensusNMFEncoder, FiLMBlock
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField
+
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
 
 
 @pytest.fixture
@@ -37,6 +41,7 @@ def _make_module(
     k_values: list[int],
     r: int,
     encoder_hidden_dims: list[int],
+    batch_size: int,
 ) -> CellariumModule:
     g = small_adata.shape[1]
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
@@ -45,6 +50,8 @@ def _make_module(
         k_values=k_values,
         r=r,
         encoder_hidden_dims=encoder_hidden_dims,
+        total_n_cells=small_adata.shape[0],
+        batch_size=batch_size,
     )
     return CellariumModule(
         cpu_transforms=[
@@ -76,7 +83,7 @@ def test_amortized_nmf_single_device(small_adata: anndata.AnnData) -> None:
     n = small_adata.shape[0]
     dm = _make_datamodule(small_adata, batch_size=n // 2)
     dm.setup(stage="fit")
-    module = _make_module(small_adata, k_values=[3], r=2, encoder_hidden_dims=[16])
+    module = _make_module(small_adata, k_values=[3], r=2, encoder_hidden_dims=[16], batch_size=n // 2)
     trainer = pl.Trainer(barebones=True, accelerator="cpu", devices=1, max_epochs=1)
     trainer.fit(module, dm)
 
@@ -88,7 +95,7 @@ def test_amortized_nmf_multiple_k_values(small_adata: anndata.AnnData) -> None:
     r = 2
     dm = _make_datamodule(small_adata, batch_size=n // 2)
     dm.setup(stage="fit")
-    module = _make_module(small_adata, k_values=k_values, r=r, encoder_hidden_dims=[16])
+    module = _make_module(small_adata, k_values=k_values, r=r, encoder_hidden_dims=[16], batch_size=n // 2)
     trainer = pl.Trainer(barebones=True, accelerator="cpu", devices=1, max_epochs=1)
     trainer.fit(module, dm)
 
@@ -109,6 +116,8 @@ def test_amortized_nmf_forward_returns_loss(small_adata: anndata.AnnData) -> Non
         k_values=[3],
         r=2,
         encoder_hidden_dims=[16],
+        total_n_cells=small_adata.shape[0],
+        batch_size=50,
     )
     result = amortized_nmf(x_ng=x_ng, var_names_g=var_names_g)
     assert "loss" in result
@@ -157,7 +166,7 @@ def test_amortized_nmf_infer_loadings(small_adata: anndata.AnnData) -> None:
     r = 1
     dm = _make_datamodule(small_adata, batch_size=n // 2)
     dm.setup(stage="fit")
-    module = _make_module(small_adata, k_values=[k], r=r, encoder_hidden_dims=[16])
+    module = _make_module(small_adata, k_values=[k], r=r, encoder_hidden_dims=[16], batch_size=n // 2)
     trainer = pl.Trainer(barebones=True, accelerator="cpu", devices=1, max_epochs=2)
     trainer.fit(module, dm)
 
