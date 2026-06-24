@@ -1543,7 +1543,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             return 0.0
         return float(cov[0, 1] / denom)
 
-    def on_validation_epoch_end(self, trainer: pl.Trainer) -> None:
+    def on_validation_epoch_end(self, lightning_module: pl.LightningModule, trainer: pl.Trainer) -> None:
         if trainer.sanity_checking:
             return
 
@@ -1603,7 +1603,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             val_elbo = (self._val_elbo_sum / self._val_n_cells).item()
             trainer.logger.log_metrics({"val_elbo": val_elbo}, step=step)
             val_rec = (self._val_rec_sum / self._val_n_cells).item()
-            trainer.logger.log_metrics({"val_reconstruction_loss": val_rec}, step=step)
+            lightning_module.log(name="val_reconstruction_loss", value=val_rec)
 
         # ontology-weighted Spearman
         if self.num_classes is not None and self.ontology_distance_matrix is not None:
@@ -1667,7 +1667,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 logits_test = X_test @ W.T + b
                 preds = logits_test.argmax(dim=-1)
                 top1 = (preds == y_test).float().mean().item()
-                trainer.logger.log_metrics({"val_cell_type_top1_accuracy": top1}, step=step)
+                lightning_module.log(name="val_cell_type_top1_accuracy", value=top1)
 
                 if self.ontology_distance_matrix is not None:
                     wrong_mask = preds != y_test

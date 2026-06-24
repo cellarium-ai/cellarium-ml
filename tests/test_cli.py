@@ -685,6 +685,7 @@ TWO_DEVICE_CONFIGS = [
                 },
                 "batch_size": "50",
                 "num_workers": "0",
+                "val_size": "0.1",
             },
             "trainer": {
                 "accelerator": "cpu",
