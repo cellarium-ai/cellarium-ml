@@ -857,7 +857,7 @@ def online_dictionary_update_fista(
         x_ng=x_ng,
         w_rkg=factors_rkg,
         h_rnk=loadings_rnk,
-        max_iter=n_iterations // 2,  # empirical
+        max_iter=n_iterations,
     )
 
     with torch.no_grad():
