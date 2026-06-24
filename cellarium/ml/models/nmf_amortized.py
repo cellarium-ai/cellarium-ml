@@ -415,13 +415,16 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
 
                 # log historgram
                 for logger in trainer.loggers:
-                    if isinstance(logger, pl.loggers.TensorBoardLogger):
-                        logger.experiment.add_histogram(
-                            f"k={k}__consensus_histogram",
-                            mean_neighbor_distance_m,
-                            global_step=trainer.global_step,
-                            bins=np.linspace(0, 1, 75),
-                        )
+                    try:
+                        if isinstance(logger, pl.loggers.TensorBoardLogger):
+                            logger.experiment.add_histogram(
+                                f"k={k}__consensus_histogram",
+                                mean_neighbor_distance_m,
+                                global_step=trainer.global_step,
+                                bins=np.linspace(0, 1, 75),
+                            )
+                    except Exception as e:
+                        warnings.warn(f"Failed to log histogram for k={k} step={trainer.global_step} due to {e}")
 
                 trainer.model.log(f"k={k}__consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
                 # trainer.model.log(f"k={k}__consensus_L2", mean_neighbor_distance_m.pow(2).mean(), prog_bar=False)
