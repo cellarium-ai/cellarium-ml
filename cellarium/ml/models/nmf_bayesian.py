@@ -13,7 +13,6 @@ from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import constraints
 
 from cellarium.ml.models.nmf import NonNegativeMatrixFactorization
-from cellarium.ml.transforms import Filter
 
 logger = logging.getLogger(__name__)
 
@@ -963,6 +962,7 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         assert obs_names_n is not None, "Must provide obs_names_n"
 
         from cellarium.ml.utilities.testing import assert_arrays_equal
+
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         # Get the consensus factors
@@ -1000,6 +1000,7 @@ class BayesianNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             Dictionary mapping k -> reconstruction error
         """
         from cellarium.ml.utilities.testing import assert_arrays_equal
+
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         rec_error = {}

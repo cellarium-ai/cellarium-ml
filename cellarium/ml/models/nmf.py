@@ -3,13 +3,12 @@
 
 import gc
 import logging
+import math
 import sys
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal, Optional
-
-from cellarium.ml.models.onepass_mean_var_std import OnePassMeanVarStd
 
 if TYPE_CHECKING:
     import cellarium.ml
@@ -54,6 +53,108 @@ def _get_logger():
 
 
 logger = _get_logger()
+
+
+@torch.compile()
+@torch.no_grad()
+def solve_nnls_fista_precomputed(
+    AtA: torch.Tensor,
+    AtB: torch.Tensor,
+    initial_x: torch.Tensor,
+    max_iter: int = 100,
+) -> torch.Tensor:
+    """
+    Highly optimized FISTA core for torch.compile.
+    Assumes AtA and AtB are already precomputed.
+    """
+    # Use eigvalsh for symmetric matrices (much faster/stable)
+    # Take the largest eigenvalue (-1 index)
+    eigenvals = torch.linalg.eigvalsh(AtA)
+    L = eigenvals[..., -1:]
+
+    # Reshape L for broadcasting and prevent division by zero
+    L = torch.clamp(L, min=1e-12).unsqueeze(-1)
+
+    x = initial_x.clone()
+    y = initial_x.clone()
+
+    # Initialize momentum scalar
+    t = 1.0
+
+    # temporary
+    history = torch.zeros(max_iter, device=AtA.device, dtype=AtA.dtype)
+
+    # Fixed iteration loop for compilation compatibility
+    for i in range(max_iter):
+        # Gradient step
+        grad = AtA @ y - AtB
+        x_new = torch.clamp(y - grad / L, min=0.0)
+
+        # ---------------------------------------------------------
+        # DIAGNOSTIC: Calculate the max absolute change across the entire batch
+        # This is safe for torch.compile because we are updating a pre-allocated tensor
+        history[i] = (x_new - x).abs().max()
+        # ---------------------------------------------------------
+
+        # Beck & Teboulle Momentum update
+        t_new = (1.0 + math.sqrt(1.0 + 4.0 * t**2)) / 2.0
+        momentum = (t - 1.0) / t_new
+        y = x_new + momentum * (x_new - x)
+
+        x = x_new
+        t = t_new
+
+    return x, history
+
+
+@torch.compile()
+@torch.no_grad()
+def nmf_compute_factors_fista(
+    w_rkg: torch.Tensor,
+    A_rkk: torch.Tensor,  # This is H^T H
+    B_rkg: torch.Tensor,  # This is H^T X
+    max_iter: int = 100,
+) -> torch.Tensor:
+    """
+    Wrapper to update Factors using FISTA.
+    """
+    # w_rkg has shape [r, k, g].
+    # A_rkk @ w_rkg works directly natively via batched matrix multiplication.
+    w_rkg_new, history = solve_nnls_fista_precomputed(AtA=A_rkk, AtB=B_rkg, initial_x=w_rkg, max_iter=max_iter)
+
+    # w_rkg.copy_(w_rkg_new)
+    return w_rkg_new, history
+
+
+@torch.compile()
+@torch.no_grad()
+def nmf_compute_loadings_fista(
+    x_ng: torch.Tensor,
+    w_rkg: torch.Tensor,
+    h_rnk: torch.Tensor,
+    max_iter: int = 100,
+) -> torch.Tensor:
+    """
+    Wrapper to update Loadings using FISTA.
+    """
+    # Precompute the transposed equivalents: W W^T and W X^T
+    # W W^T shape: [r, k, k]
+    wwT_rkk = torch.einsum("rkg,rhg->rkh", w_rkg, w_rkg)
+
+    # W X^T shape: [r, k, n]
+    wxT_rkn = torch.einsum("rkg,ng->rkn", w_rkg, x_ng)
+
+    # h_rnk is [r, n, k]. We transpose to [r, k, n] to match FISTA's Ax=B expectation
+    h_transposed_rkn = h_rnk.transpose(-2, -1)
+
+    # Solve for transposed H
+    h_new_transposed, history = solve_nnls_fista_precomputed(
+        AtA=wwT_rkk, AtB=wxT_rkn, initial_x=h_transposed_rkn, max_iter=max_iter
+    )
+
+    # Transpose back to [r, n, k] and update in place
+    # h_rnk.copy_(h_new_transposed.transpose(-2, -1))
+    return h_new_transposed.transpose(-2, -1), history
 
 
 def nmf_frobenius_loss(x_ng: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: torch.Tensor):
@@ -720,6 +821,68 @@ def online_dictionary_update_nmf_torch_hals(
     return {"factors_rkg": factors_rkg, "A_rkk": A_rkk, "B_rkg": B_rkg}
 
 
+def online_dictionary_update_fista(
+    x_ng: torch.Tensor,
+    factors_rkg: torch.Tensor,
+    loadings_rnk: torch.Tensor,
+    A_rkk: torch.Tensor,
+    B_rkg: torch.Tensor,
+    n_iterations: int = 100,
+    exponential_decay_rho: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    """
+    Algorithm adapted from the nmf-torch github library.
+
+    Args:
+        x_ng: The data.
+        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+        loadings_rnk: The matrix of cell loadings (Mairal's coefficients alpha).
+        A_rkk: Mairal's matrix A.
+        B_rkg: Mairal's matrix B.
+        n_iterations: The number of iterations to perform.
+        exponential_decay_rho: The exponential decay factor for A and B updates (default: 1, no decay).
+
+    Returns:
+        dict with keys:
+            "factors_rkg": The updated dictionary factors_rkg.
+            "A_rkk": The updated matrix A.
+            "B_rkg": The updated matrix B.
+    """
+
+    n, g = x_ng.shape
+    r, _, _ = factors_rkg.shape
+
+    # update loadings_rnk
+    loadings_rnk, loadings_history = nmf_compute_loadings_fista(
+        x_ng=x_ng,
+        w_rkg=factors_rkg,
+        h_rnk=loadings_rnk,
+        max_iter=n_iterations // 2,  # empirical
+    )
+
+    with torch.no_grad():
+        # update A and B, Mairal Algorithm 1 step 5 and 6
+        A_rkk = exponential_decay_rho * A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
+        B_rkg = exponential_decay_rho * B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+
+    # update factors_rkg
+    factors_rkg, factors_history = nmf_compute_factors_fista(
+        w_rkg=factors_rkg,
+        A_rkk=A_rkk,
+        B_rkg=B_rkg,
+        max_iter=n_iterations,
+    )
+
+    return {
+        "factors_rkg": factors_rkg,
+        "A_rkk": A_rkk,
+        "B_rkg": B_rkg,
+        "loadings_rnk": loadings_rnk,
+        "loadings_history": loadings_history,
+        "factors_history": factors_history,
+    }
+
+
 def online_dictionary_update_mairal(
     x_ng: torch.Tensor,
     factors_rkg: torch.Tensor,
@@ -1098,8 +1261,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
 
             squared_error_r = compute_reconstruction_error_compiled(
-                x_ng=x_ng, 
-                loadings_rnk=loadings_rnk, 
+                x_ng=x_ng,
+                loadings_rnk=loadings_rnk,
                 factors_rkg=factors_rkg,
             )  # (r,)
 
@@ -1790,7 +1953,8 @@ class NMFOutput:
         else:
             datamodule.setup(stage="predict")  # as this may not have been called... cpu_transforms are tricky here
 
-        # TODO fix this hacky manual stuff (appropriate fix would be to call predict on the module and have model predict be infer_loadings)
+        # TODO fix this hacky manual stuff (appropriate fix would be to call predict on the module
+        # and have model predict be infer_loadings)
         # grab the transforms
         transforms = []
         # for transform in self.nmf_module.cpu_transforms:
@@ -2128,7 +2292,7 @@ def kotliar_compute_hvgs(
     # Find parameters for expected fano line
     top_genes = df["mean_g"].sort_values(ascending=False)[:20].index
     A = (np.sqrt(df["var_g"]) / df["mean_g"])[top_genes].min()
-    
+
     w_mean_low, w_mean_high = df["mean_g"].quantile([0.10, 0.90])
     w_fano_low, w_fano_high = df["fano_g"].quantile([0.10, 0.90])
     winsor_box_logic = (
@@ -2139,7 +2303,7 @@ def kotliar_compute_hvgs(
     )
     fano_median = df["fano_g"][winsor_box_logic].median()
     B = np.sqrt(fano_median)
-    
+
     df["fano_fit_g"] = (A**2) * df["mean_g"] + (B**2)
     df["fano_ratio_g"] = df["fano_g"] / df["fano_fit_g"]
 
@@ -2150,7 +2314,7 @@ def kotliar_compute_hvgs(
         T = None
     else:
         if not expected_fano_threshold:
-            T = (1. + df["fano_g"][winsor_box_logic].std())
+            T = 1.0 + df["fano_g"][winsor_box_logic].std()
         else:
             T = expected_fano_threshold
         hvg_logic_g = (df["fano_ratio_g"] > T) & (df["mean_g"] > minimal_mean)
@@ -2159,10 +2323,18 @@ def kotliar_compute_hvgs(
 
     if plot:
         import matplotlib.pyplot as plt
+
         plt.figure(figsize=(12, 3.5))
         plt.subplot(1, 3, 1)
-        plt.scatter(df["mean_g"], df["var_g"], s=2, alpha=1, color='lightgray', label='All genes')
-        plt.scatter(df["mean_g"][hvg_logic_g], df["var_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        plt.scatter(df["mean_g"], df["var_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["var_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
         plt.xscale("log")
         plt.yscale("log")
         plt.xlabel("Mean expression")
@@ -2171,8 +2343,15 @@ def kotliar_compute_hvgs(
         plt.legend()
 
         plt.subplot(1, 3, 2)
-        plt.scatter(df["mean_g"], df["fano_g"], s=2, alpha=1, color='lightgray', label='All genes')
-        plt.scatter(df["mean_g"][hvg_logic_g], df["fano_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        plt.scatter(df["mean_g"], df["fano_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["fano_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
         order = np.argsort(df["mean_g"])
         plt.plot(df["mean_g"][order], df["fano_fit_g"][order], color="k", linestyle="--")
         plt.xscale("log")
@@ -2183,8 +2362,15 @@ def kotliar_compute_hvgs(
         plt.legend()
 
         plt.subplot(1, 3, 3)
-        plt.scatter(df["mean_g"], df["fano_ratio_g"], s=2, alpha=1, color='lightgray', label='All genes')
-        plt.scatter(df["mean_g"][hvg_logic_g], df["fano_ratio_g"][hvg_logic_g], s=4, alpha=0.2, color="r", label='Highly variable genes')
+        plt.scatter(df["mean_g"], df["fano_ratio_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["fano_ratio_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
         plt.xscale("log")
         plt.yscale("log")
         plt.xlabel("Mean expression")
