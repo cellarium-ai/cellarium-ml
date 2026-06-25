@@ -253,6 +253,19 @@ def compute_n_obs(data: CellariumAnnDataDataModule) -> int:
     return data.dadc.n_obs
 
 
+def compute_batch_size(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the batch size from the data.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        Number of cells in a minibatch.
+    """
+    return data.batch_size
+
+
 def compute_n_vars(data: CellariumAnnDataDataModule) -> int:
     """
     Compute the number of observations in the data.
@@ -847,20 +860,44 @@ def logistic_regression(args: ArgsType = None) -> None:
 @register_model
 def nmf(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.models.NonNegativeMatrixFactorization` model.
+    CLI to run the :class:`cellarium.ml.models.OnlineNonNegativeMatrixFactorization` model.
 
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
 
     cli = lightning_cli_factory(
-        "cellarium.ml.models.NonNegativeMatrixFactorization",
+        "cellarium.ml.models.OnlineNonNegativeMatrixFactorization",
         link_arguments=[
             LinkArguments(
                 ("model.cpu_transforms", "model.transforms", "data"),
                 "model.model.init_args.var_names_g",
                 compute_var_names_g,
             )
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
+def amortized_nmf(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.AmortizedOnlineNonNegativeMatrixFactorization` model.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.AmortizedOnlineNonNegativeMatrixFactorization",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.total_n_cells", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.batch_size", compute_batch_size),
         ],
     )
     cli(args=args)
