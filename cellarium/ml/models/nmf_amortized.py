@@ -443,9 +443,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             )
             and nmf_loss_converged
             and (
-                torch.quantile(
-                    [trainer.callback_metrics.get(f"k={k}__consensus_q75", float("inf")) for k in self.k_values], q=0.1
-                )
+                max([trainer.callback_metrics.get(f"k={k}__consensus_q75", float("inf")) for k in self.k_values])
                 <= self.q75_convergence_threshold
             )
         )
