@@ -1069,13 +1069,13 @@ def scvi(args: ArgsType = None) -> None:
             "model.model.init_args.var_names_g",
             compute_var_names_g,
         ),
-        LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
     ]
     if not os.environ.get("SCVI_PREDICT_SKIP_ARG_LINKING"):
         link_arguments.extend(
             [
                 LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
                 LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
+                LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
             ]
         )
     else:
