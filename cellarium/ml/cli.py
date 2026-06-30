@@ -6,6 +6,7 @@ Command line interface for Cellarium ML.
 """
 
 import copy
+import os
 import sys
 import warnings
 from collections.abc import Callable
@@ -1062,18 +1063,28 @@ def scvi(args: ArgsType = None) -> None:
     Args:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
+    link_arguments = [
+        LinkArguments(
+            ("model.cpu_transforms", "model.transforms", "data"),
+            "model.model.init_args.var_names_g",
+            compute_var_names_g,
+        ),
+        LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
+    ]
+    if not os.environ.get("SCVI_PREDICT_SKIP_ARG_LINKING"):
+        link_arguments.extend(
+            [
+                LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+                LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
+            ]
+        )
+    else:
+        # todo: add linking of the above from the checkpoint config when running predict,
+        # so that the user doesn't have to manually specify them
+        pass
     cli = lightning_cli_factory(
         "cellarium.ml.models.SingleCellVariationalInference",
-        link_arguments=[
-            LinkArguments(
-                ("model.cpu_transforms", "model.transforms", "data"),
-                "model.model.init_args.var_names_g",
-                compute_var_names_g,
-            ),
-            LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
-            LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
-            LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
-        ],
+        link_arguments=link_arguments,
     )
     cli(args=args)
 
