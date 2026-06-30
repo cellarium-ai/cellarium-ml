@@ -624,6 +624,9 @@ TWO_DEVICE_CONFIGS = [
             },
         },
     },
+]
+
+SINGLE_DEVICE_CONFIGS = [
     {
         "model_name": "scvi",
         "subcommand": "fit",
@@ -768,9 +771,6 @@ TWO_DEVICE_CONFIGS = [
             },
         },
     },
-]
-
-SINGLE_DEVICE_CONFIGS = [
     {
         "model_name": "socam",
         "subcommand": "fit",
@@ -1134,6 +1134,7 @@ def test_cpu_two_device(config: dict[str, Any]):
     ],
 )
 def test_cpu_single_device(config: dict[str, Any]):
+    config = {k: v for k, v in config.items() if not k.startswith("_")}
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
     main(config)
