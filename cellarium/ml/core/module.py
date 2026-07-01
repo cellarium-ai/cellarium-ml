@@ -482,7 +482,7 @@ class CellariumModule(pl.LightningModule):
         """
         hook = getattr(self.model, "on_validation_epoch_end", None)
         if callable(hook):
-            hook(self.trainer)
+            hook(self, self.trainer)
 
     def on_train_end(self) -> None:
         """

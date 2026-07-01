@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import warnings
 from typing import TypedDict
 
 import lightning.pytorch as pl
@@ -374,8 +375,11 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
 
         for logger in trainer.loggers:
             if isinstance(logger, pl.loggers.TensorBoardLogger):
-                logger.experiment.add_histogram(
-                    "W_gc",
-                    self.W_gc,
-                    global_step=trainer.global_step,
-                )
+                try:
+                    logger.experiment.add_histogram(
+                        "b_c",
+                        self.b_c,
+                        global_step=trainer.global_step,
+                    )
+                except ValueError as e:
+                    warnings.warn(f"Failed to log histogram for b_c step={trainer.global_step} due to {e}")
