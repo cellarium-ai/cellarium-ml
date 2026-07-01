@@ -20,7 +20,7 @@ import pandas as pd
 import torch
 import yaml
 from jsonargparse import Namespace, class_from_function
-from jsonargparse._loaders_dumpers import DefaultLoader
+from jsonargparse._loaders_dumpers import get_yaml_default_loader
 from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
 from torch.utils._pytree import tree_map
@@ -184,7 +184,12 @@ class CheckpointLoader(FileLoader):
     convert_fn: Callable[[Any], Any] | str | None = None
 
     def __new__(cls, file_path, attr=None, key=None, convert_fn=None):
-        return super().__new__(cls, file_path, CellariumModule.load_from_checkpoint, attr, key, convert_fn)
+        return super().__new__(cls, file_path, _load_cellarium_module, attr, key, convert_fn)
+
+
+def _load_cellarium_module(path: str) -> CellariumModule:
+    """Wraps load_from_checkpoint, injecting weights_only=False, due to pytorch change in 2.4.0."""
+    return CellariumModule.load_from_checkpoint(path, weights_only=False)
 
 
 def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> FileLoader:
@@ -202,7 +207,7 @@ def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.Mapp
     return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
 
 
-loader = DefaultLoader
+loader = get_yaml_default_loader()
 loader.add_constructor("!FileLoader", file_loader_constructor)
 loader.add_constructor("!FileMultiLoader", file_multi_loader_constructor)
 loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
@@ -680,6 +685,38 @@ def lightning_cli_factory(
             # disable breaking dependency injection support change introduced in PyTorch Lightning 2.3
             # https://github.com/Lightning-AI/pytorch-lightning/pull/18105
             pass
+
+        def _prepare_subcommand_parser(self, klass, subcommand, **kwargs):
+            """Override the default checkpoint loading with weights_only=True in torch 2.4.0+"""
+            parser = super()._prepare_subcommand_parser(klass, subcommand, **kwargs)
+            parser.set_defaults({"weights_only": False})
+            return parser
+
+        def _parse_ckpt_path(self) -> None:
+            from pathlib import Path
+
+            if not self.config.get("subcommand"):
+                return
+            ckpt_path = self.config[self.config.subcommand].get("ckpt_path")
+            if ckpt_path and Path(ckpt_path).is_file():
+                ckpt = torch.load(ckpt_path, weights_only=False, map_location="cpu")
+                hparams = ckpt.get("hyper_parameters", {})
+                hparams.pop("_instantiator", None)
+                if not hparams:
+                    return
+                if "_class_path" in hparams:
+                    hparams = {
+                        "class_path": hparams.pop("_class_path"),
+                        "dict_kwargs": hparams,
+                    }
+                hparams = {self.config.subcommand: {"model": hparams}}
+                try:
+                    self.config = self.parser.parse_object(hparams, self.config)
+                except SystemExit:
+                    import sys
+
+                    sys.stderr.write("Parsing of ckpt_path hyperparameters failed!\n")
+                    raise
 
         def before_instantiate_classes(self):
             # issue a UserWarning if the subcommand is predict and return_predictions is not set to False
