@@ -5,6 +5,7 @@ from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import torch
 import torch.distributed as dist
 from lightning.pytorch.strategies import DDPStrategy
@@ -32,12 +33,11 @@ class OnePassMeanVarStd(CellariumModel):
        <https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance>`_.
 
     Args:
-        var_names_g:
-            The variable names schema for the input data validation.
-        algorithm:
-            ``"naive"`` (default) or ``"shifted_data"`` (numerically stable).
-        n_batch:
-            Number of batches. Use 1 to reproduce ``batch_key``=None behavior.
+        var_names_g: The variable names schema for the input data validation.
+        algorithm: ``"naive"`` (default) or ``"shifted_data"`` (numerically stable).
+        n_batch: Number of batches. Use 1 to reproduce ``batch_key``=None behavior.
+        output_path: Optional path to save a summary CSV at the end of training, containing
+            the mean and variance for each gene. If None, no CSV will be saved.
     """
 
     def __init__(
@@ -45,6 +45,7 @@ class OnePassMeanVarStd(CellariumModel):
         var_names_g: np.ndarray,
         algorithm: Literal["naive", "shifted_data"] = "naive",
         n_batch: int = 1,
+        output_path: str | None = "onepass_mean_var_std_output.csv",
     ) -> None:
         super().__init__()
         self.var_names_g = var_names_g
@@ -52,6 +53,9 @@ class OnePassMeanVarStd(CellariumModel):
         self.n_vars = n_vars
         self.algorithm = algorithm
         self.n_batch = n_batch
+        self.output_path = output_path
+        if (self.output_path is not None) and not self.output_path.endswith(".csv"):
+            raise ValueError("OnePassMeanVarStd output_path must end with .csv")
 
         self.x_shift: torch.Tensor | None
         if self.algorithm == "shifted_data":
@@ -180,3 +184,16 @@ class OnePassMeanVarStd(CellariumModel):
         """Per-batch population variance, shape ``(n_batch, n_genes)``."""
         mean_bg = self.x_sums_bg / self.x_size_b.unsqueeze(1)
         return self.x_squared_sums_bg / self.x_size_b.unsqueeze(1) - mean_bg**2
+
+    def on_train_end(self, trainer: pl.Trainer) -> None:
+        """Save a summary output CSV so we need not load the checkpoint downstream."""
+        if trainer.is_global_zero and (self.output_path is not None):
+            df = pd.DataFrame(
+                {
+                    "var_names_g": self.var_names_g,
+                    "mean_g": self.mean_g.detach().cpu().numpy(),
+                    "var_g": self.var_g.detach().cpu().numpy(),
+                    "std_g": self.std_g.detach().cpu().numpy(),
+                }
+            )
+            df.to_csv(self.output_path, index=False)

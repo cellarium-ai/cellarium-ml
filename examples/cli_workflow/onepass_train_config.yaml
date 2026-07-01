@@ -58,6 +58,7 @@ trainer:
   default_root_dir: /tmp/test_examples/onepass
 model:
   transforms:
+    - cellarium.ml.transforms.Densify
     - class_path: cellarium.ml.transforms.NormalizeTotal
       init_args:
         target_count: 10_000
@@ -66,6 +67,7 @@ model:
     class_path: cellarium.ml.models.OnePassMeanVarStd
     init_args:
       algorithm: shifted_data
+      output_path: /tmp/test_examples/onepass/onepass.csv
   optim_fn: null
   optim_kwargs: null
   scheduler_fn: null
@@ -91,7 +93,7 @@ data:
   batch_keys:
     x_ng:
       attr: X
-      convert_fn: cellarium.ml.utilities.data.densify
+      convert_fn: cellarium.ml.utilities.data.to_torch_sparse_csr
     var_names_g:
       attr: var_names
     total_mrna_umis_n:

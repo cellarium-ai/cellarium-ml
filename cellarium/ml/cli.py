@@ -6,13 +6,14 @@ Command line interface for Cellarium ML.
 """
 
 import copy
+import os
 import sys
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from operator import attrgetter
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -22,13 +23,37 @@ from jsonargparse import Namespace, class_from_function
 from jsonargparse._loaders_dumpers import get_yaml_default_loader
 from jsonargparse._util import import_object
 from lightning.pytorch.cli import ArgsType, LightningArgumentParser, LightningCLI
-from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.utils._pytree import tree_map
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
-cached_loaders: dict[Callable, Callable] = {}
+cached_loaders: dict[Callable[[str], Any] | str, Callable[[str], Any]] = {}
+
+
+def _resolve_loader(loader_fn: Callable[[str], Any] | str) -> Callable[[str], Any]:
+    if isinstance(loader_fn, str):
+        loader_fn = import_object(loader_fn)
+    if loader_fn not in cached_loaders:
+        cached_loaders[loader_fn] = cache(loader_fn)  # type: ignore[arg-type]
+    return cached_loaders[loader_fn]
+
+
+def _resolve_value(
+    obj: Any,
+    attr: str | None = None,
+    key: Any = None,
+    convert_fn: Callable[[Any], Any] | str | None = None,
+) -> Any:
+    if attr is not None:
+        obj = attrgetter(attr)(obj)
+    if key is not None:
+        obj = obj[key]
+    if isinstance(convert_fn, str):
+        convert_fn = import_object(convert_fn)
+    if convert_fn is not None:
+        obj = convert_fn(obj)  # type: ignore[operator]
+    return obj
 
 
 @dataclass
@@ -69,24 +94,59 @@ class FileLoader:
     convert_fn: Callable[[Any], Any] | str | None = None
 
     def __new__(cls, file_path, loader_fn, attr=None, key=None, convert_fn=None):
-        if isinstance(loader_fn, str):
-            loader_fn = import_object(loader_fn)
-        if loader_fn not in cached_loaders:
-            cached_loaders[loader_fn] = cache(loader_fn)
-        loader_fn = cached_loaders[loader_fn]
-        obj = loader_fn(file_path)
+        obj = _resolve_loader(loader_fn)(file_path)
+        return _resolve_value(obj, attr=attr, key=key, convert_fn=convert_fn)
 
-        if attr is not None:
-            obj = attrgetter(attr)(obj)
-        if key is not None:
-            obj = obj[key]
 
-        if isinstance(convert_fn, str):
-            convert_fn = import_object(convert_fn)
-        if convert_fn is not None:
-            obj = convert_fn(obj)
+@dataclass
+class FileMultiLoader:
+    """
+    A YAML constructor for loading a file once and extracting multiple fields from it.
 
-        return obj
+    Applied to a ``init_args`` mapping, it returns a dict that is unpacked as keyword
+    arguments to the constructor, allowing all fields to be specified in a single block
+    instead of repeating the file path and loader for each argument.
+
+    Example:
+
+    .. code-block:: yaml
+
+        model:
+          transforms:
+            - class_path: cellarium.ml.transforms.ZScore
+              init_args:
+                !FileMultiLoader
+                file_path: /tmp/test_examples/onepass/onepass.csv
+                loader_fn: pandas.read_csv
+                fields:
+                  mean_g:
+                    attr: mean_g.values
+                    convert_fn: torch.FloatTensor
+                  std_g:
+                    attr: std_g.values
+                    convert_fn: torch.FloatTensor
+                  var_names_g:
+                    attr: var_names_g
+                    convert_fn: pandas.Series.to_numpy
+
+    Args:
+        file_path:
+            The file path to load the object from.
+        loader_fn:
+            A function to load the object from the file path.
+        fields:
+            A mapping from output key names to field specs. Each spec may contain:
+            ``attr`` (dotted attribute path), ``key`` (item key), and ``convert_fn``
+            (importable callable string or ``None``).
+    """
+
+    file_path: str
+    loader_fn: Callable[[str], Any] | str
+    fields: dict[str, dict]
+
+    def __new__(cls, file_path, loader_fn, fields) -> dict:  # type: ignore[misc]
+        obj = _resolve_loader(loader_fn)(file_path)
+        return {name: _resolve_value(obj, **spec) for name, spec in fields.items()}
 
 
 @dataclass
@@ -100,7 +160,7 @@ class CheckpointLoader(FileLoader):
     .. code-block:: yaml
 
         model:
-          transorms:
+          transforms:
             - class_path: cellarium.ml.transforms.DivideByScale
               init_args:
                 scale_g:
@@ -137,6 +197,11 @@ def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNod
     return FileLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
 
 
+def file_multi_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> dict:
+    """Construct a dict of objects from a file."""
+    return FileMultiLoader(**loader.construct_mapping(node, deep=True))  # type: ignore[arg-type, return-value]
+
+
 def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
     """Construct an object from a checkpoint."""
     return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
@@ -144,6 +209,7 @@ def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.Mapp
 
 loader = get_yaml_default_loader()
 loader.add_constructor("!FileLoader", file_loader_constructor)
+loader.add_constructor("!FileMultiLoader", file_multi_loader_constructor)
 loader.add_constructor("!CheckpointLoader", checkpoint_loader_constructor)
 
 
@@ -227,6 +293,43 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     return field(adata)
 
 
+def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
+    """Extract the number of unique categories in each covariate in the "categorical_covariate_index_nd" batch_key.
+
+    Example:
+
+        .. code-block:: yaml
+            categorical_covariate_index_nd:
+                attr: obs
+                key:
+                    - chemistry
+                    - condition
+                convert_fn: cellarium.ml.utilities.data.categories_to_codes
+
+        The field "categorical_covariate_index_nd" indicates that we are specifying categorical covariates from
+        the columnns ["chemistry", "condition"] from adata.obs.
+        We extract those columns from adata.obs and count the number of categories in each.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        List of length (number of keys) containing the number of categories in each field.
+    """
+    if "categorical_covariate_index_nd" not in data.batch_keys:
+        return []
+    field = data.batch_keys["categorical_covariate_index_nd"]
+    assert isinstance(field, AnnDataField)
+    dataframe = getattr(data.dadc[0], field.attr)
+    n_cats_per_cov = []
+    if field.key is not None:
+        keys = [field.key] if isinstance(field.key, str) else field.key
+        for key in keys:
+            covariate_series = dataframe[key]
+            n_cats_per_cov.append(len(covariate_series.cat.categories))
+    return n_cats_per_cov
+
+
 def compute_var_names_g(
     cpu_transforms: list[torch.nn.Module] | None,
     transforms: list[torch.nn.Module] | None,
@@ -246,26 +349,89 @@ def compute_var_names_g(
     Returns:
         The variable names.
     """
+    import scipy.sparse
+
+    from cellarium.ml.transforms.densify import Densify
+
     adata = data.dadc[0]
     batch = tree_map(lambda field: field(adata), data.batch_keys)
-    pipeline = CellariumPipeline(cpu_transforms) + CellariumPipeline(transforms)
-    # Normalize all pipeline tensors to meta device before entering FakeTensorMode.
-    # This is necessary because CheckpointLoader-loaded modules carry real cpu tensors,
-    # while freshly instantiated modules have meta tensors. FakeCopyMode would then
-    # produce a mix of cpu and meta FakeTensors, causing _find_common_device to raise.
-    # Only deepcopy when cpu tensors are present (e.g. CheckpointLoader transforms);
-    # in the common case all tensors are already on meta so the copy is unnecessary.
-    if any(t.device.type == "cpu" for t in [*pipeline.parameters(), *pipeline.buffers()]):
-        pipeline_meta = copy.deepcopy(pipeline)
-        pipeline_meta.to_empty(device="meta")
-    else:
-        pipeline_meta = pipeline
-    fake_batch = collate_fn([batch])
-    fake_batch = {k: v.to("meta") if isinstance(v, torch.Tensor) else v for k, v in fake_batch.items()}
-    with FakeTensorMode(allow_non_fake_inputs=True) as fake_mode:
-        with FakeCopyMode(fake_mode):
-            fake_pipeline = copy.deepcopy(pipeline_meta)
-        output = fake_pipeline(fake_batch)
+    # Transforms may have been instantiated under torch.device("meta") by Lightning CLI
+    # (see CellariumModule.configure_model).  Deep-copy each transform and materialise
+    # any meta-device parameters to uninitialised CPU tensors so the pipeline can run
+    # with real tensor inputs without calling reset_parameters.
+    all_transforms: list[torch.nn.Module] = []
+    for t in list(cpu_transforms or []) + list(transforms or []):
+        t_copy = copy.deepcopy(t)
+        if any(p.device.type == "meta" for p in t_copy.parameters()) or any(
+            b.device.type == "meta" for b in t_copy.buffers()
+        ):
+            t_copy.to_empty(device="cpu")
+        all_transforms.append(t_copy)
+
+    # Pre-flight sparse configuration checks: inspect x_ng before running the
+    # pipeline to give actionable errors instead of confusing mid-pipeline failures.
+    # These checks also fire when compute_var_names_g is called directly from Python
+    # (without going through the CLI config validator in before_instantiate_classes).
+    collated = collate_fn([batch])
+    x_ng = collated.get("x_ng")
+    if x_ng is not None:
+        if scipy.sparse.issparse(x_ng):
+            # scipy sparse x_ng is valid only if Filter is in the transform pipeline
+            # (Filter converts scipy sparse → torch.sparse_csr_tensor).
+            # If there's no Filter, keep_sparse was used without a required cpu_transform.
+            has_filter = any(type(t).__name__ == "Filter" for t in all_transforms)
+            if not has_filter:
+                raise ValueError(
+                    "Configuration Error: x_ng is a scipy sparse matrix in compute_var_names_g. "
+                    "The `keep_sparse` convert_fn requires a Filter in `model.cpu_transforms` to convert "
+                    "scipy sparse to torch.sparse_csr_tensor before this point.\n\n"
+                    "Either:\n"
+                    "  (1) Add Filter to `model.cpu_transforms` with your gene filter_list, OR\n"
+                    "  (2) Switch to `convert_fn: cellarium.ml.utilities.data.to_torch_sparse_csr` and add "
+                    "`Densify` as the first entry in `model.transforms`.\n"
+                )
+        if isinstance(x_ng, torch.Tensor) and x_ng.is_sparse_csr:
+            has_densify = any(isinstance(t, Densify) for t in all_transforms)
+            if not has_densify:
+                raise ValueError(
+                    "Configuration Error: x_ng is a torch.sparse_csr_tensor but no `Densify` transform "
+                    "was found in the combined cpu_transforms + transforms list.\n"
+                    "`Densify` must be the first entry in `model.transforms` to convert "
+                    "torch.sparse_csr_tensor to dense before any dense-only transforms run.\n\n"
+                    "Add to model.transforms (as first item):\n"
+                    "  - cellarium.ml.transforms.Densify\n"
+                )
+
+    pipeline = CellariumPipeline(all_transforms)
+    try:
+        output = pipeline(collated)
+    except (RuntimeError, ValueError, TypeError) as e:
+        error_msg = str(e)
+        if "stride" in error_msg or "sparse" in error_msg.lower() or "csr_matrix" in error_msg:
+            raise ValueError(
+                f"compute_var_names_g pipeline failed: {error_msg}\n\n"
+                "This typically occurs when using the sparse data path (keep_sparse or to_torch_sparse_csr) "
+                "and Filter is incorrectly placed in model.transforms (GPU transforms) instead of "
+                "model.cpu_transforms (CPU transforms). When using sparse data, Filter MUST be in "
+                "model.cpu_transforms to filter and convert to torch.sparse_csr_tensor before GPU transfer. "
+                "Can also occur if Densify is not included as the first transform.\n"
+                "\n\nCorrect configuration:\n"
+                "  model:\n"
+                "    cpu_transforms:\n"
+                "      - class_path: cellarium.ml.transforms.Filter\n"
+                "        init_args:\n"
+                "          filter_list: [...]\n"
+                "    transforms:\n"
+                "      - cellarium.ml.transforms.Densify\n"
+                "      - cellarium.ml.transforms.NormalizeTotal\n"
+                "      - ...\n"
+                "  data:\n"
+                "    batch_keys:\n"
+                "      x_ng:\n"
+                "        attr: X\n"
+                "        convert_fn: cellarium.ml.utilities.data.keep_sparse"
+            ) from e
+        raise
     return output["var_names_g"]
 
 
@@ -294,6 +460,174 @@ def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
         return int(x.apply(lambda col: len(col.cat.categories)).product())
     else:
         return len(x.cat.categories)
+
+
+def _get_transform_name(transform_spec: Any) -> str | None:
+    """
+    Extract a canonical transform class name from a transform specification.
+    Handles both string paths, short names, class_path dicts, and instantiated modules.
+    Returns None if unable to extract.
+    """
+    if isinstance(transform_spec, str):
+        # Already a string path like "cellarium.ml.transforms.Filter" or short name like "Filter"
+        return transform_spec.split(".")[-1] if "." in transform_spec else transform_spec
+    elif isinstance(transform_spec, dict):
+        # YAML class_path format: {"class_path": "cellarium.ml.transforms.Filter", "init_args": {...}}
+        if "class_path" in transform_spec:
+            class_path = transform_spec["class_path"]
+            return class_path.split(".")[-1]
+    elif isinstance(transform_spec, torch.nn.Module):
+        # Instantiated module
+        return transform_spec.__class__.__name__
+    return None
+
+
+def _validate_sparse_config(config: dict[Any, Any] | Namespace) -> list[str]:
+    """
+    Validate sparse data path configuration.
+    Raises ValueError for fatal misconfigurations, returns list of advisory warnings.
+    Checks for common misconfigurations like Filter in wrong transform list.
+    """
+    warnings_list: list[str] = []
+
+    try:
+        # Convert Namespace to dict if needed
+        if isinstance(config, Namespace):
+            config = vars(config)
+
+        # Try to access model and data config; skip if not present (e.g., during --help)
+        if "model" not in config or "data" not in config:
+            return warnings_list
+
+        model_config = config.get("model", {})
+        data_config = config.get("data", {})
+
+        # Extract batch_keys and x_ng convert_fn
+        batch_keys = data_config.get("batch_keys", {})
+        x_ng_config = batch_keys.get("x_ng", {})
+        convert_fn = x_ng_config.get("convert_fn", "")
+        if isinstance(convert_fn, str):
+            convert_fn_name = convert_fn.split(".")[-1]
+        else:
+            convert_fn_name = ""
+
+        # Only validate if using sparse convert_fn
+        if convert_fn_name not in ("keep_sparse", "to_torch_sparse_csr"):
+            return warnings_list
+
+        # Extract cpu_transforms and transforms
+        cpu_transforms = model_config.get("cpu_transforms", [])
+        if cpu_transforms is None:
+            cpu_transforms = []
+        transforms = model_config.get("transforms", [])
+        if transforms is None:
+            transforms = []
+
+        # Extract transform names from both lists
+        cpu_transform_names = [_get_transform_name(t) for t in cpu_transforms]
+        cpu_transform_names = [n for n in cpu_transform_names if n]  # filter None
+        transform_names = [_get_transform_name(t) for t in transforms]
+        transform_names = [n for n in transform_names if n]  # filter None
+
+        # error: keep_sparse without Filter in cpu_transforms
+        if convert_fn_name == "keep_sparse" and "Filter" not in cpu_transform_names:
+            raise ValueError(
+                "Configuration Error: Using `keep_sparse` but Filter not found in `model.cpu_transforms`.\n"
+                "The `keep_sparse` convert_fn requires a Filter cpu_transform to filter sparse data and convert to "
+                "torch.sparse_csr_tensor BEFORE GPU transfer.\n\n"
+                "Either:\n"
+                "  (1) Add Filter to `model.cpu_transforms` with your gene filter_list, OR\n"
+                "  (2) Switch to `convert_fn: cellarium.ml.utilities.data.to_torch_sparse_csr` and ensure "
+                "`Densify` is the first entry in `model.transforms`.\n"
+            )
+
+        # error: Sparse path without Densify
+        if convert_fn_name in ("keep_sparse", "to_torch_sparse_csr") and "Densify" not in transform_names:
+            raise ValueError(
+                f"Configuration Error: Using sparse data path ({convert_fn_name}) but `Densify` not found in "
+                f"`model.transforms`.\n"
+                f"`Densify` must be the first entry in `model.transforms` to convert torch.sparse_csr_tensor to dense "
+                f"on GPU before any dense-only transforms run.\n\n"
+                f"Add to model.transforms (as first item):\n"
+                f"  - cellarium.ml.transforms.Densify\n"
+            )
+
+        # warning: keep_sparse with Filter in wrong transform list
+        if convert_fn_name == "keep_sparse":
+            if "Filter" in transform_names and "Filter" not in cpu_transform_names:
+                warnings_list.append(
+                    "Configuration Issue: Using `keep_sparse` with Filter in `model.transforms` (GPU transforms) "
+                    "instead of `model.cpu_transforms` (CPU transforms). \n"
+                    "When using `keep_sparse`, Filter MUST be in `model.cpu_transforms` to filter and convert to "
+                    "torch.sparse_csr_tensor BEFORE GPU transfer. Placing Filter in GPU transforms defeats the "
+                    "purpose of sparse transfer.\n\n"
+                    "Correct configuration:\n"
+                    "  model:\n"
+                    "    cpu_transforms:\n"
+                    "      - class_path: cellarium.ml.transforms.Filter\n"
+                    "        init_args:\n"
+                    "          filter_list: [...]\n"
+                    "    transforms:\n"
+                    "      - cellarium.ml.transforms.Densify\n"
+                    "      - ...\n"
+                )
+
+        # warning: Densify not first in transforms
+        if convert_fn_name in ("keep_sparse", "to_torch_sparse_csr"):
+            if transform_names and transform_names[0] != "Densify" and "Densify" in transform_names:
+                densify_idx = transform_names.index("Densify")
+                warnings_list.append(
+                    f"Configuration Issue: `Densify` found at position {densify_idx} in `model.transforms` but should "
+                    f"be first (position 0). Dense-only transforms must run AFTER densification.\n"
+                    f"Move `Densify` to the first entry in `model.transforms`.\n"
+                )
+
+    except ValueError:
+        # Re-raise ValueError (fatal configuration errors)
+        raise
+    except Exception:
+        # Silently skip validation if config structure is unexpected
+        pass
+
+    return warnings_list
+
+
+def compute_cl_name_subset(data: CellariumAnnDataDataModule) -> list[str]:
+    """
+    Compute the list of category names in cl_names_n.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The sorted list of unique category names in the ``cl_names_n`` batch key.
+    """
+    field = data.batch_keys["cl_names_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    return list(obs[field.key].cat.categories)
+
+
+def compute_cell_type_categories(data: CellariumAnnDataDataModule) -> list[str] | None:
+    """Derive ``cell_type_categories`` from the ``validation_cell_type_index_n`` batch key.
+
+    Reads the pandas Categorical from the first shard and returns its categories as a plain
+    list of strings, in the same order as ``.cat.categories`` (which matches ``.cat.codes``).
+    Returns ``None`` when the batch key is absent so that validation metrics are simply skipped.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        Ordered list of CL ID strings, or ``None`` if the batch key is not configured.
+    """
+    if "validation_cell_type_index_n" not in data.batch_keys:
+        return None
+    field = data.batch_keys["validation_cell_type_index_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    series = obs[field.key]
+    return list(series.cat.categories)
 
 
 def lightning_cli_factory(
@@ -395,6 +729,11 @@ def lightning_cli_factory(
                         "model:  ...\ndata:  ...\ntrainer:  ...\nreturn_predictions: false",
                         UserWarning,
                     )
+            # Validate sparse data path configuration (pass subcommand-scoped config)
+            subcommand_config = self.config.get(cast(str, self.subcommand), {})
+            sparse_config_warnings = _validate_sparse_config(subcommand_config)
+            for warning_msg in sparse_config_warnings:
+                warnings.warn(warning_msg, UserWarning)
             return super().before_instantiate_classes()
 
         def instantiate_classes(self) -> None:
@@ -414,6 +753,13 @@ def lightning_cli_factory(
                     "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
                 }
             )
+
+        def predict(self, *args, **kwargs):
+            """Not well documented, but defining this here overrides the default predict subcommand.
+            This method injects return_predictions=False into the kwargs to prevent the predictions from
+            being returned, which prevents memory overflow when writing predictions to a file."""
+            kwargs["return_predictions"] = False
+            self.trainer.predict(*args, **kwargs)
 
     return NewLightningCLI
 
@@ -727,6 +1073,60 @@ def probabilistic_pca(args: ArgsType = None) -> None:
 
 
 @register_model
+def scvi(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SingleCellVariationalInference` model.
+
+    This example shows how to fit feature count data to the scVI model [1].
+
+    Example run::
+
+        cellarium-ml scvi fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 5 \
+            --data.num_workers 1 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/scvi \
+            --trainer.max_steps 10
+
+    **References:**
+
+    1. `Deep generative modeling for single-cell transcriptomics (Lopez et al.)
+       <https://www.nature.com/articles/s41592-018-0229-2>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    link_arguments = [
+        LinkArguments(
+            ("model.cpu_transforms", "model.transforms", "data"),
+            "model.model.init_args.var_names_g",
+            compute_var_names_g,
+        ),
+    ]
+    if not os.environ.get("SCVI_PREDICT_SKIP_ARG_LINKING"):
+        link_arguments.extend(
+            [
+                LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+                LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
+                LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
+            ]
+        )
+    else:
+        # todo: add linking of the above from the checkpoint config when running predict,
+        # so that the user doesn't have to manually specify them
+        pass
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SingleCellVariationalInference",
+        link_arguments=link_arguments,
+    )
+    cli(args=args)
+
+
+@register_model
 def tdigest(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.TDigest` model.
@@ -805,6 +1205,48 @@ def contrastive_mlp(args: ArgsType = None) -> None:
         trainer_defaults={
             "max_epochs": 20,
         },
+    )
+    cli(args=args)
+
+
+@register_model
+def socam(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SOCAM` model.
+
+    Example run::
+
+        cellarium-ml socam fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
+            --data.batch_keys.var_names_g.attr var_names \
+            --data.batch_keys.y_n.attr obs \
+            --data.batch_keys.y_n.key cell_type \
+            --data.batch_keys.y_n.convert_fn cellarium.ml.utilities.data.categories_to_codes \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.max_steps 1000
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SOCAM",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.cl_name_subset", compute_cl_name_subset),
+        ],
     )
     cli(args=args)
 
