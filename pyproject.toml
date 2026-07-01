@@ -32,7 +32,7 @@ dependencies = [
   "pyro-ppl>=1.9.1",
   "pytest",
   "scikit-misc==0.5.1",
-  "scverse-misc-0.1.1",
+  "scverse-misc==0.1.1",
   "torch>=2.2.0",
   "transformers",
   "zuko==1.6.0",
