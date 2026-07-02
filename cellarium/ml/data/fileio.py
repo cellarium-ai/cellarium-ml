@@ -9,6 +9,7 @@ import urllib.request
 from typing import Literal
 
 from anndata import AnnData, read_h5ad
+from google.auth.exceptions import DefaultCredentialsError
 from google.cloud.storage import Client
 
 url_schemes = ("http:", "https:", "ftp:")
@@ -41,7 +42,10 @@ def read_h5ad_gcs(
     bucket_name, blob_name = filename.split("/", 1)
 
     if storage_client is None:
-        storage_client = Client()
+        try:
+            storage_client = Client()
+        except DefaultCredentialsError:
+            storage_client = Client.create_anonymous_client()
 
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
