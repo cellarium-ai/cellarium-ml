@@ -267,6 +267,92 @@ def test_datamodule_massive_h5ad_backed(tmp_path: Path, fake_massive_dense_h5ad:
     # we have separately verified that backed=False will crash due to 40GB memory use
 
 
+@pytest.mark.parametrize("backed", [False, True], ids=["in_memory", "backed"])
+def test_datamodule_gcs_paths(backed: bool) -> None:
+    """End-to-end regression test: dataloader works with real GCS bucket paths.
+
+    Covers backed=False (in-memory) and backed=True so that both the write-buffer
+    flush fix and any backed-mode interaction with temporary files are exercised
+    against the actual GCS storage layer.
+    """
+    gcs_filenames = [
+        "gs://dsp-cellarium-cas-public/test-data/test_0.h5ad",
+        "gs://dsp-cellarium-cas-public/test-data/test_1.h5ad",
+        "gs://dsp-cellarium-cas-public/test-data/test_2.h5ad",
+    ]
+    dadc = DistributedAnnDataCollection(
+        filenames=gcs_filenames,
+        shard_size=100,
+        backed=backed,
+    )
+    datamodule = CellariumAnnDataDataModule(
+        dadc=dadc,
+        batch_size=50,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=densify),
+            "var_names_g": AnnDataField(attr="var_names"),
+        },
+        num_workers=0,
+    )
+    datamodule.setup("fit")
+    batch = next(iter(datamodule.train_dataloader()))
+
+    assert "x_ng" in batch
+    assert "var_names_g" in batch
+    x_ng = batch["x_ng"]
+    var_names_g = batch["var_names_g"]
+    assert x_ng.shape == (50, len(var_names_g)), (
+        f"Unexpected batch shape {x_ng.shape}; expected (50, {len(var_names_g)})"
+    )
+
+
+def test_read_h5ad_gcs_flushes_write_buffer(tmp_path: Path) -> None:
+    """Regression test: read_h5ad_gcs must flush the write buffer before reading.
+
+    The real GCS client streams data in chunks. Python's BufferedWriter accumulates
+    those chunks; when the buffer fills (every ~8 KB) it is auto-flushed to the OS,
+    but the final partial buffer fill stays in userspace memory until flush()/close()
+    is called. If read_h5ad opens the same path before that flush, h5py sees a
+    truncated file and raises OSError ("truncated file: eof = X, stored_eof = Y").
+
+    A single large write would bypass the buffer entirely, so this test writes in
+    1 KB chunks without flushing — exactly replicating the real client's behavior.
+    """
+    from unittest.mock import MagicMock
+
+    import anndata as ad
+    import numpy as np
+
+    from cellarium.ml.data.fileio import read_h5ad_gcs
+
+    rng = np.random.default_rng(42)
+    adata = ad.AnnData(X=rng.random((4, 3)).astype(np.float32))
+    small_h5ad = tmp_path / "small.h5ad"
+    adata.write_h5ad(small_h5ad)
+    h5ad_bytes = small_h5ad.read_bytes()
+
+    # The real GCS client streams in chunks; a single large write bypasses the buffer
+    # entirely and reaches disk immediately (no flush needed). Writing in 1 KB chunks
+    # means the last partial buffer fill (<8 KB) stays in Python's write buffer, so
+    # h5py would see a truncated file without an explicit flush().
+    chunk_size = 1024
+
+    def download_to_file_chunked(f: object) -> None:
+        for i in range(0, len(h5ad_bytes), chunk_size):
+            f.write(h5ad_bytes[i : i + chunk_size])  # type: ignore[attr-defined]
+
+    mock_blob = MagicMock()
+    mock_blob.download_to_file.side_effect = download_to_file_chunked
+    mock_bucket = MagicMock()
+    mock_bucket.blob.return_value = mock_blob
+    mock_client = MagicMock()
+    mock_client.bucket.return_value = mock_bucket
+
+    result = read_h5ad_gcs("gs://fake-bucket/fake.h5ad", storage_client=mock_client)
+
+    assert result.shape == adata.shape
+
+
 @pytest.mark.parametrize(
     "n_samples, train_size, val_size, n_train_expected, n_val_expected",
     [

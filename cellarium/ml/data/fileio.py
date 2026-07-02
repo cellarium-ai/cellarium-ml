@@ -50,13 +50,15 @@ def read_h5ad_gcs(
     with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp_file:
         temp_path = tmp_file.name
         blob.download_to_file(tmp_file)
+        tmp_file.flush()
+
+    try:
+        return read_h5ad(temp_path, backed=backed)
+    finally:
         try:
-            return read_h5ad(temp_path, backed=backed)
-        finally:
-            try:
-                os.unlink(temp_path)  # clean up the temp file
-            except OSError:
-                pass  # if there's an error during cleanup, continue
+            os.unlink(temp_path)
+        except OSError:
+            pass
 
 
 def read_h5ad_url(filename: str, backed: backed_mode_type = backed_mode_default) -> AnnData:
