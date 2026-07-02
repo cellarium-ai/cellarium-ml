@@ -13,7 +13,7 @@ from google.cloud.storage import Client
 
 url_schemes = ("http:", "https:", "ftp:")
 backed_mode_type = Literal["r"] | bool | None
-backed_mode_default: backed_mode_type = "r"
+backed_mode_default: backed_mode_type = False
 
 
 def read_h5ad_gcs(
