@@ -2375,8 +2375,8 @@ def test_predict_reconstructed_counts_realdata(train_cellarium_model, train_scvi
     print(f"training data measured counts normalized to {reconstructed_library_size}")
     df = pd.DataFrame(
         (
-            np.array(train_adata_cellarium.X[:, :n_genes_to_reconstruct].todense()).squeeze()
-            / np.array(train_adata_cellarium.X.sum(axis=1)).squeeze()[:, None]
+            np.array(train_adata_cellarium.X[:, :n_genes_to_reconstruct].toarray()).squeeze()
+            / np.asarray(train_adata_cellarium.X[:].sum(axis=1)).squeeze()[:, None]  # materialize for backed case
             * reconstructed_library_size
         ),
         index=train_adata_cellarium.obs_names,
