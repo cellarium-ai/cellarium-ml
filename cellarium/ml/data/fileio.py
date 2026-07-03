@@ -147,12 +147,12 @@ def read_h5ad_file(filename: str, backed: backed_mode_type = backed_mode_default
             [False, None] will use in-memory mode.
     """
     if filename.startswith("gs:"):
-        return read_h5ad_gcs(filename, **kwargs)
+        return read_h5ad_gcs(filename, backed=backed, **kwargs)
 
     if filename.startswith("file:"):
         return read_h5ad_local(filename, backed=backed)
 
     if any(filename.startswith(scheme) for scheme in url_schemes):
-        return read_h5ad_url(filename)
+        return read_h5ad_url(filename, backed=backed)
 
     return read_h5ad(filename, backed=backed)
