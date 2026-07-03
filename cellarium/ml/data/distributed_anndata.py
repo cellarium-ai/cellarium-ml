@@ -24,7 +24,7 @@ from anndata.experimental.multi_files._anncollection import (
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
-from cellarium.ml.data.fileio import backed_mode_default, backed_mode_type, read_h5ad_file
+from cellarium.ml.data.fileio import GCS_CACHE_DIR, backed_mode_default, backed_mode_type, read_h5ad_file
 from cellarium.ml.data.schema import AnnDataSchema
 
 
@@ -169,6 +169,13 @@ class DistributedAnnDataCollection(AnnCollection):
             h5ad files, while ``None`` will load entire count matrices from individual h5ad files
             into cached memory as needed: a strategy that necessitates smaller chunked h5ad files.
             See :func:`anndata.read_h5ad` for details on backing modes.
+        cache_dir:
+            Directory for caching GCS-downloaded h5ad files on local disk. On first access each
+            shard is downloaded and written here; subsequent accesses (including after a checkpoint
+            restart on the same machine) read from disk instead of re-downloading. If a write fails
+            (e.g. disk full) the shard is streamed from GCS instead. Set to ``None`` to always
+            stream GCS files directly into memory with no local disk usage. Only affects
+            ``gs://`` paths; local and HTTP paths are unaffected.
     """
 
     def __init__(
@@ -186,6 +193,7 @@ class DistributedAnnDataCollection(AnnCollection):
         indices_strict: bool = True,
         obs_columns_to_validate: Sequence[str] | None = None,
         backed: backed_mode_type = backed_mode_default,
+        cache_dir: str | None = str(GCS_CACHE_DIR),
     ):
         self.filenames = list(braceexpand(filenames) if isinstance(filenames, str) else filenames)
         if (shard_size is None) and (last_shard_size is not None):
@@ -210,8 +218,11 @@ class DistributedAnnDataCollection(AnnCollection):
         if backed not in allowed_backed_modes:
             raise ValueError(f"Invalid backed mode: {backed}. Choose from {allowed_backed_modes}")
         self.backed = backed
+        self.cache_dir = cache_dir
         # schema
-        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0], backed=backed)
+        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(
+            self.filenames[0], backed=backed, cache_dir=cache_dir
+        )
         if len(adata0) != limits[0]:
             raise ValueError(
                 f"The number of cells in the first anndata file ({len(adata0)}) "
@@ -221,7 +232,7 @@ class DistributedAnnDataCollection(AnnCollection):
         self.schema = AnnDataSchema(adata0, obs_columns_to_validate)
         # lazy anndatas
         lazy_adatas = [
-            LazyAnnData(filename, (start, end), self.schema, self.cache, backed=backed)
+            LazyAnnData(filename, (start, end), self.schema, self.cache, backed=backed, cache_dir=cache_dir)
             for start, end, filename in zip([0] + limits, limits, self.filenames)
         ]
         # use filenames as default keys
@@ -316,10 +327,14 @@ class DistributedAnnDataCollection(AnnCollection):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.cache = LRU(self.max_cache_size)
-        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(self.filenames[0], backed=self.backed)
+        adata0 = self.cache[self.filenames[0]] = read_h5ad_file(
+            self.filenames[0], backed=self.backed, cache_dir=self.cache_dir
+        )
         self.schema = AnnDataSchema(adata0, self.obs_columns_to_validate)
         self.adatas = [
-            LazyAnnData(filename, (start, end), self.schema, self.cache, backed=self.backed)
+            LazyAnnData(
+                filename, (start, end), self.schema, self.cache, backed=self.backed, cache_dir=self.cache_dir
+            )
             for start, end, filename in zip([0] + self.limits, self.limits, self.filenames)
         ]
         self.obs_names = pd.Index([f"cell_{i}" for i in range(self.limits[-1])])
@@ -367,6 +382,7 @@ class LazyAnnData:
         schema: AnnDataSchema,
         cache: LRU | None = None,
         backed: backed_mode_type = backed_mode_default,
+        cache_dir: str | None = str(GCS_CACHE_DIR),
     ):
         self.filename = filename
         self.limits = limits
@@ -374,6 +390,7 @@ class LazyAnnData:
         if backed not in allowed_backed_modes:
             raise ValueError(f"Invalid backed mode: {backed}. Choose from {allowed_backed_modes}")
         self.backed = backed
+        self.cache_dir = cache_dir
         if cache is None:
             cache = LRU()
         self.cache = cache
@@ -414,7 +431,7 @@ class LazyAnnData:
             adata = self.cache[self.filename]
         except KeyError:
             # fetch anndata
-            adata = read_h5ad_file(self.filename, backed=self.backed)
+            adata = read_h5ad_file(self.filename, backed=self.backed, cache_dir=self.cache_dir)
             # validate anndata
             if self.n_obs != adata.n_obs:
                 raise ValueError(
