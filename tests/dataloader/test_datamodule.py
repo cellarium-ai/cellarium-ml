@@ -315,6 +315,10 @@ def test_read_h5ad_gcs_flushes_write_buffer(tmp_path: Path) -> None:
     is called. If read_h5ad opens the same path before that flush, h5py sees a
     truncated file and raises OSError ("truncated file: eof = X, stored_eof = Y").
 
+    This flush risk only applies to the backed-mode code path, which downloads to a
+    named temp file. Non-backed mode streams directly via blob.open() with no temp
+    file involved. The test therefore uses backed='r'.
+
     A single large write would bypass the buffer entirely, so this test writes in
     1 KB chunks without flushing — exactly replicating the real client's behavior.
     """
@@ -348,7 +352,7 @@ def test_read_h5ad_gcs_flushes_write_buffer(tmp_path: Path) -> None:
     mock_client = MagicMock()
     mock_client.bucket.return_value = mock_bucket
 
-    result = read_h5ad_gcs("gs://fake-bucket/fake.h5ad", storage_client=mock_client)
+    result = read_h5ad_gcs("gs://fake-bucket/fake.h5ad", storage_client=mock_client, backed="r")
 
     assert result.shape == adata.shape
 
