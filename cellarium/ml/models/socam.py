@@ -377,9 +377,9 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             if isinstance(logger, pl.loggers.TensorBoardLogger):
                 try:
                     logger.experiment.add_histogram(
-                        "b_c",
-                        self.b_c,
+                        "W_gc",
+                        self.W_gc,
                         global_step=trainer.global_step,
                     )
                 except ValueError as e:
-                    warnings.warn(f"Failed to log histogram for b_c step={trainer.global_step} due to {e}")
+                    warnings.warn(f"Failed to log histogram for W_gc step={trainer.global_step} due to {e}")
