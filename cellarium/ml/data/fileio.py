@@ -50,7 +50,16 @@ def read_h5ad_gcs(
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
-    # write to a named temporary file
+    if backed not in [True, "r"]:
+        # Stream directly into memory — no temp file, no disk I/O.
+        with blob.open("rb") as f:
+            return read_h5ad(f)
+
+    # Backed mode requires h5py to have a real seekable file path. The file is
+    # flushed and closed before h5py opens it to avoid Python's write buffer
+    # leaving the last chunk off disk (which causes h5py to report a truncated
+    # file). After os.unlink the directory entry is gone but the inode stays
+    # allocated until h5py closes its fd (i.e. when the AnnData is GC'd).
     with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp_file:
         temp_path = tmp_file.name
         blob.download_to_file(tmp_file)
@@ -88,18 +97,27 @@ def read_h5ad_url(filename: str, backed: backed_mode_type = backed_mode_default)
     if not any(filename.startswith(scheme) for scheme in url_schemes):
         raise ValueError("The filename must start with 'http:', 'https:', or 'ftp:' protocol name.")
 
-    # write to a named temporary file
+    if backed not in [True, "r"]:
+        # Anonymous TemporaryFile: no path, no flush needed, deleted automatically.
+        with urllib.request.urlopen(filename) as response:
+            with tempfile.TemporaryFile() as tmp_file:
+                shutil.copyfileobj(response, tmp_file)
+                return read_h5ad(tmp_file)
+
+    # Backed mode needs a real path; flush and close before h5py opens it.
     with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp_file:
         temp_path = tmp_file.name
         with urllib.request.urlopen(filename) as response:
             shutil.copyfileobj(response, tmp_file)
+        tmp_file.flush()
+
+    try:
+        return read_h5ad(temp_path, backed=backed)
+    finally:
         try:
-            return read_h5ad(temp_path, backed=backed)
-        finally:
-            try:
-                os.unlink(temp_path)  # clean up the temp file
-            except OSError:
-                pass  # if there's an error during cleanup, continue
+            os.unlink(temp_path)
+        except OSError:
+            pass
 
 
 def read_h5ad_local(filename: str, backed: backed_mode_type = backed_mode_default) -> AnnData:
@@ -132,7 +150,7 @@ def read_h5ad_file(filename: str, backed: backed_mode_type = backed_mode_default
         return read_h5ad_gcs(filename, **kwargs)
 
     if filename.startswith("file:"):
-        return read_h5ad_local(filename)
+        return read_h5ad_local(filename, backed=backed)
 
     if any(filename.startswith(scheme) for scheme in url_schemes):
         return read_h5ad_url(filename)
