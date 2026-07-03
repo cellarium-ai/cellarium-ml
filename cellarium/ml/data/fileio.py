@@ -136,7 +136,7 @@ def read_h5ad_local(filename: str, backed: backed_mode_type = backed_mode_defaul
     return read_h5ad(filename, backed=backed)
 
 
-def read_h5ad_file(filename: str, backed: backed_mode_type = backed_mode_default, **kwargs) -> AnnData:
+def read_h5ad_file(filename: str, backed: backed_mode_type = backed_mode_default) -> AnnData:
     r"""
     Read ``.h5ad``-formatted hdf5 file from a filename.
 
@@ -147,7 +147,7 @@ def read_h5ad_file(filename: str, backed: backed_mode_type = backed_mode_default
             [False, None] will use in-memory mode.
     """
     if filename.startswith("gs:"):
-        return read_h5ad_gcs(filename, backed=backed, **kwargs)
+        return read_h5ad_gcs(filename, backed=backed)
 
     if filename.startswith("file:"):
         return read_h5ad_local(filename, backed=backed)
