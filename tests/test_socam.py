@@ -7,6 +7,7 @@ from pathlib import Path
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -244,6 +245,7 @@ def _make_socam(
     c: int = 5,
     probability_propagation_flag: bool = False,
     cl_name_subset: list[str] | None = None,
+    class_counts: pd.Series | None = None,
 ) -> SOCAM:
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
     cl_names = [f"cell_type_{i}" for i in range(c)]
@@ -256,6 +258,7 @@ def _make_socam(
         cl_name_subset=cl_name_subset,
         probability_propagation_flag=probability_propagation_flag,
         log_metrics=False,
+        class_counts=class_counts,
     )
 
 
@@ -309,10 +312,18 @@ def test_forward_with_cl_name_subset():
     assert result["loss"].shape == torch.Size([])  # scalar
 
 
-def test_forward_no_cl_name_subset():
+@pytest.mark.parametrize(
+    "class_counts",
+    [
+        None,
+        pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(5)}),
+    ],
+    ids=["no_class_counts", "with_class_counts"],
+)
+def test_forward_no_cl_name_subset(class_counts):
     n, g, c = 4, 3, 5
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
-    model = _make_socam(n=n, g=g, c=c)
+    model = _make_socam(n=n, g=g, c=c, class_counts=class_counts)
     x_ng = torch.randn(n, g)
     cl_names_n = np.array([f"cell_type_{i}" for i in np.random.randint(0, c, size=n)])
     result = model.forward(x_ng, var_names_g, cl_names_n)
@@ -349,6 +360,51 @@ def test_predict_no_cl_name_subset():
     output = model.predict(x_ng, var_names_g)
     assert output["y_logits_nc"].shape == (n, c)
     assert output["cell_type_probs_nc"].shape == (n, c)
+
+
+# ---------------------------------------------------------------------------
+# class_counts / class_weights tests
+# ---------------------------------------------------------------------------
+
+
+def test_class_weights_none_when_no_counts():
+    model = _make_socam()
+    assert model.class_weights is None
+
+
+def test_class_weights_mean_is_one():
+    c = 5
+    counts = pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(c)})
+    model = _make_socam(c=c, class_counts=counts)
+    assert model.class_weights is not None
+    assert model.class_weights.shape == (c,)
+    assert torch.allclose(model.class_weights.mean(), torch.tensor(1.0), atol=1e-6)
+
+
+def test_class_weights_inverse_frequency():
+    """Rarer classes must receive strictly higher weights than common classes."""
+    c = 5
+    # counts increase monotonically: cell_type_0 is rarest, cell_type_4 is most common
+    counts = pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(c)})
+    model = _make_socam(c=c, class_counts=counts)
+    weights = model.class_weights
+    assert weights is not None
+    for i in range(c - 1):
+        assert weights[i] > weights[i + 1], f"weight[{i}] should exceed weight[{i + 1}]"
+
+
+def test_class_weights_missing_class_raises():
+    c = 5
+    incomplete = pd.Series({f"cell_type_{i}": 10 for i in range(c - 1)})  # missing cell_type_4
+    with pytest.raises(ValueError, match="missing entries"):
+        _make_socam(c=c, class_counts=incomplete)
+
+
+def test_class_weights_zero_count_raises():
+    c = 5
+    bad_counts = pd.Series({f"cell_type_{i}": 0 if i == 2 else 10 for i in range(c)})
+    with pytest.raises(ValueError, match="must be > 0"):
+        _make_socam(c=c, class_counts=bad_counts)
 
 
 # ---------------------------------------------------------------------------
