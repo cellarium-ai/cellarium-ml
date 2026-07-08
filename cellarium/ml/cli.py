@@ -1090,6 +1090,73 @@ def scvi(args: ArgsType = None) -> None:
 
 
 @register_model
+def scarches(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.ScArches` model.
+
+    Fine-tunes a trained :class:`~cellarium.ml.models.SingleCellVariationalInference` model on
+    new-batch cells using scArches (single-cell Architectural Surgery) [1].  All pretrained
+    weights are frozen; only the new per-batch bias parameters are trained.
+
+    The pretrained scVI model must be supplied via a ``!CheckpointLoader`` YAML block.  The
+    number of new batches (``n_new_batch``) is inferred automatically from the
+    ``batch_index_n`` batch key in ``data.batch_keys``.  The new data is assumed to contain
+    **only** batches that were not present during scVI training.
+
+    Example config (saved as ``scarches.yaml``)::
+
+        model:
+          model:
+            class_path: cellarium.ml.models.ScArches
+            init_args:
+              pretrained_scvi:
+                !CheckpointLoader
+                file_path: /path/to/scvi.ckpt
+                attr: model
+          optim_fn: torch.optim.Adam
+        data:
+          dadc:
+            class_path: cellarium.ml.data.DistributedAnnDataCollection
+            init_args:
+              filenames: /path/to/new_data_{0..N}.h5ad
+              shard_size: 100
+              max_cache_size: 2
+          batch_keys:
+            x_ng:
+              attr: X
+              convert_fn: cellarium.ml.utilities.data.densify
+            var_names_g:
+              attr: var_names
+            batch_index_n:
+              attr: obs
+              key: <new_batch_column>
+              convert_fn: cellarium.ml.utilities.data.categories_to_codes
+          batch_size: 50
+        trainer:
+          max_steps: 1000
+
+    Example run::
+
+        cellarium-ml scarches fit --config scarches.yaml
+
+    **References:**
+
+    1. `Query to reference single-cell integration with transfer learning (Lotfollahi et al.)
+       <https://www.nature.com/articles/s41587-021-01001-7>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.ScArches",
+        link_arguments=[
+            LinkArguments("data", "model.model.init_args.n_new_batch", compute_batch_index_n_categories),
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
 def tdigest(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.TDigest` model.

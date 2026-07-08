@@ -1503,3 +1503,106 @@ def test_return_predictions_userwarning(tmp_path: Path):
             print(warning_message)
             n += 1
     assert n < 2, "Unexpected UserWarning when running predict with return_predictions=false"
+
+
+def test_scarches_cli(tmp_path: Path) -> None:
+    """Train scVI for one epoch, then run ScArches fit on the resulting checkpoint."""
+    scvi_dir = tmp_path / "scvi"
+    scvi_config = f"""
+    model:
+      model:
+        class_path: cellarium.ml.models.SingleCellVariationalInference
+        init_args:
+          n_batch: null
+          use_size_factor_key: false
+          encoder:
+            hidden_layers: []
+            final_layer:
+              class_path: torch.nn.Linear
+              init_args: {{}}
+          decoder:
+            hidden_layers:
+              - class_path: cellarium.ml.models.scvi.LinearWithBatch
+                init_args:
+                  out_features: 16
+                  label_to_bias_hidden_layers: []
+            final_layer:
+              class_path: torch.nn.Linear
+              init_args: {{}}
+            final_additive_bias: false
+      optim_fn: torch.optim.Adam
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{{0..1}}.h5ad
+          shard_size: 100
+          max_cache_size: 2
+          obs_columns_to_validate: []
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+        batch_index_n:
+          attr: obs
+          key: dataset_id
+          convert_fn: cellarium.ml.utilities.data.categories_to_codes
+      batch_size: 50
+      num_workers: 0
+    trainer:
+      accelerator: cpu
+      devices: 1
+      max_epochs: 1
+      default_root_dir: {scvi_dir}
+    """
+    with open(scvi_config_path := tmp_path / "scvi_config.yaml", "w") as f:
+        f.write(scvi_config)
+    main(["scvi", "fit", "--config", str(scvi_config_path)])
+
+    ckpt_dir = scvi_dir / "lightning_logs" / "version_0" / "checkpoints"
+    ckpt_files = sorted(ckpt_dir.glob("*.ckpt"))
+    assert len(ckpt_files) == 1, f"Expected 1 scVI checkpoint, found: {ckpt_files}"
+    ckpt_path = ckpt_files[0]
+
+    scarches_dir = tmp_path / "scarches"
+    scarches_config = f"""
+    model:
+      model:
+        class_path: cellarium.ml.models.ScArches
+        init_args:
+          pretrained_scvi:
+            !CheckpointLoader
+            file_path: {ckpt_path}
+            attr: model
+      optim_fn: torch.optim.Adam
+    data:
+      dadc:
+        class_path: cellarium.ml.data.DistributedAnnDataCollection
+        init_args:
+          filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad
+          shard_size: 100
+          max_cache_size: 2
+          obs_columns_to_validate: []
+      batch_keys:
+        x_ng:
+          attr: X
+          convert_fn: cellarium.ml.utilities.data.densify
+        var_names_g:
+          attr: var_names
+        batch_index_n:
+          attr: obs
+          key: dataset_id
+          convert_fn: cellarium.ml.utilities.data.categories_to_codes
+      batch_size: 50
+      num_workers: 0
+    trainer:
+      accelerator: cpu
+      devices: 1
+      max_steps: 2
+      default_root_dir: {scarches_dir}
+    """
+    with open(scarches_config_path := tmp_path / "scarches_config.yaml", "w") as f:
+        f.write(scarches_config)
+    main(["scarches", "fit", "--config", str(scarches_config_path)])
