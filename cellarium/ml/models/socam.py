@@ -332,9 +332,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         logits_nc = self._compute_regression(x_ng, self.W_gc, self.b_c)
         if self.probability_propagation_flag:
             logits_nc = propagate_logits(logits_nc, self.nonleaf_desc_cc, self.perm, self.inv_perm)
-        scale = self.n_obs / x_ng.shape[0]
-        ce_loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="sum", weight=self.class_weights) * scale
-        laplace_loss = self.W_gc.abs().sum() / self.W_prior_scale
+        ce_loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="mean", weight=self.class_weights)
+        laplace_loss = (self.W_gc.abs().sum() / self.W_prior_scale) / self.n_obs
         loss = ce_loss + laplace_loss
         return {"loss": loss}
 
