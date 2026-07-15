@@ -61,18 +61,23 @@ model:
       # reconstruction
       reconstruct_counts_on_predict: true
       reconstruction_transform_batch: 0
-      reconstruction_transform_categorical_covariates: [2]
+      # reconstruction_transform_categorical_covariates: [2]
 
       # these can be changed
       use_flow: false
-      batch_embedded: true
-      batch_representation_sampled: true
+      batch_embedded: false
+      batch_representation_sampled: false
       n_latent_batch: null
       batch_kl_weight_max: 0.01
       kl_warmup_epochs: 50
       encoder: 
         hidden_layers:
-        - class_path: cellarium.ml.models.scvi.LinearWithCovariates
+        # - class_path: cellarium.ml.models.scvi.LinearWithBatchAndCovariates
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
+          init_args:
+            out_features: 512
+            label_to_bias_hidden_layers: []  # one linear transformation: what scvi-tools does
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
             out_features: 128
             label_to_bias_hidden_layers: []  # one linear transformation: what scvi-tools does
@@ -81,7 +86,8 @@ model:
           init_args: {}
       decoder:
         hidden_layers:
-        - class_path: cellarium.ml.models.scvi.LinearWithBatchAndCovariates
+        # - class_path: cellarium.ml.models.scvi.LinearWithBatchAndCovariates
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
             out_features: 128
             label_to_bias_hidden_layers: []
@@ -92,12 +98,17 @@ model:
               # - class_path: torch.nn.Linear
               #     init_args:
               #       out_features: 20
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
+          init_args:
+            out_features: 512
+            label_to_bias_hidden_layers: []
         final_layer: 
-          class_path: cellarium.ml.models.scvi.LinearWithBatchAndCovariates
+          # class_path: cellarium.ml.models.scvi.LinearWithBatchAndCovariates
+          class_path: cellarium.ml.models.scvi.LinearWithBatch
           init_args:
             label_to_bias_hidden_layers: []
-        final_additive_bias: true
-      n_latent: 10
+        final_additive_bias: false
+      n_latent: 16
 
       # probably leave these alone
       n_continuous_cov: 0
@@ -144,15 +155,15 @@ data:
       attr: obs
       key: batch
       convert_fn: cellarium.ml.utilities.data.categories_to_codes
-    categorical_covariate_index_nd:
-      attr: obs
-      key: 
-        - chemistry
-      convert_fn: cellarium.ml.utilities.data.categories_to_codes
+    # categorical_covariate_index_nd:
+    #   attr: obs
+    #   key: 
+    #     - chemistry
+    #   convert_fn: cellarium.ml.utilities.data.categories_to_codes
   batch_size: 512
   shuffle: true
   # seed: 0
   # drop_last: false
   test_mode: false
   num_workers: 0
-ckpt_path: /Users/sfleming/Documents/Github/cellarium-ml/notebooks/lightning_logs/version_0/checkpoints/epoch=62-step=2961.ckpt
+ckpt_path: /Users/sfleming/Documents/Github/cellarium-ml/notebooks/lightning_logs/version_0/checkpoints/last.ckpt
