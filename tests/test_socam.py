@@ -317,8 +317,9 @@ def test_forward_with_cl_name_subset():
     [
         None,
         pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(5)}),
+        pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(4)}),  # cell_type_4 missing → weight 1.0
     ],
-    ids=["no_class_counts", "with_class_counts"],
+    ids=["no_class_counts", "with_class_counts", "partial_class_counts"],
 )
 def test_forward_no_cl_name_subset(class_counts):
     n, g, c = 4, 3, 5
@@ -393,18 +394,49 @@ def test_class_weights_inverse_frequency():
         assert weights[i] > weights[i + 1], f"weight[{i}] should exceed weight[{i + 1}]"
 
 
-def test_class_weights_missing_class_raises():
+def test_class_weights_missing_class_gets_neutral_weight():
     c = 5
-    incomplete = pd.Series({f"cell_type_{i}": 10 for i in range(c - 1)})  # missing cell_type_4
-    with pytest.raises(ValueError, match="missing entries"):
-        _make_socam(c=c, class_counts=incomplete)
+    # cell_type_4 is absent from the Series — should silently get weight 1.0
+    incomplete = pd.Series({f"cell_type_{i}": 10 for i in range(c - 1)})
+    model = _make_socam(c=c, class_counts=incomplete)
+    assert model.class_weights is not None
+    assert torch.allclose(model.class_weights[c - 1], torch.tensor(1.0), atol=1e-6)
 
 
-def test_class_weights_zero_count_raises():
+def test_class_weights_zero_count_gets_neutral_weight():
     c = 5
-    bad_counts = pd.Series({f"cell_type_{i}": 0 if i == 2 else 10 for i in range(c)})
-    with pytest.raises(ValueError, match="must be > 0"):
+    counts = pd.Series({f"cell_type_{i}": 0 if i == 2 else 10 for i in range(c)})
+    model = _make_socam(c=c, class_counts=counts)
+    assert model.class_weights is not None
+    assert torch.allclose(model.class_weights[2], torch.tensor(1.0), atol=1e-6)
+
+
+def test_class_weights_negative_count_raises():
+    c = 5
+    bad_counts = pd.Series({f"cell_type_{i}": -1 if i == 2 else 10 for i in range(c)})
+    with pytest.raises(ValueError, match=">= 0"):
         _make_socam(c=c, class_counts=bad_counts)
+
+
+def test_class_weights_extra_series_entries_ignored():
+    c = 5
+    # extra "cell_type_99" is not in active_cl_names — should be silently ignored
+    counts = pd.Series({f"cell_type_{i}": 10 for i in range(c)} | {"cell_type_99": 500})
+    model = _make_socam(c=c, class_counts=counts)
+    assert model.class_weights is not None
+    assert model.class_weights.shape == (c,)
+
+
+def test_class_weights_nonzero_mean_is_one_when_some_zero():
+    c = 5
+    # cell_type_0 has count 0; remaining four have nonzero counts
+    counts = pd.Series({f"cell_type_{i}": 0 if i == 0 else (i + 1) * 10 for i in range(c)})
+    model = _make_socam(c=c, class_counts=counts)
+    weights = model.class_weights
+    assert weights is not None
+    nonzero_weights = weights[1:]  # indices 1-4 have nonzero counts
+    assert torch.allclose(nonzero_weights.mean(), torch.tensor(1.0), atol=1e-6)
+    assert torch.allclose(weights[0], torch.tensor(1.0), atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

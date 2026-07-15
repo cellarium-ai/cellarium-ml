@@ -170,11 +170,14 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         seed: Random seed used to initialize parameters.
         log_metrics: If True, logs weight histograms (TensorBoard) during training.
             If True, logs weight histograms (TensorBoard) during training.
-        class_counts: Optional pandas Series mapping each active class name to its cell
-            count in the training data. When provided, inverse-frequency weights
-            (normalized to mean 1) are applied to the cross-entropy loss. Every name
-            in the active category set must appear in the Series index. When ``None``,
-            all classes are weighted equally.
+        class_counts: Optional pandas Series mapping class names to cell counts in the
+            training data. Classes absent from the Series (typically pure-ancestor nodes
+            with no direct cell labels) and classes with a count of zero are both treated
+            as unlabeled and receive a neutral weight of 1.0, which has no effect on the
+            loss since no cells carry those labels. Inverse-frequency weights are computed
+            and normalized to mean 1 over the nonzero-count classes only. Negative counts
+            raise a ``ValueError``. Extra Series entries not in the active category set are
+            ignored. When ``None``, all classes are weighted equally.
     """
 
     def __init__(
@@ -254,14 +257,17 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
 
         # Class weights for cross-entropy loss
         if class_counts is not None:
-            missing = [c for c in active_cl_names if c not in class_counts.index]
-            if missing:
-                raise ValueError(f"class_counts is missing entries for active classes: {missing}")
-            counts = torch.tensor([class_counts[c] for c in active_cl_names], dtype=torch.float)
-            if (counts <= 0).any():
-                raise ValueError("All class_counts values must be > 0.")
-            weights = counts.sum() / (self.n_active_cats * counts)
-            weights = weights / weights.mean()
+            provided_counts = {c: class_counts[c] for c in active_cl_names if c in class_counts.index}
+            if any(v < 0 for v in provided_counts.values()):
+                raise ValueError("All class_counts values must be >= 0.")
+            counts = torch.tensor([float(provided_counts.get(c, 0.0)) for c in active_cl_names], dtype=torch.float)
+            nonzero = counts > 0
+            weights = torch.ones(self.n_active_cats, dtype=torch.float)
+            if nonzero.any():
+                total = counts[nonzero].sum()
+                n_nonzero = nonzero.sum().float()
+                raw = total / (n_nonzero * counts[nonzero])
+                weights[nonzero] = raw / raw.mean()
             self._class_weights: torch.Tensor | None = weights
             self.register_buffer("class_weights", weights.clone())
         else:
