@@ -178,6 +178,14 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             and normalized to mean 1 over the nonzero-count classes only. Negative counts
             raise a ``ValueError``. Extra Series entries not in the active category set are
             ignored. When ``None``, all classes are weighted equally.
+        propagate_class_counts: If ``True`` and ``class_counts`` is provided, propagate
+            raw counts up the ontology before computing weights. Each node's effective
+            count becomes its own direct count plus the sum of all descendant counts. This
+            down-weights ancestor nodes (they accumulate large effective counts) relative
+            to rare leaf nodes. A pure-ancestor node with zero direct labels but nonzero
+            descendant counts will receive a real inverse-frequency weight rather than the
+            neutral 1.0 it would otherwise get. Has no effect when ``class_counts`` is
+            ``None``.
     """
 
     def __init__(
@@ -194,6 +202,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         log_metrics: bool = True,
         include_ancestors_of_cl_name_subset: bool = True,
         class_counts: pd.Series | None = None,
+        propagate_class_counts: bool = False,
     ) -> None:
         super().__init__()
         self.n_obs = n_obs
@@ -217,6 +226,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             cl_name_subset = _expand_with_ancestors(cl_name_subset, cl_names, descendant_tensor)
         self.cl_name_subset = cl_name_subset
         self.probability_propagation_flag = probability_propagation_flag
+        self.propagate_class_counts = propagate_class_counts
         self.seed = seed
         self.log_metrics = log_metrics
 
@@ -261,6 +271,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             if any(v < 0 for v in provided_counts.values()):
                 raise ValueError("All class_counts values must be >= 0.")
             counts = torch.tensor([float(provided_counts.get(c, 0.0)) for c in active_cl_names], dtype=torch.float)
+            if propagate_class_counts:
+                counts = active_descendant_tensor_cc @ counts
             nonzero = counts > 0
             weights = torch.ones(self.n_active_cats, dtype=torch.float)
             if nonzero.any():

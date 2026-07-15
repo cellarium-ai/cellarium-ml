@@ -440,6 +440,73 @@ def test_class_weights_nonzero_mean_is_one_when_some_zero():
 
 
 # ---------------------------------------------------------------------------
+# propagate_class_counts tests
+# ---------------------------------------------------------------------------
+
+
+def _make_chain_model(
+    class_counts: pd.Series | None = None,
+    propagate_class_counts: bool = False,
+) -> SOCAM:
+    """3-node chain A→B→C used for propagation tests. Index: A=0, B=1, C=2."""
+    cl_names = ["A", "B", "C"]
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = desc[0, 1] = desc[0, 2] = 1  # A is ancestor of A, B, C
+    desc[1, 1] = desc[1, 2] = 1  # B is ancestor of B, C
+    desc[2, 2] = 1  # C is its own ancestor
+    return SOCAM(
+        n_obs=4,
+        var_names_g=np.array(["gene_0"]),
+        descendant_tensor=desc,
+        cl_names=cl_names,
+        log_metrics=False,
+        class_counts=class_counts,
+        propagate_class_counts=propagate_class_counts,
+    )
+
+
+def test_class_weights_propagation_reverses_weight_order():
+    """Propagation accumulates descendant counts onto ancestors, flipping weight order.
+
+    Direct counts: A=5 (rarest), B=10, C=40 (most common).
+    Without propagation: weight_A > weight_B > weight_C.
+    With propagation: A_count=55, B_count=50, C_count=40, so weight_A < weight_B < weight_C.
+    """
+    counts = pd.Series({"A": 5, "B": 10, "C": 40})
+    model_raw = _make_chain_model(class_counts=counts, propagate_class_counts=False)
+    model_prop = _make_chain_model(class_counts=counts, propagate_class_counts=True)
+
+    w_raw = model_raw.class_weights
+    w_prop = model_prop.class_weights
+    assert w_raw is not None and w_prop is not None
+
+    # Without propagation: rarer direct count → higher weight
+    assert w_raw[0] > w_raw[1] > w_raw[2], "raw: A > B > C"
+    # With propagation: higher accumulated count → lower weight
+    assert w_prop[0] < w_prop[1] < w_prop[2], "propagated: A < B < C"
+
+
+def test_class_weights_propagation_pure_ancestor_gets_real_weight():
+    """A node with zero direct labels gets weight=1.0 without propagation but a real
+    inverse-frequency weight when propagation pulls in descendant counts."""
+    counts = pd.Series({"B": 10, "C": 40})  # A absent → direct count 0
+    model_raw = _make_chain_model(class_counts=counts, propagate_class_counts=False)
+    model_prop = _make_chain_model(class_counts=counts, propagate_class_counts=True)
+
+    # Without propagation: A has no count → neutral weight 1.0
+    assert torch.allclose(model_raw.class_weights[0], torch.tensor(1.0), atol=1e-6)
+    # With propagation: A accumulates B+C = 50 → weight ≠ 1.0
+    assert not torch.allclose(model_prop.class_weights[0], torch.tensor(1.0), atol=1e-2)
+
+
+def test_class_weights_propagation_no_effect_when_counts_none():
+    """propagate_class_counts=True is a no-op when class_counts is None."""
+    model = _make_chain_model(class_counts=None, propagate_class_counts=True)
+    assert model.class_weights is None
+
+
+# ---------------------------------------------------------------------------
 # _cl_names_to_indices tests
 # ---------------------------------------------------------------------------
 
