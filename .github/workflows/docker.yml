@@ -47,14 +47,33 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build and push Docker image
+    - name: Build Docker image
       uses: docker/build-push-action@v6
       with:
         context: .
         file: ./Dockerfile
-        push: true
+        push: false
+        load: true
         platforms: linux/amd64
         build-args: VERSION=${{ steps.version.outputs.value }}
-        tags: |
-          us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
-          us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
+        tags: cellarium-ml-test:ci
+
+    - name: Test torch.compile()
+      run: |
+        timeout 180 docker run --rm cellarium-ml-test:ci python -c "
+        import torch
+        torch._dynamo.config.suppress_errors = False
+        torch._dynamo.config.raise_on_backend_error = True
+        def f(x):
+            return (x * x).sum()
+        compiled = torch.compile(f, backend='inductor')
+        result = compiled(torch.randn(10))
+        print('torch.compile() succeeded, result:', result.item())
+        "
+
+    - name: Push Docker image
+      run: |
+        docker tag cellarium-ml-test:ci us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
+        docker tag cellarium-ml-test:ci us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
+        docker push us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
+        docker push us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
