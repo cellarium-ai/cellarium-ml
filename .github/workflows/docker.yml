@@ -60,15 +60,18 @@ jobs:
 
     - name: Test torch.compile()
       run: |
-        timeout 180 docker run --rm cellarium-ml-test:ci python -c "
-        import torch
+        timeout 180 docker run --rm \
+          -e TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_test_cache \
+          cellarium-ml-test:ci python -c "
+        import glob, torch
         torch._dynamo.config.suppress_errors = False
-        torch._dynamo.config.raise_on_backend_error = True
         def f(x):
             return (x * x).sum()
         compiled = torch.compile(f, backend='inductor')
         result = compiled(torch.randn(10))
-        print('torch.compile() succeeded, result:', result.item())
+        so_files = glob.glob('/tmp/inductor_test_cache/**/*.so', recursive=True)
+        assert so_files, 'No .so files in inductor cache — torch.compile() fell back to eager (g++ missing?)'
+        print(f'torch.compile() succeeded: {len(so_files)} compiled artifact(s) found')
         "
 
     - name: Push Docker image
