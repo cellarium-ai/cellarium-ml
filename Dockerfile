@@ -7,7 +7,7 @@ ENV DOCKER=true \
 ARG VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv python-is-python3 git curl gnupg \
+    python3 python3-pip python3-venv python-is-python3 git curl gnupg gcc g++ \
  && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
     | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - \
  && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] \
