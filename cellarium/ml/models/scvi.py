@@ -1434,10 +1434,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         total_mrna_umis_n: torch.Tensor | None = None,
         validation_cell_type_index_n: torch.Tensor | None = None,
     ) -> None:
-
         n = x_ng.shape[0]
-        if n == 0:
-            return
 
         output = self(
             x_ng=x_ng,
