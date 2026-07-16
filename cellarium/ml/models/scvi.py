@@ -515,8 +515,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             ``size_factor_key`` parameter in the model's ``setup_anndata`` method as the scaling
             factor in the mean of the conditional distribution. If ``False``, the observed library
             size (log of the sum of counts per cell) is used. Should be ``False``.
-        min_count_per_cell_threshold: Minimum number of counts required per cell. Cells with fewer counts will
-            be filtered out. Useful when gene filtering may push cells to very low counts. Default 0 (no filtering).
         reconstruct_counts_on_predict: Changes the behavior of :meth:`predict`. True will reconstruct gene
             expression count data, False will return the latent representations
         reconstruction_var_names_g: List of var_names to be reconstructed (outputs are dense matrices)
@@ -577,7 +575,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         kl_warmup_steps: int | None = None,
         kl_annealing_start: float = 0.0,
         use_size_factor_key: bool = False,
-        min_count_per_cell_threshold: int = 0,
         reconstruct_counts_on_predict: bool = False,
         reconstruction_var_names_g: np.ndarray | list | None = None,
         reconstruction_transform_batch: None | int | str = 0,
@@ -604,7 +601,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         self.latent_distribution = latent_distribution
         self.n_cats_per_cov = n_cats_per_cov if n_cats_per_cov is not None else []
         self.use_size_factor_key = use_size_factor_key
-        self.min_count_per_cell_threshold = min_count_per_cell_threshold
         self.batch_embedded = batch_embedded
         self.batch_representation_sampled = batch_representation_sampled
         self.n_latent_batch = n_latent_batch
@@ -986,49 +982,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         return dict(px=count_distribution, pz=pz)
 
-    def _filter_cells_by_min_count(
-        self,
-        x_ng: torch.Tensor,
-        batch_index_n: torch.Tensor,
-        continuous_covariates_nc: torch.Tensor | None = None,
-        categorical_covariate_index_nd: torch.Tensor | None = None,
-        total_mrna_umis_n: torch.Tensor | None = None,
-        validation_cell_type_index_n: torch.Tensor | None = None,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
-    ]:
-        """Filter cells by minimum count threshold.
-
-        Args:
-            *tensors: A list of tensors to filter. The first tensor must be the gene counts matrix.
-
-        Returns:
-            A tuple of filtered tensors.
-        """
-        if self.min_count_per_cell_threshold > 0:
-            cell_counts_n = x_ng.sum(dim=-1)
-            keeper_logic = cell_counts_n >= self.min_count_per_cell_threshold
-            x_ng = x_ng[keeper_logic]
-            batch_index_n = batch_index_n[keeper_logic]
-            continuous_covariates_nc = (
-                continuous_covariates_nc[keeper_logic] if continuous_covariates_nc is not None else None
-            )
-            categorical_covariate_index_nd = (
-                categorical_covariate_index_nd[keeper_logic] if categorical_covariate_index_nd is not None else None
-            )
-            total_mrna_umis_n = total_mrna_umis_n[keeper_logic] if total_mrna_umis_n is not None else None
-            validation_cell_type_index_n = (
-                validation_cell_type_index_n[keeper_logic] if validation_cell_type_index_n is not None else None
-            )
-        return (
-            x_ng,
-            batch_index_n,
-            continuous_covariates_nc,
-            categorical_covariate_index_nd,
-            total_mrna_umis_n,
-            validation_cell_type_index_n,
-        )
-
     def forward(
         self,
         x_ng: torch.Tensor,
@@ -1063,24 +1016,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
-
-        (
-            x_ng,
-            batch_index_n,
-            continuous_covariates_nc,
-            categorical_covariate_index_nd,
-            total_mrna_umis_n,
-            _,
-        ) = self._filter_cells_by_min_count(
-            x_ng, batch_index_n, continuous_covariates_nc, categorical_covariate_index_nd, total_mrna_umis_n
-        )
-        if x_ng.shape[0] == 0:
-            return {
-                "loss": torch.tensor(0.0, device=x_ng.device),
-                "reconstruction_loss": None,
-                "kl_divergence_z": None,
-                "z_nk": None,
-            }
 
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
@@ -1499,22 +1434,6 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         total_mrna_umis_n: torch.Tensor | None = None,
         validation_cell_type_index_n: torch.Tensor | None = None,
     ) -> None:
-
-        (
-            x_ng,
-            batch_index_n,
-            continuous_covariates_nc,
-            categorical_covariate_index_nd,
-            total_mrna_umis_n,
-            validation_cell_type_index_n,
-        ) = self._filter_cells_by_min_count(
-            x_ng,
-            batch_index_n,
-            continuous_covariates_nc,
-            categorical_covariate_index_nd,
-            total_mrna_umis_n,
-            validation_cell_type_index_n,
-        )
 
         n = x_ng.shape[0]
         if n == 0:
