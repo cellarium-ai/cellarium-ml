@@ -772,6 +772,104 @@ SINGLE_DEVICE_CONFIGS = [
         },
     },
     {
+        "model_name": "scvi",
+        "_display_id": "scvi_swiglu_resnet",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.SingleCellVariationalInference",
+                    "init_args": {
+                        "n_batch": None,
+                        "use_size_factor_key": False,
+                        "use_batch_norm": "none",
+                        "use_layer_norm": "both",
+                        "encoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
+                                    "dressing_init_args": {
+                                        "activation_fn": "cellarium.ml.layers.SwiGLUActivation",
+                                    },
+                                },
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
+                                    "dressing_init_args": {
+                                        "activation_fn": "cellarium.ml.layers.SwiGLUActivation",
+                                        "use_residual": True,
+                                    },
+                                },
+                            ],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "output_bias": True,
+                        },
+                        "decoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 64, "label_to_bias_hidden_layers": []},
+                                    "dressing_init_args": {
+                                        "activation_fn": "cellarium.ml.layers.SwiGLUActivation",
+                                    },
+                                },
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 64, "label_to_bias_hidden_layers": []},
+                                    "dressing_init_args": {
+                                        "activation_fn": "cellarium.ml.layers.SwiGLUActivation",
+                                        "use_residual": True,
+                                    },
+                                },
+                            ],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "final_additive_bias": False,
+                        },
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+                "optim_kwargs": {"lr": "1e-3"},
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "batch_index_n": {
+                        "attr": "obs",
+                        "key": "dataset_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 3,
+            },
+        },
+    },
+    {
         "model_name": "socam",
         "subcommand": "fit",
         "fit": {

@@ -19,7 +19,7 @@ from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.distributions import NegativeBinomial
-from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
+from cellarium.ml.layers import DressedLayer, FullyConnectedLinear, SwiGLUActivation
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.data import categories_to_product_codes
 from cellarium.ml.utilities.testing import (
@@ -198,24 +198,33 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
             out_features = in_features
         else:
             module_list = torch.nn.ModuleList()
-            n_hidden = [layer["init_args"].get("out_features") for layer in layers]
-            for layer, n_in, n_out in zip(layers, [in_features] + n_hidden, n_hidden):
-                layer["init_args"]["out_features"] = n_out
+            current_in = in_features
+            for layer_spec in layers:
+                init_args = {**layer_spec["init_args"]}
+                dressing_init_args = {**layer_spec["dressing_init_args"]}
+                # Resolve string activation_fn to a class (supports YAML/CLI class-path strings)
+                activation_fn_val = dressing_init_args.get("activation_fn")
+                if isinstance(activation_fn_val, str):
+                    dressing_init_args["activation_fn"] = class_from_class_path(activation_fn_val)
+                    activation_fn_val = dressing_init_args["activation_fn"]
+                # Double out_features for SwiGLU so chunking yields the user-configured effective output
+                if activation_fn_val is SwiGLUActivation:
+                    init_args["out_features"] = init_args["out_features"] * 2
                 module_list.append(
                     DressedLayer(
                         instantiate_from_class_path(
-                            layer["class_path"],
-                            in_features=n_in,
+                            layer_spec["class_path"],
+                            in_features=current_in,
                             bias=True,
-                            **layer["init_args"],
+                            **init_args,
                         ),
-                        **layer["dressing_init_args"],
+                        **dressing_init_args,
                     )
                 )
-            assert hasattr(module_list[-1].layer, "out_features") and isinstance(
-                module_list[-1].layer.out_features, int
-            )
-            out_features = module_list[-1].layer.out_features
+                assert isinstance(module_list[-1], torch.nn.Module)
+                assert isinstance(module_list[-1].out_features, int)
+                current_in = module_list[-1].out_features
+            out_features = current_in
         self.module_list = module_list
         self.out_features = out_features
 

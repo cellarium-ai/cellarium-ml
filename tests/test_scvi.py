@@ -18,6 +18,7 @@ from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.data.fileio import read_h5ad_file
+from cellarium.ml.layers import SwiGLUActivation
 from cellarium.ml.models import SingleCellVariationalInference
 from cellarium.ml.models.scvi import DecoderSCVI, EncoderSCVI
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes, collate_fn, densify
@@ -376,6 +377,81 @@ def test_vae_architectures():
             inverse_overdispersion=model.px_r.exp(),
             library_size_n1=batch["x_ng"].float().sum(dim=-1, keepdim=True),
         )
+
+
+def test_swiglu_resnet_encoder():
+    g = len(var_names_g)  # 10
+    hidden_dim = 32
+
+    # use_residual=True with mismatched dims should emit a UserWarning
+    mismatch_kwargs = copy.deepcopy(standard_kwargs)
+    mismatch_kwargs["encoder"] = {
+        **linear_encoder_kwargs,
+        "hidden_layers": [
+            {
+                "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                "init_args": {"out_features": hidden_dim, "label_to_bias_hidden_layers": []},
+                "dressing_init_args": {"activation_fn": SwiGLUActivation, "use_residual": True},
+            },
+        ],
+    }
+    with pytest.warns(UserWarning, match="residual connection will be disabled"):
+        SingleCellVariationalInference(**mismatch_kwargs)
+
+    # Good config: expanding first layer (no residual) + constant-width second layer (residual)
+    good_kwargs = copy.deepcopy(standard_kwargs)
+    good_kwargs["encoder"] = {
+        **linear_encoder_kwargs,
+        "hidden_layers": [
+            {
+                "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                "init_args": {"out_features": hidden_dim, "label_to_bias_hidden_layers": []},
+                "dressing_init_args": {"activation_fn": SwiGLUActivation},
+            },
+            {
+                "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                "init_args": {"out_features": hidden_dim, "label_to_bias_hidden_layers": []},
+                "dressing_init_args": {"activation_fn": SwiGLUActivation, "use_residual": True},
+            },
+        ],
+    }
+    model = SingleCellVariationalInference(**good_kwargs)
+
+    # Structural assertions
+    fc = model.z_encoder.fully_connected
+    layer0, layer1 = fc.module_list[0], fc.module_list[1]
+
+    # layer0: expanding (g -> hidden_dim), inner linear doubled, no residual
+    assert isinstance(layer0.layer, torch.nn.Module)
+    assert layer0.layer.in_features == g
+    assert layer0.layer.out_features == 2 * hidden_dim
+    assert layer0.out_features == hidden_dim
+    assert not layer0.use_residual
+
+    # layer1: constant-width (hidden_dim -> hidden_dim), inner linear doubled, residual active
+    assert isinstance(layer1.layer, torch.nn.Module)
+    assert layer1.layer.in_features == hidden_dim
+    assert layer1.layer.out_features == 2 * hidden_dim
+    assert layer1.out_features == hidden_dim
+    assert layer1.use_residual
+
+    assert fc.out_features == hidden_dim
+
+    # Forward pass smoke test
+    n = 8
+    x_ng = torch.from_numpy(np.random.poisson(lam=2.0, size=(n, g))).float()
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    output = model(
+        x_ng=x_ng,
+        var_names_g=np.array(var_names_g),
+        batch_index_n=batch_index_n,
+    )
+    assert isinstance(output["loss"], torch.Tensor)
+    assert output["loss"].shape == ()
+    assert torch.isfinite(output["loss"])
+    assert isinstance(output["z_nk"], torch.Tensor)
+    assert output["z_nk"].shape == (n, standard_kwargs["n_latent"])
 
 
 def compute_neighbor_accuracy(
