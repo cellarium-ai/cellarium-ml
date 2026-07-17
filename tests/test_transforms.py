@@ -8,6 +8,7 @@ import torch
 
 from cellarium.ml import CellariumPipeline
 from cellarium.ml.transforms import (
+    CellFilter,
     CenterPerCell,
     Densify,
     DivideByScale,
@@ -460,3 +461,184 @@ def test_pflogpf_matches_manual_pipeline():
     x = CenterPerCell()(x)["x_ng"]
 
     np.testing.assert_allclose(out_wrapper.numpy(), x.numpy(), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# CellFilter tests
+# ---------------------------------------------------------------------------
+
+_N, _G = 10, 4
+# Row sums: rows 0-6 have sum 30, rows 7-9 have sum 3 (below threshold of 10)
+_THRESHOLD = 10
+
+
+@pytest.fixture
+def cell_filter_batch():
+    rng = torch.Generator()
+    rng.manual_seed(0)
+    x_ng = torch.zeros(_N, _G)
+    x_ng[:7] = 10.0  # row sum 40 — above threshold
+    x_ng[7:] = 1.0  # row sum 4  — below threshold
+    batch_index_n = torch.arange(_N, dtype=torch.float32)
+    total_mrna_umis_n = x_ng.sum(dim=-1)
+    categorical_covariate_index_nd = torch.zeros(_N, 2)
+    var_names_g = np.array([f"gene_{i}" for i in range(_G)])
+    return {
+        "x_ng": x_ng,
+        "batch_index_n": batch_index_n,
+        "total_mrna_umis_n": total_mrna_umis_n,
+        "categorical_covariate_index_nd": categorical_covariate_index_nd,
+        "var_names_g": var_names_g,
+    }
+
+
+def test_cell_filter_removes_low_count_cells(cell_filter_batch):
+    result = CellFilter(min_count_per_cell=_THRESHOLD)(**cell_filter_batch)
+    assert result["x_ng"].shape[0] == 7
+
+
+def test_cell_filter_all_n_indexed_tensors_filtered_consistently(cell_filter_batch):
+    result = CellFilter(min_count_per_cell=_THRESHOLD)(**cell_filter_batch)
+    n_kept = result["x_ng"].shape[0]
+    for key, val in result.items():
+        assert val.shape[0] == n_kept, f"{key} has inconsistent first dimension after filtering"
+
+
+def test_cell_filter_gene_indexed_array_not_in_return(cell_filter_batch):
+    # var_names_g is a numpy array — must not appear in the returned dict
+    result = CellFilter(min_count_per_cell=_THRESHOLD)(**cell_filter_batch)
+    assert "var_names_g" not in result
+
+
+def test_cell_filter_zero_threshold_returns_empty_dict(cell_filter_batch):
+    result = CellFilter(min_count_per_cell=0)(**cell_filter_batch)
+    assert result == {}
+
+
+def test_cell_filter_exact_threshold_boundary():
+    # Cells at exactly the threshold are kept; one below is not.
+    x_ng = torch.tensor([[10.0, 0.0], [9.0, 0.0], [11.0, 0.0]])
+    batch_index_n = torch.tensor([0.0, 1.0, 2.0])
+    result = CellFilter(min_count_per_cell=10)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result["x_ng"].shape[0] == 2
+    assert torch.equal(result["batch_index_n"], torch.tensor([0.0, 2.0]))
+
+
+def test_cell_filter_all_cells_removed():
+    x_ng = torch.ones(5, 3)  # row sum = 3
+    batch_index_n = torch.zeros(5)
+    result = CellFilter(min_count_per_cell=100)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result["x_ng"].shape[0] == 0
+    assert result["batch_index_n"].shape[0] == 0
+
+
+def test_cell_filter_in_pipeline(cell_filter_batch):
+    pipeline = CellariumPipeline([CellFilter(min_count_per_cell=_THRESHOLD), NormalizeTotal(target_count=10_000)])
+    batch = dict(cell_filter_batch)
+    out = pipeline(batch)
+    n_kept = out["x_ng"].shape[0]
+    assert n_kept == 7
+    # All n-indexed tensors in the batch must have the same first dimension after pipeline
+    for key in ("batch_index_n", "total_mrna_umis_n", "categorical_covariate_index_nd"):
+        assert out[key].shape[0] == n_kept, f"{key} inconsistent after pipeline"
+
+
+def test_cell_filter_unknown_extra_tensor_filtered():
+    x_ng = torch.ones(6, 3) * 5
+    x_ng[4:] = 0.0  # rows 4-5: sum = 0, filtered out
+    my_custom_tensor_n = torch.arange(6, dtype=torch.float32).unsqueeze(1).expand(6, 2).clone()
+    batch_index_n = torch.zeros(6)
+    result = CellFilter(min_count_per_cell=1)(
+        x_ng=x_ng, batch_index_n=batch_index_n, my_custom_tensor_n=my_custom_tensor_n
+    )
+    assert result["x_ng"].shape[0] == 4
+    assert "my_custom_tensor_n" in result
+    assert result["my_custom_tensor_n"].shape[0] == 4
+
+
+def test_cell_filter_negative_threshold_raises():
+    with pytest.raises(ValueError, match="min_count_per_cell must be >= 0"):
+        CellFilter(min_count_per_cell=-1)
+
+
+def test_cell_filter_predict_mode_is_noop():
+    # _predict_mode sentinel injected by CellariumPipeline.predict() must disable filtering
+    x_ng = torch.ones(5, 3)  # all rows below threshold of 100
+    batch_index_n = torch.zeros(5)
+    result = CellFilter(min_count_per_cell=100)(x_ng=x_ng, batch_index_n=batch_index_n, _predict_mode=True)
+    assert result == {}
+
+
+def test_cell_filter_predict_mode_via_pipeline():
+    # End-to-end: pipeline.predict() injects _predict_mode; CellFilter becomes a no-op
+    # so all 5 cells survive despite being below the threshold.
+    from cellarium.ml.models.model import CellariumModel, PredictMixin
+
+    class _PassthroughModel(CellariumModel, PredictMixin):
+        def reset_parameters(self):
+            pass
+
+        def forward(self, **kwargs):
+            return {}
+
+        def predict(self, x_ng: torch.Tensor, **kwargs) -> dict:
+            return {"x_ng": x_ng}
+
+    x_ng = torch.ones(5, 3)  # row sum = 3, below threshold of 100
+    var_names_g = np.array(["g0", "g1", "g2"])
+    batch_index_n = torch.zeros(5)
+
+    pipeline = CellariumPipeline([CellFilter(min_count_per_cell=100), _PassthroughModel()])
+    batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor] = {
+        "x_ng": x_ng,
+        "var_names_g": var_names_g,
+        "batch_index_n": batch_index_n,
+    }
+    out = pipeline.predict(batch)
+    x_ng_out = out["x_ng"]
+    assert isinstance(x_ng_out, torch.Tensor)
+    assert x_ng_out.shape[0] == 5
+
+
+# ---------------------------------------------------------------------------
+# CellFilter — min_nonzero_genes_per_cell mode
+# ---------------------------------------------------------------------------
+
+
+def test_cell_filter_nonzero_genes_removes_sparse_cells():
+    # Rows 0-4: 3 nonzero genes each.  Rows 5-9: 1 nonzero gene each.
+    x_ng = torch.zeros(10, 5)
+    x_ng[:5, :3] = 1.0
+    x_ng[5:, :1] = 1.0
+    batch_index_n = torch.zeros(10)
+    result = CellFilter(min_nonzero_genes_per_cell=3)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result["x_ng"].shape[0] == 5
+    assert result["batch_index_n"].shape[0] == 5
+
+
+def test_cell_filter_nonzero_genes_boundary():
+    # Cell 0: exactly 3 nonzero genes (kept).  Cell 1: 2 nonzero genes (dropped).
+    x_ng = torch.tensor([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0]])
+    batch_index_n = torch.tensor([0.0, 1.0])
+    result = CellFilter(min_nonzero_genes_per_cell=3)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result["x_ng"].shape[0] == 1
+    assert torch.equal(result["batch_index_n"], torch.tensor([0.0]))
+
+
+def test_cell_filter_nonzero_genes_zero_threshold_is_noop():
+    x_ng = torch.zeros(5, 4)
+    batch_index_n = torch.zeros(5)
+    result = CellFilter(min_nonzero_genes_per_cell=0)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result == {}
+
+
+def test_cell_filter_both_modes_raises():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        CellFilter(min_count_per_cell=10, min_nonzero_genes_per_cell=5)
+
+
+def test_cell_filter_nonzero_genes_predict_mode_noop():
+    x_ng = torch.zeros(5, 4)  # all cells have 0 nonzero genes — would all be dropped
+    batch_index_n = torch.zeros(5)
+    result = CellFilter(min_nonzero_genes_per_cell=1)(x_ng=x_ng, batch_index_n=batch_index_n, _predict_mode=True)
+    assert result == {}
