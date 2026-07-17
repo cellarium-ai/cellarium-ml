@@ -493,6 +493,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 * ``"gene-cell"``: parameter is constant per gene per cell.
         log_variational: If ``True``, use :func:`~torch.log1p` on input data before encoding for numerical stability
             (not normalization).
+        normalizetotal_variational: If ``True``, normalize input data to a total of 10,000 counts per cell before
+            encoding for numerical stability. Happens before log_variational if both are True.
         gene_likelihood: Distribution to use for reconstruction in the generative process. One of the following:
                 * ``"nb"``: :class:`~scvi.distributions.NegativeBinomial`.
                 * ``"zinb"``: :class:`~scvi.distributions.ZeroInflatedNegativeBinomial`. (not implemented)
@@ -561,6 +563,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         dropout_rate: float = 0.1,
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
         log_variational: bool = True,
+        normalizetotal_variational: bool = False,
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
         latent_distribution: Literal["normal", "ln"] = "normal",
         batch_embedded: bool = False,
@@ -596,6 +599,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.log_variational = log_variational
+        self.normalizetotal_variational = normalizetotal_variational
         self.gene_likelihood = gene_likelihood
         self.input_gene_dropout_rate = input_gene_dropout_rate
         self.latent_distribution = latent_distribution
@@ -930,6 +934,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         """
 
         encoder_input_ng = x_ng
+        if self.normalizetotal_variational:
+            encoder_input_ng = encoder_input_ng / encoder_input_ng.sum(dim=-1, keepdim=True) * 10000
         if self.log_variational:
             encoder_input_ng = torch.log1p(encoder_input_ng)
 
