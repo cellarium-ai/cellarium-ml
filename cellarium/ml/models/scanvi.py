@@ -187,18 +187,37 @@ class SCANVI(SingleCellVariationalInference):
             n_hidden=secondary_n_hidden,
         )
 
-        # Prior over cell types p(c); uniform by default
+        # Prior over cell types p(c); uniform by default. Kept as a numpy array so it can be
+        # restored in reset_parameters() after meta-device materialization wipes the buffer.
         if y_prior_probs is not None:
-            y_prior = torch.tensor(y_prior_probs, dtype=torch.float32)
-            y_prior = y_prior / y_prior.sum()
+            y_prior_np = np.asarray(y_prior_probs, dtype=np.float32)
+            y_prior_np = y_prior_np / y_prior_np.sum()
         else:
-            y_prior = torch.ones(n_classes, dtype=torch.float32) / n_classes
-        self.register_buffer("y_prior", y_prior)
+            y_prior_np = np.ones(n_classes, dtype=np.float32) / n_classes
+        self._y_prior_numpy = y_prior_np
+        self.register_buffer("y_prior", torch.as_tensor(y_prior_np))
 
-        # Initialize new modules (parent's reset_parameters() ran before these existed)
+        # The parent's reset_parameters() ran during super().__init__(), before the
+        # SCANVI-specific modules and buffers existed. Run it again now that they do, so
+        # they are initialized (mirrors SingleCellVariationalInference.__init__).
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        # SingleCellVariationalInference.__init__ calls reset_parameters() before the
+        # SCANVI-specific attributes have been built; skip them on that first call. They
+        # are initialized by the explicit reset_parameters() call at the end of
+        # SCANVI.__init__ and re-initialized here on later calls (e.g. after meta-device
+        # materialization in CellariumModule.configure_model).
+        if not hasattr(self, "cell_type_classifier"):
+            return
         self.cell_type_classifier.apply(weights_init)
         self.u_encoder.apply(weights_init)
         self.z_prior_decoder.apply(weights_init)
+        # to_empty() during meta-device materialization leaves buffers as uninitialized
+        # memory, so restore y_prior from the stored probabilities.
+        with torch.no_grad():
+            self.y_prior.copy_(torch.as_tensor(self._y_prior_numpy, device=self.y_prior.device))
 
     # ------------------------------------------------------------------
     # Internal helper
