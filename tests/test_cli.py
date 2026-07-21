@@ -7,6 +7,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pytest
 import torch
 
@@ -1201,7 +1202,7 @@ SINGLE_DEVICE_CONFIGS = [
                 "model": {
                     "class_path": "cellarium.ml.models.SCANVI",
                     "init_args": {
-                        "n_classes": 5,
+                        "classifier_type": "flat",
                         "n_batch": None,
                         "use_size_factor_key": False,
                         "encoder": {
@@ -1250,6 +1251,10 @@ SINGLE_DEVICE_CONFIGS = [
                         "key": "dataset_id",
                         "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
                     },
+                    "cell_type_labels_n": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                    },
                 },
                 "batch_size": "50",
                 "num_workers": "0",
@@ -1263,6 +1268,115 @@ SINGLE_DEVICE_CONFIGS = [
         },
     },
 ]
+
+
+def _build_scanvi_ontology_inputs() -> tuple[torch.Tensor, list[str], pd.Series]:
+    """Build a small hierarchical ontology for the SCANVI ``classifier_type="ontology"`` CLI test.
+
+    Reuses the SOCAM CL-ID leaves (which cover the labels present in the public test shards) and
+    stacks a synthetic two-level hierarchy on top: ``CL_ROOT -> GROUP_i -> leaves``. Counts are
+    chosen so that the last group's leaves are individually under-supported and roll up to their
+    ``GROUP_*`` node, exercising the frontier cut, finer-than-frontier binning, and propagation
+    over internal active nodes.
+    """
+    socam_cfg = next(c for c in SINGLE_DEVICE_CONFIGS if c["model_name"] == "socam")
+    leaves: list[str] = list(socam_cfg["fit"]["model"]["model"]["init_args"]["cl_names"])  # type: ignore[index]
+    groups = [f"GROUP_{i}" for i in range(5)]
+    root = "CL_ROOT"
+    cl_names = [root] + groups + leaves
+    index = {name: i for i, name in enumerate(cl_names)}
+    desc = torch.eye(len(cl_names))
+    per_group = -(-len(leaves) // len(groups))  # ceil division
+    counts: dict[str, float] = {}
+    for name in groups + leaves:
+        desc[index[root], index[name]] = 1.0  # root is an ancestor of every node
+    for li, leaf in enumerate(leaves):
+        group = groups[min(li // per_group, len(groups) - 1)]
+        desc[index[group], index[leaf]] = 1.0
+        # last group's leaves are sparse -> the GROUP node becomes the frontier and they bin up
+        counts[leaf] = 5.0 if group == groups[-1] else 100.0
+    return desc, cl_names, pd.Series(counts)
+
+
+_SCANVI_ONT_DESC, _SCANVI_ONT_CL_NAMES, _SCANVI_ONT_COUNTS = _build_scanvi_ontology_inputs()
+
+SINGLE_DEVICE_CONFIGS.append(
+    {
+        "model_name": "scanvi",
+        "_display_id": "scanvi_ontology",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.SCANVI",
+                    "init_args": {
+                        "classifier_type": "ontology",
+                        "descendant_tensor": _SCANVI_ONT_DESC,
+                        "cl_names": _SCANVI_ONT_CL_NAMES,
+                        "class_counts": _SCANVI_ONT_COUNTS,
+                        "frontier_min_cells": 50,
+                        "propagate_class_counts": True,
+                        "classifier_n_hidden": [32],
+                        "secondary_n_hidden": [32],
+                        "n_batch": None,
+                        "use_size_factor_key": False,
+                        "encoder": {
+                            "hidden_layers": [],
+                            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+                        },
+                        "decoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "label_to_bias_hidden_layers": []},
+                                }
+                            ],
+                            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+                            "final_additive_bias": True,
+                        },
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+                "optim_kwargs": {"lr": "1e-3"},
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["cell_type_ontology_term_id"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "batch_index_n": {
+                        "attr": "obs",
+                        "key": "dataset_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                    "cell_type_labels_n": {
+                        "attr": "obs",
+                        "key": "cell_type_ontology_term_id",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+                "val_size": "0.1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 3,
+            },
+        },
+    }
+)
 
 
 @pytest.mark.parametrize(

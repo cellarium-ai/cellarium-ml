@@ -604,25 +604,27 @@ def compute_cl_name_subset(data: CellariumAnnDataDataModule) -> list[str]:
 
 
 def compute_cell_type_categories(data: CellariumAnnDataDataModule) -> list[str] | None:
-    """Derive ``cell_type_categories`` from the ``validation_cell_type_index_n`` batch key.
+    """Derive ``cell_type_categories`` from a cell-type label batch key.
 
     Reads the pandas Categorical from the first shard and returns its categories as a plain
     list of strings, in the same order as ``.cat.categories`` (which matches ``.cat.codes``).
-    Returns ``None`` when the batch key is absent so that validation metrics are simply skipped.
+    Prefers the ``cell_type_labels_n`` key (SCANVI string labels) and falls back to
+    ``validation_cell_type_index_n`` (scVI validation metrics). Returns ``None`` when neither
+    key is configured so that the value can be supplied explicitly or metrics simply skipped.
 
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
 
     Returns:
-        Ordered list of CL ID strings, or ``None`` if the batch key is not configured.
+        Ordered list of category strings, or ``None`` if no label key is configured.
     """
-    if "validation_cell_type_index_n" not in data.batch_keys:
+    key = next((k for k in ("cell_type_labels_n", "validation_cell_type_index_n") if k in data.batch_keys), None)
+    if key is None:
         return None
-    field = data.batch_keys["validation_cell_type_index_n"]
+    field = data.batch_keys[key]
     assert isinstance(field, AnnDataField)
     obs = getattr(data.dadc[0], field.attr)
-    series = obs[field.key]
-    return list(series.cat.categories)
+    return list(obs[field.key].cat.categories)
 
 
 def lightning_cli_factory(
@@ -1109,9 +1111,12 @@ def scanvi(args: ArgsType = None) -> None:
             --trainer.default_root_dir runs/scanvi \
             --trainer.max_steps 10
 
-    ``n_classes`` must be set manually in the config to match the number of annotated
-    cell types in the training data.  When ``cell_type_categories`` is provided it must
-    have the same length as ``n_classes``.
+    Cell-type labels are provided as strings via the ``cell_type_labels_n`` batch key (cells
+    equal to ``unlabeled_category``, default ``"unknown"``, are unlabeled). In the default
+    ``classifier_type="flat"`` mode, ``cell_type_categories`` (the class partition) is linked
+    automatically from that key. For ``classifier_type="ontology"`` provide ``descendant_tensor``,
+    ``cl_names``, and ``class_counts`` (e.g. via the OWL helpers in
+    :mod:`cellarium.ml.utilities.data`).
 
     **References:**
 
