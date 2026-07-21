@@ -1090,6 +1090,61 @@ def scvi(args: ArgsType = None) -> None:
 
 
 @register_model
+def scanvi(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SCANVI` model.
+
+    This example shows how to fit semi-supervised scANVI to single-cell RNA-seq data.
+
+    Example run::
+
+        cellarium-ml scanvi fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 5 \
+            --data.num_workers 1 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/scanvi \
+            --trainer.max_steps 10
+
+    ``n_classes`` must be set manually in the config to match the number of annotated
+    cell types in the training data.  When ``cell_type_categories`` is provided it must
+    have the same length as ``n_classes``.
+
+    **References:**
+
+    1. `Probabilistic harmonization and annotation of single-cell transcriptomics data
+       with deep generative models (Xu et al., 2021)
+       <https://doi.org/10.15252/msb.20209620>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    link_arguments = [
+        LinkArguments(
+            ("model.cpu_transforms", "model.transforms", "data"),
+            "model.model.init_args.var_names_g",
+            compute_var_names_g,
+        ),
+    ]
+    if not os.environ.get("SCVI_PREDICT_SKIP_ARG_LINKING"):
+        link_arguments.extend(
+            [
+                LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+                LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
+                LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
+            ]
+        )
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SCANVI",
+        link_arguments=link_arguments,
+    )
+    cli(args=args)
+
+
+@register_model
 def tdigest(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.TDigest` model.

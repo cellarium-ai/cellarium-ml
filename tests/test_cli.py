@@ -1193,6 +1193,75 @@ SINGLE_DEVICE_CONFIGS = [
             },
         },
     },
+    {
+        "model_name": "scanvi",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.SCANVI",
+                    "init_args": {
+                        "n_classes": 5,
+                        "n_batch": None,
+                        "use_size_factor_key": False,
+                        "encoder": {
+                            "hidden_layers": [],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                        },
+                        "decoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "label_to_bias_hidden_layers": []},
+                                }
+                            ],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "final_additive_bias": True,
+                        },
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+                "optim_kwargs": {"lr": "1e-3"},
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "batch_index_n": {
+                        "attr": "obs",
+                        "key": "dataset_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+                "val_size": "0.1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 3,
+            },
+        },
+    },
 ]
 
 
