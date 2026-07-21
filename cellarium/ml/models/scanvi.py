@@ -640,6 +640,182 @@ class SCANVI(SingleCellVariationalInference):
         return set_idx, active_idx
 
     # ------------------------------------------------------------------
+    # Vectorized label preprocessing and per-bucket KL helpers
+    # ------------------------------------------------------------------
+
+    def _preprocess_labels(
+        self,
+        labels: np.ndarray,
+        device: torch.device,
+    ) -> dict[str, torch.Tensor]:
+        """Partition cells into leaf, coarse, and unlabeled buckets (CPU preprocessing).
+
+        Returns a dict with keys::
+
+            leaf_idx, leaf_c_class, leaf_ce_target,
+            coarse_idx, coarse_set_idx_padded, coarse_mask, coarse_ce_target,
+            unlabeled_idx
+
+        *leaf*: labeled cells whose resolved partition set has exactly one member.
+        *coarse*: labeled cells whose resolved partition set has two or more members.
+        *unlabeled*: cells whose label equals ``unlabeled_category``.
+        """
+        leaf_groups: list[tuple[np.ndarray, int, int]] = []
+        coarse_groups: list[tuple[np.ndarray, torch.Tensor, int]] = []
+        unlabeled_ids: list[int] = []
+
+        for label in np.unique(labels):
+            label_str = str(label)
+            group = np.where(labels == label)[0]
+            set_idx, ce_target = self._resolve_group(label_str)
+
+            if label_str == self.unlabeled_category:
+                unlabeled_ids.extend(group.tolist())
+            else:
+                assert ce_target is not None
+                if set_idx.numel() == 1:
+                    leaf_groups.append((group, int(set_idx[0].item()), ce_target))
+                else:
+                    if self.classifier_type == "ontology":
+                        frac = set_idx.numel() / max(self.n_partition, 1)
+                        if frac > self.marginalization_warn_fraction and label_str not in self._warned_marg_labels:
+                            self._warned_marg_labels.add(label_str)
+                            warnings.warn(
+                                f"Coarse label {label_str!r} marginalizes over "
+                                f"{set_idx.numel()}/{self.n_partition} frontier nodes "
+                                f"({frac:.0%}); this costs nearly as much as an unlabeled cell.",
+                                UserWarning,
+                            )
+                    coarse_groups.append((group, set_idx, ce_target))
+
+        _empty = torch.empty(0, dtype=torch.long, device=device)
+
+        if leaf_groups:
+            leaf_cell_ids = np.concatenate([g for g, _, _ in leaf_groups])
+            leaf_c_class_arr = np.concatenate([[c] * len(g) for g, c, _ in leaf_groups])
+            leaf_ce_target_arr = np.concatenate([[t] * len(g) for g, _, t in leaf_groups])
+            leaf_idx = torch.tensor(leaf_cell_ids, dtype=torch.long, device=device)
+            leaf_c_class = torch.tensor(leaf_c_class_arr, dtype=torch.long, device=device)
+            leaf_ce_target = torch.tensor(leaf_ce_target_arr, dtype=torch.long, device=device)
+        else:
+            leaf_idx = leaf_c_class = leaf_ce_target = _empty
+
+        if coarse_groups:
+            max_s = max(s.numel() for _, s, _ in coarse_groups)
+            row_ids, row_set, row_mask, row_ce = [], [], [], []
+            for grp, set_idx_k, ce_t in coarse_groups:
+                n_k = len(grp)
+                s = set_idx_k.numel()
+                row_ids.append(grp)
+                padded = np.zeros(max_s, dtype=np.int64)
+                padded[:s] = set_idx_k.cpu().numpy()
+                mask_row = np.zeros(max_s, dtype=bool)
+                mask_row[:s] = True
+                row_set.append(np.tile(padded, (n_k, 1)))
+                row_mask.append(np.tile(mask_row, (n_k, 1)))
+                row_ce.append(np.full(n_k, ce_t, dtype=np.int64))
+            coarse_idx = torch.tensor(np.concatenate(row_ids), dtype=torch.long, device=device)
+            coarse_set_idx_padded = torch.tensor(np.concatenate(row_set, axis=0), dtype=torch.long, device=device)
+            coarse_mask = torch.tensor(np.concatenate(row_mask, axis=0), dtype=torch.bool, device=device)
+            coarse_ce_target = torch.tensor(np.concatenate(row_ce), dtype=torch.long, device=device)
+        else:
+            coarse_idx = coarse_ce_target = _empty
+            coarse_set_idx_padded = torch.empty((0, 0), dtype=torch.long, device=device)
+            coarse_mask = torch.empty((0, 0), dtype=torch.bool, device=device)
+
+        unlabeled_idx = torch.tensor(unlabeled_ids, dtype=torch.long, device=device) if unlabeled_ids else _empty
+
+        return {
+            "leaf_idx": leaf_idx,
+            "leaf_c_class": leaf_c_class,
+            "leaf_ce_target": leaf_ce_target,
+            "coarse_idx": coarse_idx,
+            "coarse_set_idx_padded": coarse_set_idx_padded,
+            "coarse_mask": coarse_mask,
+            "coarse_ce_target": coarse_ce_target,
+            "unlabeled_idx": unlabeled_idx,
+        }
+
+    def _leaf_kls(
+        self,
+        z: torch.Tensor,
+        qz_mean: torch.Tensor,
+        qz_std: torch.Tensor,
+        leaf_idx: torch.Tensor,
+        leaf_c_class: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Single vectorized KL pass for all singleton-set (leaf) cells.
+
+        ``kl_c`` is identically 0 for leaf cells and is not returned.
+        """
+        c_onehot = F.one_hot(leaf_c_class, self.n_partition).float()  # [N_leaf, n_partition]
+        return self._conditional_kls(z[leaf_idx], qz_mean[leaf_idx], qz_std[leaf_idx], c_onehot)
+
+    def _coarse_kls(
+        self,
+        z: torch.Tensor,
+        qz_mean: torch.Tensor,
+        qz_std: torch.Tensor,
+        q_partition: torch.Tensor,
+        coarse_idx: torch.Tensor,
+        coarse_set_idx_padded: torch.Tensor,
+        coarse_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Padded batched marginalization for all coarse-labeled cells in one GPU pass.
+
+        All coarse cells are stacked with their frontier subsets padded to ``max_s``, so a single
+        ``_conditional_kls`` call handles every cell simultaneously. The existing ``chunk_size``
+        is applied along the padded-set dimension to bound peak VRAM.
+
+        Returns:
+            ``(kl_z, kl_u, kl_c)`` each ``[N_coarse]``.
+        """
+        N_coarse = coarse_idx.numel()
+        max_s = coarse_set_idx_padded.shape[1]
+        device = z.device
+
+        # q(c|z) restricted to the subtree S, renormalized; padding positions -> 0.
+        q_S = q_partition[coarse_idx].gather(1, coarse_set_idx_padded)  # [N_coarse, max_s]
+        q_S = q_S * coarse_mask.float()
+        q_S_norm = q_S / q_S.sum(dim=-1, keepdim=True).clamp_min(_EPS)  # [N_coarse, max_s]
+
+        # Restricted kl_c (pure tensor arithmetic, no encoder call).
+        # masked_fill keeps log finite at padding positions; clamp_min guards near-zero valid probs.
+        p_S = self.y_prior[coarse_set_idx_padded]  # [N_coarse, max_s]
+        p_S = p_S * coarse_mask.float()
+        p_S_norm = p_S / p_S.sum(dim=-1, keepdim=True).clamp_min(_EPS)
+
+        q_log = q_S_norm.masked_fill(~coarse_mask, 1.0).clamp_min(_EPS).log()
+        p_log = p_S_norm.masked_fill(~coarse_mask, 1.0).clamp_min(_EPS).log()
+        kl_c = (q_S_norm * (q_log - p_log)).sum(dim=-1)  # [N_coarse]
+
+        # kl_z and kl_u: chunk over the padded-set dimension, all N_coarse cells in parallel.
+        z_c = z[coarse_idx]  # [N_coarse, n_latent]
+        qzm_c = qz_mean[coarse_idx]  # [N_coarse, n_latent]
+        qzs_c = qz_std[coarse_idx]  # [N_coarse, n_latent]
+
+        kl_z = torch.zeros(N_coarse, device=device)
+        kl_u = torch.zeros(N_coarse, device=device)
+
+        for start in range(0, max_s, self.chunk_size):
+            end = min(start + self.chunk_size, max_s)
+            chunk = end - start
+            members = coarse_set_idx_padded[:, start:end]  # [N_coarse, chunk]
+            w = q_S_norm[:, start:end] * coarse_mask[:, start:end].float()  # [N_coarse, chunk]
+
+            c_onehot = F.one_hot(members, self.n_partition).float()  # [N_coarse, chunk, n_partition]
+            z_exp = z_c.unsqueeze(1).expand(-1, chunk, -1).reshape(N_coarse * chunk, -1)
+            qzm_exp = qzm_c.unsqueeze(1).expand(-1, chunk, -1).reshape(N_coarse * chunk, -1)
+            qzs_exp = qzs_c.unsqueeze(1).expand(-1, chunk, -1).reshape(N_coarse * chunk, -1)
+            c_exp = c_onehot.reshape(N_coarse * chunk, -1)
+
+            kl_z_chunk, kl_u_chunk = self._conditional_kls(z_exp, qzm_exp, qzs_exp, c_exp)
+            kl_z += (w * kl_z_chunk.view(N_coarse, chunk)).sum(dim=-1)
+            kl_u += (w * kl_u_chunk.view(N_coarse, chunk)).sum(dim=-1)
+
+        return kl_z, kl_u, kl_c
+
+    # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
 
@@ -745,33 +921,48 @@ class SCANVI(SingleCellVariationalInference):
         kl_c_n = torch.zeros(n, device=device)
         ce_loss_n = torch.zeros(n, device=device)
 
-        # Group cells by label string: same label -> same marginalization set and CE target.
-        for label in np.unique(labels):
-            group = np.where(labels == label)[0]
-            idx = torch.as_tensor(group, dtype=torch.long, device=device)
-            set_idx, ce_target = self._resolve_group(str(label))
-            set_idx = set_idx.to(device)
+        # Partition cells into leaf / coarse / unlabeled buckets, then process each in one GPU pass.
+        buckets = self._preprocess_labels(labels, device)
 
-            if self.classifier_type == "ontology" and ce_target is not None and set_idx.numel() > 1:
-                frac = set_idx.numel() / max(self.n_partition, 1)
-                if frac > self.marginalization_warn_fraction and label not in self._warned_marg_labels:
-                    self._warned_marg_labels.add(str(label))
-                    warnings.warn(
-                        f"Coarse label {label!r} marginalizes over {set_idx.numel()}/{self.n_partition} "
-                        f"frontier nodes ({frac:.0%}); this costs nearly as much as an unlabeled cell.",
-                        UserWarning,
-                    )
+        # Leaf path: all singleton-set cells in a single encoder call; kl_c == 0 identically.
+        if buckets["leaf_idx"].numel() > 0:
+            leaf_idx = buckets["leaf_idx"]
+            kl_z_leaf, kl_u_leaf = self._leaf_kls(z, qz_mean, qz_std, leaf_idx, buckets["leaf_c_class"])
+            kl_z_n[leaf_idx] = kl_z_leaf
+            kl_u_n[leaf_idx] = kl_u_leaf
+            ce_loss_n[leaf_idx] = self._supervised_ce(logits[leaf_idx], buckets["leaf_ce_target"])
 
-            kl_z_g, kl_u_g, kl_c_g = self._marginalize_over_set(
-                z[idx], qz_mean[idx], qz_std[idx], q_partition[idx], set_idx
+        # Coarse path: all multi-set labeled cells in one padded encoder call.
+        if buckets["coarse_idx"].numel() > 0:
+            coarse_idx = buckets["coarse_idx"]
+            kl_z_c, kl_u_c, kl_c_c = self._coarse_kls(
+                z,
+                qz_mean,
+                qz_std,
+                q_partition,
+                coarse_idx,
+                buckets["coarse_set_idx_padded"],
+                buckets["coarse_mask"],
             )
-            kl_z_n[idx] = kl_z_g
-            kl_u_n[idx] = kl_u_g
-            kl_c_n[idx] = kl_c_g
+            kl_z_n[coarse_idx] = kl_z_c
+            kl_u_n[coarse_idx] = kl_u_c
+            kl_c_n[coarse_idx] = kl_c_c
+            ce_loss_n[coarse_idx] = self._supervised_ce(logits[coarse_idx], buckets["coarse_ce_target"])
 
-            if ce_target is not None:
-                target = torch.full((idx.numel(),), ce_target, dtype=torch.long, device=device)
-                ce_loss_n[idx] = self._supervised_ce(logits[idx], target)
+        # Unlabeled path: single batch marginalized over the whole frontier with a chunk loop.
+        if buckets["unlabeled_idx"].numel() > 0:
+            unlabeled_idx = buckets["unlabeled_idx"]
+            all_frontier = torch.arange(self.n_partition, dtype=torch.long, device=device)
+            kl_z_u, kl_u_u, kl_c_u = self._marginalize_over_set(
+                z[unlabeled_idx],
+                qz_mean[unlabeled_idx],
+                qz_std[unlabeled_idx],
+                q_partition[unlabeled_idx],
+                all_frontier,
+            )
+            kl_z_n[unlabeled_idx] = kl_z_u
+            kl_u_n[unlabeled_idx] = kl_u_u
+            kl_c_n[unlabeled_idx] = kl_c_u
 
         loss = torch.mean(
             rec_loss_n
