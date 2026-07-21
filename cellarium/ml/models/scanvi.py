@@ -291,6 +291,8 @@ class SCANVI(SingleCellVariationalInference):
         if scvi_kwargs.get("use_flow", False):
             raise ValueError("SCANVI does not support use_flow=True.")
 
+        # Propagate compile flag to scVI so encoder + decoder are also compiled.
+        scvi_kwargs["use_torch_compile"] = use_torch_compile
         super().__init__(**scvi_kwargs)
 
         if classifier_n_hidden is None:
