@@ -6,6 +6,7 @@ from typing import TypedDict
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional
 
@@ -169,6 +170,22 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         seed: Random seed used to initialize parameters.
         log_metrics: If True, logs weight histograms (TensorBoard) during training.
             If True, logs weight histograms (TensorBoard) during training.
+        class_counts: Optional pandas Series mapping class names to cell counts in the
+            training data. Classes absent from the Series (typically pure-ancestor nodes
+            with no direct cell labels) and classes with a count of zero are both treated
+            as unlabeled and receive a neutral weight of 1.0, which has no effect on the
+            loss since no cells carry those labels. Inverse-frequency weights are computed
+            and normalized to mean 1 over the nonzero-count classes only. Negative counts
+            raise a ``ValueError``. Extra Series entries not in the active category set are
+            ignored. When ``None``, all classes are weighted equally.
+        propagate_class_counts: If ``True`` and ``class_counts`` is provided, propagate
+            raw counts up the ontology before computing weights. Each node's effective
+            count becomes its own direct count plus the sum of all descendant counts. This
+            down-weights ancestor nodes (they accumulate large effective counts) relative
+            to rare leaf nodes. A pure-ancestor node with zero direct labels but nonzero
+            descendant counts will receive a real inverse-frequency weight rather than the
+            neutral 1.0 it would otherwise get. Has no effect when ``class_counts`` is
+            ``None``.
     """
 
     def __init__(
@@ -184,6 +201,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         seed: int = 0,
         log_metrics: bool = True,
         include_ancestors_of_cl_name_subset: bool = True,
+        class_counts: pd.Series | None = None,
+        propagate_class_counts: bool = False,
     ) -> None:
         super().__init__()
         self.n_obs = n_obs
@@ -207,6 +226,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             cl_name_subset = _expand_with_ancestors(cl_name_subset, cl_names, descendant_tensor)
         self.cl_name_subset = cl_name_subset
         self.probability_propagation_flag = probability_propagation_flag
+        self.propagate_class_counts = propagate_class_counts
         self.seed = seed
         self.log_metrics = log_metrics
 
@@ -245,6 +265,27 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_active_cats, dtype=torch.float))
         self.b_c = torch.nn.Parameter(torch.empty(self.n_active_cats, dtype=torch.float))
 
+        # Class weights for cross-entropy loss
+        if class_counts is not None:
+            provided_counts = {c: class_counts[c] for c in active_cl_names if c in class_counts.index}
+            if any(v < 0 for v in provided_counts.values()):
+                raise ValueError("All class_counts values must be >= 0.")
+            counts = torch.tensor([float(provided_counts.get(c, 0.0)) for c in active_cl_names], dtype=torch.float)
+            if propagate_class_counts:
+                counts = active_descendant_tensor_cc @ counts
+            nonzero = counts > 0
+            weights = torch.ones(self.n_active_cats, dtype=torch.float)
+            if nonzero.any():
+                total = counts[nonzero].sum()
+                n_nonzero = nonzero.sum().float()
+                raw = total / (n_nonzero * counts[nonzero])
+                weights[nonzero] = raw / raw.mean()
+            self._class_weights: torch.Tensor | None = weights
+            self.register_buffer("class_weights", weights.clone())
+        else:
+            self._class_weights = None
+            self.register_buffer("class_weights", None)
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -257,6 +298,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.nonleaf_desc_cc.copy_(self._nonleaf_desc_cc)
         self.perm.copy_(self._perm)
         self.inv_perm.copy_(self._inv_perm)
+        if self._class_weights is not None:
+            self.class_weights.copy_(self._class_weights)
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
         self.b_c.data.zero_()
 
@@ -307,7 +350,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         logits_nc = self._compute_regression(x_ng, self.W_gc, self.b_c)
         if self.probability_propagation_flag:
             logits_nc = propagate_logits(logits_nc, self.nonleaf_desc_cc, self.perm, self.inv_perm)
-        ce_loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="mean")
+        ce_loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="mean", weight=self.class_weights)
         laplace_loss = (self.W_gc.abs().sum() / self.W_prior_scale) / self.n_obs
         loss = ce_loss + laplace_loss
         return {"loss": loss}
