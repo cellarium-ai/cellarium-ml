@@ -104,7 +104,9 @@ def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) 
 
 
 def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
-    temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
+    c_nonleaf = desc_matrix_cc.shape[0]
+    expanded_logits = logits_nc.unsqueeze(dim=-1).expand(-1, -1, c_nonleaf)
+    temp = expanded_logits.masked_fill(desc_matrix_cc.T == 0, float("-inf"))
     return temp.logsumexp(dim=1)
 
 
