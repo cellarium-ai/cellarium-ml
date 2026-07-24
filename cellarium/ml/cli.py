@@ -604,25 +604,27 @@ def compute_cl_name_subset(data: CellariumAnnDataDataModule) -> list[str]:
 
 
 def compute_cell_type_categories(data: CellariumAnnDataDataModule) -> list[str] | None:
-    """Derive ``cell_type_categories`` from the ``validation_cell_type_index_n`` batch key.
+    """Derive ``cell_type_categories`` from a cell-type label batch key.
 
     Reads the pandas Categorical from the first shard and returns its categories as a plain
     list of strings, in the same order as ``.cat.categories`` (which matches ``.cat.codes``).
-    Returns ``None`` when the batch key is absent so that validation metrics are simply skipped.
+    Prefers the ``cell_type_labels_n`` key (SCANVI string labels) and falls back to
+    ``validation_cell_type_index_n`` (scVI validation metrics). Returns ``None`` when neither
+    key is configured so that the value can be supplied explicitly or metrics simply skipped.
 
     Args:
         data: A :class:`CellariumAnnDataDataModule` instance.
 
     Returns:
-        Ordered list of CL ID strings, or ``None`` if the batch key is not configured.
+        Ordered list of category strings, or ``None`` if no label key is configured.
     """
-    if "validation_cell_type_index_n" not in data.batch_keys:
+    key = next((k for k in ("cell_type_labels_n", "validation_cell_type_index_n") if k in data.batch_keys), None)
+    if key is None:
         return None
-    field = data.batch_keys["validation_cell_type_index_n"]
+    field = data.batch_keys[key]
     assert isinstance(field, AnnDataField)
     obs = getattr(data.dadc[0], field.attr)
-    series = obs[field.key]
-    return list(series.cat.categories)
+    return list(obs[field.key].cat.categories)
 
 
 def lightning_cli_factory(
@@ -1084,6 +1086,64 @@ def scvi(args: ArgsType = None) -> None:
         pass
     cli = lightning_cli_factory(
         "cellarium.ml.models.SingleCellVariationalInference",
+        link_arguments=link_arguments,
+    )
+    cli(args=args)
+
+
+@register_model
+def scanvi(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SCANVI` model.
+
+    This example shows how to fit semi-supervised scANVI to single-cell RNA-seq data.
+
+    Example run::
+
+        cellarium-ml scanvi fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 5 \
+            --data.num_workers 1 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/scanvi \
+            --trainer.max_steps 10
+
+    Cell-type labels are provided as strings via the ``cell_type_labels_n`` batch key (cells
+    equal to ``unlabeled_category``, default ``"unknown"``, are unlabeled). In the default
+    ``classifier_type="flat"`` mode, ``cell_type_categories`` (the class partition) is linked
+    automatically from that key. For ``classifier_type="ontology"`` provide ``descendant_tensor``,
+    ``cl_names``, and ``class_counts`` (e.g. via the OWL helpers in
+    :mod:`cellarium.ml.utilities.data`).
+
+    **References:**
+
+    1. `Probabilistic harmonization and annotation of single-cell transcriptomics data
+       with deep generative models (Xu et al., 2021)
+       <https://doi.org/10.15252/msb.20209620>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    link_arguments = [
+        LinkArguments(
+            ("model.cpu_transforms", "model.transforms", "data"),
+            "model.model.init_args.var_names_g",
+            compute_var_names_g,
+        ),
+    ]
+    if not os.environ.get("SCVI_PREDICT_SKIP_ARG_LINKING"):
+        link_arguments.extend(
+            [
+                LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+                LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
+                LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
+            ]
+        )
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SCANVI",
         link_arguments=link_arguments,
     )
     cli(args=args)

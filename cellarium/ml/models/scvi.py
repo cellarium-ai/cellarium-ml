@@ -600,6 +600,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         cell_type_categories: list[str] | None = None,
         ontology_distance_matrix: pd.DataFrame | None = None,
         val_cell_type_classifier_reservoir_size: int = 50_000,
+        use_torch_compile: bool = False,
     ):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -840,6 +841,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             and len(self.n_cats_per_cov) > 0
             and sum(self.n_cats_per_cov) > 0
         )
+
+        self.use_torch_compile = use_torch_compile
+        if use_torch_compile:
+            # Wraps each module in an OptimizedModule; state_dict keys gain an _orig_mod. prefix,
+            # so checkpoints are only compatible across runs with the same use_torch_compile setting.
+            self.z_encoder = torch.compile(self.z_encoder, dynamic=True)  # type: ignore[assignment]
+            self.decoder = torch.compile(self.decoder, dynamic=True)  # type: ignore[assignment]
 
         self.reset_parameters()
 
