@@ -6,6 +6,7 @@ from cellarium.ml.callbacks.early_stopping_patch import MetaSafeEarlyStopping
 from cellarium.ml.callbacks.get_coord_data import GetCoordData
 from cellarium.ml.callbacks.loss_scale_monitor import LossScaleMonitor
 from cellarium.ml.callbacks.prediction_writer import PredictionWriter
+from cellarium.ml.callbacks.socam_hop_scoring_prediction_writer import SOCAMHopScoringPredictionWriter
 from cellarium.ml.callbacks.variance_monitor import VarianceMonitor
 
 __all__ = [
@@ -14,5 +15,6 @@ __all__ = [
     "LossScaleMonitor",
     "MetaSafeEarlyStopping",
     "PredictionWriter",
+    "SOCAMHopScoringPredictionWriter",
     "VarianceMonitor",
 ]

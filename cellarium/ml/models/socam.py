@@ -244,7 +244,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         # create a meta tensor, but descendant_tensor here is still a real CPU tensor).
         index_map_init = {cat: i for i, cat in enumerate(cl_names)}
         active_indices = [index_map_init[cat] for cat in active_cl_names]
-        ix = torch.tensor(active_indices, dtype=torch.long)
+        ix = torch.tensor(active_indices, dtype=torch.long, device=descendant_tensor.device)
         active_descendant_tensor_cc = descendant_tensor[ix][:, ix]
         nonleaf_info = _build_nonleaf_info(active_descendant_tensor_cc)
 

@@ -1,0 +1,119 @@
+# lightning.pytorch==2.5.2
+seed_everything: true
+trainer:
+  accelerator: cpu
+  strategy: auto
+  devices: 1
+  num_nodes: 1
+  precision: 32-true
+  logger: null
+  callbacks:
+  - class_path: cellarium.ml.callbacks.SOCAMHopScoringPredictionWriter
+    init_args:
+      output_dir: gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_validation_split_20241126/SOCAM_inference_july_26/
+      co_resource_path: gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_validation_split_20241126/shared_meta/dev_benchmarking_june_2024_metadata_benchmarking_resource_schema_5-0.pickle
+      key: cell_type_probs_nc
+      obs_names_key: obs_names_n
+      ground_truth_key: cl_names_n
+      num_hops: 4
+      gzip: false
+      ontology_term_id_replace_from: ":"
+      ontology_term_id_replace_to: "_"
+  limit_predict_batches: null
+  enable_checkpointing: false
+  enable_progress_bar: true
+  inference_mode: true
+  use_distributed_sampler: false
+  default_root_dir: null
+model:
+  optim_fn: torch.optim.Adam
+  optim_kwargs:
+    lr: 5e-3
+  cpu_transforms:
+  - class_path: cellarium.ml.transforms.Filter
+    init_args:
+      filter_list:
+        !FileLoader
+        file_path: gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_training_split_20241106/models/shared_metadata/features_TPM_above_1_intersection_with_CAS_lrexp_human_train.csv
+        loader_fn: pandas.read_csv
+        attr: original_feature_id
+        convert_fn: pandas.Series.to_list
+      ordering: true
+  transforms:
+  - cellarium.ml.transforms.Densify
+  - class_path: cellarium.ml.transforms.NormalizeTotal
+    init_args:
+      target_count: 10000
+      eps: 1.0e-06
+  - class_path: cellarium.ml.transforms.Log1p
+  - class_path: cellarium.ml.transforms.DivideByScale
+    init_args:
+      scale_g:
+        !CheckpointLoader
+        file_path: gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_training_split_20241106/models/tdigest_NT_log1p_lrexp_human/lightning_logs/version_0/checkpoints/epoch=0-step=420.ckpt
+        attr: model.median_g
+        convert_fn: torch.Tensor.float
+      var_names_g:
+        !CheckpointLoader
+        file_path: gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_training_split_20241106/models/tdigest_NT_log1p_lrexp_human/lightning_logs/version_0/checkpoints/epoch=0-step=420.ckpt
+        attr: model.var_names_g
+        convert_fn: null
+  model:
+    class_path: cellarium.ml.models.SOCAM
+    init_args:
+      n_obs: null
+      var_names_g: null
+      W_prior_scale: 0.01
+      descendant_tensor:
+        !FileLoader
+        file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2024-01-04/cl.owl
+        loader_fn: cellarium.ml.utilities.data.get_cl_descendant_tensor_from_owl
+      cl_names:
+        !FileLoader
+        file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2024-01-04/cl.owl
+        loader_fn: cellarium.ml.utilities.data.get_cl_names_from_owl
+      cl_name_subset:
+        !CheckpointLoader
+        file_path: gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_training_split_20241106/models/SOCAM_lambda_experiment_models/lambda_100_trial_15072026/lightning_logs/corrected_run1/checkpoints/epoch=5-step=25500.ckpt
+        attr: model.cl_name_subset
+        convert_fn: null
+      probability_propagation_flag: true
+      seed: 0
+      include_ancestors_of_cl_name_subset: true
+  is_initialized: false
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      filenames: gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_validation_split_20241126/extract_files/extract_1.h5ad
+      limits: null
+      shard_size: 8693
+      last_shard_size: null
+      max_cache_size: 1
+      cache_size_strictly_enforced: true
+      label: null
+      keys: null
+      index_unique: null
+      convert: null
+      indices_strict: true
+      obs_columns_to_validate: []
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.keep_sparse
+    var_names_g:
+      attr: var_names
+    cl_names_n:
+      attr: obs
+      key: cell_type_ontology_term_id
+    obs_names_n:
+      attr: obs_names
+  batch_size: 8693
+  iteration_strategy: cache_efficient
+  shuffle: false
+  drop_last_indices: false
+  num_workers: 0
+  drop_incomplete_batch: false
+  persistent_workers: false
+return_predictions: false
+ckpt_path: gs://cellarium-file-system-cas-archive/curriculum/lrexp_human_training_split_20241106/models/SOCAM_lambda_experiment_models/lambda_100_trial_15072026/lightning_logs/corrected_run1/checkpoints/epoch=5-step=25500.ckpt
