@@ -1648,6 +1648,11 @@ def plot_clustermap(
     plt.show()
 
 
+def is_subclass_by_name(instance, class_name):
+    # Search the Method Resolution Order for the target class name
+    return any(c.__name__ == class_name for c in type(instance).__mro__)
+
+
 class NMFOutput:
     """
     A class to facilitate interaction with a trained NMF model and computation of downstream outputs.
@@ -1741,9 +1746,9 @@ class NMFOutput:
             module = cellarium.ml.CellariumModule.load_from_checkpoint(path, map_location=map_location, strict=False)
 
             model = module.model
-            if not isinstance(model, OnlineNonNegativeMatrixFactorization):
+            if not is_subclass_by_name(model, "NonNegativeMatrixFactorization"):
                 raise ValueError(
-                    f"Checkpoint {path!r} model must be OnlineNonNegativeMatrixFactorization, "
+                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, "
                     f"got {type(model).__name__}"
                 )
 
