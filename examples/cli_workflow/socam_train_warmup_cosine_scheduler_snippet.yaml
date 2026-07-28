@@ -1,0 +1,23 @@
+# Add this under `model` in a SOCAM training config.
+#
+# Keep `trainer.max_steps` equal to `scheduler_kwargs.num_training_steps`
+# when you want cosine annealing to reach exactly 0 at the end of training.
+#
+# Example:
+# trainer:
+#   max_steps: 40500
+#   max_epochs: 1000
+#
+# model:
+#   optim_fn: torch.optim.Adam
+#   optim_kwargs:
+#     lr: 5e-3
+#   scheduler_fn: cellarium.ml.lr_schedulers.WarmupCosineLR
+#   scheduler_kwargs:
+#     num_training_steps: 40500
+#     warmup_fraction: 0.2
+
+scheduler_fn: cellarium.ml.lr_schedulers.WarmupCosineLR
+scheduler_kwargs:
+  num_training_steps: 40500
+  warmup_fraction: 0.2
