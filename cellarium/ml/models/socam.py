@@ -272,12 +272,18 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             provided_counts = {c: class_counts[c] for c in active_cl_names if c in class_counts.index}
             if any(v < 0 for v in provided_counts.values()):
                 raise ValueError("All class_counts values must be >= 0.")
-            counts = torch.tensor([float(provided_counts.get(c, 0.0)) for c in active_cl_names], dtype=torch.float)
+            # Build class-count tensors on CPU so their reductions/branching remain
+            # valid even when the module itself is being instantiated on meta.
+            counts = torch.tensor(
+                [float(provided_counts.get(c, 0.0)) for c in active_cl_names],
+                dtype=torch.float,
+                device="cpu",
+            )
             if propagate_class_counts:
                 counts = active_descendant_tensor_cc @ counts
             nonzero = counts > 0
-            weights = torch.ones(self.n_active_cats, dtype=torch.float)
-            if nonzero.any():
+            weights = torch.ones(self.n_active_cats, dtype=torch.float, device="cpu")
+            if bool(nonzero.any().item()):
                 total = counts[nonzero].sum()
                 n_nonzero = nonzero.sum().float()
                 raw = total / (n_nonzero * counts[nonzero])
