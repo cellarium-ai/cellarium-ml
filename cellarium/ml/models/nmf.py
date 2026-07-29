@@ -1916,7 +1916,7 @@ class NMFOutput:
         """
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
         rec_error = {k: 0.0 for k in self.nmf_module.model.k_values}
-        for batch in tqdm(self.datamodule.train_dataloader()):
+        for batch in tqdm(self.datamodule.predict_dataloader()):
             for transform in self.nmf_module.transforms:
                 batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
             errors_keyed_by_k = self.nmf_module.model.reconstruction_error(
