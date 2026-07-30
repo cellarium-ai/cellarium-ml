@@ -55,7 +55,7 @@ def _get_logger():
 logger = _get_logger()
 
 
-@torch.compile()
+@torch.compile(dynamic=True)
 @torch.no_grad()
 def solve_nnls_fista_precomputed(
     AtA: torch.Tensor,
@@ -66,6 +66,12 @@ def solve_nnls_fista_precomputed(
     """
     Highly optimized FISTA core for torch.compile.
     Assumes AtA and AtB are already precomputed.
+
+    .. note::
+        Compiled with ``dynamic=True`` because callers such as
+        :class:`~cellarium.ml.models.CNMFTransformer` sample a different ``k`` on every step.
+        Static shape specialization would recompile for every distinct ``k`` and silently
+        fall back to eager once ``torch._dynamo.config.cache_size_limit`` is exceeded.
     """
     # Use eigvalsh for symmetric matrices (much faster/stable)
     # Take the largest eigenvalue (-1 index)
@@ -126,7 +132,7 @@ def nmf_compute_factors_fista(
     return w_rkg_new, history
 
 
-@torch.compile()
+@torch.compile(dynamic=True)
 @torch.no_grad()
 def nmf_compute_loadings_fista(
     x_ng: torch.Tensor,
@@ -136,6 +142,11 @@ def nmf_compute_loadings_fista(
 ) -> torch.Tensor:
     """
     Wrapper to update Loadings using FISTA.
+
+    .. note::
+        Compiled with ``dynamic=True`` so that callers which vary ``k`` (and hence the shapes of
+        ``w_rkg`` / ``h_rnk``) from call to call do not trigger a recompilation per ``k``.
+        See :func:`solve_nnls_fista_precomputed`.
     """
     # Precompute the transposed equivalents: W W^T and W X^T
     # W W^T shape: [r, k, k]
@@ -1748,8 +1759,7 @@ class NMFOutput:
             model = module.model
             if not is_subclass_by_name(model, "NonNegativeMatrixFactorization"):
                 raise ValueError(
-                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, "
-                    f"got {type(model).__name__}"
+                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, got {type(model).__name__}"
                 )
 
             if reference_var_names_g is None:

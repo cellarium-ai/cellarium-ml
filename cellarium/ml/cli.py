@@ -880,6 +880,28 @@ def nmf(args: ArgsType = None) -> None:
 
 
 @register_model
+def cnmf_transformer(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.CNMFTransformer` model.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.CNMFTransformer",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
 def amortized_nmf(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.AmortizedOnlineNonNegativeMatrixFactorization` model.

@@ -1,0 +1,1654 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""
+Amortized consensus NMF: a slot-attention transformer that learns to *solve* NMF for any ``k``.
+
+Standard consensus NMF (cNMF) requires thousands of independent NMF optimizations to sweep
+:math:`k` (number of programs) and :math:`R` (random restarts).  This module trains a single
+lightweight transformer to act as an amortized solver for one dataset: given a minibatch of cells,
+a value of :math:`k`, and :math:`R` independent noise seeds, it emits :math:`R` replicate
+factorizations plus a differentiable Sinkhorn consensus.  Once trained, the stability / error
+trade-off curve for every :math:`k` can be measured in minutes rather than GPU-days.
+
+**References:**
+
+1. `Identifying gene expression programs of cell-type identity and cellular activity with
+   single-cell RNA-Seq. Kotliar et al. eLife 2019.`
+2. `Object-Centric Learning with Slot Attention. Locatello et al. NeurIPS 2020.`
+"""
+
+import math
+import warnings
+from collections.abc import Iterable, Sequence
+from typing import Any
+
+import lightning.pytorch as pl
+import numpy as np
+import torch
+import torch.nn.functional as F
+from tqdm.auto import tqdm
+
+from cellarium.ml.models.model import PredictMixin, ValidateMixin
+from cellarium.ml.models.nmf import NonNegativeMatrixFactorization, nmf_compute_loadings_fista
+from cellarium.ml.utilities.testing import (
+    assert_arrays_equal,
+    assert_columns_and_array_lengths_equal,
+)
+
+_EPS = 1e-8
+
+
+# -----------------------------------------------------------------------------------------------
+# Tensor helpers
+# -----------------------------------------------------------------------------------------------
+
+
+def l1_normalize_rows(w: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
+    """
+    L1-normalize the last dimension.
+
+    This fixes the NMF scale gauge: rows of ``W`` sum to one and all magnitude lives in ``H``,
+    which removes a flat direction from the loss landscape.
+    """
+    return w / w.sum(dim=-1, keepdim=True).clamp(min=eps)
+
+
+def l2_normalize_rows(w: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
+    """L2-normalize the last dimension (for cosine distances)."""
+    return w / w.norm(dim=-1, keepdim=True).clamp(min=eps)
+
+
+def log_sinkhorn(cost_kj: torch.Tensor, epsilon: float = 0.05, n_iterations: int = 50) -> torch.Tensor:
+    """
+    Entropic optimal transport plan between two equal-size sets, computed in log space.
+
+    The returned plan has unit row sums *and* unit column sums, so contracting it against either
+    axis produces a convex combination.  The log-domain formulation is not optional: a naive
+    ``exp(-C / epsilon)`` underflows for ``epsilon = 0.05`` and cosine costs approaching 2.
+
+    Args:
+        cost_kj: Cost matrix of shape ``(..., k, k)``.
+        epsilon: Entropic regularization.  Smaller is closer to a hard permutation but less stable.
+        n_iterations: Number of Sinkhorn-Knopp iterations.
+
+    Returns:
+        Transport plan of shape ``(..., k, k)``.
+    """
+    if cost_kj.shape[-1] != cost_kj.shape[-2]:
+        raise ValueError(f"log_sinkhorn expects a square cost matrix, got {tuple(cost_kj.shape)}")
+    # Sinkhorn is numerically delicate; always run it in fp32 even under autocast.
+    log_plan_kj = (-cost_kj / epsilon).float()
+    f_k = torch.zeros_like(log_plan_kj[..., :, 0])
+    g_j = torch.zeros_like(log_plan_kj[..., 0, :])
+    for _ in range(n_iterations):
+        f_k = -torch.logsumexp(log_plan_kj + g_j.unsqueeze(-2), dim=-1)
+        g_j = -torch.logsumexp(log_plan_kj + f_k.unsqueeze(-1), dim=-2)
+    return torch.exp(log_plan_kj + f_k.unsqueeze(-1) + g_j.unsqueeze(-2)).to(cost_kj.dtype)
+
+
+def align_factors(
+    w_rkg: torch.Tensor,
+    reference_kg: torch.Tensor,
+    epsilon: float = 0.05,
+    n_iterations: int = 50,
+    detach_plan: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Sinkhorn-match every replicate's factors onto a reference set of factors.
+
+    Matching uses cosine distance in **gene space** rather than latent space: it is closer to
+    Kotliar's procedure, and it needs no assumption that averaging in the latent space corresponds
+    to averaging in gene space (it does not -- the encoder ``LayerNorm`` and the decoder
+    ``Softplus`` are both nonlinear).
+
+    Args:
+        w_rkg: Replicate factors, shape ``(r, k, g)``, non-negative.
+        reference_kg: Reference factors, shape ``(k, g)``.
+        epsilon: Sinkhorn entropic regularization.
+        n_iterations: Sinkhorn iterations.
+        detach_plan: If ``True``, no gradient flows through the transport plan.  The matching is a
+            discrete *decision*; differentiating through many Sinkhorn iterations is expensive and
+            is the most likely source of instability.  Gradient still flows through the aligned
+            factor values themselves.
+
+    Returns:
+        ``(aligned_rkg, cosine_rk, plan_rkj, similarity_rkj)``, where ``aligned_rkg[r, j]`` is
+        replicate ``r``'s factor matched to reference factor ``j``, ``cosine_rk[r, j]`` is its
+        cosine similarity to that reference factor, and ``similarity_rkj[r, i, j]`` is the full
+        cosine similarity matrix between replicate factors and reference factors (before matching).
+    """
+    reference_normalized_kg = l2_normalize_rows(reference_kg)
+    similarity_rkj = torch.einsum("rkg,jg->rkj", l2_normalize_rows(w_rkg), reference_normalized_kg)
+    cost_rkj = 1.0 - similarity_rkj
+    plan_rkj = log_sinkhorn(cost_rkj.detach() if detach_plan else cost_rkj, epsilon, n_iterations)
+    if detach_plan:
+        plan_rkj = plan_rkj.detach()
+    aligned_rkg = torch.einsum("rkj,rkg->rjg", plan_rkj, w_rkg)
+    cosine_rk = torch.einsum("rjg,jg->rj", l2_normalize_rows(aligned_rkg), reference_normalized_kg)
+    return aligned_rkg, cosine_rk, plan_rkj, similarity_rkj
+
+
+def matched_distance(similarity_rkj: torch.Tensor, plan_rkj: torch.Tensor) -> torch.Tensor:
+    """
+    Cosine distance from each factor to the reference factor it was matched to, using a **hard**
+    assignment (the argmax of the transport plan).
+
+    This matters for the drift criterion.  The soft-aligned factor returned by
+    :func:`align_factors` is a *blend* of factors weighted by the transport plan, so its cosine to
+    the reference is strictly less than 1 even for two **identical** factor sets -- at
+    ``epsilon = 0.05`` the residual is on the order of ``1e-3``.  That would give the drift metric a
+    nonzero floor far above any sensible tolerance, and early stopping would never fire.  With a
+    hard assignment, identical factor sets give exactly zero.
+
+    Args:
+        similarity_rkj: Cosine similarities between factors and reference factors.
+        plan_rkj: Transport plan from :func:`align_factors`.
+
+    Returns:
+        Distance per factor, shape ``(r, k)``.
+    """
+    matched_rk1 = plan_rkj.argmax(dim=-1, keepdim=True)
+    return 1.0 - similarity_rkj.gather(-1, matched_rk1).squeeze(-1)
+
+
+def matched_silhouette(similarity_rkj: torch.Tensor, plan_rkj: torch.Tensor) -> torch.Tensor:
+    """
+    Silhouette-like stability score for each matched factor, in ``[-1, 1]``.
+
+    Mean cosine similarity is *not* usable as a stability metric for non-negative factors: two
+    independent random non-negative vectors already score around 0.75, and after matching and
+    averaging they score around 0.94, so the entire interesting range is compressed into the last
+    few percent.  Kotliar's silhouette avoids this because it is a *contrast* -- own-cluster
+    tightness against nearest-other-cluster separation -- and the baseline cancels.
+
+    This is the direct analogue: for each replicate factor, ``a`` is its distance to the reference
+    factor it was matched to and ``b`` is its distance to the nearest *other* reference factor, and
+    the score is ``(b - a) / max(a, b)``.  It is near 1 when a factor is unambiguously reproduced,
+    and near 0 when it sits equally close to two consensus programs.
+
+    Args:
+        similarity_rkj: Cosine similarities between replicate factors and reference factors.
+        plan_rkj: Transport plan from :func:`align_factors`.
+
+    Returns:
+        Score per replicate factor, shape ``(r, k)``.
+    """
+    k = similarity_rkj.shape[-1]
+    if k == 1:
+        # A single factor is trivially unambiguous; there is no "nearest other" to contrast with.
+        return torch.ones_like(similarity_rkj[..., 0])
+    matched_rk1 = plan_rkj.argmax(dim=-1, keepdim=True)
+    a_rk = matched_distance(similarity_rkj, plan_rkj)
+    other_rkj = similarity_rkj.scatter(-1, matched_rk1, float("-inf"))
+    b_rk = 1.0 - other_rkj.max(dim=-1).values
+    return (b_rk - a_rk) / torch.maximum(a_rk, b_rk).clamp(min=_EPS)
+
+
+def sinkhorn_consensus(
+    w_rkg: torch.Tensor,
+    epsilon: float = 0.05,
+    n_iterations: int = 50,
+    outlier_gamma: float = 5.0,
+    n_refine: int = 2,
+    detach_plan: bool = True,
+    anchor: int = 0,
+) -> dict[str, torch.Tensor | None]:
+    """
+    Differentiable consensus over ``r`` replicate factorizations, replacing cNMF's k-means step.
+
+    K-means cannot be used here: it lacks a one-to-one matching constraint (so it mode-collapses)
+    and its hard assignments sever the computation graph.  Sinkhorn-Knopp gives a GPU-native,
+    differentiable, doubly-stochastic matching instead.
+
+    Outliers are handled the way cNMF handles them, but natively inside the forward pass: a
+    replicate factor that matches poorly (large cosine distance to the running consensus) receives
+    weight ``exp(-outlier_gamma * distance)``, decaying toward zero.
+
+    The consensus is refined toward a barycenter rather than anchored on one replicate.  Anchoring
+    permanently on replicate 0 would make the consensus asymmetric and give that replicate
+    privileged, unpenalized status, unlike k-means which is symmetric.  Refinement rounds are
+    detached: they are a fixed-point *search*, and only the final aggregation carries gradient.
+
+    Args:
+        w_rkg: Replicate factors of shape ``(r, k, g)``, non-negative.
+        epsilon: Sinkhorn entropic regularization.
+        n_iterations: Sinkhorn iterations.
+        outlier_gamma: Decay rate of the outlier-masking weights.
+        n_refine: Number of detached barycenter refinement rounds.
+        detach_plan: See :func:`align_factors`.
+        anchor: Replicate index used to seed the refinement.
+
+    Returns:
+        Dict with keys ``consensus_kg`` (L1-normalized), ``stability`` (mean
+        :func:`matched_silhouette` score over replicate factors), ``agreement`` (mean cosine
+        similarity to the consensus, which is what the outlier weights are built from),
+        ``cosine_rk``, ``weights_rk`` and ``plan_rkj`` (``None`` when ``r == 1``).
+    """
+    r = w_rkg.shape[0]
+    if r == 1:
+        ones_rk = w_rkg.new_ones(w_rkg.shape[:2])
+        return {
+            "consensus_kg": l1_normalize_rows(w_rkg[0]),
+            "stability": w_rkg.new_ones(()),
+            "agreement": w_rkg.new_ones(()),
+            "cosine_rk": ones_rk,
+            "weights_rk": ones_rk,
+            "plan_rkj": None,
+        }
+
+    # Detached barycenter refinement: settle on a reference that no single replicate owns.
+    reference_kg = w_rkg[anchor].detach()
+    w_detached_rkg = w_rkg.detach()
+    for _ in range(max(0, n_refine)):
+        aligned_rkg, cosine_rk, _, _ = align_factors(w_detached_rkg, reference_kg, epsilon, n_iterations, True)
+        weights_rk1 = torch.exp(-outlier_gamma * (1.0 - cosine_rk)).unsqueeze(-1)
+        reference_kg = ((weights_rk1 * aligned_rkg).sum(dim=0) / weights_rk1.sum(dim=0).clamp(min=_EPS)).detach()
+
+    # Final, differentiable pass against the settled reference.
+    aligned_rkg, cosine_rk, plan_rkj, similarity_rkj = align_factors(
+        w_rkg, reference_kg, epsilon, n_iterations, detach_plan
+    )
+    weights_rk = torch.exp(-outlier_gamma * (1.0 - cosine_rk))
+    weights_rk1 = weights_rk.unsqueeze(-1)
+    consensus_kg = (weights_rk1 * aligned_rkg).sum(dim=0) / weights_rk1.sum(dim=0).clamp(min=_EPS)
+    return {
+        "consensus_kg": l1_normalize_rows(consensus_kg),
+        "stability": matched_silhouette(similarity_rkj.detach(), plan_rkj.detach()).mean(),
+        "agreement": cosine_rk.detach().mean(),
+        "cosine_rk": cosine_rk,
+        "weights_rk": weights_rk,
+        "plan_rkj": plan_rkj,
+    }
+
+
+def match_stability(
+    w1_kg: torch.Tensor,
+    w2_kg: torch.Tensor,
+    epsilon: float = 0.05,
+    n_iterations: int = 50,
+) -> torch.Tensor:
+    """
+    Mean cosine similarity between two independently derived factor sets after optimal matching.
+
+    This is the *cross-batch* stability statistic.  Within-batch stability (see
+    :func:`sinkhorn_consensus`) folds in initialization variance only, exactly like Kotliar's
+    silhouette.  This statistic additionally folds in *sampling* variance, and therefore answers
+    "is this program a property of the data, or of this particular sample of cells?".  The gap
+    between the two is the diagnostic for how much stability is a sampling artifact.
+
+    Uses the same :func:`matched_silhouette` contrast as within-batch stability, so the two are on
+    a comparable scale and free of the non-negative cosine baseline.
+    """
+    _, _, plan_rkj, similarity_rkj = align_factors(w1_kg.unsqueeze(0), w2_kg, epsilon, n_iterations, detach_plan=True)
+    return matched_silhouette(similarity_rkj, plan_rkj).mean()
+
+
+def frobenius_loss_trace(
+    x_ng: torch.Tensor,
+    h_rnk: torch.Tensor,
+    w_rkg: torch.Tensor,
+    x_squared_sum: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Per-replicate ``||X - H W||_F^2`` computed *without* materializing the reconstruction.
+
+    Uses :math:`\\|X - HW\\|_F^2 = \\|X\\|^2 - 2\\langle HX, W\\rangle + \\langle H^\\top H,
+    WW^\\top\\rangle`, so the intermediates are ``(r, k, g)`` and ``(r, k, k)`` rather than
+    ``(r, n, g)``.  At ``r=100, n=2048, g=2000`` that is 80 MB instead of 1.6 GB.  And because
+    ``H`` is detached and ``X`` is data, both ``HX`` and ``H^T H`` are autograd constants: the
+    entire backward reduces to :math:`\\nabla_W = -2 HX + 2 (H^\\top H) W`.
+
+    This is why the loss is Frobenius rather than Poisson KL.  KL does not factorize this way, and
+    its Poisson justification does not survive per-gene rescaling of the input anyway.
+
+    Args:
+        x_ng: Data, shape ``(n, g)``.
+        h_rnk: Loadings, shape ``(r, n, k)``.
+        w_rkg: Factors, shape ``(r, k, g)``.
+        x_squared_sum: Optional precomputed ``(x_ng ** 2).sum()``, shared across replicates.
+
+    Returns:
+        Sum of squared errors per replicate, shape ``(r,)``.
+    """
+    if x_squared_sum is None:
+        x_squared_sum = x_ng.pow(2).sum()
+    hx_rkg = torch.einsum("rnk,ng->rkg", h_rnk, x_ng)
+    hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
+    wwt_rkk = torch.einsum("rkg,rjg->rkj", w_rkg, w_rkg)
+    cross_r = (hx_rkg * w_rkg).sum(dim=(-2, -1))
+    quad_r = (hth_rkk * wwt_rkk).sum(dim=(-2, -1))
+    # Upcasting only the three reduced scalars is free and removes any cancellation concern.
+    sse_r = x_squared_sum.double() - 2.0 * cross_r.double() + quad_r.double()
+    return sse_r.clamp(min=0.0).to(w_rkg.dtype)
+
+
+def _all_reduce_mean(tensor: torch.Tensor) -> torch.Tensor:
+    """Average a tensor across DDP ranks in place (no-op when not distributed)."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
+        tensor /= torch.distributed.get_world_size()
+    return tensor
+
+
+def _broadcast_from_rank_zero(tensor: torch.Tensor) -> torch.Tensor:
+    """Broadcast rank 0's copy of a tensor to all ranks in place (no-op when not distributed)."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.broadcast(tensor, src=0)
+    return tensor
+
+
+def _weights_init(m: torch.nn.Module) -> None:
+    """Re-initialize a module's parameters.  Required because models are built on the meta device."""
+    if isinstance(m, torch.nn.MultiheadAttention):
+        m._reset_parameters()
+    elif isinstance(m, torch.nn.Linear):
+        torch.nn.init.xavier_normal_(m.weight)
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
+    elif isinstance(m, torch.nn.LayerNorm):
+        if m.elementwise_affine:
+            torch.nn.init.ones_(m.weight)
+            torch.nn.init.zeros_(m.bias)
+    elif isinstance(m, torch.nn.Embedding):
+        torch.nn.init.normal_(m.weight, std=0.02)
+
+
+# -----------------------------------------------------------------------------------------------
+# Sub-modules
+# -----------------------------------------------------------------------------------------------
+
+
+class LinearCellEncoder(torch.nn.Module):
+    """
+    Deliberately low-capacity cell encoder: one linear layer plus ``LayerNorm``, nothing else.
+
+    Keeping the encoder shallow forces the transformer's attention layers to do all of the
+    optimization work rather than letting a deep MLP absorb it.  ``LayerNorm`` discards per-cell
+    magnitude, which is fine here: the embedding only feeds attention (where "which program"
+    matters, not "how much") and the loadings hot start, whose scale is set analytically and then
+    polished by FISTA.
+    """
+
+    def __init__(self, n_genes: int, latent_dim: int) -> None:
+        super().__init__()
+        self.linear = torch.nn.Linear(n_genes, latent_dim)
+        self.norm = torch.nn.LayerNorm(latent_dim)
+
+    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.linear(x_ng))
+
+
+class LinearFactorDecoder(torch.nn.Module):
+    """
+    Deliberately low-capacity factor decoder: one linear layer, ``Softplus``, L1-normalized rows.
+
+    The L1 normalization matches the convention used by
+    :class:`~cellarium.ml.models.AmortizedOnlineNonNegativeMatrixFactorization`, so factors can be
+    handed off between the two models.  Do not change this to L2 without changing that too.
+    """
+
+    def __init__(self, latent_dim: int, n_genes: int) -> None:
+        super().__init__()
+        self.linear = torch.nn.Linear(latent_dim, n_genes)
+
+    def forward(self, z_rke: torch.Tensor) -> torch.Tensor:
+        return l1_normalize_rows(F.softplus(self.linear(z_rke)))
+
+
+class SlotAttentionBlock(torch.nn.Module):
+    """
+    One layer of the "physics engine": slot self-attention, then slot *cross*-attention to cells.
+
+    Two departures from :class:`torch.nn.TransformerDecoderLayer`, both load-bearing:
+
+    1. **The cross-attention softmax is over the slot (``k``) axis, not the cell axis.**  Ordinary
+       cross-attention gives the ``k`` factors no reason not to be duplicates -- self-attention is
+       permutation-equivariant and carries no repulsive term, so the usual outcome is mode
+       collapse.  Slot Attention's anti-collapse mechanism is competition *between* slots for each
+       input, which is exactly what a softmax over ``k`` provides.
+    2. **Aggregation over cells is a normalized weighted mean, not a weighted sum.**  This makes
+       the update depend on the empirical *distribution* of cells rather than on their count, so
+       the block behaves the same whether it sees 2,048 cells or 500,000.
+
+    Keys and values are projected once by the parent model and shared across layers (as in Slot
+    Attention, which applies one recurrent module repeatedly) and across replicates -- expanding
+    the cell memory to ``(r, n, e)`` per layer would duplicate ~1.3 GB at ``r=100`` for no gain.
+    """
+
+    def __init__(self, latent_dim: int, n_self_attention_heads: int = 8, ffn_mult: int = 4) -> None:
+        super().__init__()
+        self.norm_self_attention = torch.nn.LayerNorm(latent_dim)
+        self.self_attention = torch.nn.MultiheadAttention(latent_dim, n_self_attention_heads, batch_first=True)
+        self.norm_cross_attention = torch.nn.LayerNorm(latent_dim)
+        self.to_query = torch.nn.Linear(latent_dim, latent_dim, bias=False)
+        self.norm_ffn = torch.nn.LayerNorm(latent_dim)
+        self.ffn = torch.nn.Sequential(
+            torch.nn.Linear(latent_dim, ffn_mult * latent_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(ffn_mult * latent_dim, latent_dim),
+        )
+        self.scale = latent_dim**-0.5
+
+    def forward(self, slots_rke: torch.Tensor, key_ne: torch.Tensor, value_ne: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            slots_rke: Slot (factor) tokens, shape ``(r, k, e)``.
+            key_ne: Projected cell keys, shape ``(n, e)``, shared across replicates.
+            value_ne: Projected cell values, shape ``(n, e)``, shared across replicates.
+
+        Returns:
+            Updated slots, shape ``(r, k, e)``.
+        """
+        # Slots attend to each other within a replicate.
+        normed_rke = self.norm_self_attention(slots_rke)
+        attended_rke, _ = self.self_attention(normed_rke, normed_rke, normed_rke, need_weights=False)
+        slots_rke = slots_rke + attended_rke
+
+        # Slots compete for cells (softmax over k), then aggregate by normalized weighted mean.
+        query_rke = self.to_query(self.norm_cross_attention(slots_rke)) * self.scale
+        logits_rkn = torch.einsum("rke,ne->rkn", query_rke, key_ne)
+        attention_rkn = logits_rkn.softmax(dim=-2)
+        attention_rkn = attention_rkn / attention_rkn.sum(dim=-1, keepdim=True).clamp(min=_EPS)
+        slots_rke = slots_rke + torch.einsum("rkn,ne->rke", attention_rkn, value_ne)
+
+        return slots_rke + self.ffn(self.norm_ffn(slots_rke))
+
+
+# -----------------------------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------------------------
+
+
+class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixin):
+    """
+    Universal amortized consensus-NMF solver: one transformer that factorizes for any ``k``.
+
+    Every training step samples a ``k`` from a growing curriculum window, embeds the cells with a
+    strictly linear encoder, runs ``R`` independent noise seeds through a slot-attention stack
+    (cells as keys/values), decodes each replicate's factors ``W``, solves the loadings ``H`` with
+    a detached FISTA polish, and reduces the ``R`` replicates to a differentiable Sinkhorn
+    consensus.  Training minimizes the consensus reconstruction error plus a decaying weight times
+    the mean replicate reconstruction error.
+
+    Three design constraints are deliberate and should not be "simplified" away:
+
+    * **Stop-gradient on H.**  The FISTA polish is fully detached.  If gradients flowed through the
+      solver, the transformer would spend capacity learning to invert FISTA instead of shaping the
+      geometric basins of ``W``.
+    * **Low-capacity encoder and decoder.**  Single linear layers only.  All of the optimization
+      work belongs to the attention stack.
+    * **Frobenius loss, not Poisson KL.**  See :func:`frobenius_loss_trace`.
+
+    Convergence is judged by *factor drift* -- how far the consensus programs rotate per optimizer
+    step, measured with fixed noise on a fixed set of cells -- and never by the training loss.  The
+    loss is not usable as a convergence signal here: ``k`` is resampled every step, so consecutive
+    losses come from different problems, and the curriculum systematically shifts the ``k``
+    distribution over time, so the loss series carries a trend driven by the schedule rather than
+    by learning.
+
+    .. note::
+        If ``cross_batch_stability`` is ``True`` the incoming minibatch is split in half, so set the
+        dataloader ``batch_size`` to **twice** the number of cells each factorization should
+        condition on.
+
+    .. note::
+        ``broadcast_buffers=False`` is recommended for
+        :class:`~lightning.pytorch.strategies.DDPStrategy` with this model.  Everything that must
+        agree across ranks is either derived deterministically or synchronized explicitly, and the
+        persisted consensus factors are large enough that broadcasting all buffers every step is
+        pure waste.
+
+    Args:
+        var_names_g: The variable names schema for the input data: should be highly variable genes.
+        k_values: The universe of ``k`` values the model may be asked to solve.  Sorted ascending
+            and revealed progressively by the curriculum.  This is also the grid on which the
+            stability and error curves are measured, so pass every integer you want on the plot --
+            stability curves are frequently discontinuous and a coarse grid will miss structure.
+        latent_dim: Width of the latent/slot space.
+        n_layers: Number of :class:`SlotAttentionBlock` layers.
+        n_self_attention_heads: Heads for slot-to-slot self-attention.
+        ffn_mult: Feed-forward expansion factor inside each block.
+        n_replicates: ``R`` used during training.  Fresh replicates are drawn every step and
+            information accumulates over thousands of steps, so this can be far smaller than
+            Kotliar's 100 without hurting the gradient.
+        n_replicates_measure: ``R`` used in the final measurement phase, where no activations are
+            retained and a Kotliar-comparable replicate count is affordable.
+        cross_batch_stability: Split the minibatch in half and assign half the replicates to each,
+            enabling the cross-batch stability statistic.
+        min_cells_per_split: Minimum cells per half; below this the split is skipped.
+        shuffle_split: Randomly permute rows before splitting, guarding against a dataloader that
+            returns cells in a systematic order.
+        fista_iterations_train: FISTA iterations for the loadings polish during training.  This is
+            a *polish* of a good hot start, not a solve from scratch, so it can be small.
+        fista_iterations_measure: FISTA iterations during measurement, where the error axis needs
+            to be converged.
+        sinkhorn_epsilon: Entropic regularization for consensus matching.
+        sinkhorn_iterations: Sinkhorn iterations.
+        sinkhorn_refine_rounds: Detached barycenter refinement rounds.
+        outlier_gamma: Decay rate of the consensus outlier-masking weights.
+        detach_sinkhorn_plan: Do not backpropagate through the transport plan.
+        curriculum_warmup_steps: Steps over which the ``k`` window grows to cover all ``k_values``.
+        curriculum_initial_k_count: How many of the smallest ``k_values`` are available at step 0.
+        lam_init: Initial weight on the replicate loss (favor independent replicates early).
+        lam_min: Floor for the replicate loss weight.
+        lam_decay_steps: Exponential decay constant for the replicate loss weight.
+        stability_burn_in_steps: Do not accumulate monitoring EMAs before this step; an untrained
+            network's stability is meaningless.
+        stability_ema_beta: Per-``k`` EMA decay for the monitoring curves.
+        drift_k_values: ``k`` values at which factor drift is measured.  Defaults to the smallest,
+            median and largest of ``k_values``.  Reduced with a max, so the worst ``k`` governs.
+        drift_eval_n_cells: Size of the fixed cell set used for the drift measurement.
+        drift_check_every_n_steps: Steps between drift checks.  Zero disables early stopping.
+        drift_tol: Convergence threshold on ``1 - cosine similarity`` **per optimizer step**.  The
+            metric is scale-free by construction and reads as an angle: ``1 - cos(theta) ~
+            theta ** 2 / 2``, so the default ``5e-7`` is about 0.8 degrees of program rotation per
+            200 steps.
+        drift_patience_checks: Consecutive checks below ``drift_tol`` required to stop.
+        drift_settle_steps: Extra steps after the curriculum finishes before stopping is allowed.
+            Checking earlier is meaningless: while the ``k`` window is still expanding, new ``k``
+            values are still being introduced and drift *should* be nonzero.
+        store_replicates_k_values: ``k`` values for which full replicate factors are persisted, for
+            :func:`~cellarium.ml.models.nmf.plot_density_histograms` and
+            :func:`~cellarium.ml.models.nmf.plot_clustermap`.  Defaults to five values spread over
+            ``k_values``; storing all ``k`` at ``r_store`` replicates would be hundreds of MB.
+        r_store: Number of replicates persisted per entry of ``store_replicates_k_values``.
+        measure_at_end: Run the measurement phase automatically in ``on_train_end``.
+        measurement_n_batches: Minibatches used by the measurement phase.
+        k_sampling_seed: Seed for ``k`` sampling.  ``k`` is drawn from a step-seeded generator so
+            that every DDP rank draws the *same* ``k``; independent per-rank sampling would produce
+            mismatched tensor shapes and hang the gradient all-reduce.
+        noise_seed: Seed for the fixed drift-evaluation noise.
+        log_every_n_steps: Interval for logging monitoring scalars.
+    """
+
+    def __init__(
+        self,
+        var_names_g: Sequence[str],
+        k_values: list[int],
+        latent_dim: int = 256,
+        n_layers: int = 3,
+        n_self_attention_heads: int = 8,
+        ffn_mult: int = 4,
+        n_replicates: int = 32,
+        n_replicates_measure: int = 100,
+        cross_batch_stability: bool = True,
+        min_cells_per_split: int = 64,
+        shuffle_split: bool = True,
+        fista_iterations_train: int = 25,
+        fista_iterations_measure: int = 150,
+        sinkhorn_epsilon: float = 0.05,
+        sinkhorn_iterations: int = 50,
+        sinkhorn_refine_rounds: int = 2,
+        outlier_gamma: float = 5.0,
+        detach_sinkhorn_plan: bool = True,
+        curriculum_warmup_steps: int = 5000,
+        curriculum_initial_k_count: int = 1,
+        lam_init: float = 10.0,
+        lam_min: float = 0.1,
+        lam_decay_steps: int = 5000,
+        stability_burn_in_steps: int = 1000,
+        stability_ema_beta: float = 0.9,
+        drift_k_values: list[int] | None = None,
+        drift_eval_n_cells: int = 2048,
+        drift_check_every_n_steps: int = 200,
+        drift_tol: float = 5e-7,
+        drift_patience_checks: int = 5,
+        drift_settle_steps: int = 1000,
+        store_replicates_k_values: list[int] | None = None,
+        r_store: int = 20,
+        measure_at_end: bool = True,
+        measurement_n_batches: int = 50,
+        k_sampling_seed: int = 0,
+        noise_seed: int = 1,
+        log_every_n_steps: int = 50,
+    ) -> None:
+        if len(k_values) == 0:
+            raise ValueError("k_values must not be empty")
+        if min(k_values) < 1:
+            raise ValueError(f"k_values must all be >= 1, got minimum {min(k_values)}")
+        if len(set(k_values)) != len(k_values):
+            raise ValueError("k_values must not contain duplicates")
+        sorted_k_values = sorted(k_values)
+        if list(k_values) != sorted_k_values:
+            warnings.warn("k_values was not sorted ascending; sorting it so the curriculum is monotone.", UserWarning)
+
+        super().__init__(var_names_g=var_names_g, k_values=sorted_k_values)
+        g = len(self.var_names_g)
+        self.n_genes = g
+        self.latent_dim = latent_dim
+        self.n_replicates = n_replicates
+        self.n_replicates_measure = n_replicates_measure
+        self.cross_batch_stability = cross_batch_stability
+        self.min_cells_per_split = min_cells_per_split
+        self.shuffle_split = shuffle_split
+        self.fista_iterations_train = fista_iterations_train
+        self.fista_iterations_measure = fista_iterations_measure
+        self.sinkhorn_epsilon = sinkhorn_epsilon
+        self.sinkhorn_iterations = sinkhorn_iterations
+        self.sinkhorn_refine_rounds = sinkhorn_refine_rounds
+        self.outlier_gamma = outlier_gamma
+        self.detach_sinkhorn_plan = detach_sinkhorn_plan
+        self.curriculum_warmup_steps = curriculum_warmup_steps
+        self.curriculum_initial_k_count = max(1, min(len(self.k_values), curriculum_initial_k_count))
+        self.lam_init = lam_init
+        self.lam_min = lam_min
+        self.lam_decay_steps = max(1, lam_decay_steps)
+        self.stability_burn_in_steps = stability_burn_in_steps
+        self.stability_ema_beta = stability_ema_beta
+        self.drift_eval_n_cells = drift_eval_n_cells
+        self.drift_check_every_n_steps = drift_check_every_n_steps
+        self.drift_tol = drift_tol
+        self.drift_patience_checks = drift_patience_checks
+        self.drift_settle_steps = drift_settle_steps
+        self.measure_at_end = measure_at_end
+        self.measurement_n_batches = measurement_n_batches
+        self.k_sampling_seed = k_sampling_seed
+        self.noise_seed = noise_seed
+        self.log_every_n_steps = log_every_n_steps
+
+        self.k_max = max(self.k_values)
+        self._k_to_index = {k: i for i, k in enumerate(self.k_values)}
+        self.metric_names: tuple[str, ...] = ("stability", "stability_cross", "error", "error_cross")
+
+        self.drift_k_values = self._default_drift_k_values() if drift_k_values is None else sorted(drift_k_values)
+        unknown = [k for k in self.drift_k_values if k not in self._k_to_index]
+        if unknown:
+            raise ValueError(f"drift_k_values {unknown} are not in k_values")
+
+        if store_replicates_k_values is None:
+            store_replicates_k_values = self._default_store_k_values()
+        self.store_replicates_k_values = sorted(store_replicates_k_values)
+        unknown = [k for k in self.store_replicates_k_values if k not in self._k_to_index]
+        if unknown:
+            raise ValueError(f"store_replicates_k_values {unknown} are not in k_values")
+        if r_store > n_replicates_measure:
+            raise ValueError(f"r_store ({r_store}) must not exceed n_replicates_measure ({n_replicates_measure})")
+        self.r_store = r_store
+
+        # --- modules ---
+        self.encoder = LinearCellEncoder(g, latent_dim)
+        # Keys and values are projected once and shared across layers and replicates.
+        self.to_key = torch.nn.Linear(latent_dim, latent_dim, bias=False)
+        self.to_value = torch.nn.Linear(latent_dim, latent_dim, bias=False)
+        self.blocks = torch.nn.ModuleList(
+            [SlotAttentionBlock(latent_dim, n_self_attention_heads, ffn_mult) for _ in range(n_layers)]
+        )
+        self.decoder = LinearFactorDecoder(latent_dim, g)
+        # Non-affine on purpose: the loadings hot start is inside a no_grad region (stop-gradient on
+        # H), so learnable parameters here could never receive a gradient and would sit dead.
+        self.norm_hot_start = torch.nn.LayerNorm(latent_dim, elementwise_affine=False)
+        # Slot initialization as in Slot Attention: a learned Gaussian, whose symmetry across the k
+        # slots is broken only by the noise.  The k embedding is what tells the network which
+        # problem it is solving; without it the only signal about k is the number of tokens.
+        self.slot_mu = torch.nn.Parameter(torch.empty(latent_dim))
+        self.slot_log_sigma = torch.nn.Parameter(torch.empty(latent_dim))
+        self.k_embedding = torch.nn.Embedding(self.k_max + 1, latent_dim)
+
+        # --- buffers: declared here, valued in reset_parameters (models are built on meta) ---
+        self._step: torch.Tensor
+        self.drift_slot_noise_rke: torch.Tensor
+        self._drift_x_ng: torch.Tensor
+        self._drift_n_captured: torch.Tensor
+        self._drift_has_previous: torch.Tensor
+        self._drift_below_tol_count: torch.Tensor
+        self._drift_rate: torch.Tensor
+        self._measured_n_batches: torch.Tensor
+        self.register_buffer("_step", torch.zeros((), dtype=torch.long))
+        self.register_buffer("drift_slot_noise_rke", torch.empty(n_replicates, self.k_max, latent_dim))
+        self.register_buffer("_drift_x_ng", torch.empty(drift_eval_n_cells, g))
+        self.register_buffer("_drift_n_captured", torch.zeros((), dtype=torch.long))
+        self.register_buffer("_drift_has_previous", torch.zeros((), dtype=torch.bool))
+        self.register_buffer("_drift_below_tol_count", torch.zeros((), dtype=torch.long))
+        self.register_buffer("_drift_rate", torch.zeros(()))
+        for k in self.drift_k_values:
+            self.register_buffer(f"_drift_previous_w_{k}_kg", torch.empty(k, g))
+
+        n_k = len(self.k_values)
+        for name in self.metric_names:
+            self.register_buffer(f"_ema_{name}_k", torch.empty(n_k))
+            self.register_buffer(f"_ema_count_{name}_k", torch.empty(n_k))
+            self.register_buffer(f"_measured_{name}_mean_k", torch.empty(n_k))
+            self.register_buffer(f"_measured_{name}_sem_k", torch.empty(n_k))
+        self.register_buffer("_measured_n_batches", torch.zeros((), dtype=torch.long))
+
+        for k in self.k_values:
+            self.register_buffer(f"consensus_D_{k}_kg", torch.empty(k, g))
+        for k in self.store_replicates_k_values:
+            self.register_buffer(f"D_{k}_rkg", torch.empty(r_store, k, g))
+
+        self.predict_k: int | None = None
+        self._last_k = self.k_values[0]
+        self.reset_parameters()
+
+    # -------------------------------------------------------------------------------------------
+    # construction / initialization
+    # -------------------------------------------------------------------------------------------
+
+    def _default_drift_k_values(self) -> list[int]:
+        return sorted({self.k_values[0], self.k_values[len(self.k_values) // 2], self.k_values[-1]})
+
+    def _default_store_k_values(self, n: int = 5) -> list[int]:
+        if len(self.k_values) <= n:
+            return list(self.k_values)
+        indices = np.linspace(0, len(self.k_values) - 1, n).round().astype(int)
+        return sorted({self.k_values[i] for i in indices})
+
+    def reset_parameters(self) -> None:
+        self.apply(_weights_init)
+        torch.nn.init.normal_(self.slot_mu, std=0.02)
+        torch.nn.init.zeros_(self.slot_log_sigma)
+
+        self._step.zero_()
+        self._step_cache = 0
+        self._last_k = self.k_values[0]
+
+        # Fixed, reproducible drift noise.  Generated here rather than in __init__ because __init__
+        # runs on the meta device; a CPU generator keeps it identical across devices and runs.
+        generator = torch.Generator().manual_seed(self.noise_seed)
+        self.drift_slot_noise_rke.copy_(torch.randn(tuple(self.drift_slot_noise_rke.shape), generator=generator))
+        self._drift_x_ng.zero_()
+        self._drift_n_captured.zero_()
+        self._drift_cells_full = False
+        self._drift_has_previous.fill_(False)
+        self._drift_below_tol_count.zero_()
+        self._drift_rate.zero_()
+        for k in self.drift_k_values:
+            getattr(self, f"_drift_previous_w_{k}_kg").zero_()
+
+        for name in self.metric_names:
+            getattr(self, f"_ema_{name}_k").zero_()
+            getattr(self, f"_ema_count_{name}_k").zero_()
+            # NaN marks "never measured", so a partial measurement phase is visible rather than
+            # silently reading as zero.
+            getattr(self, f"_measured_{name}_mean_k").fill_(float("nan"))
+            getattr(self, f"_measured_{name}_sem_k").fill_(float("nan"))
+        self._measured_n_batches.zero_()
+
+        for k in self.k_values:
+            getattr(self, f"consensus_D_{k}_kg").zero_()
+        for k in self.store_replicates_k_values:
+            getattr(self, f"D_{k}_rkg").zero_()
+
+    @property
+    def device(self) -> torch.device:
+        return self.slot_mu.device
+
+    # -------------------------------------------------------------------------------------------
+    # curriculum
+    # -------------------------------------------------------------------------------------------
+
+    def curriculum_k_count(self, step: int | None = None) -> int:
+        """Number of ``k_values`` (from the smallest up) currently available to the sampler."""
+        step = self._step_cache if step is None else step
+        n = len(self.k_values)
+        if self.curriculum_warmup_steps <= 0:
+            return n
+        progress = min(1.0, step / self.curriculum_warmup_steps)
+        count = self.curriculum_initial_k_count + progress * (n - self.curriculum_initial_k_count)
+        return int(min(n, max(1, math.ceil(count))))
+
+    def sample_k(self, step: int | None = None) -> int:
+        """
+        Draw ``k`` from the curriculum window using a step-seeded generator.
+
+        Determinism here is not cosmetic: under DDP every rank must draw the *same* ``k``, or the
+        replicate tensors have different shapes on different ranks and the gradient all-reduce
+        deadlocks.  The noise seeds are deliberately left rank-dependent -- extra diversity there
+        is useful.
+        """
+        step = self._step_cache if step is None else step
+        generator = torch.Generator().manual_seed(self.k_sampling_seed * 1_000_003 + step)
+        index = int(torch.randint(0, self.curriculum_k_count(step), (1,), generator=generator).item())
+        return self.k_values[index]
+
+    def replicate_loss_weight(self, step: int | None = None) -> float:
+        """Weight on the independent-replicate loss: high early, annealed toward the consensus."""
+        step = self._step_cache if step is None else step
+        return max(self.lam_min, self.lam_init * math.exp(-step / self.lam_decay_steps))
+
+    # -------------------------------------------------------------------------------------------
+    # core solver
+    # -------------------------------------------------------------------------------------------
+
+    def _initial_slots(self, k: int, slot_noise_rke: torch.Tensor) -> torch.Tensor:
+        return self.slot_mu + torch.exp(self.slot_log_sigma) * slot_noise_rke + self.k_embedding.weight[k]
+
+    @torch.no_grad()
+    def hot_start_loadings(self, x_ng: torch.Tensor, x_emb_ne: torch.Tensor, slots_rke: torch.Tensor) -> torch.Tensor:
+        """
+        Analytic hot start for ``H`` from a slot-competition map over the target cells.
+
+        Because the decoder L1-normalizes each factor, ``sum_g x[n, g] == sum_k H[n, k]`` exactly.
+        A softmax over ``k`` already sums to one per cell, so scaling it by each cell's total puts
+        the hot start on precisely the right scale, leaving FISTA only the direction to fix.
+        """
+        logits_rkn = torch.einsum("rke,ne->rkn", self.norm_hot_start(slots_rke), x_emb_ne) * self.latent_dim**-0.5
+        attention_rkn = logits_rkn.softmax(dim=-2)
+        return (attention_rkn * x_ng.sum(dim=-1)).transpose(-2, -1).contiguous()
+
+    @torch.no_grad()
+    def _solve_loadings(
+        self,
+        x_ng: torch.Tensor,
+        x_emb_ne: torch.Tensor,
+        slots_rke: torch.Tensor,
+        w_rkg: torch.Tensor,
+        n_iterations: int,
+    ) -> torch.Tensor:
+        """Hot start, then FISTA polish.  Fully detached: see the class docstring on stop-gradient."""
+        h_rnk = self.hot_start_loadings(x_ng, x_emb_ne, slots_rke.detach())
+        h_rnk, _ = nmf_compute_loadings_fista(
+            x_ng=x_ng, w_rkg=w_rkg.detach().contiguous(), h_rnk=h_rnk, max_iter=n_iterations
+        )
+        return h_rnk.clamp(min=0.0)
+
+    def solve(
+        self,
+        x_ng: torch.Tensor,
+        k: int,
+        slot_noise_rke: torch.Tensor,
+        n_iterations: int,
+        x_target_ng: torch.Tensor | None = None,
+        compute_loadings: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        """
+        One amortized factorization: ``R`` replicate ``W`` matrices, and optionally ``H``.
+
+        Args:
+            x_ng: Cells to condition on (the cross-attention memory).
+            k: Number of factors.
+            slot_noise_rke: Standard normal noise, shape ``(r, k, latent_dim)``.
+            n_iterations: FISTA iterations for the loadings.
+            x_target_ng: Cells on which to solve loadings.  Defaults to ``x_ng``.
+            compute_loadings: Skip the FISTA solve when only ``W`` is needed (e.g. drift checks).
+
+        Returns:
+            Dict with ``w_rkg``, ``slots_rke``, and if requested ``h_rnk`` and ``x_target_ng``.
+        """
+        x_emb_ne = self.encoder(x_ng)
+        key_ne = self.to_key(x_emb_ne)
+        value_ne = self.to_value(x_emb_ne)
+
+        slots_rke = self._initial_slots(k, slot_noise_rke)
+        for block in self.blocks:
+            slots_rke = block(slots_rke, key_ne, value_ne)
+
+        w_rkg = self.decoder(slots_rke)
+        out = {"w_rkg": w_rkg, "slots_rke": slots_rke}
+        if compute_loadings:
+            target_ng = x_ng if x_target_ng is None else x_target_ng
+            target_emb_ne = x_emb_ne if x_target_ng is None else self.encoder(target_ng)
+            out["h_rnk"] = self._solve_loadings(target_ng, target_emb_ne, slots_rke, w_rkg, n_iterations)
+            out["x_target_ng"] = target_ng
+        return out
+
+    def _consensus(self, w_rkg: torch.Tensor) -> dict[str, torch.Tensor | None]:
+        return sinkhorn_consensus(
+            w_rkg,
+            epsilon=self.sinkhorn_epsilon,
+            n_iterations=self.sinkhorn_iterations,
+            outlier_gamma=self.outlier_gamma,
+            n_refine=self.sinkhorn_refine_rounds,
+            detach_plan=self.detach_sinkhorn_plan,
+        )
+
+    @torch.no_grad()
+    def _consensus_loadings(
+        self,
+        x_ng: torch.Tensor,
+        h_rnk: torch.Tensor,
+        consensus_kg: torch.Tensor,
+        plan_rkj: torch.Tensor | None,
+        weights_rk: torch.Tensor,
+        n_iterations: int,
+    ) -> torch.Tensor:
+        """
+        Loadings for the consensus factors, hot started by permuting and averaging the replicates'
+        loadings with the same transport plans and outlier weights used to build the consensus.
+        """
+        if plan_rkj is None:
+            h_nk = h_rnk[0]
+        else:
+            aligned_rnj = torch.einsum("rkj,rnk->rnj", plan_rkj, h_rnk)
+            weights_r1k = weights_rk.unsqueeze(1)
+            h_nk = (weights_r1k * aligned_rnj).sum(dim=0) / weights_r1k.sum(dim=0).clamp(min=_EPS)
+        h_1nk, _ = nmf_compute_loadings_fista(
+            x_ng=x_ng,
+            w_rkg=consensus_kg.detach().unsqueeze(0).contiguous(),
+            h_rnk=h_nk.unsqueeze(0).contiguous(),
+            max_iter=n_iterations,
+        )
+        return h_1nk.squeeze(0).clamp(min=0.0)
+
+    @torch.no_grad()
+    def _solve_loadings_cold(self, x_ng: torch.Tensor, w_kg: torch.Tensor, n_iterations: int) -> torch.Tensor:
+        """NNLS loadings for a factor set that did not come from this batch's forward pass."""
+        h_1nk, _ = nmf_compute_loadings_fista(
+            x_ng=x_ng,
+            w_rkg=w_kg.detach().unsqueeze(0).contiguous(),
+            h_rnk=x_ng.new_zeros((1, x_ng.shape[0], w_kg.shape[0])),
+            max_iter=n_iterations,
+        )
+        return h_1nk.clamp(min=0.0)
+
+    # -------------------------------------------------------------------------------------------
+    # forward / training
+    # -------------------------------------------------------------------------------------------
+
+    def _split_batch(self, x_ng: torch.Tensor) -> list[tuple[torch.Tensor, int]]:
+        """Split the minibatch into conditioning sets, one per group of replicates."""
+        n = x_ng.shape[0]
+        if not self.cross_batch_stability or self.n_replicates < 2 or n < 2 * self.min_cells_per_split:
+            return [(x_ng, self.n_replicates)]
+        if self.shuffle_split:
+            x_ng = x_ng[torch.randperm(n, device=x_ng.device)]
+        half = n // 2
+        r_first = self.n_replicates // 2
+        return [(x_ng[:half], r_first), (x_ng[half : 2 * half], self.n_replicates - r_first)]
+
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+        """
+        Args:
+            x_ng: Gene counts matrix (already transformed).
+            var_names_g: The list of the variable names in the input data.
+
+        Returns:
+            A dictionary with the ``loss`` and per-step monitoring scalars.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+
+        self._maybe_capture_drift_cells(x_ng)
+
+        k = self.sample_k()
+        self._last_k = k
+        lam = self.replicate_loss_weight()
+
+        replicate_losses: list[torch.Tensor] = []
+        consensus_losses: list[torch.Tensor] = []
+        stabilities: list[torch.Tensor] = []
+        consensus_list: list[torch.Tensor] = []
+        cells_list: list[torch.Tensor] = []
+
+        for x_half_ng, r in self._split_batch(x_ng):
+            slot_noise_rke = torch.randn(r, k, self.latent_dim, device=x_ng.device, dtype=x_ng.dtype)
+            solved = self.solve(x_half_ng, k, slot_noise_rke, self.fista_iterations_train)
+
+            x_squared_sum = x_half_ng.pow(2).sum()
+            denominator = x_half_ng.numel()
+            sse_r = frobenius_loss_trace(x_half_ng, solved["h_rnk"], solved["w_rkg"], x_squared_sum)
+            replicate_losses.append(sse_r.mean() / denominator)
+
+            consensus = self._consensus(solved["w_rkg"])
+            consensus_kg = consensus["consensus_kg"]
+            weights_rk = consensus["weights_rk"]
+            assert isinstance(consensus_kg, torch.Tensor) and isinstance(weights_rk, torch.Tensor)
+            h_nk = self._consensus_loadings(
+                x_half_ng,
+                solved["h_rnk"],
+                consensus_kg,
+                consensus["plan_rkj"],
+                weights_rk,
+                self.fista_iterations_train,
+            )
+            sse_1 = frobenius_loss_trace(x_half_ng, h_nk.unsqueeze(0), consensus_kg.unsqueeze(0), x_squared_sum)
+            consensus_losses.append(sse_1.squeeze(0) / denominator)
+
+            stability = consensus["stability"]
+            assert isinstance(stability, torch.Tensor)
+            stabilities.append(stability)
+            consensus_list.append(consensus_kg.detach())
+            cells_list.append(x_half_ng)
+
+        loss = torch.stack(consensus_losses).mean() + lam * torch.stack(replicate_losses).mean()
+
+        metrics = self._step_metrics(stabilities, consensus_losses, consensus_list, cells_list)
+        self._update_ema(k, metrics)
+
+        return {"loss": loss, **metrics}
+
+    @torch.no_grad()
+    def _step_metrics(
+        self,
+        stabilities: list[torch.Tensor],
+        consensus_losses: list[torch.Tensor],
+        consensus_list: list[torch.Tensor],
+        cells_list: list[torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        metrics = {
+            "stability": torch.stack([s.detach() for s in stabilities]).mean(),
+            "error": torch.stack([e.detach() for e in consensus_losses]).mean(),
+        }
+        if len(consensus_list) == 2:
+            metrics["stability_cross"] = match_stability(
+                consensus_list[0], consensus_list[1], self.sinkhorn_epsilon, self.sinkhorn_iterations
+            )
+            # Cross error: the consensus from one half scored on the other half's cells.  Cheap, and
+            # it is the direct read on whether W is solution-grade or only hot-start-grade.
+            cross_errors = []
+            for source, target_ng in ((0, cells_list[1]), (1, cells_list[0])):
+                consensus_kg = consensus_list[source]
+                h_1nk = self._solve_loadings_cold(target_ng, consensus_kg, max(50, self.fista_iterations_train))
+                sse_1 = frobenius_loss_trace(target_ng, h_1nk, consensus_kg.unsqueeze(0))
+                cross_errors.append(sse_1.squeeze(0) / target_ng.numel())
+            metrics["error_cross"] = torch.stack(cross_errors).mean()
+        return metrics
+
+    @torch.no_grad()
+    def _update_ema(self, k: int, metrics: dict[str, torch.Tensor]) -> None:
+        """
+        Per-``k`` EMA of the monitoring metrics.
+
+        These are per-bin rather than global-step EMAs: each ``k`` is drawn only a fraction of the
+        time, so a global decay would give different effective time constants to different ``k``.
+        They are for *monitoring* -- the curriculum makes large-``k`` bins both sparse and
+        contaminated by a still-learning network, which is why the measurement phase exists.
+        """
+        if self._step_cache < self.stability_burn_in_steps:
+            return
+        available = [name for name in self.metric_names if name in metrics]
+        if not available:
+            return
+        # One collective for all metrics.  Without this, per-rank accumulations diverge (and
+        # broadcast_buffers, if enabled, would silently discard every non-zero rank's).
+        values = _all_reduce_mean(torch.stack([metrics[name].detach().float() for name in available]))
+        index = self._k_to_index[k]
+        beta = self.stability_ema_beta
+        for name, value in zip(available, values):
+            ema_k = getattr(self, f"_ema_{name}_k")
+            count_k = getattr(self, f"_ema_count_{name}_k")
+            ema_k[index] = beta * ema_k[index] + (1.0 - beta) * value.to(ema_k.dtype)
+            count_k[index] += 1
+
+    def ema_curve(self, name: str) -> torch.Tensor:
+        """Bias-corrected per-``k`` EMA of a monitoring metric, ``NaN`` where nothing accumulated."""
+        if name not in self.metric_names:
+            raise ValueError(f"unknown metric {name!r}; choose from {self.metric_names}")
+        ema_k = getattr(self, f"_ema_{name}_k")
+        count_k = getattr(self, f"_ema_count_{name}_k")
+        correction = 1.0 - self.stability_ema_beta ** count_k.clamp(min=1)
+        curve = ema_k / correction
+        return torch.where(count_k > 0, curve, torch.full_like(curve, float("nan")))
+
+    # -------------------------------------------------------------------------------------------
+    # drift-based convergence
+    # -------------------------------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _maybe_capture_drift_cells(self, x_ng: torch.Tensor) -> None:
+        """
+        Fill the fixed drift cell buffer from the first training batches.
+
+        Taken from training data on purpose: the drift metric measures whether the *weights* have
+        stopped moving, not generalization, so there is nothing to be gained from held-out cells --
+        and this way the criterion works with no validation dataloader configured.
+        """
+        # Short-circuit on a Python flag rather than reading the buffer: this runs on every training
+        # step, and `.item()` on a device tensor forces a host synchronization.
+        if self._drift_cells_full:
+            return
+        n_captured = int(self._drift_n_captured.item())
+        if n_captured >= self.drift_eval_n_cells:
+            self._drift_cells_full = True
+            return
+        take = min(x_ng.shape[0], self.drift_eval_n_cells - n_captured)
+        self._drift_x_ng[n_captured : n_captured + take] = x_ng[:take].detach().to(self._drift_x_ng.dtype)
+        self._drift_n_captured.fill_(n_captured + take)
+        if n_captured + take >= self.drift_eval_n_cells:
+            self._drift_cells_full = True
+            # All ranks must measure drift on identical cells, or they disagree about stopping.
+            _broadcast_from_rank_zero(self._drift_x_ng)
+
+    @torch.no_grad()
+    def drift_check(self) -> float | None:
+        """
+        Measure factor drift and update the convergence counter.
+
+        Deterministic by construction -- fixed noise, fixed cells, fixed ``k`` -- which is the whole
+        point: there is no sampling noise, so no smoothing is needed, and every rank computes the
+        same number and reaches the same decision without any reduction.
+
+        Returns:
+            The per-step drift rate, or ``None`` if there is nothing to compare against yet.
+        """
+        n_captured = int(self._drift_n_captured.item())
+        if n_captured == 0:
+            return None
+        x_ng = self._drift_x_ng[:n_captured]
+
+        rates: list[torch.Tensor] = []
+        for k in self.drift_k_values:
+            slot_noise_rke = self.drift_slot_noise_rke[:, :k, :].to(x_ng.dtype)
+            solved = self.solve(x_ng, k, slot_noise_rke, 0, compute_loadings=False)
+            consensus_kg = self._consensus(solved["w_rkg"])["consensus_kg"]
+            assert isinstance(consensus_kg, torch.Tensor)
+            previous_kg = getattr(self, f"_drift_previous_w_{k}_kg")
+            if bool(self._drift_has_previous):
+                # Re-align before comparing: without matching, one permutation flip in the slot
+                # ordering reads as catastrophic drift.  The comparison uses the hard assignment
+                # (see matched_distance) so that unchanged weights give exactly zero drift.
+                _, _, plan_1kj, similarity_1kj = align_factors(
+                    consensus_kg.unsqueeze(0), previous_kg, self.sinkhorn_epsilon, self.sinkhorn_iterations
+                )
+                distance = matched_distance(similarity_1kj, plan_1kj).mean()
+                rates.append(distance / max(1, self.drift_check_every_n_steps))
+            previous_kg.copy_(consensus_kg)
+
+        self._drift_has_previous.fill_(True)
+        if not rates:
+            return None
+
+        rate = torch.stack(rates).max()  # the worst k governs
+        self._drift_rate.copy_(rate.to(self._drift_rate.dtype))
+        if float(rate) < self.drift_tol:
+            self._drift_below_tol_count += 1
+        else:
+            self._drift_below_tol_count.zero_()
+        return float(rate)
+
+    @property
+    def stopping_allowed(self) -> bool:
+        """Stopping is only meaningful once the curriculum has finished and had time to settle."""
+        return self._step_cache >= self.curriculum_warmup_steps + self.drift_settle_steps
+
+    @property
+    def converged(self) -> bool:
+        """Drift has stayed below tolerance for ``drift_patience_checks`` consecutive checks."""
+        return self.stopping_allowed and int(self._drift_below_tol_count.item()) >= self.drift_patience_checks
+
+    # -------------------------------------------------------------------------------------------
+    # lightning hooks
+    # -------------------------------------------------------------------------------------------
+
+    def on_train_start(self, trainer: pl.Trainer) -> None:
+        # Restore the Python-side caches from their buffers (one sync, at startup only, so the hot
+        # path stays free).  Doing this here rather than in reset_parameters is what makes a resumed
+        # run continue the curriculum and the convergence criterion instead of restarting them.
+        self._step_cache = int(self._step.item())
+        self._drift_cells_full = int(self._drift_n_captured.item()) >= self.drift_eval_n_cells
+        if trainer.world_size > 1 and getattr(trainer.strategy, "_ddp_kwargs", {}).get("broadcast_buffers", False):
+            warnings.warn(
+                "CNMFTransformer recommends DDPStrategy(broadcast_buffers=False). Everything that must "
+                "agree across ranks is derived deterministically or synchronized explicitly, and this "
+                "model's persisted consensus factors make a per-step buffer broadcast expensive.",
+                UserWarning,
+            )
+
+    def on_train_batch_end(self, trainer: pl.Trainer) -> None:
+        self._step_cache += 1
+        self._step.fill_(self._step_cache)
+
+        if self.log_every_n_steps > 0 and self._step_cache % self.log_every_n_steps == 0:
+            self._log_monitoring(trainer)
+
+        if self.drift_check_every_n_steps > 0 and self._step_cache % self.drift_check_every_n_steps == 0:
+            rate = self.drift_check()
+            pl_module = self._lightning_module(trainer)
+            if rate is not None and pl_module is not None:
+                pl_module.log("factor_drift_rate", self._drift_rate, prog_bar=True)
+            if self.converged:
+                trainer.should_stop = True
+                print(
+                    f"Stopping early: factor drift below {self.drift_tol} for "
+                    f"{self.drift_patience_checks} consecutive checks"
+                )
+
+    @staticmethod
+    def _lightning_module(trainer: pl.Trainer) -> pl.LightningModule | None:
+        module = trainer.model
+        return module if isinstance(module, pl.LightningModule) else None
+
+    def _log_monitoring(self, trainer: pl.Trainer) -> None:
+        pl_module = self._lightning_module(trainer)
+        if pl_module is None:
+            return
+        pl_module.log("curriculum_k_max", float(self.k_values[self.curriculum_k_count() - 1]))
+        pl_module.log("replicate_loss_weight", self.replicate_loss_weight())
+        pl_module.log("sampled_k", float(self._last_k))
+        for name in self.metric_names:
+            curve = self.ema_curve(name)
+            finite = curve[torch.isfinite(curve)]
+            if finite.numel() > 0:
+                pl_module.log(f"{name}__mean_over_k", finite.mean(), prog_bar=(name == "stability"))
+            for k in self.drift_k_values:
+                value = curve[self._k_to_index[k]]
+                if bool(torch.isfinite(value)):
+                    pl_module.log(f"k={k}__{name}", value)
+
+    def validate(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        batch_idx: int,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        output = self(*args, **kwargs)
+        loss = output.get("loss")
+        if loss is not None:
+            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
+
+    def on_train_end(self, trainer: pl.Trainer) -> None:
+        if not self.measure_at_end:
+            return
+        if trainer.global_rank == 0:
+            dataloader = self._measurement_dataloader(trainer)
+            if dataloader is None:
+                warnings.warn("Could not obtain a dataloader for the measurement phase; skipping.", UserWarning)
+            else:
+                # The model normally sits at the end of a CellariumPipeline, so the (GPU) transforms
+                # have to be applied by hand when pulling batches from the datamodule directly.
+                run_measurement_phase(
+                    self,
+                    dataloader=dataloader,
+                    transforms=list(getattr(trainer.model, "transforms", []) or []),
+                    n_batches=self.measurement_n_batches,
+                )
+        trainer.strategy.barrier()
+
+    @staticmethod
+    def _measurement_dataloader(trainer: pl.Trainer) -> Iterable | None:
+        datamodule = getattr(trainer, "datamodule", None)
+        if datamodule is None:
+            return None
+        for name in ("predict_dataloader", "train_dataloader"):
+            factory = getattr(datamodule, name, None)
+            if callable(factory):
+                try:
+                    return factory()
+                except Exception:  # noqa: BLE001 -- try the next candidate
+                    continue
+        return None
+
+    def on_end(self, trainer: pl.Trainer) -> None:
+        trainer.save_checkpoint(trainer.default_root_dir + "/CNMFTransformer.ckpt")
+
+    # -------------------------------------------------------------------------------------------
+    # outputs
+    # -------------------------------------------------------------------------------------------
+
+    @property
+    def factors_dict(self) -> dict[int, torch.Tensor]:
+        """
+        Replicate factors per ``k``, shape ``(r, k, g)``.
+
+        Entries in :attr:`store_replicates_k_values` carry ``r_store`` genuine replicates and are
+        suitable for :func:`~cellarium.ml.models.nmf.plot_density_histograms` and
+        :func:`~cellarium.ml.models.nmf.plot_clustermap`.  Every other ``k`` falls back to the
+        batch-averaged consensus as a single replicate, so any stability computed for those ``k`` by
+        :func:`~cellarium.ml.models.nmf.compute_consensus_factors` is trivially 1.0 and meaningless.
+        Use :attr:`consensus_factors` for those.
+        """
+        out: dict[int, torch.Tensor] = {}
+        for k in self.k_values:
+            if k in self.store_replicates_k_values:
+                out[k] = getattr(self, f"D_{k}_rkg")
+            else:
+                out[k] = getattr(self, f"consensus_D_{k}_kg").unsqueeze(0)
+        return out
+
+    @property
+    def consensus_factors(self) -> dict[int, dict[str, torch.Tensor | float]]:
+        """
+        Measured consensus factors in the format expected by :meth:`infer_loadings`,
+        :meth:`reconstruction_error` and :class:`~cellarium.ml.models.nmf.NMFOutput`, for every
+        ``k`` in :attr:`k_values`.
+        """
+        measured_stability_k = getattr(self, "_measured_stability_mean_k")
+        return {
+            k: {
+                "consensus_D_kg": getattr(self, f"consensus_D_{k}_kg"),
+                "stability": float(measured_stability_k[i]),
+            }
+            for i, k in enumerate(self.k_values)
+        }
+
+    def selection_curves(self) -> dict[str, np.ndarray]:
+        """
+        The measured k-selection curves as numpy arrays, keyed by metric name plus ``"k"``.
+
+        ``stability`` is a Kotliar-comparable silhouette-like contrast (see
+        :func:`matched_silhouette`) reflecting initialization variance only.  ``stability_cross``
+        additionally folds in sampling variance; the *gap* between the two says how much of the
+        stability is a sampling artifact.  ``error`` and ``error_cross`` are per-entry mean squared
+        errors.  The ``*_sem`` entries are standard errors across measurement batches -- on the full
+        integer ``k`` grid these are what let you tell a real discontinuity from measurement noise.
+        """
+        curves: dict[str, np.ndarray] = {"k": np.asarray(self.k_values)}
+        for name in self.metric_names:
+            curves[name] = getattr(self, f"_measured_{name}_mean_k").detach().cpu().numpy()
+            curves[f"{name}_sem"] = getattr(self, f"_measured_{name}_sem_k").detach().cpu().numpy()
+        return curves
+
+    @torch.no_grad()
+    def infer_loadings(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        consensus_factors: dict[int, dict[str, torch.Tensor | float]],
+        k: int,
+        normalize: bool = False,
+        obs_names_n: np.ndarray | None = None,
+    ) -> torch.Tensor:
+        """Infer per-cell loadings for a given ``k`` by solving NNLS against the consensus factors."""
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+        consensus_D_kg = consensus_factors[k]["consensus_D_kg"]
+        assert isinstance(consensus_D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
+        consensus_D_kg = consensus_D_kg.to(device=x_ng.device, dtype=x_ng.dtype)
+        if bool((consensus_D_kg == 0).all()):
+            raise ValueError(
+                f"consensus factors for k={k} are all zeros; run run_measurement_phase() before inferring loadings"
+            )
+        alpha_nk = self._solve_loadings_cold(x_ng, consensus_D_kg, 1000).squeeze(0)
+        if normalize:
+            alpha_nk = F.normalize(alpha_nk, p=1, dim=-1)
+        return alpha_nk
+
+    @torch.no_grad()
+    def reconstruction_error(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        consensus_factors: dict[int, dict[str, torch.Tensor | float]],
+    ) -> dict[int, float]:
+        """Sum of squared reconstruction error for each ``k`` in ``consensus_factors``."""
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+        errors: dict[int, float] = {}
+        for k in consensus_factors:
+            consensus_D_kg = consensus_factors[k]["consensus_D_kg"]
+            assert isinstance(consensus_D_kg, torch.Tensor)
+            consensus_D_kg = consensus_D_kg.to(device=x_ng.device, dtype=x_ng.dtype)
+            alpha_nk = self.infer_loadings(x_ng, var_names_g, consensus_factors, k)
+            errors[k] = float(frobenius_loss_trace(x_ng, alpha_nk.unsqueeze(0), consensus_D_kg.unsqueeze(0)).squeeze(0))
+        return errors
+
+    @torch.no_grad()
+    def predict(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        k: int | None = None,
+        normalize: bool = True,
+        obs_names_n: np.ndarray | None = None,
+    ) -> dict[str, np.ndarray | torch.Tensor]:
+        """Per-cell loadings against the measured consensus factors for ``k``."""
+        k = self.predict_k if k is None else k
+        if k is None:
+            raise ValueError("set `predict_k` on the model or pass `k` to predict()")
+        alpha_nk = self.infer_loadings(x_ng, var_names_g, self.consensus_factors, k, normalize=normalize)
+        out: dict[str, np.ndarray | torch.Tensor] = {"alpha_nk": alpha_nk}
+        if obs_names_n is not None:
+            out["obs_names_n"] = obs_names_n
+        return out
+
+
+# -----------------------------------------------------------------------------------------------
+# Measurement phase
+# -----------------------------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def run_measurement_phase(
+    model: CNMFTransformer,
+    dataloader: Iterable,
+    transforms: Iterable[torch.nn.Module] = (),
+    n_batches: int | None = None,
+    k_values: list[int] | None = None,
+    n_replicates: int | None = None,
+    fista_iterations: int | None = None,
+    device: torch.device | str | None = None,
+    verbose: bool = True,
+) -> dict[str, np.ndarray]:
+    """
+    Measure the stability / error curves and the batch-averaged consensus factors.
+
+    Run after training, when the network has settled.  This exists because the per-``k`` EMAs
+    collected *during* training are non-stationary in a ``k``-dependent way: the curriculum reveals
+    large ``k`` late, so exactly the bins near the interesting part of the curve have both the
+    fewest samples and the most contamination from a still-learning network.  Here the weights are
+    frozen, so the estimate is clean, and with no activations retained ``R`` can be raised to a
+    Kotliar-comparable value.
+
+    The loop is **batches outer, k inner**: each minibatch is fetched once and reused for every
+    ``k``.  For out-of-core data the dataloader is usually the bottleneck, so this matters more than
+    the arithmetic.
+
+    Cross-batch statistics are computed against the *previous* batch's consensus rather than by
+    splitting each batch, which keeps the full ``R`` for both statistics at one solve per
+    ``(batch, k)``.  (Training uses a within-batch split instead, since it has no cross-step state.)
+
+    Args:
+        model: A trained :class:`CNMFTransformer`.
+        dataloader: Yields batch dicts with ``x_ng`` and ``var_names_g``.
+        transforms: GPU transforms to apply to each batch (the model normally sits at the end of a
+            :class:`~cellarium.ml.core.CellariumPipeline` and receives transformed data).
+        n_batches: Number of minibatches.  Defaults to ``model.measurement_n_batches``.
+        k_values: Defaults to every ``k`` in ``model.k_values``.
+        n_replicates: Defaults to ``model.n_replicates_measure``.
+        fista_iterations: Defaults to ``model.fista_iterations_measure``.
+        device: Device on which to run.  Defaults to the model's device.
+        verbose: Show a progress bar.
+
+    Returns:
+        The same dict as :meth:`CNMFTransformer.selection_curves`.
+    """
+    was_training = model.training
+    model.eval()
+    try:
+        k_values = list(model.k_values) if k_values is None else sorted(k_values)
+        n_batches = model.measurement_n_batches if n_batches is None else n_batches
+        n_replicates = model.n_replicates_measure if n_replicates is None else n_replicates
+        fista_iterations = model.fista_iterations_measure if fista_iterations is None else fista_iterations
+        device = model.device if device is None else torch.device(device)
+        transform_list = list(transforms)
+        dtype = model.slot_mu.dtype
+
+        unknown = [k for k in k_values if k not in model._k_to_index]
+        if unknown:
+            raise ValueError(f"k values {unknown} are not in model.k_values")
+
+        names = model.metric_names
+        n_k = len(k_values)
+        sums = {name: torch.zeros(n_k, dtype=torch.float64, device=device) for name in names}
+        sums_of_squares = {name: torch.zeros(n_k, dtype=torch.float64, device=device) for name in names}
+        counts = {name: torch.zeros(n_k, dtype=torch.float64, device=device) for name in names}
+
+        consensus_sums: dict[int, torch.Tensor] = {}
+        consensus_reference: dict[int, torch.Tensor] = {}
+        previous_consensus: dict[int, torch.Tensor] = {}
+        n_consensus: dict[int, int] = {k: 0 for k in k_values}
+
+        iterator: Iterable = enumerate(dataloader)
+        if verbose:
+            iterator = tqdm(iterator, total=n_batches, desc="measuring k-selection curves")
+
+        batches_used = 0
+        for batch_index, batch in iterator:
+            if batch_index >= n_batches:
+                break
+            for transform in transform_list:
+                batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
+            x_ng = batch["x_ng"].to(device=device, dtype=dtype)
+            if x_ng.shape[0] < 2:
+                continue
+            x_squared_sum = x_ng.pow(2).sum()
+            denominator = x_ng.numel()
+            batches_used += 1
+
+            for k_index, k in enumerate(k_values):
+                slot_noise_rke = torch.randn(n_replicates, k, model.latent_dim, device=device, dtype=dtype)
+                solved = model.solve(x_ng, k, slot_noise_rke, fista_iterations)
+                consensus = model._consensus(solved["w_rkg"])
+                consensus_kg = consensus["consensus_kg"]
+                weights_rk = consensus["weights_rk"]
+                stability = consensus["stability"]
+                assert isinstance(consensus_kg, torch.Tensor)
+                assert isinstance(weights_rk, torch.Tensor)
+                assert isinstance(stability, torch.Tensor)
+
+                h_nk = model._consensus_loadings(
+                    x_ng, solved["h_rnk"], consensus_kg, consensus["plan_rkj"], weights_rk, fista_iterations
+                )
+                error = (
+                    frobenius_loss_trace(x_ng, h_nk.unsqueeze(0), consensus_kg.unsqueeze(0), x_squared_sum).squeeze(0)
+                    / denominator
+                )
+                observations: dict[str, torch.Tensor] = {"stability": stability, "error": error}
+
+                if k in previous_consensus:
+                    observations["stability_cross"] = match_stability(
+                        previous_consensus[k], consensus_kg, model.sinkhorn_epsilon, model.sinkhorn_iterations
+                    )
+                    h_1nk = model._solve_loadings_cold(x_ng, previous_consensus[k], fista_iterations)
+                    observations["error_cross"] = (
+                        frobenius_loss_trace(x_ng, h_1nk, previous_consensus[k].unsqueeze(0), x_squared_sum).squeeze(0)
+                        / denominator
+                    )
+
+                for name, value in observations.items():
+                    scalar = value.detach().double()
+                    sums[name][k_index] += scalar
+                    sums_of_squares[name][k_index] += scalar * scalar
+                    counts[name][k_index] += 1.0
+
+                # Running consensus mean, Sinkhorn-aligned to the first batch's reference.
+                detached_kg = consensus_kg.detach()
+                if k not in consensus_reference:
+                    consensus_reference[k] = detached_kg.clone()
+                    consensus_sums[k] = detached_kg.double().clone()
+                else:
+                    aligned_1kg, _, _, _ = align_factors(
+                        detached_kg.unsqueeze(0),
+                        consensus_reference[k],
+                        model.sinkhorn_epsilon,
+                        model.sinkhorn_iterations,
+                    )
+                    consensus_sums[k] += aligned_1kg.squeeze(0).double()
+                n_consensus[k] += 1
+                previous_consensus[k] = detached_kg
+
+                # Replicate factors for the diagnostic plots, from the first batch only.
+                if batches_used == 1 and k in model.store_replicates_k_values:
+                    stored_rkg = getattr(model, f"D_{k}_rkg")
+                    stored_rkg.copy_(solved["w_rkg"].detach()[: stored_rkg.shape[0]].to(stored_rkg.dtype))
+
+        if batches_used == 0:
+            raise RuntimeError("the measurement dataloader yielded no usable batches")
+
+        for name in names:
+            mean_k = getattr(model, f"_measured_{name}_mean_k")
+            sem_k = getattr(model, f"_measured_{name}_sem_k")
+            mean_k.fill_(float("nan"))
+            sem_k.fill_(float("nan"))
+            for k_index, k in enumerate(k_values):
+                count = float(counts[name][k_index])
+                if count < 1.0:
+                    continue
+                model_index = model._k_to_index[k]
+                mean = sums[name][k_index] / count
+                mean_k[model_index] = mean.to(mean_k.dtype)
+                if count >= 2.0:
+                    variance = (sums_of_squares[name][k_index] / count - mean * mean).clamp(min=0.0)
+                    variance = variance * count / (count - 1.0)  # sample variance
+                    sem_k[model_index] = (variance / count).sqrt().to(sem_k.dtype)
+                else:
+                    sem_k[model_index] = 0.0
+
+        for k in k_values:
+            if n_consensus[k] == 0:
+                continue
+            averaged_kg = (consensus_sums[k] / n_consensus[k]).to(dtype)
+            buffer_kg = getattr(model, f"consensus_D_{k}_kg")
+            buffer_kg.copy_(l1_normalize_rows(averaged_kg).to(buffer_kg.dtype))
+
+        model._measured_n_batches.fill_(batches_used)
+        if verbose:
+            print(f"measurement phase complete: {batches_used} batches x {len(k_values)} k values")
+        return model.selection_curves()
+    finally:
+        model.train(was_training)
+
+
+def export_hot_start(
+    model: CNMFTransformer,
+    k_values: list[int] | None = None,
+    r: int = 1,
+) -> dict[int, torch.Tensor]:
+    """
+    Export measured consensus factors as ``{k: (r, k, g)}`` for seeding another NMF model.
+
+    Intended for :class:`~cellarium.ml.models.AmortizedOnlineNonNegativeMatrixFactorization`, whose
+    ``D_{k}_rkg`` buffers use the same L1-normalized-row convention.
+
+    .. warning::
+        Hot starting a *consensus* run partly defeats the consensus.  Kotliar's ``r`` replicates are
+        meant to be independent random initializations, and that independence is what makes the
+        downstream silhouette meaningful; seeding them all from one consensus makes them converge
+        together and inflates stability regardless of whether the programs are real.  Use ``r=1``
+        (or a small ``r``) to *polish* factors at a ``k`` you have already chosen.  To obtain a
+        Kotliar-comparable stability number, run the other model cold instead.
+
+    .. note::
+        The receiving model accumulates Mairal's ``A_rkk`` / ``B_rkg`` from zero, so its first
+        factor update optimizes against a single minibatch and will pull the injected factors a long
+        way.  To preserve the hot start, accumulate ``A`` / ``B`` over a few batches with the
+        injected factors frozen before letting them update.
+
+    Args:
+        model: A :class:`CNMFTransformer` whose measurement phase has been run.
+        k_values: Which ``k`` to export.  Defaults to all of ``model.k_values``.
+        r: Number of (identical) replicates to stack.
+
+    Returns:
+        Dict mapping ``k`` to a factor tensor of shape ``(r, k, g)``.
+    """
+    k_values = list(model.k_values) if k_values is None else sorted(k_values)
+    unknown = [k for k in k_values if k not in model._k_to_index]
+    if unknown:
+        raise ValueError(f"k values {unknown} are not in model.k_values")
+
+    out: dict[int, torch.Tensor] = {}
+    for k in k_values:
+        consensus_kg = getattr(model, f"consensus_D_{k}_kg").detach()
+        if bool((consensus_kg == 0).all()):
+            raise ValueError(f"consensus factors for k={k} are all zeros; run run_measurement_phase() first")
+        row_sums = consensus_kg.sum(dim=-1)
+        if not bool(torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-4)):
+            raise ValueError(
+                f"consensus factors for k={k} are not L1-normalized by row, which is required for "
+                "compatibility with AmortizedOnlineNonNegativeMatrixFactorization"
+            )
+        out[k] = consensus_kg.unsqueeze(0).expand(r, -1, -1).clone()
+    return out
+
+
+def plot_k_selection(model: CNMFTransformer, use_cross: bool = False) -> None:
+    """
+    Plot the measured stability / error trade-off, with error bars from the measurement batches.
+
+    Args:
+        model: A :class:`CNMFTransformer` whose measurement phase has been run.
+        use_cross: Plot the cross-batch statistics (which fold in sampling variance) instead of the
+            Kotliar-comparable within-batch ones.
+    """
+    from matplotlib import pyplot as plt
+
+    curves = model.selection_curves()
+    stability_key = "stability_cross" if use_cross else "stability"
+    error_key = "error_cross" if use_cross else "error"
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.errorbar(curves["k"], curves[stability_key], yerr=curves[f"{stability_key}_sem"], fmt="o-", color="b", capsize=2)
+    ax.set_ylabel(f"Stability ({'cross-batch' if use_cross else 'within-batch'})", color="b")
+    ax.set_xlabel("Number of components: k")
+    ax.tick_params(axis="y", colors="b")
+    ax.grid(True)
+
+    ax2 = ax.twinx()
+    ax2.errorbar(curves["k"], curves[error_key], yerr=curves[f"{error_key}_sem"], fmt="o-", color="r", capsize=2)
+    ax2.set_ylabel("Reconstruction error (per-entry MSE)", color="r")
+    ax2.tick_params(axis="y", colors="r")
+    ax2.grid(False)
+    fig.tight_layout()
+    plt.show()

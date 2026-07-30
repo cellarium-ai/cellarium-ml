@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from cellarium.ml.models.cellarium_gpt import CellariumGPT
+from cellarium.ml.models.cnmf_transformer import CNMFTransformer
 from cellarium.ml.models.contrastive_mlp import ContrastiveMLP
 from cellarium.ml.models.geneformer import Geneformer
 from cellarium.ml.models.hvg_seurat_v3 import HVGSeuratV3
@@ -18,6 +19,7 @@ from cellarium.ml.models.tdigest import TDigest
 __all__ = [
     "AmortizedOnlineNonNegativeMatrixFactorization",
     "BayesianNonNegativeMatrixFactorization",
+    "CNMFTransformer",
     "CellariumGPT",
     "CellariumModel",
     "ContrastiveMLP",
