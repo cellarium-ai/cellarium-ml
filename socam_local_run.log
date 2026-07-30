@@ -1,0 +1,118 @@
+/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/google/api_core/_python_version_support.py:255: FutureWarning: You are using a Python version (3.10.20) which Google will stop supporting in new releases of google.api_core once it reaches its end of life (2026-10-04). Please upgrade to the latest Python version, or at least Python 3.11, to continue receiving updates for google.api_core past that date.
+  warnings.warn(message, FutureWarning)
+* Owlready2 * Warning: ignoring cyclic subclass of/subproperty of, involving:
+  http://purl.obolibrary.org/obo/CHEBI_36080
+  http://purl.obolibrary.org/obo/PR_000000001
+
+/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/google/api_core/_python_version_support.py:255: FutureWarning: You are using a Python version (3.10.20) which Google will stop supporting in new releases of google.cloud._storage_v2 once it reaches its end of life (2026-10-04). Please upgrade to the latest Python version, or at least Python 3.11, to continue receiving updates for google.cloud._storage_v2 past that date.
+  warnings.warn(message, FutureWarning)
+/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/google/api_core/_python_version_support.py:255: FutureWarning: You are using a Python version (3.10.20) which Google will stop supporting in new releases of google.cloud.storage_control_v2 once it reaches its end of life (2026-10-04). Please upgrade to the latest Python version, or at least Python 3.11, to continue receiving updates for google.cloud.storage_control_v2 past that date.
+  warnings.warn(message, FutureWarning)
+/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/lightning/fabric/utilities/seed.py:42: No seed found, seed set to 0
+Seed set to 0
+/home/nmagre/Github_repos/cellarium-ml-SOCAM_inference/cellarium/ml/transforms/divide_by_scale.py:39: UserWarning: NaN values found in `scale_g`. These will be replaced with 1/eps = 1000000.0
+  warnings.warn(f"NaN values found in `scale_g`. These will be replaced with 1/eps = {1 / eps}")
+I0728 23:50:31.089494   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:31.324967   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/1
+----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 1 processes
+----------------------------------------------------------------------------------------------------
+
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/nmagre/.netrc.
+wandb: Currently logged in as: nmagre (nmagre-broad-institute) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.28.0
+wandb: Run data is saved locally in /tmp/wandb/wandb/run-20260728_235032-irtwm3k2
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run socam_lam100_class_balanced_warmup_cosine_7epochs
+wandb: ⭐️ View project at https://wandb.ai/nmagre-broad-institute/socam-lambda_trial
+wandb: 🚀 View run at https://wandb.ai/nmagre-broad-institute/socam-lambda_trial/runs/irtwm3k2
+/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/jsonargparse/_typehints.py:1265: JsonargparseWarning: 
+    Unable to serialize instance tensor([0.8612, 0.9435, 0.5936,  ..., 0.5792, 0.3004, 0.6224])
+
+  warning(val)
+/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/jsonargparse/_typehints.py:1265: JsonargparseWarning: 
+    Unable to serialize instance ['ENSG00000187642' 'ENSG00000078808' 'ENSG00000272106' ...  'ENSG00000228836'
+    'ENSG00000231937' 'ENSG00000268916']
+
+  warning(val)
+/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/jsonargparse/_typehints.py:1265: JsonargparseWarning: 
+    Unable to serialize instance tensor([[ True,  True,  True,  ...,  True,  True, False],         [False,  True,
+    True,  ..., False, False, False],         [False, False,  True,  ..., False, False, False],         ...,
+    [False, False, False,  ...,  True, False, False],         [False, False, False,  ..., False,  True, False],
+    [False, False, False,  ..., False, False,  True]])
+
+  warning(val)
+/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/jsonargparse/_typehints.py:1265: JsonargparseWarning: 
+    Unable to serialize instance cell_type_ontology_term_id CL:0000001        80 CL:0000006      1837 CL:0000019
+    11 CL:0000030       540 CL:0000031      7617                ...   CL:4033044        71 CL:4033048      1916
+    CL:4033054    131160 CL:4033057    289758 CL:4033058    197952 Name: num_cells, Length: 670, dtype: int64
+
+  warning(val)
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0,1]
+
+  | Name     | Type              | Params | Mode 
+-------------------------------------------------------
+0 | pipeline | CellariumPipeline | 18.6 M | train
+-------------------------------------------------------
+18.6 M    Trainable params
+0         Non-trainable params
+18.6 M    Total params
+74.457    Total estimated model params size (MB)
+7         Modules in train mode
+0         Modules in eval mode
+Sanity Checking: |          | 0/? [00:00<?, ?it/s]I0728 23:50:37.298821   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:37.404290   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:37.523160   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:37.648868   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:37.773886   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:37.894122   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.012891   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.133050   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.252264   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.377207   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.497960   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.622867   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.742820   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.860761   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:38.979745   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:39.103113   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:39.222476   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:39.350521   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:39.487180   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:39.608343   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:39.735926   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:39.855086   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:39.974950   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:50:40.096230   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+Sanity Checking:   0%|          | 0/2 [00:00<?, ?it/s]Sanity Checking DataLoader 0:   0%|          | 0/2 [00:00<?, ?it/s]/opt/conda/envs/socam_local_gpu/lib/python3.10/site-packages/lightning/pytorch/utilities/data.py:79: Trying to infer the `batch_size` from an ambiguous collection. The batch size we found is 8192. To avoid any miscalculations, use `self.log(..., batch_size=batch_size)`.
+Sanity Checking DataLoader 0:  50%|█████     | 1/2 [00:03<00:03,  0.29it/s]Sanity Checking DataLoader 0: 100%|██████████| 2/2 [00:12<00:00,  0.16it/s]                                                                           I0728 23:51:05.309844   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:05.468823   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:05.673881   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:05.904543   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:06.063073   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:06.205917   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:06.389653   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:06.548263   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:06.719204   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:06.906537   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:07.086893   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:07.272080   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:07.457216   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:07.615220   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:07.837074   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:08.018021   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:08.211893   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:08.366076   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:08.524112   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:08.699767   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:08.910297   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:09.089356   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:09.322285   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0728 23:51:09.480985   58762 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+Training: |          | 0/? [00:00<?, ?it/s]Training:   0%|          | 0/5023 [00:00<?, ?it/s]Epoch 0:   0%|          | 0/5023 [00:00<?, ?it/s] Epoch 0:   0%|          | 1/5023 [00:34<47:51:55,  0.03it/s]Epoch 0:   0%|          | 1/5023 [00:34<47:52:06,  0.03it/s, v_num=m3k2]Epoch 0:   0%|          | 2/5023 [00:34<24:08:52,  0.06it/s, v_num=m3k2]Epoch 0:   0%|          | 2/5023 [00:34<24:08:56,  0.06it/s, v_num=m3k2]Epoch 0:   0%|          | 3/5023 [00:35<16:18:05,  0.09it/s, v_num=m3k2]Epoch 0:   0%|          | 3/5023 [00:35<16:18:09,  0.09it/s, v_num=m3k2]Epoch 0:   0%|          | 4/5023 [00:35<12:22:28,  0.11it/s, v_num=m3k2]Epoch 0:   0%|          | 4/5023 [00:35<12:22:30,  0.11it/s, v_num=m3k2]Epoch 0:   0%|          | 5/5023 [00:35<10:01:52,  0.14it/s, v_num=m3k2]Epoch 0:   0%|          | 5/5023 [00:35<10:01:55,  0.14it/s, v_num=m3k2]Epoch 0:   0%|          | 6/5023 [00:36<8:28:01,  0.16it/s, v_num=m3k2] Epoch 0:   0%|          | 6/5023 [00:36<8:28:03,  0.16it/s, v_num=m3k2]

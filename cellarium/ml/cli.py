@@ -603,6 +603,22 @@ def compute_cl_name_subset(data: CellariumAnnDataDataModule) -> list[str]:
     return list(obs[field.key].cat.categories)
 
 
+def resolve_cl_name_subset(
+    data: CellariumAnnDataDataModule,
+    cl_name_subset: list[str] | None,
+) -> list[str]:
+    """
+    Preserve an explicitly configured class subset, otherwise derive it from the data.
+
+    This is important for SOCAM checkpoint restore during prediction, where the
+    output class space must match the checkpoint rather than the categories present
+    in the prediction dataset.
+    """
+    if cl_name_subset is not None:
+        return cl_name_subset
+    return compute_cl_name_subset(data)
+
+
 def compute_cell_type_categories(data: CellariumAnnDataDataModule) -> list[str] | None:
     """Derive ``cell_type_categories`` from the ``validation_cell_type_index_n`` batch key.
 
@@ -1208,7 +1224,11 @@ def socam(args: ArgsType = None) -> None:
                 compute_var_names_g,
             ),
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
-            LinkArguments("data", "model.model.init_args.cl_name_subset", compute_cl_name_subset),
+            LinkArguments(
+                ("data", "model.model.init_args.cl_name_subset"),
+                "model.model.init_args.cl_name_subset",
+                resolve_cl_name_subset,
+            ),
         ],
     )
     cli(args=args)
