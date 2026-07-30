@@ -603,22 +603,6 @@ def compute_cl_name_subset(data: CellariumAnnDataDataModule) -> list[str]:
     return list(obs[field.key].cat.categories)
 
 
-def resolve_cl_name_subset(
-    data: CellariumAnnDataDataModule,
-    cl_name_subset: list[str] | None,
-) -> list[str]:
-    """
-    Preserve an explicitly configured class subset, otherwise derive it from the data.
-
-    This is important for SOCAM checkpoint restore during prediction, where the
-    output class space must match the checkpoint rather than the categories present
-    in the prediction dataset.
-    """
-    if cl_name_subset is not None:
-        return cl_name_subset
-    return compute_cl_name_subset(data)
-
-
 def compute_cell_type_categories(data: CellariumAnnDataDataModule) -> list[str] | None:
     """Derive ``cell_type_categories`` from the ``validation_cell_type_index_n`` batch key.
 
@@ -738,6 +722,10 @@ def lightning_cli_factory(
             This method injects return_predictions=False into the kwargs to prevent the predictions from
             being returned, which prevents memory overflow when writing predictions to a file."""
             kwargs["return_predictions"] = False
+            # Prediction checkpoints may contain training-only buffers such as
+            # class_weights. These are not required for inference and should not
+            # block checkpoint restore.
+            self.model.strict_loading = False
             self.trainer.predict(*args, **kwargs)
 
     return NewLightningCLI
@@ -1215,21 +1203,28 @@ def socam(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
 
+    if isinstance(args, list):
+        subcommand = args[0] if args else None
+    elif args is None:
+        argv = sys.argv[1:]
+        subcommand = argv[0] if argv else None
+    else:
+        subcommand = getattr(args, "subcommand", None)
+
+    link_arguments = [
+        LinkArguments(
+            ("model.cpu_transforms", "model.transforms", "data"),
+            "model.model.init_args.var_names_g",
+            compute_var_names_g,
+        ),
+        LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+    ]
+    if subcommand != "predict":
+        link_arguments.append(LinkArguments("data", "model.model.init_args.cl_name_subset", compute_cl_name_subset))
+
     cli = lightning_cli_factory(
         "cellarium.ml.models.SOCAM",
-        link_arguments=[
-            LinkArguments(
-                ("model.cpu_transforms", "model.transforms", "data"),
-                "model.model.init_args.var_names_g",
-                compute_var_names_g,
-            ),
-            LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
-            LinkArguments(
-                ("data", "model.model.init_args.cl_name_subset"),
-                "model.model.init_args.cl_name_subset",
-                resolve_cl_name_subset,
-            ),
-        ],
+        link_arguments=link_arguments,
     )
     cli(args=args)
 
