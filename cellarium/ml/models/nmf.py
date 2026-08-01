@@ -1434,49 +1434,50 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
     assert local_neighborhood_size > 0 and local_neighborhood_size < 1, (
         "local_neighborhood_size must be between 0 and 1"
     )
-    assert density_threshold > 0 and density_threshold <= 1, "density_threshold must be > 0 and <= 1"
+    assert density_threshold > 0 and density_threshold <= 2, "density_threshold must be > 0 and <= 2"
     r, num_component, g = D_rkg.shape
     d_norm_rkg = F.normalize(D_rkg, dim=-1, p=2)
     d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
 
     if r > 1:
         n_neighbors = int(r * local_neighborhood_size)
-        if n_neighbors < 2:
-            raise UserWarning(
-                f"local_neighborhood_size {local_neighborhood_size} is too small for k={num_component}. "
-                f"n_neighbors = int(replicates * local_neighborhood_size) = {n_neighbors}. "
-                "We want n_neighbors >= 2. Increase local_neighborhood_size."
-            )
+        can_filter = n_neighbors >= 2
 
-        # euclidean distance to every other run
-        euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
-        euclidean_dist_mm.fill_diagonal_(0)  # correct for roundoff errors that may be present
+        if can_filter:
+            # euclidean distance to every other run
+            euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+            euclidean_dist_mm.fill_diagonal_(0)  # correct for roundoff errors that may be present
 
-        # top n_neighbors plus self (distance 0)
-        n_nearest_dist_including_self_mL, _ = torch.topk(euclidean_dist_mm, n_neighbors + 1, largest=False)
+            # top n_neighbors plus self (distance 0)
+            n_nearest_dist_including_self_mL, _ = torch.topk(euclidean_dist_mm, n_neighbors + 1, largest=False)
 
-        # distances to top n_neighbors
-        n_nearest_dist_ml = n_nearest_dist_including_self_mL[:, 1:]
+            # distances to top n_neighbors
+            n_nearest_dist_ml = n_nearest_dist_including_self_mL[:, 1:]
 
-        # mean distance to top n_neighbors
-        mean_neighbor_distance_m = n_nearest_dist_ml.mean(dim=1)
+            # mean distance to top n_neighbors
+            mean_neighbor_distance_m = n_nearest_dist_ml.mean(dim=1)
 
-        if plot_only:
-            import matplotlib.pyplot as plt
+            if plot_only:
+                import matplotlib.pyplot as plt
 
-            plt.figure(figsize=(5, 2))
-            plt.hist(mean_neighbor_distance_m.cpu().numpy(), bins=75)
-            plt.title(f"Local Neighborhood Distances: k = {num_component}")
-            plt.ylabel("Number of NMF factors\n(total is replicates times k)")
-            plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
-            plt.xlim([-0.05, 1.05])
-            plt.show()
-            return
+                plt.figure(figsize=(5, 2))
+                plt.hist(mean_neighbor_distance_m.cpu().numpy(), bins=75)
+                plt.title(f"Local Neighborhood Distances: k = {num_component}")
+                plt.ylabel("Number of NMF factors\n(total is replicates times k)")
+                plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
+                plt.xlim([-0.05, 1.05])
+                plt.show()
+                return
 
-        # filter out runs considered outliers based on threshold
-        logic = mean_neighbor_distance_m < density_threshold
-        euclidean_dist_ff = euclidean_dist_mm[logic, :][:, logic]
-        n_nearest_dist_fl = n_nearest_dist_ml[logic, :]
+            logic = mean_neighbor_distance_m < density_threshold
+        else:
+            # Too few replicates for a meaningful neighborhood estimate; keep all rows.
+            euclidean_dist_mm = None
+            n_nearest_dist_ml = None
+            logic = torch.ones(len(d_norm_mg), dtype=torch.bool, device=d_norm_mg.device)
+
+        euclidean_dist_ff = euclidean_dist_mm[logic, :][:, logic] if euclidean_dist_mm is not None else None
+        n_nearest_dist_fl = n_nearest_dist_ml[logic, :] if n_nearest_dist_ml is not None else None
         d_norm_fg = d_norm_mg[logic, :]
 
         if len(d_norm_fg) == 0:

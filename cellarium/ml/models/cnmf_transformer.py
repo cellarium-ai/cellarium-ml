@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from tqdm.auto import tqdm
 
 from cellarium.ml.models.model import PredictMixin, ValidateMixin
-from cellarium.ml.models.nmf import NonNegativeMatrixFactorization, nmf_compute_loadings_fista
+from cellarium.ml.models.nmf import NonNegativeMatrixFactorization, consensus as nmf_consensus, nmf_compute_factors_fista, nmf_compute_loadings_fista
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -466,19 +466,25 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
 
     Every training step samples a ``k`` from a growing curriculum window, embeds the cells with a
     strictly linear encoder, runs ``R`` independent noise seeds through a slot-attention stack
-    (cells as keys/values), decodes each replicate's factors ``W``, solves the loadings ``H`` with
-    a detached FISTA polish, and reduces the ``R`` replicates to a differentiable Sinkhorn
-    consensus.  Training minimizes the consensus reconstruction error plus a decaying weight times
-    the mean replicate reconstruction error.
+    (cells as keys/values), and decodes each layer's slots to replicate factor matrices ``W``.
+    Loadings ``H`` are solved with a detached FISTA polish of the final-layer ``W``.  Training
+    minimizes a **self-consistency loss**: the mean squared error between each layer's decoded ``W``
+    and a stop-gradient target ``W'`` produced by running :func:`nmf_compute_factors_fista` on the
+    final-layer ``W`` given the stop-gradient ``H``.  Per-layer decoders (the AlphaFold trick)
+    give early layers a direct gradient path without running FISTA per layer.
 
     Three design constraints are deliberate and should not be "simplified" away:
 
     * **Stop-gradient on H.**  The FISTA polish is fully detached.  If gradients flowed through the
       solver, the transformer would spend capacity learning to invert FISTA instead of shaping the
       geometric basins of ``W``.
-    * **Low-capacity encoder and decoder.**  Single linear layers only.  All of the optimization
-      work belongs to the attention stack.
-    * **Frobenius loss, not Poisson KL.**  See :func:`frobenius_loss_trace`.
+    * **Low-capacity encoder and per-layer decoders.**  Single linear layers only.  All of the
+      optimization work belongs to the attention stack.
+    * **Self-consistency loss.**  The training signal is ``||W_l - stop_grad(W')||²`` summed over
+      layers, where ``W'`` is produced by running ``fista_w_iterations_train`` FISTA steps on the
+      final-layer ``W`` given the stop-gradient ``H``.  This is zero if and only if the transformer
+      outputs a true NMF fixed point, which avoids the gradient symmetry that causes mode collapse
+      under a pure Frobenius reconstruction loss.
 
     Convergence is judged by *factor drift* -- how far the consensus programs rotate per optimizer
     step, measured with fixed noise on a fixed set of cells -- and never by the training loss.  The
@@ -512,8 +518,6 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         n_replicates: ``R`` used during training.  Fresh replicates are drawn every step and
             information accumulates over thousands of steps, so this can be far smaller than
             Kotliar's 100 without hurting the gradient.
-        n_replicates_measure: ``R`` used in the final measurement phase, where no activations are
-            retained and a Kotliar-comparable replicate count is affordable.
         cross_batch_stability: Split the minibatch in half and assign half the replicates to each,
             enabling the cross-batch stability statistic.
         min_cells_per_split: Minimum cells per half; below this the split is skipped.
@@ -521,8 +525,9 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             returns cells in a systematic order.
         fista_iterations_train: FISTA iterations for the loadings polish during training.  This is
             a *polish* of a good hot start, not a solve from scratch, so it can be small.
-        fista_iterations_measure: FISTA iterations during measurement, where the error axis needs
-            to be converged.
+        fista_w_iterations_train: FISTA iterations for polishing ``W`` into the self-consistency
+            target ``W'`` during training.  More steps → cleaner training signal; the default 100
+            is usually well-converged for the hot-started ``W``.
         sinkhorn_epsilon: Entropic regularization for consensus matching.
         sinkhorn_iterations: Sinkhorn iterations.
         sinkhorn_refine_rounds: Detached barycenter refinement rounds.
@@ -530,11 +535,9 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         detach_sinkhorn_plan: Do not backpropagate through the transport plan.
         curriculum_warmup_steps: Steps over which the ``k`` window grows to cover all ``k_values``.
         curriculum_initial_k_count: How many of the smallest ``k_values`` are available at step 0.
-        lam_init: Initial weight on the replicate loss (favor independent replicates early).
-        lam_min: Floor for the replicate loss weight.
-        lam_decay_steps: Exponential decay constant for the replicate loss weight.
-        stability_burn_in_steps: Do not accumulate monitoring EMAs before this step; an untrained
-            network's stability is meaningless.
+        stability_burn_in_steps: Do not accumulate monitoring EMAs before this step.  The default
+            is 0 (accumulate from the first step); set it if you want to discard the noisiest
+            early-training data from the per-k EMA curves.
         stability_ema_beta: Per-``k`` EMA decay for the monitoring curves.
         drift_k_values: ``k`` values at which factor drift is measured.  Defaults to the smallest,
             median and largest of ``k_values``.  Reduced with a max, so the worst ``k`` governs.
@@ -567,27 +570,24 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         var_names_g: Sequence[str],
         k_values: list[int],
         latent_dim: int = 256,
-        n_layers: int = 3,
+        n_iterations: int = 3,
         n_self_attention_heads: int = 8,
         ffn_mult: int = 4,
+        loss_discount_ratio: float = 2.0,
         n_replicates: int = 32,
-        n_replicates_measure: int = 100,
         cross_batch_stability: bool = True,
         min_cells_per_split: int = 64,
         shuffle_split: bool = True,
         fista_iterations_train: int = 25,
-        fista_iterations_measure: int = 150,
+        fista_w_iterations_train: int = 100,
         sinkhorn_epsilon: float = 0.05,
         sinkhorn_iterations: int = 50,
         sinkhorn_refine_rounds: int = 2,
-        outlier_gamma: float = 5.0,
+        outlier_gamma: float = 0.0,
         detach_sinkhorn_plan: bool = True,
         curriculum_warmup_steps: int = 5000,
         curriculum_initial_k_count: int = 1,
-        lam_init: float = 10.0,
-        lam_min: float = 0.1,
-        lam_decay_steps: int = 5000,
-        stability_burn_in_steps: int = 1000,
+        stability_burn_in_steps: int = 0,
         stability_ema_beta: float = 0.9,
         drift_k_values: list[int] | None = None,
         drift_eval_n_cells: int = 2048,
@@ -617,13 +617,19 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         g = len(self.var_names_g)
         self.n_genes = g
         self.latent_dim = latent_dim
+        self.n_iterations = n_iterations
+        self.loss_discount_ratio = loss_discount_ratio
+        # Geometric discount weights: later iterations get more weight.  Normalized to sum to 1
+        # so the loss scale is stable regardless of n_iterations or loss_discount_ratio.
+        raw = [loss_discount_ratio**i for i in range(n_iterations)]
+        total = sum(raw)
+        self._iter_weights: list[float] = [w / total for w in raw]
         self.n_replicates = n_replicates
-        self.n_replicates_measure = n_replicates_measure
         self.cross_batch_stability = cross_batch_stability
         self.min_cells_per_split = min_cells_per_split
         self.shuffle_split = shuffle_split
         self.fista_iterations_train = fista_iterations_train
-        self.fista_iterations_measure = fista_iterations_measure
+        self.fista_w_iterations_train = fista_w_iterations_train
         self.sinkhorn_epsilon = sinkhorn_epsilon
         self.sinkhorn_iterations = sinkhorn_iterations
         self.sinkhorn_refine_rounds = sinkhorn_refine_rounds
@@ -631,9 +637,6 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self.detach_sinkhorn_plan = detach_sinkhorn_plan
         self.curriculum_warmup_steps = curriculum_warmup_steps
         self.curriculum_initial_k_count = max(1, min(len(self.k_values), curriculum_initial_k_count))
-        self.lam_init = lam_init
-        self.lam_min = lam_min
-        self.lam_decay_steps = max(1, lam_decay_steps)
         self.stability_burn_in_steps = stability_burn_in_steps
         self.stability_ema_beta = stability_ema_beta
         self.drift_eval_n_cells = drift_eval_n_cells
@@ -662,27 +665,27 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         unknown = [k for k in self.store_replicates_k_values if k not in self._k_to_index]
         if unknown:
             raise ValueError(f"store_replicates_k_values {unknown} are not in k_values")
-        if r_store > n_replicates_measure:
-            raise ValueError(f"r_store ({r_store}) must not exceed n_replicates_measure ({n_replicates_measure})")
         self.r_store = r_store
 
         # --- modules ---
         self.encoder = LinearCellEncoder(g, latent_dim)
-        # Keys and values are projected once and shared across layers and replicates.
+        # Keys and values are projected once and shared across iterations and replicates.
         self.to_key = torch.nn.Linear(latent_dim, latent_dim, bias=False)
         self.to_value = torch.nn.Linear(latent_dim, latent_dim, bias=False)
-        self.blocks = torch.nn.ModuleList(
-            [SlotAttentionBlock(latent_dim, n_self_attention_heads, ffn_mult) for _ in range(n_layers)]
-        )
+        # Single shared block and decoder applied recurrently, mirroring an unrolled iterative
+        # solver (cf. LISTA / Slot Attention).  Every iteration applies the same update rule so
+        # the slot space keeps a fixed coordinate system, making the shared decoder coherent.
+        self.block = SlotAttentionBlock(latent_dim, n_self_attention_heads, ffn_mult)
         self.decoder = LinearFactorDecoder(latent_dim, g)
         # Non-affine on purpose: the loadings hot start is inside a no_grad region (stop-gradient on
         # H), so learnable parameters here could never receive a gradient and would sit dead.
         self.norm_hot_start = torch.nn.LayerNorm(latent_dim, elementwise_affine=False)
-        # Slot initialization as in Slot Attention: a learned Gaussian, whose symmetry across the k
-        # slots is broken only by the noise.  The k embedding is what tells the network which
-        # problem it is solving; without it the only signal about k is the number of tokens.
+        # Slot initialization as in Slot Attention: a Gaussian broken by noise tokens.  slot_mu is
+        # learned; slot_log_sigma is intentionally frozen at 0 (sigma = 1).  Keeping sigma fixed
+        # prevents the model from learning to suppress the noise tokens (posterior collapse), which
+        # would make all replicates identical and lose the exploration needed for k-selection.
         self.slot_mu = torch.nn.Parameter(torch.empty(latent_dim))
-        self.slot_log_sigma = torch.nn.Parameter(torch.empty(latent_dim))
+        self.slot_log_sigma = torch.nn.Parameter(torch.zeros(latent_dim), requires_grad=False)
         self.k_embedding = torch.nn.Embedding(self.k_max + 1, latent_dim)
 
         # --- buffers: declared here, valued in reset_parameters (models are built on meta) ---
@@ -719,6 +722,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
 
         self.predict_k: int | None = None
         self._last_k = self.k_values[0]
+        self._last_sc_loss: float = float("nan")
         self.reset_parameters()
 
     # -------------------------------------------------------------------------------------------
@@ -737,11 +741,12 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
     def reset_parameters(self) -> None:
         self.apply(_weights_init)
         torch.nn.init.normal_(self.slot_mu, std=0.02)
-        torch.nn.init.zeros_(self.slot_log_sigma)
+        # slot_log_sigma is frozen at 0 (sigma=1); do not reinitialize it here.
 
         self._step.zero_()
         self._step_cache = 0
         self._last_k = self.k_values[0]
+        self._last_sc_loss = float("nan")
 
         # Fixed, reproducible drift noise.  Generated here rather than in __init__ because __init__
         # runs on the meta device; a CPU generator keeps it identical across devices and runs.
@@ -802,11 +807,6 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         index = int(torch.randint(0, self.curriculum_k_count(step), (1,), generator=generator).item())
         return self.k_values[index]
 
-    def replicate_loss_weight(self, step: int | None = None) -> float:
-        """Weight on the independent-replicate loss: high early, annealed toward the consensus."""
-        step = self._step_cache if step is None else step
-        return max(self.lam_min, self.lam_init * math.exp(-step / self.lam_decay_steps))
-
     # -------------------------------------------------------------------------------------------
     # core solver
     # -------------------------------------------------------------------------------------------
@@ -851,9 +851,12 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         n_iterations: int,
         x_target_ng: torch.Tensor | None = None,
         compute_loadings: bool = True,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor | list[torch.Tensor]]:
         """
-        One amortized factorization: ``R`` replicate ``W`` matrices, and optionally ``H``.
+        One amortized factorization: ``R`` replicate ``W`` matrices per layer, and optionally ``H``.
+
+        Each transformer layer decodes its own slot state into a factor matrix, enabling the
+        AlphaFold-style per-layer auxiliary loss.  ``w_rkg`` is always the final-layer output.
 
         Args:
             x_ng: Cells to condition on (the cross-attention memory).
@@ -864,18 +867,25 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             compute_loadings: Skip the FISTA solve when only ``W`` is needed (e.g. drift checks).
 
         Returns:
-            Dict with ``w_rkg``, ``slots_rke``, and if requested ``h_rnk`` and ``x_target_ng``.
+            Dict with ``w_rkg`` (final layer), ``w_layers_rkg`` (list of W per layer),
+            ``slots_rke``, and if requested ``h_rnk`` and ``x_target_ng``.
         """
         x_emb_ne = self.encoder(x_ng)
         key_ne = self.to_key(x_emb_ne)
         value_ne = self.to_value(x_emb_ne)
 
         slots_rke = self._initial_slots(k, slot_noise_rke)
-        for block in self.blocks:
-            slots_rke = block(slots_rke, key_ne, value_ne)
+        w_layers_rkg: list[torch.Tensor] = []
+        for _ in range(self.n_iterations):
+            slots_rke = self.block(slots_rke, key_ne, value_ne)
+            w_layers_rkg.append(self.decoder(slots_rke))
 
-        w_rkg = self.decoder(slots_rke)
-        out = {"w_rkg": w_rkg, "slots_rke": slots_rke}
+        w_rkg = w_layers_rkg[-1]
+        out: dict[str, torch.Tensor | list[torch.Tensor]] = {
+            "w_rkg": w_rkg,
+            "w_layers_rkg": w_layers_rkg,
+            "slots_rke": slots_rke,
+        }
         if compute_loadings:
             target_ng = x_ng if x_target_ng is None else x_target_ng
             target_emb_ne = x_emb_ne if x_target_ng is None else self.encoder(target_ng)
@@ -932,6 +942,31 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         )
         return h_1nk.clamp(min=0.0)
 
+    @torch.no_grad()
+    def _compute_w_target(
+        self,
+        x_ng: torch.Tensor,
+        h_rnk: torch.Tensor,
+        w_rkg: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        FISTA-improved W as a stop-gradient training target.
+
+        Hot-starts from the transformer's final-layer W, runs ``fista_w_iterations_train`` steps
+        given the stop-gradient H, then L1-normalizes to match the decoder output convention.
+        The result is zero-gradient: gradients flow only through the transformer output W_l on the
+        other side of the MSE loss.
+        """
+        hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
+        htx_rkg = torch.einsum("rnk,ng->rkg", h_rnk, x_ng)
+        w_prime_rkg, _ = nmf_compute_factors_fista(
+            w_rkg=w_rkg.detach().contiguous(),
+            A_rkk=hth_rkk,
+            B_rkg=htx_rkg,
+            max_iter=self.fista_w_iterations_train,
+        )
+        return l1_normalize_rows(w_prime_rkg.clamp(min=0.0))
+
     # -------------------------------------------------------------------------------------------
     # forward / training
     # -------------------------------------------------------------------------------------------
@@ -963,50 +998,23 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
 
         k = self.sample_k()
         self._last_k = k
-        lam = self.replicate_loss_weight()
 
-        replicate_losses: list[torch.Tensor] = []
-        consensus_losses: list[torch.Tensor] = []
-        stabilities: list[torch.Tensor] = []
-        consensus_list: list[torch.Tensor] = []
-        cells_list: list[torch.Tensor] = []
+        sc_losses: list[torch.Tensor] = []
 
         for x_half_ng, r in self._split_batch(x_ng):
             slot_noise_rke = torch.randn(r, k, self.latent_dim, device=x_ng.device, dtype=x_ng.dtype)
             solved = self.solve(x_half_ng, k, slot_noise_rke, self.fista_iterations_train)
-
-            x_squared_sum = x_half_ng.pow(2).sum()
-            denominator = x_half_ng.numel()
-            sse_r = frobenius_loss_trace(x_half_ng, solved["h_rnk"], solved["w_rkg"], x_squared_sum)
-            replicate_losses.append(sse_r.mean() / denominator)
-
-            consensus = self._consensus(solved["w_rkg"])
-            consensus_kg = consensus["consensus_kg"]
-            weights_rk = consensus["weights_rk"]
-            assert isinstance(consensus_kg, torch.Tensor) and isinstance(weights_rk, torch.Tensor)
-            h_nk = self._consensus_loadings(
-                x_half_ng,
-                solved["h_rnk"],
-                consensus_kg,
-                consensus["plan_rkj"],
-                weights_rk,
-                self.fista_iterations_train,
+            w_target_rkg = self._compute_w_target(x_half_ng, solved["h_rnk"], solved["w_rkg"])
+            sc_losses.append(
+                sum(
+                    self._iter_weights[i] * (w_l - w_target_rkg).pow(2).mean()
+                    for i, w_l in enumerate(solved["w_layers_rkg"])
+                )
             )
-            sse_1 = frobenius_loss_trace(x_half_ng, h_nk.unsqueeze(0), consensus_kg.unsqueeze(0), x_squared_sum)
-            consensus_losses.append(sse_1.squeeze(0) / denominator)
 
-            stability = consensus["stability"]
-            assert isinstance(stability, torch.Tensor)
-            stabilities.append(stability)
-            consensus_list.append(consensus_kg.detach())
-            cells_list.append(x_half_ng)
-
-        loss = torch.stack(consensus_losses).mean() + lam * torch.stack(replicate_losses).mean()
-
-        metrics = self._step_metrics(stabilities, consensus_losses, consensus_list, cells_list)
-        self._update_ema(k, metrics)
-
-        return {"loss": loss, **metrics}
+        loss = torch.stack(sc_losses).mean()
+        self._last_sc_loss = float(loss.detach())
+        return {"loss": loss}
 
     @torch.no_grad()
     def _step_metrics(
@@ -1204,17 +1212,9 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         if pl_module is None:
             return
         pl_module.log("curriculum_k_max", float(self.k_values[self.curriculum_k_count() - 1]))
-        pl_module.log("replicate_loss_weight", self.replicate_loss_weight())
         pl_module.log("sampled_k", float(self._last_k))
-        for name in self.metric_names:
-            curve = self.ema_curve(name)
-            finite = curve[torch.isfinite(curve)]
-            if finite.numel() > 0:
-                pl_module.log(f"{name}__mean_over_k", finite.mean(), prog_bar=(name == "stability"))
-            for k in self.drift_k_values:
-                value = curve[self._k_to_index[k]]
-                if bool(torch.isfinite(value)):
-                    pl_module.log(f"k={k}__{name}", value)
+        if not math.isnan(self._last_sc_loss):
+            pl_module.log("sc_loss", self._last_sc_loss, prog_bar=True)
 
     def validate(
         self,
@@ -1395,8 +1395,10 @@ def run_measurement_phase(
     transforms: Iterable[torch.nn.Module] = (),
     n_batches: int | None = None,
     k_values: list[int] | None = None,
-    n_replicates: int | None = None,
-    fista_iterations: int | None = None,
+    n_replicates: int = 100,
+    fista_iterations: int = 150,
+    density_threshold: float = 1.0,
+    local_neighborhood_size: float = 0.30,
     device: torch.device | str | None = None,
     verbose: bool = True,
 ) -> dict[str, np.ndarray]:
@@ -1418,6 +1420,13 @@ def run_measurement_phase(
     splitting each batch, which keeps the full ``R`` for both statistics at one solve per
     ``(batch, k)``.  (Training uses a within-batch split instead, since it has no cross-step state.)
 
+    Consensus follows Kotliar et al. 2019: the ``r * k`` L2-normalized factor rows are density-
+    filtered and then clustered with k-means into ``k`` groups; the per-cluster median row is taken
+    as the consensus program and L1-renormalized.  This is structurally different from the Sinkhorn
+    approach used during training for drift measurement — k-means assigns each row to whichever
+    cluster it belongs to, so replicates that missed a program never contaminate that program's
+    consensus centroid.
+
     Args:
         model: A trained :class:`CNMFTransformer`.
         dataloader: Yields batch dicts with ``x_ng`` and ``var_names_g``.
@@ -1425,8 +1434,16 @@ def run_measurement_phase(
             :class:`~cellarium.ml.core.CellariumPipeline` and receives transformed data).
         n_batches: Number of minibatches.  Defaults to ``model.measurement_n_batches``.
         k_values: Defaults to every ``k`` in ``model.k_values``.
-        n_replicates: Defaults to ``model.n_replicates_measure``.
-        fista_iterations: Defaults to ``model.fista_iterations_measure``.
+        n_replicates: Number of independent noise seeds per ``(batch, k)`` solve.  A
+            Kotliar-comparable value (50–100) is usually appropriate.  Must be ≥ ``model.r_store``
+            so the replicate storage buffers can be filled.
+        fista_iterations: FISTA iterations per solve.  More steps give a more converged error axis;
+            150 is usually sufficient.
+        density_threshold: Mean neighbor distance above which a factor row is excluded before
+            k-means.  Range ``(0, 2]``; ``1.0`` (no filtering) is a safe starting point — run
+            ``nmf_consensus(..., plot_only=True)`` to pick a tighter value for your data.
+        local_neighborhood_size: Fraction of replicates used to define the local neighborhood for
+            density filtering.  Range ``(0, 1)``.
         device: Device on which to run.  Defaults to the model's device.
         verbose: Show a progress bar.
 
@@ -1438,8 +1455,11 @@ def run_measurement_phase(
     try:
         k_values = list(model.k_values) if k_values is None else sorted(k_values)
         n_batches = model.measurement_n_batches if n_batches is None else n_batches
-        n_replicates = model.n_replicates_measure if n_replicates is None else n_replicates
-        fista_iterations = model.fista_iterations_measure if fista_iterations is None else fista_iterations
+        if n_replicates < model.r_store:
+            raise ValueError(
+                f"n_replicates ({n_replicates}) must be >= model.r_store ({model.r_store}) "
+                "to fill the replicate storage buffers"
+            )
         device = model.device if device is None else torch.device(device)
         transform_list = list(transforms)
         dtype = model.slot_mu.dtype
@@ -1479,19 +1499,32 @@ def run_measurement_phase(
             for k_index, k in enumerate(k_values):
                 slot_noise_rke = torch.randn(n_replicates, k, model.latent_dim, device=device, dtype=dtype)
                 solved = model.solve(x_ng, k, slot_noise_rke, fista_iterations)
-                consensus = model._consensus(solved["w_rkg"])
-                consensus_kg = consensus["consensus_kg"]
-                weights_rk = consensus["weights_rk"]
-                stability = consensus["stability"]
-                assert isinstance(consensus_kg, torch.Tensor)
-                assert isinstance(weights_rk, torch.Tensor)
-                assert isinstance(stability, torch.Tensor)
+                try:
+                    kmeans_result = nmf_consensus(
+                        solved["w_rkg"].detach().float().cpu(), density_threshold, local_neighborhood_size
+                    )
+                except UserWarning as exc:
+                    warnings.warn(f"k={k}, batch {batch_index}: skipping — {exc}")
+                    continue
+                consensus_kg = kmeans_result["consensus_D_kg"].to(device=device, dtype=dtype)
 
-                h_nk = model._consensus_loadings(
-                    x_ng, solved["h_rnk"], consensus_kg, consensus["plan_rkj"], weights_rk, fista_iterations
+                # Stability via Sinkhorn matched-silhouette against the k-means consensus.
+                # The k-means sklearn silhouette measures cluster tightness, which stays high
+                # for any k an amortized model solves consistently.  The Sinkhorn matched-
+                # silhouette is a contrast metric — it drops when replicates disagree about
+                # which consensus factor a given program maps to, which is the correct signal
+                # for k > k_true.
+                _, _, plan_rkj, similarity_rkj = align_factors(
+                    solved["w_rkg"].detach(),
+                    consensus_kg,
+                    model.sinkhorn_epsilon,
+                    model.sinkhorn_iterations,
                 )
+                stability = matched_silhouette(similarity_rkj.detach(), plan_rkj.detach()).mean()
+
+                h_1nk = model._solve_loadings_cold(x_ng, consensus_kg, fista_iterations)
                 error = (
-                    frobenius_loss_trace(x_ng, h_nk.unsqueeze(0), consensus_kg.unsqueeze(0), x_squared_sum).squeeze(0)
+                    frobenius_loss_trace(x_ng, h_1nk, consensus_kg.unsqueeze(0), x_squared_sum).squeeze(0)
                     / denominator
                 )
                 observations: dict[str, torch.Tensor] = {"stability": stability, "error": error}
