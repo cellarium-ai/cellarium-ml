@@ -2,7 +2,8 @@ FROM nvcr.io/nvidia/cuda:12.4.1-base-ubuntu22.04
 
 LABEL maintainer="Stephen Fleming <sfleming@broadinstitute.org>"
 ENV DOCKER=true \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    CLOUDSDK_PYTHON="/usr/bin/python3"
 
 ARG VERSION
 
