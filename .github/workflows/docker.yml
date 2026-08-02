@@ -79,7 +79,5 @@ jobs:
 
     - name: Push Docker image
       run: |
-        docker tag cellarium-ml-test:ci us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
-        docker tag cellarium-ml-test:ci us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
-        docker push us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
-        docker push us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
+        docker tag cellarium-ml-test:ci us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:20260801
+        docker push us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:20260801
