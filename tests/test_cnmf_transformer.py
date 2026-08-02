@@ -28,6 +28,7 @@ from cellarium.ml.models.cnmf_transformer import (  # noqa: E402
     match_stability,
     matched_distance,
     matched_silhouette,
+    plot_density_histograms,
     run_measurement_phase,
     sinkhorn_consensus,
 )
@@ -538,6 +539,67 @@ def test_split_is_skipped_for_small_batches() -> None:
     assert len(model._split_batch(torch.rand(80, 20))) == 2
 
 
+# -----------------------------------------------------------------------------------------------
+# non-recurrent mode
+# -----------------------------------------------------------------------------------------------
+
+
+def test_non_recurrent_forward_returns_finite_loss() -> None:
+    torch.manual_seed(0)
+    model = make_model(20, [2, 3], recurrent=False)
+    x_ng = torch.from_numpy(make_synthetic_nmf_data(80, 20, 3, seed=0)[0])
+    out = model(x_ng=x_ng, var_names_g=model.var_names_g)
+    assert set(out.keys()) == {"loss"}
+    loss = as_tensor(out["loss"])
+    assert torch.isfinite(loss) and float(loss) >= 0.0
+
+
+def test_non_recurrent_backward_produces_gradients_everywhere() -> None:
+    torch.manual_seed(0)
+    model = make_model(20, [3], recurrent=False)
+    x_ng = torch.from_numpy(make_synthetic_nmf_data(80, 20, 3, seed=0)[0])
+    as_tensor(model(x_ng=x_ng, var_names_g=model.var_names_g)["loss"]).backward()
+
+    without_grad = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.grad is None or not bool(parameter.grad.abs().sum() > 0)
+    ]
+    without_grad = [name for name in without_grad if "k_embedding" not in name]
+    without_grad = [name for name in without_grad if "slot_log_sigma" not in name]
+    assert without_grad == [], f"parameters received no gradient: {without_grad}"
+
+
+def test_non_recurrent_has_n_iterations_times_more_block_parameters() -> None:
+    n_iter = 3
+    recurrent = make_model(20, [3], n_iterations=n_iter, recurrent=True)
+    non_recurrent = make_model(20, [3], n_iterations=n_iter, recurrent=False)
+
+    recurrent_block_params = sum(p.numel() for p in recurrent.blocks.parameters())
+    non_recurrent_block_params = sum(p.numel() for p in non_recurrent.blocks.parameters())
+    assert non_recurrent_block_params == n_iter * recurrent_block_params
+
+    recurrent_decoder_params = sum(p.numel() for p in recurrent.decoders.parameters())
+    non_recurrent_decoder_params = sum(p.numel() for p in non_recurrent.decoders.parameters())
+    assert non_recurrent_decoder_params == n_iter * recurrent_decoder_params
+
+
+def test_non_recurrent_measurement_phase_runs() -> None:
+    torch.manual_seed(0)
+    n, g = 100, 20
+    model = make_model(g, [2, 3], recurrent=False)
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, 3, seed=0)
+    curves = run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=4),
+        n_batches=4,
+        n_replicates=4,
+        verbose=False,
+    )
+    assert set(curves.keys()) >= {"k", "stability", "error"}
+    assert list(curves["k"]) == [2, 3]
+
+
 def test_forward_rejects_mismatched_var_names() -> None:
     model = make_model(20, [3])
     with pytest.raises(ValueError, match="must match"):
@@ -610,7 +672,7 @@ def test_drift_is_positive_after_the_weights_move() -> None:
     model._maybe_capture_drift_cells(torch.rand(32, 20).abs())
     model.drift_check()
     with torch.no_grad():
-        for parameter in model.decoder.parameters():
+        for parameter in model.decoders.parameters():
             parameter.add_(torch.randn_like(parameter))
     rate = model.drift_check()
     assert rate is not None and rate > 1e-6
@@ -671,7 +733,7 @@ def test_drift_counter_resets_when_drift_exceeds_tolerance() -> None:
     model.drift_check()
     model.drift_check()
     with torch.no_grad():
-        for parameter in model.decoder.parameters():
+        for parameter in model.decoders.parameters():
             parameter.add_(torch.randn_like(parameter))
     model.drift_check()
     assert int(model._drift_below_tol_count) == 0
@@ -718,6 +780,32 @@ def test_measurement_phase_populates_curves_and_consensus() -> None:
         assert bool((consensus_kg > 0).any())
         torch.testing.assert_close(consensus_kg.sum(dim=-1), torch.ones(k), atol=1e-4, rtol=0)
     assert bool((getattr(model, "D_3_rkg") != 0).any())
+
+
+def test_plot_density_histograms_returns_figure_with_correct_panels() -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+
+    torch.manual_seed(0)
+    n, g = 100, 20
+    model = make_model(g, [2, 3, 4], store_replicates_k_values=[2, 4], r_store=4)
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, 3, seed=0)
+    run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=2),
+        n_batches=2,
+        n_replicates=4,
+        verbose=False,
+    )
+    fig = plot_density_histograms(model, density_threshold=0.8, local_neighborhood_size=0.30)
+    assert fig is not None
+    assert len(fig.axes) == 2  # one panel per k in store_replicates_k_values
+
+
+def test_plot_density_histograms_raises_before_measurement() -> None:
+    model = make_model(20, [2, 3], store_replicates_k_values=[2], r_store=4)
+    with pytest.raises(RuntimeError, match="run_measurement_phase"):
+        plot_density_histograms(model)
 
 
 def test_measurement_phase_raises_on_an_empty_dataloader() -> None:

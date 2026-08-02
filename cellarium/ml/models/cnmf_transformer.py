@@ -512,7 +512,13 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             stability and error curves are measured, so pass every integer you want on the plot --
             stability curves are frequently discontinuous and a coarse grid will miss structure.
         latent_dim: Width of the latent/slot space.
-        n_layers: Number of :class:`SlotAttentionBlock` layers.
+        n_iterations: Number of slot-attention passes.  In recurrent mode this is the number of
+            times the *same* block and decoder are applied; in non-recurrent mode it is the number
+            of independent block/decoder pairs (each pass gets its own weights).
+        recurrent: When ``True`` (default) a single :class:`SlotAttentionBlock` and
+            :class:`LinearFactorDecoder` are shared across all ``n_iterations`` passes, mirroring an
+            unrolled iterative solver.  When ``False`` each pass gets its own independent block and
+            decoder; parameter count scales with ``n_iterations`` but each stage can specialize.
         n_self_attention_heads: Heads for slot-to-slot self-attention.
         ffn_mult: Feed-forward expansion factor inside each block.
         n_replicates: ``R`` used during training.  Fresh replicates are drawn every step and
@@ -571,6 +577,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         k_values: list[int],
         latent_dim: int = 256,
         n_iterations: int = 3,
+        recurrent: bool = True,
         n_self_attention_heads: int = 8,
         ffn_mult: int = 4,
         loss_discount_ratio: float = 2.0,
@@ -672,11 +679,14 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         # Keys and values are projected once and shared across iterations and replicates.
         self.to_key = torch.nn.Linear(latent_dim, latent_dim, bias=False)
         self.to_value = torch.nn.Linear(latent_dim, latent_dim, bias=False)
-        # Single shared block and decoder applied recurrently, mirroring an unrolled iterative
-        # solver (cf. LISTA / Slot Attention).  Every iteration applies the same update rule so
-        # the slot space keeps a fixed coordinate system, making the shared decoder coherent.
-        self.block = SlotAttentionBlock(latent_dim, n_self_attention_heads, ffn_mult)
-        self.decoder = LinearFactorDecoder(latent_dim, g)
+        self.recurrent = recurrent
+        n_modules = 1 if recurrent else n_iterations
+        self.blocks = torch.nn.ModuleList(
+            [SlotAttentionBlock(latent_dim, n_self_attention_heads, ffn_mult) for _ in range(n_modules)]
+        )
+        self.decoders = torch.nn.ModuleList(
+            [LinearFactorDecoder(latent_dim, g) for _ in range(n_modules)]
+        )
         # Non-affine on purpose: the loadings hot start is inside a no_grad region (stop-gradient on
         # H), so learnable parameters here could never receive a gradient and would sit dead.
         self.norm_hot_start = torch.nn.LayerNorm(latent_dim, elementwise_affine=False)
@@ -876,9 +886,10 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
 
         slots_rke = self._initial_slots(k, slot_noise_rke)
         w_layers_rkg: list[torch.Tensor] = []
-        for _ in range(self.n_iterations):
-            slots_rke = self.block(slots_rke, key_ne, value_ne)
-            w_layers_rkg.append(self.decoder(slots_rke))
+        for i in range(self.n_iterations):
+            idx = 0 if self.recurrent else i
+            slots_rke = self.blocks[idx](slots_rke, key_ne, value_ne)
+            w_layers_rkg.append(self.decoders[idx](slots_rke))
 
         w_rkg = w_layers_rkg[-1]
         out: dict[str, torch.Tensor | list[torch.Tensor]] = {
@@ -1654,6 +1665,94 @@ def export_hot_start(
             )
         out[k] = consensus_kg.unsqueeze(0).expand(r, -1, -1).clone()
     return out
+
+
+def plot_density_histograms(
+    model: CNMFTransformer,
+    density_threshold: float = 1.0,
+    local_neighborhood_size: float = 0.30,
+    k_values: list[int] | None = None,
+    n_bins: int = 75,
+):
+    """
+    Histogram of mean neighbor distances for each ``k``, to guide the choice of
+    ``density_threshold`` and ``local_neighborhood_size`` in :func:`run_measurement_phase`.
+
+    Each subplot shows the distribution of mean L2 distances from each L2-normalized factor row to
+    its ``n_neighbors`` nearest neighbors (where ``n_neighbors = int(r * local_neighborhood_size)``).
+    A red vertical line marks ``density_threshold``; rows to the right of that line would be treated
+    as outliers and excluded before k-means.  The title reports what fraction would be filtered.
+
+    Requires :func:`run_measurement_phase` to have been called first, and only covers
+    ``k`` values in :attr:`~CNMFTransformer.store_replicates_k_values` (those for which full
+    replicate tensors are stored).
+
+    Args:
+        model: A :class:`CNMFTransformer` whose measurement phase has been run.
+        density_threshold: Shown as a red vertical line.  Rows with mean neighbor distance above
+            this value would be filtered.  Range ``(0, 2]``; ``1.0`` is a safe no-filter starting
+            point for L2-normalized non-negative vectors.
+        local_neighborhood_size: Fraction of replicates used to define each row's neighborhood.
+            ``n_neighbors = int(r * local_neighborhood_size)``.  Range ``(0, 1)``.
+        k_values: ``k`` values to plot.  Defaults to :attr:`~CNMFTransformer.store_replicates_k_values`.
+        n_bins: Number of histogram bins.
+
+    Returns:
+        The :class:`matplotlib.figure.Figure` — call ``plt.show()`` or ``fig.savefig(...)``
+        on it yourself.
+    """
+    from matplotlib import pyplot as plt
+
+    if int(model._measured_n_batches) == 0:
+        raise RuntimeError("run run_measurement_phase() before calling plot_density_histograms()")
+
+    if k_values is None:
+        k_values = list(model.store_replicates_k_values)
+    else:
+        k_values = sorted(k_values)
+        unknown = [k for k in k_values if k not in model.store_replicates_k_values]
+        if unknown:
+            raise ValueError(
+                f"k values {unknown} are not in model.store_replicates_k_values; "
+                "pass store_replicates_k_values to run_measurement_phase() to cover them"
+            )
+
+    if not k_values:
+        raise ValueError("no k values to plot; store_replicates_k_values is empty")
+
+    n_panels = len(k_values)
+    fig, axes = plt.subplots(1, n_panels, figsize=(4.5 * n_panels, 3), squeeze=False)
+    axes = axes[0]
+
+    for ax, k in zip(axes, k_values):
+        w_rkg = getattr(model, f"D_{k}_rkg").detach().float()  # (r, k, g)
+        r = w_rkg.shape[0]
+        n_neighbors = int(r * local_neighborhood_size)
+
+        if n_neighbors < 2:
+            ax.text(0.5, 0.5, f"k={k}\ntoo few replicates\nfor neighborhood\n(r={r})",
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            continue
+
+        # L2-normalize and flatten to (r*k, g), same as consensus()
+        d_norm_mg = F.normalize(w_rkg.reshape(r * k, -1), dim=-1, p=2)
+        dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+        dist_mm.fill_diagonal_(0.0)
+        nearest_ml, _ = torch.topk(dist_mm, n_neighbors + 1, largest=False)
+        mean_dist_m = nearest_ml[:, 1:].mean(dim=1).cpu().numpy()  # exclude self (col 0)
+
+        pct_filtered = 100.0 * float((mean_dist_m > density_threshold).mean())
+        ax.hist(mean_dist_m, bins=n_bins, color="steelblue", edgecolor="none")
+        ax.axvline(density_threshold, color="red", linewidth=1.5, label=f"threshold={density_threshold}")
+        ax.set_xlim(-0.05, 2.05)
+        ax.set_xlabel(f"mean dist. to {n_neighbors} neighbors")
+        ax.set_ylabel(f"factor rows  (r×k = {r * k})")
+        ax.set_title(f"k = {k}\n{pct_filtered:.1f}% filtered at threshold")
+        ax.legend(fontsize=8)
+
+    fig.tight_layout()
+    return fig
 
 
 def plot_k_selection(model: CNMFTransformer, use_cross: bool = False) -> None:
