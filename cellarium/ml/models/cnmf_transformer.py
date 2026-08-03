@@ -59,6 +59,45 @@ def l2_normalize_rows(w: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
     return w / w.norm(dim=-1, keepdim=True).clamp(min=eps)
 
 
+def sinusoidal_k_encoding(k: int, k_max: int, dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """
+    Sinusoidal encoding of the integer ``k`` into a ``dim``-dimensional vector.
+
+    Uses ``k`` directly as the positional input with ``base = k_max``, giving frequencies that
+    span ``[1, 1/k_max]``:
+
+    * ``i = 0``: ``sin(k)`` — high frequency, distinguishes adjacent ``k`` values.
+    * ``i = dim/2 - 1``: ``sin(k / k_max)`` — low frequency, one full sweep over ``[1, k_max]``.
+
+    Every component carries meaningful signal for ``k ∈ [1, k_max]``.  Using ``k / k_max`` as
+    the input with the standard base of 10000 would collapse most components to near zero, because
+    the input range ``(0, 1]`` is too narrow for those low frequencies to vary.
+
+    Args:
+        k: The integer number of factors for this forward pass.
+        k_max: The largest ``k`` in the model's ``k_values``; sets the base for the frequency
+            schedule so all components are active for ``k ∈ [1, k_max]``.
+        dim: Output dimensionality (should equal ``latent_dim``).
+        device: Target device.
+        dtype: Target dtype.
+
+    Returns:
+        1D tensor of shape ``(dim,)``.
+    """
+    half = dim // 2
+    # Frequencies: k_max^(-2i/dim) for i in [0, half), ranging from 1 (i=0) to 1/k_max (i→half)
+    freq = torch.pow(
+        torch.tensor(float(k_max), device=device, dtype=torch.float32),
+        -torch.arange(half, device=device, dtype=torch.float32) * 2.0 / dim,
+    )
+    t = torch.tensor(float(k), device=device, dtype=torch.float32)
+    args = t * freq
+    enc = torch.cat([args.sin(), args.cos()], dim=0)  # (dim,) if dim is even
+    if dim % 2 == 1:
+        enc = torch.cat([enc, torch.zeros(1, device=device, dtype=torch.float32)])
+    return enc.to(dtype=dtype)
+
+
 def log_sinkhorn(cost_kj: torch.Tensor, epsilon: float = 0.05, n_iterations: int = 50) -> torch.Tensor:
     """
     Entropic optimal transport plan between two equal-size sets, computed in log space.
@@ -414,45 +453,73 @@ class SlotAttentionBlock(torch.nn.Module):
     Keys and values are projected once by the parent model and shared across layers (as in Slot
     Attention, which applies one recurrent module repeatedly) and across replicates -- expanding
     the cell memory to ``(r, n, e)`` per layer would duplicate ~1.3 GB at ``r=100`` for no gain.
+
+    Each block receives a per-forward-pass conditioning vector ``cond_e`` derived from the
+    sinusoidal encoding of ``k``.  It uses Adaptive LayerNorm (AdaLN / FiLM) to scale and shift
+    all three normalization points, so ``k`` conditions the block's computation at every step rather
+    than only at slot initialization.  The AdaLN projection is zero-initialized so the block starts
+    as identity with respect to ``k`` conditioning and learns to use it gradually.
     """
 
     def __init__(self, latent_dim: int, n_self_attention_heads: int = 8, ffn_mult: int = 4) -> None:
         super().__init__()
-        self.norm_self_attention = torch.nn.LayerNorm(latent_dim)
+        # Non-affine LayerNorms: scale and shift are supplied by AdaLN instead.
+        self.norm_self_attention = torch.nn.LayerNorm(latent_dim, elementwise_affine=False)
         self.self_attention = torch.nn.MultiheadAttention(latent_dim, n_self_attention_heads, batch_first=True)
-        self.norm_cross_attention = torch.nn.LayerNorm(latent_dim)
+        self.norm_cross_attention = torch.nn.LayerNorm(latent_dim, elementwise_affine=False)
         self.to_query = torch.nn.Linear(latent_dim, latent_dim, bias=False)
-        self.norm_ffn = torch.nn.LayerNorm(latent_dim)
+        self.norm_ffn = torch.nn.LayerNorm(latent_dim, elementwise_affine=False)
         self.ffn = torch.nn.Sequential(
             torch.nn.Linear(latent_dim, ffn_mult * latent_dim),
             torch.nn.GELU(),
             torch.nn.Linear(ffn_mult * latent_dim, latent_dim),
         )
         self.scale = latent_dim**-0.5
+        # AdaLN: one linear layer projects the shared conditioning vector to (scale, shift) for
+        # each of the three norm points (self-attn, cross-attn, ffn) → 6 * latent_dim outputs.
+        # Zero-initialized so the block starts as identity w.r.t. k conditioning.
+        # skip_init avoids the default kaiming init (which would consume random numbers and then be
+        # discarded), keeping the global random state stable so other parameter initializations
+        # (especially slot_mu) are unaffected by whether AdaLN is present.
+        adaLN = torch.nn.utils.skip_init(torch.nn.Linear, latent_dim, 6 * latent_dim)
+        torch.nn.init.zeros_(adaLN.weight)
+        torch.nn.init.zeros_(adaLN.bias)
+        self.adaLN = adaLN
 
-    def forward(self, slots_rke: torch.Tensor, key_ne: torch.Tensor, value_ne: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        slots_rke: torch.Tensor,
+        key_ne: torch.Tensor,
+        value_ne: torch.Tensor,
+        cond_e: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Args:
             slots_rke: Slot (factor) tokens, shape ``(r, k, e)``.
             key_ne: Projected cell keys, shape ``(n, e)``, shared across replicates.
             value_ne: Projected cell values, shape ``(n, e)``, shared across replicates.
+            cond_e: AdaLN conditioning vector, shape ``(e,)``, derived from ``k``.
 
         Returns:
             Updated slots, shape ``(r, k, e)``.
         """
+        # Unpack the 6 AdaLN parameters (scale1, shift1, scale2, shift2, scale3, shift3).
+        params = self.adaLN(cond_e)  # (6e,)
+        s1, b1, s2, b2, s3, b3 = params.chunk(6, dim=-1)  # each (e,)
+
         # Slots attend to each other within a replicate.
-        normed_rke = self.norm_self_attention(slots_rke)
+        normed_rke = (1 + s1) * self.norm_self_attention(slots_rke) + b1
         attended_rke, _ = self.self_attention(normed_rke, normed_rke, normed_rke, need_weights=False)
         slots_rke = slots_rke + attended_rke
 
         # Slots compete for cells (softmax over k), then aggregate by normalized weighted mean.
-        query_rke = self.to_query(self.norm_cross_attention(slots_rke)) * self.scale
+        query_rke = self.to_query((1 + s2) * self.norm_cross_attention(slots_rke) + b2) * self.scale
         logits_rkn = torch.einsum("rke,ne->rkn", query_rke, key_ne)
         attention_rkn = logits_rkn.softmax(dim=-2)
         attention_rkn = attention_rkn / attention_rkn.sum(dim=-1, keepdim=True).clamp(min=_EPS)
         slots_rke = slots_rke + torch.einsum("rkn,ne->rke", attention_rkn, value_ne)
 
-        return slots_rke + self.ffn(self.norm_ffn(slots_rke))
+        return slots_rke + self.ffn((1 + s3) * self.norm_ffn(slots_rke) + b3)
 
 
 # -----------------------------------------------------------------------------------------------
@@ -696,7 +763,15 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         # would make all replicates identical and lose the exploration needed for k-selection.
         self.slot_mu = torch.nn.Parameter(torch.empty(latent_dim))
         self.slot_log_sigma = torch.nn.Parameter(torch.zeros(latent_dim), requires_grad=False)
-        self.k_embedding = torch.nn.Embedding(self.k_max + 1, latent_dim)
+        # k-conditioning via sinusoidal encoding of k/k_max → shared MLP → conditioning vector.
+        # The MLP output is passed into each block's AdaLN and also used to shift slot initialization.
+        # Sinusoidal encoding (rather than a learned discrete embedding) enables smooth
+        # generalization to all k values, including those underrepresented during training.
+        self.k_to_cond = torch.nn.Sequential(
+            torch.nn.Linear(latent_dim, latent_dim),
+            torch.nn.SiLU(),
+            torch.nn.Linear(latent_dim, latent_dim),
+        )
 
         # --- buffers: declared here, valued in reset_parameters (models are built on meta) ---
         self._step: torch.Tensor
@@ -821,8 +896,13 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
     # core solver
     # -------------------------------------------------------------------------------------------
 
-    def _initial_slots(self, k: int, slot_noise_rke: torch.Tensor) -> torch.Tensor:
-        return self.slot_mu + torch.exp(self.slot_log_sigma) * slot_noise_rke + self.k_embedding.weight[k]
+    def _k_cond(self, k: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Compute the shared AdaLN conditioning vector for ``k``."""
+        enc = sinusoidal_k_encoding(k, self.k_max, self.latent_dim, device, dtype)
+        return self.k_to_cond(enc)
+
+    def _initial_slots(self, k: int, slot_noise_rke: torch.Tensor, cond_e: torch.Tensor) -> torch.Tensor:
+        return self.slot_mu + torch.exp(self.slot_log_sigma) * slot_noise_rke + cond_e
 
     @torch.no_grad()
     def hot_start_loadings(self, x_ng: torch.Tensor, x_emb_ne: torch.Tensor, slots_rke: torch.Tensor) -> torch.Tensor:
@@ -884,11 +964,12 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         key_ne = self.to_key(x_emb_ne)
         value_ne = self.to_value(x_emb_ne)
 
-        slots_rke = self._initial_slots(k, slot_noise_rke)
+        cond_e = self._k_cond(k, x_ng.device, x_ng.dtype)
+        slots_rke = self._initial_slots(k, slot_noise_rke, cond_e)
         w_layers_rkg: list[torch.Tensor] = []
         for i in range(self.n_iterations):
             idx = 0 if self.recurrent else i
-            slots_rke = self.blocks[idx](slots_rke, key_ne, value_ne)
+            slots_rke = self.blocks[idx](slots_rke, key_ne, value_ne, cond_e)
             w_layers_rkg.append(self.decoders[idx](slots_rke))
 
         w_rkg = w_layers_rkg[-1]

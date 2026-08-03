@@ -365,17 +365,19 @@ def test_slot_attention_is_invariant_to_duplicating_cells() -> None:
     slots_rke = torch.randn(r, k, e)
     key_ne = torch.randn(n, e)
     value_ne = torch.randn(n, e)
+    cond_e = torch.zeros(e)  # zero → AdaLN acts as identity (scale=1, shift=0)
 
     with torch.no_grad():
-        once = block(slots_rke, key_ne, value_ne)
-        twice = block(slots_rke, key_ne.repeat(2, 1), value_ne.repeat(2, 1))
+        once = block(slots_rke, key_ne, value_ne, cond_e)
+        twice = block(slots_rke, key_ne.repeat(2, 1), value_ne.repeat(2, 1), cond_e)
     torch.testing.assert_close(once, twice, atol=1e-5, rtol=1e-4)
 
 
 def test_slot_attention_preserves_shape() -> None:
-    block = SlotAttentionBlock(16, n_self_attention_heads=4, ffn_mult=2)
-    out = block(torch.randn(3, 7, 16), torch.randn(20, 16), torch.randn(20, 16))
-    assert out.shape == (3, 7, 16)
+    e = 16
+    block = SlotAttentionBlock(e, n_self_attention_heads=4, ffn_mult=2)
+    out = block(torch.randn(3, 7, e), torch.randn(20, e), torch.randn(20, e), torch.zeros(e))
+    assert out.shape == (3, 7, e)
 
 
 def test_decoder_output_is_non_negative_and_l1_normalized() -> None:
