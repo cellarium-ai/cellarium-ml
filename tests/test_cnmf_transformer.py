@@ -108,6 +108,7 @@ def make_model(n_genes: int, k_values: list[int], **kwargs) -> CNMFTransformer:
         stability_burn_in_steps=0,
         drift_eval_n_cells=32,
         drift_check_every_n_steps=0,
+        lr_reduction_factor=1.0,
         r_store=4,
         measure_at_end=False,
         measurement_n_batches=3,
@@ -741,6 +742,123 @@ def test_drift_counter_resets_when_drift_exceeds_tolerance() -> None:
     assert int(model._drift_below_tol_count) == 0
 
 
+def test_lr_reduction_divides_lr_and_resets_drift_state() -> None:
+    """_apply_lr_reduction halves the LR and clears the drift patience / history buffers."""
+    import torch.optim as optim
+
+    g, k = 20, 3
+    initial_lr = 1e-3
+    factor = 5.0
+    model = make_model(
+        g,
+        [k],
+        curriculum_warmup_steps=10,
+        drift_settle_steps=5,
+        drift_check_every_n_steps=1,
+        drift_eval_n_cells=16,
+        lr_reduction_factor=factor,
+    )
+
+    raw_opt = optim.Adam(model.parameters(), lr=initial_lr)
+
+    # Minimal pl.LightningModule so _lightning_module()'s isinstance check passes.
+    class FakeModule(pl.LightningModule):
+        def __init__(self, opt: optim.Adam) -> None:
+            super().__init__()
+            self._opt = opt
+
+        def optimizers(self, use_pl_optimizer: bool = True):  # type: ignore[override]
+            return self._opt
+
+        def lr_schedulers(self):  # type: ignore[override]
+            return None
+
+        def forward(self, *args, **kwargs):  # type: ignore[override]
+            pass
+
+    fake_module = FakeModule(raw_opt)
+
+    class FakeTrainer:
+        world_size = 1
+
+        @property
+        def model(self):
+            return fake_module
+
+    # Simulate some accumulated drift patience so we can verify the reset.
+    model._maybe_capture_drift_cells(torch.rand(16, g).abs())
+    model.drift_check()
+    model._drift_has_previous.fill_(True)
+    model._drift_below_tol_count.fill_(3)
+
+    assert not bool(model._lr_reduced.item())
+
+    model._apply_lr_reduction(FakeTrainer())  # type: ignore[arg-type]
+
+    assert bool(model._lr_reduced.item()), "_lr_reduced must be True after reduction"
+    actual_lr = raw_opt.param_groups[0]["lr"]
+    assert actual_lr == pytest.approx(initial_lr / factor, rel=1e-5)
+    assert int(model._drift_below_tol_count) == 0, "patience counter must be reset"
+    assert not bool(model._drift_has_previous.item()), "drift history flag must be cleared"
+
+
+def test_lr_reduction_guard_prevents_double_reduction() -> None:
+    """on_train_batch_end only fires _apply_lr_reduction once even when called repeatedly."""
+    import torch.optim as optim
+
+    g, k = 20, 3
+    initial_lr = 1e-3
+    factor = 4.0
+    settle_boundary = 5
+    model = make_model(
+        g,
+        [k],
+        curriculum_warmup_steps=0,
+        drift_settle_steps=settle_boundary,
+        drift_check_every_n_steps=0,  # disable drift check to isolate LR logic
+        drift_eval_n_cells=16,
+        lr_reduction_factor=factor,
+    )
+
+    raw_opt = optim.Adam(model.parameters(), lr=initial_lr)
+
+    class FakeModule(pl.LightningModule):
+        def __init__(self, opt: optim.Adam) -> None:
+            super().__init__()
+            self._opt = opt
+
+        def optimizers(self, use_pl_optimizer: bool = True):  # type: ignore[override]
+            return self._opt
+
+        def lr_schedulers(self):  # type: ignore[override]
+            return None
+
+        def forward(self, *args, **kwargs):  # type: ignore[override]
+            pass
+
+    fake_module = FakeModule(raw_opt)
+
+    class FakeTrainer:
+        world_size = 1
+        should_stop = False
+
+        @property
+        def model(self):
+            return fake_module
+
+    fake_trainer = FakeTrainer()
+    model._step_cache = settle_boundary - 1  # one step before boundary
+    model.on_train_batch_end(fake_trainer)  # type: ignore[arg-type]
+    # step is now settle_boundary — reduction should fire
+    assert bool(model._lr_reduced.item())
+    lr_after_first = raw_opt.param_groups[0]["lr"]
+    assert lr_after_first == pytest.approx(initial_lr / factor, rel=1e-5)
+
+    # Advance one more step — reduction must NOT fire again.
+    model.on_train_batch_end(fake_trainer)  # type: ignore[arg-type]
+    assert raw_opt.param_groups[0]["lr"] == pytest.approx(initial_lr / factor, rel=1e-5)
+
+
 # -----------------------------------------------------------------------------------------------
 # measurement phase, outputs and hand-off
 # -----------------------------------------------------------------------------------------------
@@ -802,6 +920,34 @@ def test_plot_density_histograms_returns_figure_with_correct_panels() -> None:
     fig = plot_density_histograms(model, density_threshold=0.8, local_neighborhood_size=0.30)
     assert fig is not None
     assert len(fig.axes) == 2  # one panel per k in store_replicates_k_values
+
+
+def test_plot_density_histograms_with_dataloader_needs_no_prior_measurement() -> None:
+    """plot_density_histograms with a dataloader works on a never-measured model."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    torch.manual_seed(0)
+    n, g = 100, 20
+    k_values = [2, 3, 4]
+    model = make_model(g, k_values)
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, 3, seed=0)
+
+    # Model has never had run_measurement_phase called — should not raise.
+    assert int(model._measured_n_batches) == 0
+    fig = plot_density_histograms(
+        model,
+        dataloader=_fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=2),
+        n_batches=2,
+        n_replicates=4,
+        density_threshold=0.8,
+        local_neighborhood_size=0.30,
+        k_values=k_values,
+    )
+    assert fig is not None
+    assert len(fig.axes) == len(k_values)
+    # Model buffers must not be mutated.
+    assert int(model._measured_n_batches) == 0
 
 
 def test_plot_density_histograms_raises_before_measurement() -> None:

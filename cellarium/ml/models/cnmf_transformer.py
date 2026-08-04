@@ -616,14 +616,18 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             median and largest of ``k_values``.  Reduced with a max, so the worst ``k`` governs.
         drift_eval_n_cells: Size of the fixed cell set used for the drift measurement.
         drift_check_every_n_steps: Steps between drift checks.  Zero disables early stopping.
-        drift_tol: Convergence threshold on ``1 - cosine similarity`` **per optimizer step**.  The
-            metric is scale-free by construction and reads as an angle: ``1 - cos(theta) ~
-            theta ** 2 / 2``, so the default ``5e-7`` is about 0.8 degrees of program rotation per
-            200 steps.
+        drift_tol: Convergence threshold on ``1 - cosine similarity`` **per optimizer step** after
+            the LR reduction fires.  Calibrate for the post-reduction learning rate
+            (``initial_lr / lr_reduction_factor``), not the training LR.
         drift_patience_checks: Consecutive checks below ``drift_tol`` required to stop.
-        drift_settle_steps: Extra steps after the curriculum finishes before stopping is allowed.
-            Checking earlier is meaningless: while the ``k`` window is still expanding, new ``k``
-            values are still being introduced and drift *should* be nonzero.
+        drift_settle_steps: Extra steps after the curriculum finishes before the LR is reduced and
+            stopping is allowed.  Checking earlier is meaningless: while the ``k`` window is still
+            expanding, new ``k`` values are still being introduced and drift *should* be nonzero.
+        lr_reduction_factor: Factor by which the optimizer learning rate is divided once the
+            curriculum and settle window have elapsed.  The reduced LR lowers the gradient-update
+            floor so that ``drift_tol`` becomes reachable.  Set to ``1.0`` to disable (keeps the
+            original behavior where the LR is never touched and stopping is allowed from the end of
+            the settle window).
         store_replicates_k_values: ``k`` values for which full replicate factors are persisted, for
             :func:`~cellarium.ml.models.nmf.plot_density_histograms` and
             :func:`~cellarium.ml.models.nmf.plot_clustermap`.  Defaults to five values spread over
@@ -659,16 +663,17 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         sinkhorn_refine_rounds: int = 2,
         outlier_gamma: float = 0.0,
         detach_sinkhorn_plan: bool = True,
-        curriculum_warmup_steps: int = 5000,
+        curriculum_warmup_steps: int = 100,
         curriculum_initial_k_count: int = 1,
         stability_burn_in_steps: int = 0,
         stability_ema_beta: float = 0.9,
         drift_k_values: list[int] | None = None,
         drift_eval_n_cells: int = 2048,
         drift_check_every_n_steps: int = 200,
-        drift_tol: float = 5e-7,
+        drift_tol: float = 5e-6,
         drift_patience_checks: int = 5,
         drift_settle_steps: int = 1000,
+        lr_reduction_factor: float = 10.0,
         store_replicates_k_values: list[int] | None = None,
         r_store: int = 20,
         measure_at_end: bool = True,
@@ -718,6 +723,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self.drift_tol = drift_tol
         self.drift_patience_checks = drift_patience_checks
         self.drift_settle_steps = drift_settle_steps
+        self.lr_reduction_factor = lr_reduction_factor
         self.measure_at_end = measure_at_end
         self.measurement_n_batches = measurement_n_batches
         self.k_sampling_seed = k_sampling_seed
@@ -781,6 +787,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self._drift_has_previous: torch.Tensor
         self._drift_below_tol_count: torch.Tensor
         self._drift_rate: torch.Tensor
+        self._lr_reduced: torch.Tensor
         self._measured_n_batches: torch.Tensor
         self.register_buffer("_step", torch.zeros((), dtype=torch.long))
         self.register_buffer("drift_slot_noise_rke", torch.empty(n_replicates, self.k_max, latent_dim))
@@ -789,6 +796,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self.register_buffer("_drift_has_previous", torch.zeros((), dtype=torch.bool))
         self.register_buffer("_drift_below_tol_count", torch.zeros((), dtype=torch.long))
         self.register_buffer("_drift_rate", torch.zeros(()))
+        self.register_buffer("_lr_reduced", torch.zeros((), dtype=torch.bool))
         for k in self.drift_k_values:
             self.register_buffer(f"_drift_previous_w_{k}_kg", torch.empty(k, g))
 
@@ -843,6 +851,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self._drift_has_previous.fill_(False)
         self._drift_below_tol_count.zero_()
         self._drift_rate.zero_()
+        self._lr_reduced.fill_(False)
         for k in self.drift_k_values:
             getattr(self, f"_drift_previous_w_{k}_kg").zero_()
 
@@ -1249,7 +1258,10 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
 
     @property
     def stopping_allowed(self) -> bool:
-        """Stopping is only meaningful once the curriculum has finished and had time to settle."""
+        """Stopping is only meaningful once the LR has been reduced (or the settle window has
+        elapsed when ``lr_reduction_factor == 1.0`` and there is nothing to reduce)."""
+        if self.lr_reduction_factor != 1.0:
+            return bool(self._lr_reduced.item())
         return self._step_cache >= self.curriculum_warmup_steps + self.drift_settle_steps
 
     @property
@@ -1282,6 +1294,14 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         if self.log_every_n_steps > 0 and self._step_cache % self.log_every_n_steps == 0:
             self._log_monitoring(trainer)
 
+        settle_boundary = self.curriculum_warmup_steps + self.drift_settle_steps
+        if (
+            self.lr_reduction_factor != 1.0
+            and not bool(self._lr_reduced.item())
+            and self._step_cache >= settle_boundary
+        ):
+            self._apply_lr_reduction(trainer)
+
         if self.drift_check_every_n_steps > 0 and self._step_cache % self.drift_check_every_n_steps == 0:
             rate = self.drift_check()
             pl_module = self._lightning_module(trainer)
@@ -1298,6 +1318,44 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
     def _lightning_module(trainer: pl.Trainer) -> pl.LightningModule | None:
         module = trainer.model
         return module if isinstance(module, pl.LightningModule) else None
+
+    def _apply_lr_reduction(self, trainer: pl.Trainer) -> None:
+        """Divide the optimizer LR by ``lr_reduction_factor`` once, then reset drift state."""
+        pl_module = self._lightning_module(trainer)
+        if pl_module is None:
+            return
+
+        if pl_module.lr_schedulers() is not None:
+            warnings.warn(
+                "lr_reduction_factor is set but a LR scheduler is active; the scheduler will "
+                "overwrite the reduced LR on the next step.  Either set lr_reduction_factor=1.0 "
+                "or remove the scheduler.",
+                UserWarning,
+            )
+
+        optimizers = pl_module.optimizers()
+        if not isinstance(optimizers, (list, tuple)):
+            optimizers = [optimizers]
+        for opt in optimizers:
+            # unwrap Lightning's optimizer wrapper if present
+            raw_opt = opt.optimizer if hasattr(opt, "optimizer") else opt
+            for pg in raw_opt.param_groups:
+                pg["lr"] = pg["lr"] / self.lr_reduction_factor
+                if "initial_lr" in pg:
+                    pg["initial_lr"] = pg["initial_lr"] / self.lr_reduction_factor
+
+        self._lr_reduced.fill_(True)
+
+        # Reset drift state so convergence is measured relative to the post-reduction baseline.
+        self._drift_has_previous.fill_(False)
+        self._drift_below_tol_count.zero_()
+        for k in self.drift_k_values:
+            getattr(self, f"_drift_previous_w_{k}_kg").zero_()
+
+        print(
+            f"Step {self._step_cache}: LR reduced by {self.lr_reduction_factor}×. "
+            f"Now checking drift for early stopping (tol={self.drift_tol})."
+        )
 
     def _log_monitoring(self, trainer: pl.Trainer) -> None:
         pl_module = self._lightning_module(trainer)
@@ -1750,6 +1808,12 @@ def export_hot_start(
 
 def plot_density_histograms(
     model: CNMFTransformer,
+    dataloader: Iterable | None = None,
+    transforms: Iterable[torch.nn.Module] = (),
+    n_batches: int = 1,
+    n_replicates: int = 50,
+    fista_iterations: int = 150,
+    device: torch.device | str | None = None,
     density_threshold: float = 1.0,
     local_neighborhood_size: float = 0.30,
     k_values: list[int] | None = None,
@@ -1759,23 +1823,44 @@ def plot_density_histograms(
     Histogram of mean neighbor distances for each ``k``, to guide the choice of
     ``density_threshold`` and ``local_neighborhood_size`` in :func:`run_measurement_phase`.
 
+    Can be called **before** :func:`run_measurement_phase` by passing a ``dataloader`` — this
+    is the intended workflow, since ``density_threshold`` must be chosen before running the full
+    measurement.  When a dataloader is provided, a lightweight solve (no consensus, no stability
+    metrics) is run on ``n_batches`` minibatches and the replicate tensors are held locally without
+    mutating any model buffers.
+
     Each subplot shows the distribution of mean L2 distances from each L2-normalized factor row to
-    its ``n_neighbors`` nearest neighbors (where ``n_neighbors = int(r * local_neighborhood_size)``).
+    its ``n_neighbors`` nearest neighbors (where
+    ``n_neighbors = int(r_total * local_neighborhood_size)`` and
+    ``r_total = n_replicates * n_batches``).
     A red vertical line marks ``density_threshold``; rows to the right of that line would be treated
     as outliers and excluded before k-means.  The title reports what fraction would be filtered.
 
-    Requires :func:`run_measurement_phase` to have been called first, and only covers
-    ``k`` values in :attr:`~CNMFTransformer.store_replicates_k_values` (those for which full
-    replicate tensors are stored).
-
     Args:
-        model: A :class:`CNMFTransformer` whose measurement phase has been run.
+        model: A trained :class:`CNMFTransformer`.
+        dataloader: Yields batch dicts with ``x_ng`` and ``var_names_g``.  If provided, a fresh
+            solve is run and ``k_values`` defaults to all of ``model.k_values``.  If ``None``,
+            reads from the replicate buffers populated by :func:`run_measurement_phase`.
+        transforms: GPU transforms to apply to each batch (same as :func:`run_measurement_phase`).
+        n_batches: Number of minibatches to solve.  More batches give a larger replicate pool and
+            a better-sampled density distribution.  Only used when ``dataloader`` is provided.
+        n_replicates: Independent replicate solves per ``(batch, k)``.  Only used when
+            ``dataloader`` is provided.
+        fista_iterations: FISTA iterations for the replicate solve.  Only used when ``dataloader``
+            is provided.
+        device: Device on which to run.  Defaults to the model's device.  Only used when
+            ``dataloader`` is provided.
         density_threshold: Shown as a red vertical line.  Rows with mean neighbor distance above
             this value would be filtered.  Range ``(0, 2]``; ``1.0`` is a safe no-filter starting
             point for L2-normalized non-negative vectors.
-        local_neighborhood_size: Fraction of replicates used to define each row's neighborhood.
-            ``n_neighbors = int(r * local_neighborhood_size)``.  Range ``(0, 1)``.
-        k_values: ``k`` values to plot.  Defaults to :attr:`~CNMFTransformer.store_replicates_k_values`.
+        local_neighborhood_size: Fraction of replicates used to define the local neighborhood.
+            ``n_neighbors = int(r_total * local_neighborhood_size)`` — matches the formula in
+            :func:`~cellarium.ml.models.nmf.consensus`, measuring within-cluster density rather
+            than cross-program distances.
+            Range ``(0, 1)``.
+        k_values: ``k`` values to plot.  When a dataloader is provided, defaults to all of
+            ``model.k_values``; otherwise defaults to
+            :attr:`~CNMFTransformer.store_replicates_k_values`.
         n_bins: Number of histogram bins.
 
     Returns:
@@ -1784,40 +1869,97 @@ def plot_density_histograms(
     """
     from matplotlib import pyplot as plt
 
-    if int(model._measured_n_batches) == 0:
-        raise RuntimeError("run run_measurement_phase() before calling plot_density_histograms()")
+    if dataloader is not None:
+        # --- fresh-solve mode: run lightweight solves, accumulate replicates locally ---
+        if k_values is None:
+            k_values = list(model.k_values)
+        else:
+            k_values = sorted(k_values)
+            unknown = [k for k in k_values if k not in model._k_to_index]
+            if unknown:
+                raise ValueError(f"k values {unknown} are not in model.k_values")
 
-    if k_values is None:
-        k_values = list(model.store_replicates_k_values)
+        device_ = model.device if device is None else torch.device(device)
+        dtype = model.slot_mu.dtype
+        transform_list = list(transforms)
+
+        # w_batches[k] accumulates (r, k, g) tensors from each batch
+        w_batches: dict[int, list[torch.Tensor]] = {k: [] for k in k_values}
+
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.no_grad():
+                for batch_idx, batch in enumerate(dataloader):
+                    if batch_idx >= n_batches:
+                        break
+                    for transform in transform_list:
+                        batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
+                    x_ng = batch["x_ng"].to(device=device_, dtype=dtype)
+                    if x_ng.shape[0] < 2:
+                        continue
+                    for k in k_values:
+                        slot_noise_rke = torch.randn(n_replicates, k, model.latent_dim, device=device_, dtype=dtype)
+                        solved = model.solve(x_ng, k, slot_noise_rke, fista_iterations)
+                        w_batches[k].append(solved["w_rkg"].detach().float().cpu())
+        finally:
+            model.train(was_training)
+
+        # replicate_factors[k]: (r_total, k, g) where r_total = n_replicates * n_batches_used
+        replicate_factors: dict[int, torch.Tensor] = {
+            k: torch.cat(w_batches[k], dim=0) for k in k_values if w_batches[k]
+        }
+        k_values = [k for k in k_values if k in replicate_factors]
+        if not k_values:
+            raise RuntimeError("dataloader yielded no usable batches")
+
     else:
-        k_values = sorted(k_values)
-        unknown = [k for k in k_values if k not in model.store_replicates_k_values]
-        if unknown:
-            raise ValueError(
-                f"k values {unknown} are not in model.store_replicates_k_values; "
-                "pass store_replicates_k_values to run_measurement_phase() to cover them"
+        # --- buffer mode: read from replicate buffers stored by run_measurement_phase ---
+        if int(model._measured_n_batches) == 0:
+            raise RuntimeError(
+                "pass a dataloader to plot_density_histograms(), or call run_measurement_phase() first"
             )
+        if k_values is None:
+            k_values = list(model.store_replicates_k_values)
+        else:
+            k_values = sorted(k_values)
+            unknown = [k for k in k_values if k not in model.store_replicates_k_values]
+            if unknown:
+                raise ValueError(
+                    f"k values {unknown} are not in model.store_replicates_k_values; "
+                    "pass store_replicates_k_values to run_measurement_phase() to cover them"
+                )
+        if not k_values:
+            raise ValueError("no k values to plot; store_replicates_k_values is empty")
 
-    if not k_values:
-        raise ValueError("no k values to plot; store_replicates_k_values is empty")
+        replicate_factors = {
+            k: getattr(model, f"D_{k}_rkg").detach().float() for k in k_values
+        }
 
     n_panels = len(k_values)
     fig, axes = plt.subplots(1, n_panels, figsize=(4.5 * n_panels, 3), squeeze=False)
     axes = axes[0]
 
     for ax, k in zip(axes, k_values):
-        w_rkg = getattr(model, f"D_{k}_rkg").detach().float()  # (r, k, g)
-        r = w_rkg.shape[0]
-        n_neighbors = int(r * local_neighborhood_size)
+        w_rkg = replicate_factors[k]  # (r_total, k, g)
+        r_total = w_rkg.shape[0]
+        total_rows = r_total * k
+        # n_neighbors scales with replicates, not total rows — same formula as nmf.py consensus().
+        # This measures within-cluster density: ~30% of same-program replicates per factor.
+        # Using total_rows here would force cross-program comparisons and inflate the metric.
+        n_neighbors = int(r_total * local_neighborhood_size)
 
         if n_neighbors < 2:
-            ax.text(0.5, 0.5, f"k={k}\ntoo few replicates\nfor neighborhood\n(r={r})",
-                    ha="center", va="center", transform=ax.transAxes)
+            ax.text(
+                0.5, 0.5,
+                f"k={k}\ntoo few replicates\nfor neighborhood\n(r={r_total})",
+                ha="center", va="center", transform=ax.transAxes,
+            )
             ax.set_axis_off()
             continue
 
-        # L2-normalize and flatten to (r*k, g), same as consensus()
-        d_norm_mg = F.normalize(w_rkg.reshape(r * k, -1), dim=-1, p=2)
+        # L2-normalize and flatten to (r_total*k, g), same as consensus()
+        d_norm_mg = F.normalize(w_rkg.reshape(total_rows, -1), dim=-1, p=2)
         dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
         dist_mm.fill_diagonal_(0.0)
         nearest_ml, _ = torch.topk(dist_mm, n_neighbors + 1, largest=False)
@@ -1828,7 +1970,7 @@ def plot_density_histograms(
         ax.axvline(density_threshold, color="red", linewidth=1.5, label=f"threshold={density_threshold}")
         ax.set_xlim(-0.05, 2.05)
         ax.set_xlabel(f"mean dist. to {n_neighbors} neighbors")
-        ax.set_ylabel(f"factor rows  (r×k = {r * k})")
+        ax.set_ylabel(f"factor rows  (r×k = {total_rows})")
         ax.set_title(f"k = {k}\n{pct_filtered:.1f}% filtered at threshold")
         ax.legend(fontsize=8)
 
