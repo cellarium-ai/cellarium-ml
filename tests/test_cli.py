@@ -594,6 +594,62 @@ TWO_DEVICE_CONFIGS = [
         },
     },
     {
+        "model_name": "ols",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "model": "cellarium.ml.models.StreamingOrdinaryLeastSquares",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "y_nk": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                        "convert_fn": "cellarium.ml.utilities.data.to_float_column",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
+        },
+    },
+    {
         "model_name": "tdigest",
         "subcommand": "fit",
         "fit": {
