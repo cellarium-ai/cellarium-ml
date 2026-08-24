@@ -35,6 +35,7 @@ dependencies = [
   "scikit-misc==0.5.1",
   "torch>=2.2.0",
   "transformers",
+  "zuko==1.6.0",
 ]
 
 dynamic = ["version"]
@@ -42,12 +43,16 @@ dynamic = ["version"]
 [project.optional-dependencies]
 lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML", "types-requests"]
+mypy = ["mypy", "types-PyYAML"]
+ontology = ["networkx", "owlready2"]
 test = [
   "pytest-xdist",
-  "scanpy",
+  "scanpy==1.11.5",
   "tenacity",
   "tensorboard",
   "torchvision",
+  "scvi-tools==1.3.3",
+  "zarr==2.18.3",
 ]
 scanpy = ["scanpy[leiden]"]
 docs = [

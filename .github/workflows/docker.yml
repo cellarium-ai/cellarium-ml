@@ -15,6 +15,7 @@ jobs:
     permissions:
       contents: read
       id-token: write  # required for Workload Identity Federation
+      actions: write   # required for GHA cache read/write
 
     steps:
     - name: Resolve version
@@ -47,14 +48,38 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build and push Docker image
+    - name: Build Docker image
       uses: docker/build-push-action@v6
       with:
         context: .
         file: ./Dockerfile
-        push: true
+        push: false
+        load: true
         platforms: linux/amd64
         build-args: VERSION=${{ steps.version.outputs.value }}
-        tags: |
-          us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
-          us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
+        tags: cellarium-ml-test:ci
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Test torch.compile()
+      run: |
+        timeout 180 docker run --rm \
+          -e TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_test_cache \
+          cellarium-ml-test:ci python -c "
+        import glob, torch
+        torch._dynamo.config.suppress_errors = False
+        def f(x):
+            return (x * x).sum()
+        compiled = torch.compile(f, backend='inductor')
+        result = compiled(torch.randn(10))
+        so_files = glob.glob('/tmp/inductor_test_cache/**/*.so', recursive=True)
+        assert so_files, 'No .so files in inductor cache — torch.compile() fell back to eager (g++ missing?)'
+        print(f'torch.compile() succeeded: {len(so_files)} compiled artifact(s) found')
+        "
+
+    - name: Push Docker image
+      run: |
+        docker tag cellarium-ml-test:ci us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
+        docker tag cellarium-ml-test:ci us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest
+        docker push us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:${{ steps.version.outputs.value }}
+        docker push us-central1-docker.pkg.dev/broad-dsde-methods/cellarium-ai/cellarium-ml:latest

@@ -22,6 +22,8 @@ from cellarium.ml.utilities.layers import create_initializer, scale_initializers
 from cellarium.ml.utilities.mup import LRAdjustmentGroup
 from cellarium.ml.utilities.testing import coord_check_MLP, get_coord_data
 
+# the official Toronto hosted CIFAR-10 takes 20 mins to download as of 2026-07-1, so we are hosting
+CIFAR10_URL = "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/cifar-10-python.tar.gz"
 optim_dict = {"sgd": torch.optim.SGD, "adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
 
 
@@ -130,14 +132,16 @@ def get_coord_data_MLP(
     retry=(lambda exc: isinstance(exc, urllib.error.URLError)),  # retry on URLError
 )
 def cifar_dataset(path: Path, transform) -> datasets.CIFAR10:
+    datasets.CIFAR10.url = CIFAR10_URL  # serve from our fast public bucket instead of toronto.edu
     return datasets.CIFAR10(root=path, train=True, download=True, transform=transform)
 
 
-@pytest.fixture
-def train_loader(tmp_path: Path) -> torch.utils.data.DataLoader:
+@pytest.fixture(scope="session")
+def train_loader(tmp_path_factory: pytest.TempPathFactory) -> torch.utils.data.DataLoader:
     batch_size = 64
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-    trainset = cifar_dataset(tmp_path, transform)
+    path = tmp_path_factory.mktemp("cifar")
+    trainset = cifar_dataset(path, transform)
     return torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
 
 
