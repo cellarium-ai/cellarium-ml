@@ -27,6 +27,11 @@ def _reference_solve(x: torch.Tensor, y: torch.Tensor, ridge: float = 0.0) -> to
     return torch.linalg.solve(XtX, x.T @ y)
 
 
+def _reference_univariate_solve(x: torch.Tensor, y: torch.Tensor, ridge: float = 0.0) -> torch.Tensor:
+    Xsq_g = (x**2).sum(dim=0)  # (g,)
+    return (x.T @ y) / (Xsq_g + ridge).unsqueeze(1)
+
+
 @pytest.mark.parametrize("batch_size", [1, 7, 100])
 def test_streaming_matches_direct(batch_size: int):
     """Streaming accumulation over minibatches produces the same solution as a direct solve."""
@@ -56,6 +61,59 @@ def test_ridge_penalty(ridge: float):
     W_reference = _reference_solve(x, y, ridge=ridge)
 
     torch.testing.assert_close(W_streaming, W_reference)
+
+
+@pytest.mark.parametrize("batch_size", [1, 7, 100])
+def test_univariate_streaming_matches_direct(batch_size: int):
+    """Univariate streaming accumulation produces the same solution as the direct per-feature formula."""
+    n, g, k = 100, 8, 3
+    x, y, var_names = _make_data(n, g, k)
+
+    model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, univariate=True, ridge_penalty=0.0)
+    for start in range(0, n, batch_size):
+        model.update(x[start : start + batch_size], y[start : start + batch_size])
+
+    W_streaming = model.solve()
+    W_reference = _reference_univariate_solve(x, y, ridge=0.0)
+
+    torch.testing.assert_close(W_streaming, W_reference)
+
+
+@pytest.mark.parametrize("ridge", [0.0, 1e-4, 1.0])
+def test_univariate_ridge_penalty(ridge: float):
+    """Univariate ridge penalty is applied correctly: W_gk = XtY_gk / (Xsq_g + ridge)."""
+    n, g, k = 200, 10, 4
+    x, y, var_names = _make_data(n, g, k, seed=2)
+
+    model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, univariate=True, ridge_penalty=ridge)
+    model.update(x, y)
+
+    W_streaming = model.solve()
+    W_reference = _reference_univariate_solve(x, y, ridge=ridge)
+
+    torch.testing.assert_close(W_streaming, W_reference)
+
+
+def test_univariate_differs_from_multivariate():
+    """Univariate and multivariate solutions differ when features are correlated."""
+    n, g, k = 200, 5, 2
+    rng = torch.Generator()
+    rng.manual_seed(99)
+    # Introduce correlation by making features linear combinations of a smaller basis
+    basis = torch.randn(n, 2, generator=rng)
+    x = basis @ torch.randn(2, g, generator=rng)
+    y = torch.randn(n, k, generator=rng)
+    var_names = np.array([f"gene_{i}" for i in range(g)])
+
+    mv_model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, univariate=False, ridge_penalty=1e-3)
+    uv_model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, univariate=True, ridge_penalty=1e-3)
+    mv_model.update(x, y)
+    uv_model.update(x, y)
+
+    W_mv = mv_model.solve()
+    W_uv = uv_model.solve()
+
+    assert not torch.allclose(W_mv, W_uv), "Multivariate and univariate solutions should differ for correlated features"
 
 
 class _OLSDataset(torch.utils.data.Dataset):

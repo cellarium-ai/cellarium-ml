@@ -17,32 +17,66 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
     """
     Streaming ordinary least squares (OLS) solver.
 
-    Accumulates X^T X and X^T Y over minibatches, then solves the normal equations
+    Accumulates sufficient statistics over minibatches, then solves the normal equations
     once at the end of the first epoch. Training is stopped after one pass.
+
+    Two modes are supported:
+
+    * **Multivariate** (``univariate=False``, default): fits a single joint regression
+      ``X @ W = Y`` where all features compete simultaneously. Requires accumulating
+      ``X^T X`` of shape ``(n_features, n_features)`` — only tractable when ``n_features``
+      is small (e.g. a gene expression matrix filtered to a relevant gene set, or a
+      low-dimensional embedding from ``obsm``).
+
+    * **Univariate** (``univariate=True``): fits ``n_features × n_targets`` independent
+      simple linear regressions, one per feature–target pair. Accumulates only the sum of
+      squared feature values (shape ``(n_features,)``), making it tractable for
+      high-dimensional ``X`` such as a raw genotype matrix with millions of variants.
+      The ridge penalty is added per-feature to the scalar denominator rather than to
+      a matrix diagonal; it is otherwise equivalent in intent.
 
     Args:
         var_names_g:
             The variable names schema for the input data validation.
         n_targets:
             Number of target columns (k in y_nk).
+        univariate:
+            If ``True``, run massively parallel univariate regressions instead of a single
+            joint multivariate regression.
         ridge_penalty:
-            L2 penalty added to the diagonal of X^T X before solving.
-            Recommended for numerical stability when some features have zero variance.
+            L2 penalty added to the diagonal of X^T X (multivariate) or to each feature's
+            sum of squares (univariate) before solving. Recommended for numerical stability.
     """
 
-    def __init__(self, var_names_g: np.ndarray, n_targets: int, ridge_penalty: float = 1e-6) -> None:
+    def __init__(
+        self,
+        var_names_g: np.ndarray,
+        n_targets: int,
+        univariate: bool = False,
+        ridge_penalty: float = 1e-6,
+    ) -> None:
         super().__init__()
 
         self.var_names_g = var_names_g
         n_features = len(var_names_g)
+        self.univariate = univariate
         self.ridge_penalty = ridge_penalty
 
-        self.XtX_gg: torch.Tensor
+        if univariate:
+            self.Xsq_g: torch.Tensor
+            self.register_buffer("Xsq_g", torch.zeros(n_features))
+        else:
+            self.XtX_gg: torch.Tensor
+            self.register_buffer("XtX_gg", torch.zeros(n_features, n_features))
+
         self.XtY_gk: torch.Tensor
         self.W_gk: torch.Tensor
-        self.register_buffer("XtX_gg", torch.zeros(n_features, n_features))
         self.register_buffer("XtY_gk", torch.zeros(n_features, n_targets))
         self.register_buffer("W_gk", torch.zeros(n_features, n_targets))
+
+        # DDP requires at least one parameter with requires_grad=True even when no
+        # optimizer is used; this scalar satisfies that constraint without affecting results.
+        self._dummy_param = torch.nn.Parameter(torch.empty(()))
 
         self.reset_parameters()
 
@@ -78,7 +112,10 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
             x_ng: Tensor of shape (batch_size, n_features).
             y_nk: Tensor of shape (batch_size, n_targets).
         """
-        self.XtX_gg += x_ng.T @ x_ng
+        if self.univariate:
+            self.Xsq_g += (x_ng**2).sum(dim=0)
+        else:
+            self.XtX_gg += x_ng.T @ x_ng
         self.XtY_gk += x_ng.T @ y_nk
 
     @torch.no_grad()
@@ -88,12 +125,18 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
 
         Args:
             ridge_penalty:
-                L2 penalty on the diagonal of X^T X. Defaults to ``self.ridge_penalty``.
+                L2 penalty. In multivariate mode it is added to the diagonal of X^T X;
+                in univariate mode it is added to each feature's sum of squares.
+                Defaults to ``self.ridge_penalty``.
 
         Returns:
             Coefficient matrix of shape (n_features, n_targets).
         """
         penalty = self.ridge_penalty if ridge_penalty is None else ridge_penalty
+
+        if self.univariate:
+            return self.XtY_gk / (self.Xsq_g + penalty).unsqueeze(1)
+
         XtX = self.XtX_gg
         if penalty > 0.0:
             identity = torch.eye(XtX.size(0), device=XtX.device, dtype=XtX.dtype)
@@ -109,7 +152,10 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
         the solution uses the full dataset rather than a single shard.
         """
         if trainer.world_size > 1:
-            dist.all_reduce(self.XtX_gg, op=dist.ReduceOp.SUM)
+            if self.univariate:
+                dist.all_reduce(self.Xsq_g, op=dist.ReduceOp.SUM)
+            else:
+                dist.all_reduce(self.XtX_gg, op=dist.ReduceOp.SUM)
             dist.all_reduce(self.XtY_gk, op=dist.ReduceOp.SUM)
 
         self.W_gk.copy_(self.solve())
@@ -136,6 +182,10 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
 
     @torch.no_grad()
     def reset_parameters(self) -> None:
-        self.XtX_gg.zero_()
+        if self.univariate:
+            self.Xsq_g.zero_()
+        else:
+            self.XtX_gg.zero_()
         self.XtY_gk.zero_()
         self.W_gk.zero_()
+        self._dummy_param.data.zero_()
