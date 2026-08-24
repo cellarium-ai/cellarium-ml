@@ -1,0 +1,116 @@
+# lightning.pytorch==2.5.2
+seed_everything: true
+trainer:
+  accelerator: auto
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: 32-true
+  max_epochs: 6
+  max_steps: -1
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 10
+  val_check_interval: 2500
+  gradient_clip_val: 10.0
+  gradient_clip_algorithm: norm
+  default_root_dir: null
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
+      log_momentum: false
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      every_n_epochs: 1
+      save_top_k: -1
+      save_last: true
+model:
+  optim_fn: torch.optim.Adam
+  optim_kwargs:
+    lr: 5e-3 
+  cpu_transforms:
+  - class_path: cellarium.ml.transforms.Filter
+    init_args:
+      filter_list:
+        !FileLoader
+        file_path: /home/sfleming/socam_runs/hvg_genes__top4000__hvg_only.csv
+        loader_fn: pandas.read_csv
+        attr: "feature_id"
+        convert_fn: pandas.Series.to_list
+  transforms:
+  - cellarium.ml.transforms.Densify
+  - class_path: cellarium.ml.transforms.NormalizeTotal
+    init_args:
+      target_count: 10000
+      eps: 1.0e-06
+  - class_path: cellarium.ml.transforms.Log1p
+  - class_path: cellarium.ml.transforms.DivideByScale
+    init_args:
+      scale_g:
+        !CheckpointLoader
+        file_path: /home/sfleming/socam_runs/tdigest/lightning_logs/version_16/checkpoints/epoch=0-step=4004.ckpt
+        attr: model.median_g
+        convert_fn: torch.Tensor.float
+      var_names_g:
+        !CheckpointLoader
+        file_path: /home/sfleming/socam_runs/tdigest/lightning_logs/version_16/checkpoints/epoch=0-step=4004.ckpt
+        attr: model.var_names_g
+  model:
+    class_path: cellarium.ml.models.SOCAM
+    init_args:
+      n_obs: null
+      var_names_g: null
+      W_prior_scale: 1e-2
+      descendant_tensor:
+        !FileLoader
+        file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2025-07-30/cl-basic.owl
+        loader_fn: cellarium.ml.utilities.data.get_cl_descendant_tensor_from_owl
+      cl_names:
+        !FileLoader
+        file_path: https://github.com/obophenotype/cell-ontology/releases/download/v2025-07-30/cl-basic.owl
+        loader_fn: cellarium.ml.utilities.data.get_cl_names_from_owl
+      cl_name_subset: null
+      probability_propagation_flag: true
+      seed: 0
+  is_initialized: false
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      filenames: /home/sfleming/data/extract_{000000..001000}.h5ad
+      limits: null
+      shard_size: 10000
+      # last_shard_size: 515 
+      max_cache_size: 3
+      cache_size_strictly_enforced: true
+      label: null
+      keys: null
+      index_unique: null
+      convert: null
+      indices_strict: true
+      obs_columns_to_validate: []
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.keep_sparse
+    var_names_g:
+      attr: var
+      key: feature_id
+    total_mrna_umis_n:
+      attr: obs
+      key: raw_sum
+    cl_names_n:
+      attr: obs
+      key: cell_type_ontology_term_id
+    obs_names_n:
+      attr: obs_names   
+  batch_size: 4096
+  iteration_strategy: cache_efficient
+  shuffle: true
+  drop_last_indices: false
+  train_size: 0.9
+  num_workers: 12
+  drop_incomplete_batch: false
+  prefetch_factor: 4
+  persistent_workers: true
+ckpt_path: null

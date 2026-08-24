@@ -1999,7 +1999,7 @@ class NMFOutput:
         return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
 
     @torch.no_grad()
-    def refit_consensus_factor_for_all_genes(
+    def refit_consensus_factors_tpm_all_genes(
         self,
         k: int,
         normalize_tpm_spectra: bool,
@@ -2010,15 +2010,19 @@ class NMFOutput:
         # self.datamodule.setup(stage="predict")
 
         # Initialize tensors if needed
-        if self._tpm_D_kg is None:
-            consensus_D_kg = self.consensus[k]["consensus_D_kg"]
-            assert isinstance(consensus_D_kg, torch.Tensor)
-            self._tpm_D_kg = consensus_D_kg.clone()
-            self._tpm_A_kk = torch.zeros(k, k, device=consensus_D_kg.device)
-            self._tpm_B_kg = torch.zeros(k, consensus_D_kg.shape[1], device=consensus_D_kg.device)
+        # if self._tpm_D_kg is None:
+        consensus_D_kg = self.consensus[k]["consensus_D_kg"]
+        assert isinstance(consensus_D_kg, torch.Tensor)
+        self._tpm_D_kg = None
+        self._tpm_A_kk = torch.zeros(k, k, device=consensus_D_kg.device)
+        self._tpm_B_kg = None
 
         for batch in tqdm(self.datamodule.predict_dataloader()):
             x_ng = batch["x_ng"]
+            if self._tpm_B_kg is None:
+                self._tpm_B_kg = torch.zeros(k, x_ng.shape[1], device=x_ng.device)
+            if self._tpm_D_kg is None:
+                self._tpm_D_kg = torch.zeros(k, x_ng.shape[1], device=x_ng.device)
 
             consensus_D_kg = self.consensus[k]["consensus_D_kg"]
             assert isinstance(consensus_D_kg, torch.Tensor)
@@ -2074,13 +2078,13 @@ class NMFOutput:
             var_names_g=filtered_var_names_g,
             consensus_factors={k: {"consensus_D_kg": consensus_D_kg}},
             k=k,
-            normalize=False,
-        )
+            normalize=True,
+        ).unsqueeze(0)
 
         # normalize counts to TPM
         if normalize_tpm_spectra:
             tpm_transform = NormalizeTotal(target_count=1_000_000)
-            x_ng = tpm_transform(x_ng)
+            x_ng = tpm_transform(x_ng)["x_ng"]
         n, g = x_ng.shape
         r = 1
 

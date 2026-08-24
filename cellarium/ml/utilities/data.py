@@ -71,7 +71,11 @@ class AnnDataField:
         return value
 
 
-def convert_to_tensor(value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor) -> np.ndarray | torch.Tensor:
+def convert_to_tensor_or_array(
+    value: np.ndarray | scipy.sparse.spmatrix | torch.Tensor | pd.Series,
+) -> np.ndarray | torch.Tensor:
+    if isinstance(value, pd.Series):
+        value = value.to_numpy()  # oom without this potentially because copying clears the reference
     if isinstance(value, torch.Tensor) or scipy.sparse.issparse(value):
         return value
     if np.issubdtype(value.dtype, np.str_) or np.issubdtype(value.dtype, np.object_):
@@ -132,7 +136,7 @@ def collate_fn(
 
         collated_batch[key] = value
 
-    return tree_map(convert_to_tensor, collated_batch)
+    return tree_map(convert_to_tensor_or_array, collated_batch)
 
 
 def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
@@ -146,6 +150,18 @@ def densify(x: scipy.sparse.csr_matrix) -> np.ndarray:
         Dense matrix.
     """
     return x.toarray()
+
+
+def series_to_str_list(x: pd.Series) -> list[str]:
+    """
+    Convert a pandas Series of strings to a list of strings.
+    Args:
+        x: Pandas Series object.
+
+    Returns:
+        List of strings.
+    """
+    return x.astype(str).to_list()
 
 
 def keep_sparse(x: scipy.sparse.spmatrix) -> scipy.sparse.spmatrix:
@@ -220,6 +236,30 @@ def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
         return np.asarray(x.cat.codes, dtype=np.int32)
 
 
+def categories_to_product_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
+    """
+    Convert a pandas Series or DataFrame of categorical data to a numpy array of codes.
+    If the input is a DataFrame, the output is created by first combining the codes of each
+    column into a single code representing the Cartesian product of the categories.
+
+    Args:
+        x: Pandas Series object or a pandas DataFrame containing multiple categorical Series.
+
+    Returns:
+        Numpy array.
+    """
+    if isinstance(x, pd.DataFrame):
+        codes = x.apply(lambda col: col.cat.codes)
+        n_cats = x.apply(lambda col: len(col.cat.categories))
+        # compute codes as product of number of categories
+        # like the code [1, 1] if there are 3 categories in the first column and 2 in the second
+        # would be 1 + 1*3 = 4
+        n_cats = n_cats.cumprod().shift(1).fillna(1)
+        return np.array((n_cats.values[None, :] * codes).sum(axis=1).values).astype(int)
+    else:
+        return np.array(x.cat.codes).astype(int)
+
+
 def get_categories(x: pd.Series) -> np.ndarray:
     """
     Get the categories of a pandas Series object.
@@ -231,6 +271,22 @@ def get_categories(x: pd.Series) -> np.ndarray:
         Numpy array.
     """
     return np.asarray(x.cat.categories)
+
+
+def to_float_column(x: pd.Series) -> np.ndarray:
+    """
+    Convert a pandas Series to a float32 numpy column vector of shape ``(n, 1)``.
+
+    Useful as a ``convert_fn`` when a single continuous ``obs`` column is used as a
+    regression target (``y_nk`` with ``k=1``).
+
+    Args:
+        x: Pandas Series object.
+
+    Returns:
+        Float32 numpy array of shape ``(n, 1)``.
+    """
+    return x.to_numpy(dtype=np.float32)[:, None]
 
 
 def get_var_names_g_indices(
@@ -271,3 +327,159 @@ def get_var_names_g_indices(
     if missing:
         raise ValueError(f"The following genes in `var_names_g` are not present in the stored schema: {missing}")
     return np.array(indices, dtype=np.intp)
+
+
+def _get_classes_from_owl(owl_uri: str, prefix: str = "CL_") -> list:
+    """
+    Load an OWL file and return classes with a given prefix and a singleton label.
+    """
+    import owlready2
+
+    cl = owlready2.get_ontology(owl_uri).load()
+
+    # only keep CL classes with a singleton label
+    classes = list(_class for _class in cl.classes() if _class.name.startswith(prefix) and len(_class.label) == 1)
+    return classes
+
+
+def get_cl_classes_from_owl(owl_uri: str) -> list:
+    """
+    Get CL classes from an OWL file: the ontology IDs, e.g. CL_0000123.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns: A list of CL classes
+    """
+    return _get_classes_from_owl(owl_uri, prefix="CL_")
+
+
+def get_cl_descendant_tensor_from_owl(owl_uri: str) -> torch.Tensor:
+    """
+    Get a descendant tensor from an OWL file. Include "unknown" a new disconnected category at the end.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns:
+        A descendant tensor, where the entry at index (i, j) is True if i=j or cell type j is a descendant of
+        cell type i, and False otherwise.
+    """
+
+    cl_classes = get_cl_classes_from_owl(owl_uri)
+
+    cell_type_to_index = {cell_type: idx for idx, cell_type in enumerate(cl_classes)}
+    descendant_tensor = torch.zeros((len(cl_classes) + 1, len(cl_classes) + 1), dtype=torch.bool)
+    for cl_class in cl_classes:
+        idx = cell_type_to_index[cl_class]
+        descendant_tensor[idx, idx] = True  # identity is included in this tensor
+        for descendant in cl_class.descendants():
+            descendant_idx = cell_type_to_index[descendant]
+            descendant_tensor[idx, descendant_idx] = True
+    descendant_tensor[-1, -1] = True  # "unknown" is a descendant of itself and no other cell types
+    return descendant_tensor
+
+
+def get_cl_names_from_owl(owl_uri: str) -> list[str]:
+    """
+    Get cell type names (e.g., CL:0000123) from an OWL file, with "unknown" appended as a new disconnected category.
+
+    Args:
+        owl_uri: The URI of the OWL file.
+    Returns:
+        A list of cell type names, where the name at index i corresponds to the cell type
+        at index i in the descendant tensor.
+    """
+    cl_classes = get_cl_classes_from_owl(owl_uri)
+    underscore_names = [_class.name for _class in cl_classes]
+    colon_names = [name.replace("CL_", "CL:") for name in underscore_names]
+    return colon_names + ["unknown"]
+
+
+def compute_cl_distance_matrix(owl_uri: str) -> pd.DataFrame:
+    """
+    Compute an all-pairs shortest-path distance matrix over the Cell Ontology (CL).
+
+    Nodes are all CL classes found in the OWL file. Distances are computed on the
+    **undirected** ontology graph, so sibling cell types separated by a common parent
+    get a finite distance (2 hops) rather than infinity.
+
+    This is a slow, one-time offline pre-computation (typically ~1 minute for the full
+    CL ontology). Save the result to disk and pass it to the scVI model constructor via
+    ``ontology_distance_matrix``. Example::
+
+        df = compute_cl_distance_matrix(
+            "https://github.com/obophenotype/cell-ontology/releases/download/v2024-01-04/cl.owl"
+        )
+        df.to_parquet("cl_distance_matrix.parquet")
+
+    Args:
+        owl_uri: URI or local path of the CL OWL file (passed to
+            ``owlready2.get_ontology(...).load()``).
+
+    Returns:
+        A symmetric square :class:`pandas.DataFrame` of ``float32`` values with CL ID
+        strings (e.g. ``"CL:0000540"``) as both index and columns. Diagonal entries are
+        ``0.0``; disconnected pairs have ``inf``.
+
+    Raises:
+        ImportError: If ``owlready2`` or ``networkx`` are not installed.
+            Install with ``pip install cellarium-ml[ontology]``.
+    """
+    try:
+        import networkx as nx
+        import owlready2
+    except ImportError as e:
+        raise ImportError(
+            "owlready2 and networkx are required for compute_cl_distance_matrix. "
+            "Install them with: pip install cellarium-ml[ontology]"
+        ) from e
+
+    ontology = owlready2.get_ontology(owl_uri).load()
+    all_classes = list(ontology.classes())
+
+    # Filter to CL classes that have exactly one label
+    cl_prefix = "CL_"
+    classes = [c for c in all_classes if c.name.startswith(cl_prefix) and len(c.label) == 1]
+    cl_ids = [c.name.replace("_", ":") for c in classes]
+    name_to_idx: dict[str, int] = {cl_id: i for i, cl_id in enumerate(cl_ids)}
+    classes_set = set(classes)
+
+    # Build directed graph using parent/child relationships
+    graph = nx.DiGraph()
+    for cl_id in cl_ids:
+        graph.add_node(cl_id)
+    for cls in classes:
+        cl_id = cls.name.replace("_", ":")
+        for parent in ontology.get_parents_of(cls):
+            if parent not in classes_set:
+                continue
+            parent_id = parent.name.replace("_", ":")
+            graph.add_edge(parent_id, cl_id)
+        for child in ontology.get_children_of(cls):
+            if child not in classes_set:
+                continue
+            child_id = child.name.replace("_", ":")
+            graph.add_edge(cl_id, child_id)
+
+    # Use undirected graph so sibling pairs are reachable
+    undirected = graph.to_undirected()
+
+    n = len(cl_ids)
+    dist_matrix = np.full((n, n), np.inf, dtype=np.float32)
+    np.fill_diagonal(dist_matrix, 0.0)
+
+    for source, lengths in nx.all_pairs_shortest_path_length(undirected):
+        src_idx = name_to_idx[source]
+        for target, d in lengths.items():
+            tgt_idx = name_to_idx[target]
+            dist_matrix[src_idx, tgt_idx] = float(d)
+
+    df = pd.DataFrame(dist_matrix, index=cl_ids, columns=cl_ids)
+
+    # Append an "unknown" label with inf distance to all other labels (and 0 to itself).
+    # This allows datasets that include an "unknown" cell type to pass through the constructor
+    # without errors; the inf distances will be excluded from all finite-only metric calculations.
+    df.loc["unknown", :] = np.inf
+    df.loc[:, "unknown"] = np.inf
+    df.loc["unknown", "unknown"] = 0.0
+
+    return df

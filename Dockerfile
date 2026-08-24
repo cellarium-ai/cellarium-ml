@@ -7,7 +7,7 @@ ENV DOCKER=true \
 ARG VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv python-is-python3 git curl gnupg \
+    python3 python3-dev python3-pip python3-venv python-is-python3 git curl gnupg gcc g++ \
  && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
     | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - \
  && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] \
@@ -18,5 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/* \
  && python3 -m venv /opt/venv \
  && /opt/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu124 \
- && /opt/venv/bin/pip install git+https://github.com/cellarium-ai/cellarium-ml@${VERSION} \
+ && rm -rf ~/.cache/pip
+
+RUN /opt/venv/bin/pip install git+https://github.com/cellarium-ai/cellarium-ml@${VERSION} \
  && rm -rf ~/.cache/pip

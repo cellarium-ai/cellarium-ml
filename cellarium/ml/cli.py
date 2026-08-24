@@ -6,6 +6,7 @@ Command line interface for Cellarium ML.
 """
 
 import copy
+import os
 import sys
 import warnings
 from collections.abc import Callable
@@ -159,7 +160,7 @@ class CheckpointLoader(FileLoader):
     .. code-block:: yaml
 
         model:
-          transorms:
+          transforms:
             - class_path: cellarium.ml.transforms.DivideByScale
               init_args:
                 scale_g:
@@ -300,6 +301,43 @@ def compute_y_categories(data: CellariumAnnDataDataModule) -> np.ndarray:
     return field(adata)
 
 
+def compute_n_cats_per_cov(data: CellariumAnnDataDataModule) -> list[int]:
+    """Extract the number of unique categories in each covariate in the "categorical_covariate_index_nd" batch_key.
+
+    Example:
+
+        .. code-block:: yaml
+            categorical_covariate_index_nd:
+                attr: obs
+                key:
+                    - chemistry
+                    - condition
+                convert_fn: cellarium.ml.utilities.data.categories_to_codes
+
+        The field "categorical_covariate_index_nd" indicates that we are specifying categorical covariates from
+        the columnns ["chemistry", "condition"] from adata.obs.
+        We extract those columns from adata.obs and count the number of categories in each.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        List of length (number of keys) containing the number of categories in each field.
+    """
+    if "categorical_covariate_index_nd" not in data.batch_keys:
+        return []
+    field = data.batch_keys["categorical_covariate_index_nd"]
+    assert isinstance(field, AnnDataField)
+    dataframe = getattr(data.dadc[0], field.attr)
+    n_cats_per_cov = []
+    if field.key is not None:
+        keys = [field.key] if isinstance(field.key, str) else field.key
+        for key in keys:
+            covariate_series = dataframe[key]
+            n_cats_per_cov.append(len(covariate_series.cat.categories))
+    return n_cats_per_cov
+
+
 def compute_var_names_g(
     cpu_transforms: list[torch.nn.Module] | None,
     transforms: list[torch.nn.Module] | None,
@@ -403,6 +441,26 @@ def compute_var_names_g(
             ) from e
         raise
     return output["var_names_g"]
+
+
+def compute_n_targets(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of target columns in the ``y_nk`` batch key.
+
+    Reads the ``y_nk`` field from the first shard (including its ``convert_fn``) and returns
+    ``shape[1]`` for 2D arrays (e.g. an ``obsm`` embedding) or ``1`` for 1D arrays
+    (e.g. a single ``obs`` column converted with :func:`~cellarium.ml.utilities.data.to_float_column`).
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of target columns.
+    """
+    field = data.batch_keys["y_nk"]
+    assert isinstance(field, AnnDataField)
+    y = field(data.dadc[0])
+    return 1 if y.ndim == 1 else y.shape[1]
 
 
 def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
@@ -562,6 +620,44 @@ def _validate_sparse_config(config: dict[Any, Any] | Namespace) -> list[str]:
     return warnings_list
 
 
+def compute_cl_name_subset(data: CellariumAnnDataDataModule) -> list[str]:
+    """
+    Compute the list of category names in cl_names_n.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The sorted list of unique category names in the ``cl_names_n`` batch key.
+    """
+    field = data.batch_keys["cl_names_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    return list(obs[field.key].cat.categories)
+
+
+def compute_cell_type_categories(data: CellariumAnnDataDataModule) -> list[str] | None:
+    """Derive ``cell_type_categories`` from the ``validation_cell_type_index_n`` batch key.
+
+    Reads the pandas Categorical from the first shard and returns its categories as a plain
+    list of strings, in the same order as ``.cat.categories`` (which matches ``.cat.codes``).
+    Returns ``None`` when the batch key is absent so that validation metrics are simply skipped.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        Ordered list of CL ID strings, or ``None`` if the batch key is not configured.
+    """
+    if "validation_cell_type_index_n" not in data.batch_keys:
+        return None
+    field = data.batch_keys["validation_cell_type_index_n"]
+    assert isinstance(field, AnnDataField)
+    obs = getattr(data.dadc[0], field.attr)
+    series = obs[field.key]
+    return list(series.cat.categories)
+
+
 def lightning_cli_factory(
     model_class_path: str,
     link_arguments: list[LinkArguments] | None = None,
@@ -653,6 +749,13 @@ def lightning_cli_factory(
                     "data.dadc": "cellarium.ml.data.DistributedAnnDataCollection",
                 }
             )
+
+        def predict(self, *args, **kwargs):
+            """Not well documented, but defining this here overrides the default predict subcommand.
+            This method injects return_predictions=False into the kwargs to prevent the predictions from
+            being returned, which prevents memory overflow when writing predictions to a file."""
+            kwargs["return_predictions"] = False
+            self.trainer.predict(*args, **kwargs)
 
     return NewLightningCLI
 
@@ -1034,6 +1137,60 @@ def probabilistic_pca(args: ArgsType = None) -> None:
 
 
 @register_model
+def scvi(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SingleCellVariationalInference` model.
+
+    This example shows how to fit feature count data to the scVI model [1].
+
+    Example run::
+
+        cellarium-ml scvi fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_size 5 \
+            --data.num_workers 1 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/scvi \
+            --trainer.max_steps 10
+
+    **References:**
+
+    1. `Deep generative modeling for single-cell transcriptomics (Lopez et al.)
+       <https://www.nature.com/articles/s41592-018-0229-2>`_.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    link_arguments = [
+        LinkArguments(
+            ("model.cpu_transforms", "model.transforms", "data"),
+            "model.model.init_args.var_names_g",
+            compute_var_names_g,
+        ),
+    ]
+    if not os.environ.get("SCVI_PREDICT_SKIP_ARG_LINKING"):
+        link_arguments.extend(
+            [
+                LinkArguments("data", "model.model.init_args.n_batch", compute_batch_index_n_categories),
+                LinkArguments("data", "model.model.init_args.n_cats_per_cov", compute_n_cats_per_cov),
+                LinkArguments("data", "model.model.init_args.cell_type_categories", compute_cell_type_categories),
+            ]
+        )
+    else:
+        # todo: add linking of the above from the checkpoint config when running predict,
+        # so that the user doesn't have to manually specify them
+        pass
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SingleCellVariationalInference",
+        link_arguments=link_arguments,
+    )
+    cli(args=args)
+
+
+@register_model
 def tdigest(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.TDigest` model.
@@ -1111,6 +1268,104 @@ def contrastive_mlp(args: ArgsType = None) -> None:
         ],
         trainer_defaults={
             "max_epochs": 20,
+        },
+    )
+    cli(args=args)
+
+
+@register_model
+def socam(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.SOCAM` model.
+
+    Example run::
+
+        cellarium-ml socam fit \
+            --data.filenames "gs://dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad" \
+            --data.shard_size 100 \
+            --data.max_cache_size 2 \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
+            --data.batch_keys.var_names_g.attr var_names \
+            --data.batch_keys.y_n.attr obs \
+            --data.batch_keys.y_n.key cell_type \
+            --data.batch_keys.y_n.convert_fn cellarium.ml.utilities.data.categories_to_codes \
+            --data.batch_size 100 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.max_steps 1000
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.SOCAM",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.cl_name_subset", compute_cl_name_subset),
+        ],
+    )
+    cli(args=args)
+
+
+@register_model
+def ols(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.StreamingOrdinaryLeastSquares` model.
+
+    Accumulates sufficient statistics (X^T X and X^T Y) over minibatches in a single pass and
+    solves the normal equations at the end of epoch 1. Training always stops after one epoch
+    regardless of ``max_epochs``.
+
+    The model accepts:
+
+    * ``x_ng`` — feature matrix (e.g. log-normalised gene expression)
+    * ``y_nk`` — target matrix (e.g. a neighbourhood embedding from ``obsm``, or a single
+      continuous ``obs`` column converted with
+      :func:`~cellarium.ml.utilities.data.to_float_column`)
+
+    ``var_names_g`` (number of features) and ``n_targets`` (number of target columns) are
+    derived automatically from the data configuration.
+
+    Example run (predicting a cell-neighbourhood embedding from gene expression)::
+
+        cellarium-ml ols fit \
+            --data.filenames "gs://my-bucket/cells_{0..9}.h5ad" \
+            --data.shard_size 10000 \
+            --data.max_cache_size 2 \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
+            --data.batch_keys.var_names_g.attr var_names \
+            --data.batch_keys.y_nk.attr obsm \
+            --data.batch_keys.y_nk.key X_neighborhood \
+            --data.batch_size 512 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/ols
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.StreamingOrdinaryLeastSquares",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_targets", compute_n_targets),
+        ],
+        trainer_defaults={
+            "max_epochs": 1,  # one pass; the model also enforces this via trainer.should_stop
         },
     )
     cli(args=args)
