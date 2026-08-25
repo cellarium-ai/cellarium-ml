@@ -814,6 +814,57 @@ def geneformer(args: ArgsType = None) -> None:
 
 
 @register_model
+def geometric_sketch(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.StreamingGeometricSketch` model.
+
+    Streams cells in a single pass and retains a geometrically diverse sketch by
+    partitioning gene-expression space with locality-sensitive hashing (LSH).  At most
+    ``max_cells_per_bucket`` cells are kept per LSH bucket via reservoir sampling.
+    Training stops after one epoch regardless of ``max_epochs``.
+
+    The ``obs_names_n`` batch key is required so that cell IDs are stored alongside
+    expression data.  ``var_names_g`` is derived automatically from the data
+    configuration.
+
+    Example run::
+
+        cellarium-ml geometric_sketch fit \
+            --data.filenames "gs://my-bucket/cells_{0..9}.h5ad" \
+            --data.shard_size 10000 \
+            --data.max_cache_size 2 \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
+            --data.batch_keys.var_names_g.attr var_names \
+            --data.batch_keys.obs_names_n.attr obs_names \
+            --data.batch_size 512 \
+            --data.num_workers 4 \
+            --model.model.init_args.n_bits 12 \
+            --model.model.init_args.max_cells_per_bucket 100 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/sketch
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.StreamingGeometricSketch",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
+        ],
+        trainer_defaults={
+            "max_epochs": 1,  # one pass; the model also enforces this via trainer.should_stop
+        },
+    )
+    cli(args=args)
+
+
+@register_model
 def hvg_seurat_v3(args: ArgsType = None) -> None:
     r"""
     CLI to run the :class:`cellarium.ml.models.HVGSeuratV3` model.
