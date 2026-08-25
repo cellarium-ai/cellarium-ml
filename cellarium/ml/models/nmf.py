@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
 import gc
 import logging
 import math
@@ -24,7 +25,9 @@ from sklearn.metrics import silhouette_score
 from tqdm.auto import tqdm
 
 from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.transforms import DivideByScale, Filter, NormalizeTotal
+from cellarium.ml.models.ols import StreamingOrdinaryLeastSquares
+from cellarium.ml.transforms import DivideByScale, Filter, NormalizeTotal, ZScore
+from cellarium.ml.utilities.core import call_func_with_batch
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -1999,114 +2002,79 @@ class NMFOutput:
         return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
 
     @torch.no_grad()
-    def refit_consensus_factors_tpm_all_genes(
+    def refit_consensus_factors_zscored_tpm_all_genes(
         self,
         k: int,
-        normalize_tpm_spectra: bool,
-    ) -> dict[str, torch.Tensor]:
-        print("WARNING: at this point, the cellarium implmentation may differ from Kotliar cNMF")
+        normalize_loadings: bool = False,
+        mean_g: torch.Tensor | None = None,
+        std_g: torch.Tensor | None = None,
+        var_names_g: np.ndarray | None = None,
+    ) -> dict[str, torch.Tensor | np.ndarray]:
+        """
+        Refit the consensus factors using all genes, after TPM normalization, and Z-scoring.
+
+        Args:
+            k: The run identifier, i.e. the number of factors to use from self.consensus to refit.
+            normalize_loadings: Whether to normalize the inferred loadings. False for Kotliar default.
+            mean_g: The mean expression of each gene for Z-scoring.
+                NOTE: should be TPM normalized stats.
+            std_g: The standard deviation of each gene for Z-scoring.
+            var_names_g: The names of the genes for Z-scoring.
+
+        Returns:
+            A dictionary mapping factor indices to their refitted loadings.
+        """
         if k not in self.consensus:
             raise KeyError(f"Missing consensus_factors key k={k}. Choose from {list(self.consensus.keys())}")
-        # self.datamodule.setup(stage="predict")
+        assert self.datamodule is not None, "datamodule must be present to refit consensus factors"
+        self.datamodule.setup(stage="predict")
 
-        # Initialize tensors if needed
-        # if self._tpm_D_kg is None:
-        consensus_D_kg = self.consensus[k]["consensus_D_kg"]
-        assert isinstance(consensus_D_kg, torch.Tensor)
-        self._tpm_D_kg = None
-        self._tpm_A_kk = torch.zeros(k, k, device=consensus_D_kg.device)
-        self._tpm_B_kg = None
+        # set up transforms
+        refit_transforms = [
+            NormalizeTotal(target_count=1_000_000),
+            ZScore(mean_g=mean_g, std_g=std_g, var_names_g=var_names_g, eps=1e-12),
+        ]
+        inference_transforms = self.nmf_module.transforms
 
-        for batch in tqdm(self.datamodule.predict_dataloader()):
-            x_ng = batch["x_ng"]
-            if self._tpm_B_kg is None:
-                self._tpm_B_kg = torch.zeros(k, x_ng.shape[1], device=x_ng.device)
-            if self._tpm_D_kg is None:
-                self._tpm_D_kg = torch.zeros(k, x_ng.shape[1], device=x_ng.device)
+        # set up streaming OLS solver
+        ols_solver = None
 
-            consensus_D_kg = self.consensus[k]["consensus_D_kg"]
-            assert isinstance(consensus_D_kg, torch.Tensor)
-            assert self._tpm_D_kg is not None
-            assert self._tpm_A_kk is not None
-            assert self._tpm_B_kg is not None
+        dataloader = self.datamodule.predict_dataloader()
+        for full_batch in tqdm(dataloader):
 
-            refit = self._refit(
-                x_ng=x_ng,
-                var_names_g=batch["var_names_g"],
-                consensus_D_kg=consensus_D_kg,
-                refit_D_kg=self._tpm_D_kg,
-                A_kk=self._tpm_A_kk,
-                B_kg=self._tpm_B_kg,
-                normalize_tpm_spectra=normalize_tpm_spectra,
-            )
-            self._tpm_D_kg = refit["D_kg"]
-            self._tpm_A_kk = refit["A_kk"]
-            self._tpm_B_kg = refit["B_kg"]
+            # get the batch used for inference (HVGs, same transforms as used for training)
+            inference_batch = copy.deepcopy(full_batch)
+            for transform in inference_transforms:
+                inference_batch |= call_func_with_batch(transform.forward, batch=inference_batch)
 
-        # Ensure all return values are tensors
-        assert self._tpm_D_kg is not None
-        assert self._tpm_A_kk is not None
-        assert self._tpm_B_kg is not None
-        return {"D_kg": self._tpm_D_kg, "A_kk": self._tpm_A_kk, "B_kg": self._tpm_B_kg}
-
-    def _refit(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        consensus_D_kg: torch.Tensor,
-        refit_D_kg: torch.Tensor,
-        A_kk: torch.Tensor,
-        B_kg: torch.Tensor,
-        normalize_tpm_spectra: bool,
-    ) -> dict[str, torch.Tensor]:
-        assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
-        # Filter to HVGs and normalize using the pre-computed scale from the checkpoint's
-        # DivideByScale transform (correct dataset-wide std), not a per-batch approximation.
-        assert self._hvg_filter is not None, "NMFOutput._hvg_filter is None; no Filter found in module transforms"
-        filter_result = self._hvg_filter(x_ng, var_names_g)
-        x_filtered_ng = filter_result["x_ng"]
-        filtered_var_names_g = filter_result["var_names_g"]
-        if self._scale_normalizer is not None:
-            x_normalized_ng = self._scale_normalizer(x_filtered_ng, filtered_var_names_g)["x_ng"]
-        else:
-            x_normalized_ng = x_filtered_ng
-
-        # compute loadings, called "norm_usages" in Kotliar, based on consensus factors
-        k = consensus_D_kg.shape[0]
-        alpha_rnk = self.nmf_module.model.infer_loadings(
-            x_ng=x_normalized_ng,
-            var_names_g=filtered_var_names_g,
-            consensus_factors={k: {"consensus_D_kg": consensus_D_kg}},
-            k=k,
-            normalize=True,
-        ).unsqueeze(0)
-
-        # normalize counts to TPM
-        if normalize_tpm_spectra:
-            tpm_transform = NormalizeTotal(target_count=1_000_000)
-            x_ng = tpm_transform(x_ng)["x_ng"]
-        n, g = x_ng.shape
-        r = 1
-
-        with torch.no_grad():
-            # update A and B, Mairal Algorithm 1 step 5 and 6
-            A_rkk = A_kk.unsqueeze(0) + torch.bmm(alpha_rnk.transpose(1, 2), alpha_rnk) / n
-            B_rkg = B_kg.unsqueeze(0) + torch.bmm(alpha_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
-
-            # update D, Mairal Algorithm 1 step 7
-            updated_factors_rkg = compute_factors(
-                factors_rkg=refit_D_kg.unsqueeze(0),
-                A_rkk=A_rkk,
-                B_rkg=B_rkg,
-                n_iterations=1000,
-                D_tol=self.nmf_module.model._D_tol,
+            # infer per-cell loadings for consensus factors for this minibatch
+            loadings_nk = self.nmf_module.model.infer_loadings(
+                x_ng=inference_batch["x_ng"],
+                var_names_g=inference_batch["var_names_g"],
+                obs_names_n=inference_batch.get("obs_names_n", None),
+                consensus_factors=self.consensus,
+                k=k,
+                normalize=normalize_loadings,
             )
 
-        # # update A and B
-        # D_kg, A_kk, B_kg = efficient_ols_all_cols(
-        #     alpha_nk.cpu().numpy(), x_ng.cpu().numpy(), A_kk.cpu().numpy(), B_kg.cpu().numpy()
-        # )
-        return {"D_kg": updated_factors_rkg.squeeze(0), "A_kk": A_rkk.squeeze(0), "B_kg": B_rkg.squeeze(0)}
+            # get the batch used for refitting (all genes, TPM normalized, Z-scored globally - different from training)
+            for transform in refit_transforms:
+                full_batch |= call_func_with_batch(transform.forward, batch=full_batch)
+
+            # incremental OLS fit update
+            if ols_solver is None:
+                ols_solver = StreamingOrdinaryLeastSquares(
+                    var_names_g=np.arange(k).astype(str), 
+                    n_targets=len(full_batch["var_names_g"]), 
+                    univariate=False, 
+                    ridge_penalty=0.0,
+                )
+            assert isinstance(ols_solver, StreamingOrdinaryLeastSquares)
+            ols_solver.update(x_ng=loadings_nk, y_nk=full_batch["x_ng"])
+
+        # finalize OLS fit
+        factors_kg = ols_solver.solve()
+        return {"factors_kg": factors_kg, "var_names_g": full_batch["var_names_g"]}
 
     def default_k_selection_plot(self):
         """
