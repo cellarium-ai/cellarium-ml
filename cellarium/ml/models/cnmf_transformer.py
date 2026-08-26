@@ -29,14 +29,24 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
+from cellarium.ml.models.geometric_sketch import StreamingGeometricSketch
 from cellarium.ml.models.model import PredictMixin, ValidateMixin
-from cellarium.ml.models.nmf import NonNegativeMatrixFactorization, consensus as nmf_consensus, nmf_compute_factors_fista, nmf_compute_loadings_fista
+from cellarium.ml.models.nmf import (
+    NonNegativeMatrixFactorization,
+    nmf_compute_factors_fista,
+    nmf_compute_loadings_fista,
+)
+from cellarium.ml.models.nmf import consensus as nmf_consensus
+from cellarium.ml.utilities.core import call_func_with_batch
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 _EPS = 1e-8
+# Size of the residual noise added to a data-dependent slot seed, relative to the spread of the
+# cell embeddings.  Only there to separate two slots that seeded on the same cell.
+_SEED_JITTER = 0.01
 
 
 # -----------------------------------------------------------------------------------------------
@@ -681,6 +691,10 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         k_sampling_seed: int = 0,
         noise_seed: int = 1,
         log_every_n_steps: int = 50,
+        use_reservoir: bool = True,
+        reservoir_n_bits: int = 12,
+        reservoir_max_cells_per_bucket: int = 2,
+        reservoir_seed: int = 0,
     ) -> None:
         if len(k_values) == 0:
             raise ValueError("k_values must not be empty")
@@ -757,16 +771,17 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self.blocks = torch.nn.ModuleList(
             [SlotAttentionBlock(latent_dim, n_self_attention_heads, ffn_mult) for _ in range(n_modules)]
         )
-        self.decoders = torch.nn.ModuleList(
-            [LinearFactorDecoder(latent_dim, g) for _ in range(n_modules)]
-        )
+        self.decoders = torch.nn.ModuleList([LinearFactorDecoder(latent_dim, g) for _ in range(n_modules)])
         # Non-affine on purpose: the loadings hot start is inside a no_grad region (stop-gradient on
         # H), so learnable parameters here could never receive a gradient and would sit dead.
         self.norm_hot_start = torch.nn.LayerNorm(latent_dim, elementwise_affine=False)
-        # Slot initialization as in Slot Attention: a Gaussian broken by noise tokens.  slot_mu is
-        # learned; slot_log_sigma is intentionally frozen at 0 (sigma = 1).  Keeping sigma fixed
-        # prevents the model from learning to suppress the noise tokens (posterior collapse), which
-        # would make all replicates identical and lose the exploration needed for k-selection.
+        # Slot initialization, as in Slot Attention but seeded on the data manifold: the noise
+        # tokens pick which cell embedding seeds each slot (see _initial_slots), and slot_mu is a
+        # learned offset applied to every seed.  slot_log_sigma is intentionally frozen at 0
+        # (sigma = 1) and now only scales the residual tie-breaking jitter; the exploration that
+        # k-selection needs comes from the noise choosing different seed cells per replicate, which
+        # no parameter can suppress (posterior collapse is structurally ruled out rather than
+        # merely discouraged).
         self.slot_mu = torch.nn.Parameter(torch.empty(latent_dim))
         self.slot_log_sigma = torch.nn.Parameter(torch.zeros(latent_dim), requires_grad=False)
         # k-conditioning via sinusoidal encoding of k/k_max → shared MLP → conditioning vector.
@@ -816,6 +831,22 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self.predict_k: int | None = None
         self._last_k = self.k_values[0]
         self._last_sc_loss: float = float("nan")
+
+        self.use_reservoir = use_reservoir
+        self._reservoir_cell_counter: int = 0
+        if use_reservoir:
+            self.reservoir: StreamingGeometricSketch | None = StreamingGeometricSketch(
+                var_names_g=np.array(self.var_names_g),
+                n_bits=reservoir_n_bits,
+                max_cells_per_bucket=reservoir_max_cells_per_bucket,
+                store_cell_data=True,
+                seed=reservoir_seed,
+            )
+            # Disable the dummy DDP-compatibility param; CNMFTransformer's own params handle that.
+            self.reservoir._dummy_param.requires_grad_(False)
+        else:
+            self.reservoir = None
+
         self.reset_parameters()
 
     # -------------------------------------------------------------------------------------------
@@ -869,6 +900,10 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         for k in self.store_replicates_k_values:
             getattr(self, f"D_{k}_rkg").zero_()
 
+        if self.use_reservoir and self.reservoir is not None:
+            self.reservoir.reset_parameters()
+            self._reservoir_cell_counter = 0
+
     @property
     def device(self) -> torch.device:
         return self.slot_mu.device
@@ -910,8 +945,68 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         enc = sinusoidal_k_encoding(k, self.k_max, self.latent_dim, device, dtype)
         return self.k_to_cond(enc)
 
-    def _initial_slots(self, k: int, slot_noise_rke: torch.Tensor, cond_e: torch.Tensor) -> torch.Tensor:
-        return self.slot_mu + torch.exp(self.slot_log_sigma) * slot_noise_rke + cond_e
+    # def _initial_slots(
+    #     self,
+    #     k: int,
+    #     slot_noise_rke: torch.Tensor,
+    #     cond_e: torch.Tensor,
+    #     x_emb_ne: torch.Tensor,
+    # ) -> torch.Tensor:
+    #     """
+    #     Data-dependent slot initialization: every noise token is a random *direction*, and the slot
+    #     it seeds is the cell embedding whose direction best matches it.
+
+    #     Isotropic ``N(0, I)`` slots live off the manifold the encoder maps cells onto, so the
+    #     cross-attention logits ``slot @ key^T`` in :class:`SlotAttentionBlock` carry no information
+    #     about which cells a slot ought to claim.  The competitive softmax over ``k`` then sees
+    #     near-equal logits for every slot, splits each cell evenly, and every slot aggregates the
+    #     same global mean -- the intra-replicate factor collapse this seeding exists to prevent.
+    #     Seeding on the manifold makes the very first round of competition meaningful, and the
+    #     softmax sharpens that separation over subsequent blocks rather than having to create it.
+
+    #     Directions are compared after L2 normalization so that the argmax spreads over the angular
+    #     extent of the manifold; an unnormalized dot product would keep picking whichever few cells
+    #     have the largest embedding norm, no matter the direction asked for.
+
+    #     The noise alone still determines the seed, which keeps the two properties the rest of the
+    #     model leans on: replicates remain independent random restarts (so consensus across them is
+    #     meaningful), and a fixed noise tensor still gives a bit-for-bit reproducible solve, which
+    #     :meth:`_check_drift` relies on to stay rank-consistent without a reduction.
+    #     """
+    #     similarity_rkn = torch.einsum("rke,ne->rkn", F.normalize(slot_noise_rke, dim=-1), F.normalize(x_emb_ne, dim=-1))
+    #     seed_rke = x_emb_ne.detach()[similarity_rkn.argmax(dim=-1)]
+    #     # Jitter, scaled to the embeddings, so two slots seeded on the same cell still diverge.
+    #     jitter = _SEED_JITTER * x_emb_ne.detach().std().clamp(min=_EPS)
+    #     return seed_rke + self.slot_mu + jitter * torch.exp(self.slot_log_sigma) * slot_noise_rke + cond_e
+
+    def _initial_slots(
+        self,
+        k: int,
+        slot_noise_rke: torch.Tensor,
+        cond_e: torch.Tensor,
+        x_emb_ne: torch.Tensor,
+    ) -> torch.Tensor:
+        n_cells = x_emb_ne.shape[0]
+        n_replicates = slot_noise_rke.shape[0]
+        seed_rke = torch.empty(n_replicates, k, self.latent_dim, device=x_emb_ne.device, dtype=x_emb_ne.dtype)
+
+        # Use a local generator seeded by the noise tensor.
+        # This guarantees DDP sync (deterministic) but allows us to use randperm
+        # to guarantee K UNIQUE cells, completely avoiding the Hypersphere Cone trap!
+        for r in range(n_replicates):
+            # Deterministic seed derived from the noise for this replicate
+            seed_val = int(abs(slot_noise_rke[r, 0, 0].item() * 1e6))
+            gen = torch.Generator(device=x_emb_ne.device).manual_seed(seed_val)
+            
+            if n_cells >= k:
+                rand_idx = torch.randperm(n_cells, generator=gen, device=x_emb_ne.device)[:k]
+            else:
+                rand_idx = torch.randint(0, n_cells, (k,), generator=gen, device=x_emb_ne.device)
+                
+            seed_rke[r] = x_emb_ne[rand_idx].detach()
+
+        jitter = _SEED_JITTER * x_emb_ne.detach().std().clamp(min=_EPS)
+        return seed_rke + self.slot_mu + jitter * torch.exp(self.slot_log_sigma) * slot_noise_rke + cond_e
 
     @torch.no_grad()
     def hot_start_loadings(self, x_ng: torch.Tensor, x_emb_ne: torch.Tensor, slots_rke: torch.Tensor) -> torch.Tensor:
@@ -922,9 +1017,21 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         A softmax over ``k`` already sums to one per cell, so scaling it by each cell's total puts
         the hot start on precisely the right scale, leaving FISTA only the direction to fix.
         """
-        logits_rkn = torch.einsum("rke,ne->rkn", self.norm_hot_start(slots_rke), x_emb_ne) * self.latent_dim**-0.5
+        # # original
+        # logits_rkn = torch.einsum("rke,ne->rkn", self.norm_hot_start(slots_rke), x_emb_ne) * self.latent_dim**-0.5
+        # attention_rkn = logits_rkn.softmax(dim=-2)
+        # return (attention_rkn * x_ng.sum(dim=-1)).transpose(-2, -1).contiguous()
+
+        # no temp
+        logits_rkn = torch.einsum("rke,ne->rkn", self.norm_hot_start(slots_rke), x_emb_ne)
         attention_rkn = logits_rkn.softmax(dim=-2)
         return (attention_rkn * x_ng.sum(dim=-1)).transpose(-2, -1).contiguous()
+
+        # # not great
+        # logits_rkn = torch.einsum("rke,ne->rkn", self.norm_hot_start(slots_rke), x_emb_ne)
+        # max_idx_r1n = logits_rkn.argmax(dim=-2, keepdim=True)
+        # hard_attention_rkn = torch.zeros_like(logits_rkn).scatter_(-2, max_idx_r1n, 1.0)
+        # return (hard_attention_rkn * x_ng.sum(dim=-1)).transpose(-2, -1).contiguous()
 
     @torch.no_grad()
     def _solve_loadings(
@@ -969,12 +1076,13 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             Dict with ``w_rkg`` (final layer), ``w_layers_rkg`` (list of W per layer),
             ``slots_rke``, and if requested ``h_rnk`` and ``x_target_ng``.
         """
-        x_emb_ne = self.encoder(x_ng)
+        x_emb_ne = self.encoder(torch.log1p(x_ng))
         key_ne = self.to_key(x_emb_ne)
         value_ne = self.to_value(x_emb_ne)
 
         cond_e = self._k_cond(k, x_ng.device, x_ng.dtype)
-        slots_rke = self._initial_slots(k, slot_noise_rke, cond_e)
+        slots_initial_rke = self._initial_slots(k, slot_noise_rke, cond_e, x_emb_ne)
+        slots_rke = slots_initial_rke
         w_layers_rkg: list[torch.Tensor] = []
         for i in range(self.n_iterations):
             idx = 0 if self.recurrent else i
@@ -990,6 +1098,13 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         if compute_loadings:
             target_ng = x_ng if x_target_ng is None else x_target_ng
             target_emb_ne = x_emb_ne if x_target_ng is None else self.encoder(target_ng)
+
+            # # attempt to resolve collapse
+            # # h_hot uses pre-attention initial slots: diversity guaranteed by slot_noise regardless
+            # # of student collapse, making it a robust seed for the decoupled teacher ALS.
+            # out["h_hot_rnk"] = self.hot_start_loadings(target_ng, target_emb_ne, slots_initial_rke.detach())
+
+            # h_rnk uses final-layer slots: best quality for inference and measurement phase.
             out["h_rnk"] = self._solve_loadings(target_ng, target_emb_ne, slots_rke, w_rkg, n_iterations)
             out["x_target_ng"] = target_ng
         return out
@@ -1058,10 +1173,16 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         The result is zero-gradient: gradients flow only through the transformer output W_l on the
         other side of the MSE loss.
         """
-        hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
-        htx_rkg = torch.einsum("rnk,ng->rkg", h_rnk, x_ng)
+        # Scale H down to a maximum of 1.0, and W up proportionally.
+        # This keeps the Lipschitz constant small and step sizes large.
+        c = h_rnk.max().clamp(min=1e-8)
+        h_scaled_rnk = h_rnk / c
+        w_scaled_rkg = w_rkg.detach().contiguous() * c
+
+        hth_rkk = torch.einsum("rnk,rnj->rkj", h_scaled_rnk, h_scaled_rnk)
+        htx_rkg = torch.einsum("rnk,ng->rkg", h_scaled_rnk, x_ng)
         w_prime_rkg, _ = nmf_compute_factors_fista(
-            w_rkg=w_rkg.detach().contiguous(),
+            w_rkg=w_scaled_rkg,
             A_rkk=hth_rkk,
             B_rkg=htx_rkg,
             max_iter=self.fista_w_iterations_train,
@@ -1094,18 +1215,49 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+        assert x_ng.min() >= 0.0, "x_ng must be nonnegative"
+
+        # print(x_ng.min(), x_ng.max(), x_ng.sum(-1).min(), x_ng.sum(-1).max(), x_ng.sum(-1).std())
 
         self._maybe_capture_drift_cells(x_ng)
 
         k = self.sample_k()
         self._last_k = k
 
+        # Retrieve strictly historical reservoir (empty on step 0; updated after training below).
+        x_reservoir_ng: torch.Tensor | None = None
+        if self.use_reservoir and self.reservoir is not None and self.reservoir.total_cells > 0:
+            x_reservoir_ng = self.reservoir.get_reservoir()["x_ng"].to_dense().to(device=x_ng.device, dtype=x_ng.dtype)
+
         sc_losses: list[torch.Tensor] = []
 
         for x_half_ng, r in self._split_batch(x_ng):
+            # Both halves of the cross-batch split condition on the same historical reservoir.
+            x_aug_ng = torch.cat([x_half_ng, x_reservoir_ng], dim=0) if x_reservoir_ng is not None else x_half_ng
             slot_noise_rke = torch.randn(r, k, self.latent_dim, device=x_ng.device, dtype=x_ng.dtype)
-            solved = self.solve(x_half_ng, k, slot_noise_rke, self.fista_iterations_train)
-            w_target_rkg = self._compute_w_target(x_half_ng, solved["h_rnk"], solved["w_rkg"])
+
+            solved = self.solve(x_aug_ng, k, slot_noise_rke, self.fista_iterations_train)
+            w_target_rkg = self._compute_w_target(x_aug_ng, solved["h_rnk"], solved["w_rkg"])
+
+            # # wild attempts to solve collapse, did not work
+            # solved = self.solve(x_aug_ng, k, slot_noise_rke, self.fista_iterations_train)
+            # # Decoupled teacher ALS.  All three steps are no_grad (enforced by their decorators /
+            # # the nmf_compute_loadings_fista decorator).
+            # h_hot_rnk = solved["h_hot_rnk"]
+            # # Step A: W from guaranteed-diverse h_hot; student W warm-starts the FISTA.
+            # # w_1_rkg = self._compute_w_target(x_aug_ng, h_hot_rnk, solved["w_rkg"])
+            # # Create a dummy uniform matrix so the student's collapse CANNOT leak.
+            # dummy_w_rkg = torch.ones_like(solved["w_rkg"]) / self.n_genes
+            # w_1_rkg = self._compute_w_target(x_aug_ng, h_hot_rnk, dummy_w_rkg)
+            # # Step B: relax hard clusters into soft NMF mixtures using the diverse W_1.
+            # h_1_rnk, _ = nmf_compute_loadings_fista(
+            #     x_ng=x_aug_ng,
+            #     w_rkg=w_1_rkg,
+            #     h_rnk=h_hot_rnk,
+            #     max_iter=self.fista_iterations_train,
+            # )
+            # # Step C: final W target conditioned on soft H; warm-started from W_1.
+            # w_target_rkg = self._compute_w_target(x_aug_ng, h_1_rnk.clamp(min=0.0), w_1_rkg)
             sc_losses.append(
                 sum(
                     self._iter_weights[i] * (w_l - w_target_rkg).pow(2).mean()
@@ -1115,6 +1267,14 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
 
         loss = torch.stack(sc_losses).mean()
         self._last_sc_loss = float(loss.detach())
+
+        # Update reservoir after training so it only ever contains historical cells.
+        if self.use_reservoir and self.reservoir is not None:
+            n = x_ng.shape[0]
+            obs_names = np.array([str(self._reservoir_cell_counter + i) for i in range(n)])
+            self.reservoir.update(x_ng.detach(), obs_names)
+            self._reservoir_cell_counter += n
+
         return {"loss": loss}
 
     @torch.no_grad()
@@ -1306,7 +1466,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             rate = self.drift_check()
             pl_module = self._lightning_module(trainer)
             if rate is not None and pl_module is not None:
-                pl_module.log("factor_drift_rate", self._drift_rate, prog_bar=True)
+                pl_module.log("factor_drift", self._drift_rate, prog_bar=True)
             if self.converged:
                 trainer.should_stop = True
                 print(
@@ -1365,6 +1525,9 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         pl_module.log("sampled_k", float(self._last_k))
         if not math.isnan(self._last_sc_loss):
             pl_module.log("sc_loss", self._last_sc_loss, prog_bar=True)
+        if self.use_reservoir and self.reservoir is not None:
+            pl_module.log("res_cells", int(self.reservoir.total_cells), prog_bar=True)
+            pl_module.log("res_fill", self.reservoir.bucket_fill_fraction, prog_bar=True)
 
     def validate(
         self,
@@ -1629,6 +1792,13 @@ def run_measurement_phase(
         previous_consensus: dict[int, torch.Tensor] = {}
         n_consensus: dict[int, int] = {k: 0 for k in k_values}
 
+        # Retrieve the reservoir once so all batches condition on the same historical context.
+        # If the reservoir is empty (first run, or post-checkpoint before re-warming) this is a
+        # no-op and measurement degrades gracefully to the non-reservoir path.
+        x_reservoir_ng: torch.Tensor | None = None
+        if model.use_reservoir and model.reservoir is not None and model.reservoir.total_cells > 0:
+            x_reservoir_ng = model.reservoir.get_reservoir()["x_ng"].to_dense().to(device=device, dtype=dtype)
+
         iterator: Iterable = enumerate(dataloader)
         if verbose:
             iterator = tqdm(iterator, total=n_batches, desc="measuring k-selection curves")
@@ -1638,22 +1808,25 @@ def run_measurement_phase(
             if batch_index >= n_batches:
                 break
             for transform in transform_list:
-                batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
+                batch |= call_func_with_batch(transform.forward, batch)
             x_ng = batch["x_ng"].to(device=device, dtype=dtype)
             if x_ng.shape[0] < 2:
                 continue
+            # x_squared_sum and denominator are over the current batch only; error metrics stay
+            # anchored to fresh cells rather than the (biased) geometric sketch.
             x_squared_sum = x_ng.pow(2).sum()
             denominator = x_ng.numel()
             batches_used += 1
+            x_aug_ng = torch.cat([x_ng, x_reservoir_ng], dim=0) if x_reservoir_ng is not None else x_ng
 
             for k_index, k in enumerate(k_values):
                 slot_noise_rke = torch.randn(n_replicates, k, model.latent_dim, device=device, dtype=dtype)
-                solved = model.solve(x_ng, k, slot_noise_rke, fista_iterations)
+                solved = model.solve(x_aug_ng, k, slot_noise_rke, fista_iterations)
                 try:
                     kmeans_result = nmf_consensus(
                         solved["w_rkg"].detach().float().cpu(), density_threshold, local_neighborhood_size
                     )
-                except UserWarning as exc:
+                except (UserWarning, ValueError) as exc:
                     warnings.warn(f"k={k}, batch {batch_index}: skipping — {exc}")
                     continue
                 consensus_kg = kmeans_result["consensus_D_kg"].to(device=device, dtype=dtype)
@@ -1674,8 +1847,7 @@ def run_measurement_phase(
 
                 h_1nk = model._solve_loadings_cold(x_ng, consensus_kg, fista_iterations)
                 error = (
-                    frobenius_loss_trace(x_ng, h_1nk, consensus_kg.unsqueeze(0), x_squared_sum).squeeze(0)
-                    / denominator
+                    frobenius_loss_trace(x_ng, h_1nk, consensus_kg.unsqueeze(0), x_squared_sum).squeeze(0) / denominator
                 )
                 observations: dict[str, torch.Tensor] = {"stability": stability, "error": error}
 
@@ -1916,9 +2088,7 @@ def plot_density_histograms(
     else:
         # --- buffer mode: read from replicate buffers stored by run_measurement_phase ---
         if int(model._measured_n_batches) == 0:
-            raise RuntimeError(
-                "pass a dataloader to plot_density_histograms(), or call run_measurement_phase() first"
-            )
+            raise RuntimeError("pass a dataloader to plot_density_histograms(), or call run_measurement_phase() first")
         if k_values is None:
             k_values = list(model.store_replicates_k_values)
         else:
@@ -1932,9 +2102,7 @@ def plot_density_histograms(
         if not k_values:
             raise ValueError("no k values to plot; store_replicates_k_values is empty")
 
-        replicate_factors = {
-            k: getattr(model, f"D_{k}_rkg").detach().float() for k in k_values
-        }
+        replicate_factors = {k: getattr(model, f"D_{k}_rkg").detach().float() for k in k_values}
 
     n_panels = len(k_values)
     fig, axes = plt.subplots(1, n_panels, figsize=(4.5 * n_panels, 3), squeeze=False)
@@ -1951,9 +2119,12 @@ def plot_density_histograms(
 
         if n_neighbors < 2:
             ax.text(
-                0.5, 0.5,
+                0.5,
+                0.5,
                 f"k={k}\ntoo few replicates\nfor neighborhood\n(r={r_total})",
-                ha="center", va="center", transform=ax.transAxes,
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
             )
             ax.set_axis_off()
             continue

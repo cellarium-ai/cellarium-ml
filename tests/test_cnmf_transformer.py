@@ -112,6 +112,7 @@ def make_model(n_genes: int, k_values: list[int], **kwargs) -> CNMFTransformer:
         r_store=4,
         measure_at_end=False,
         measurement_n_batches=3,
+        use_reservoir=False,
     )
     defaults.update(kwargs)
     return CNMFTransformer(
@@ -430,7 +431,9 @@ def test_invalid_k_values_are_rejected() -> None:
         make_model(20, [2, 3], store_replicates_k_values=[9])
     with pytest.raises(ValueError, match="r_store"):
         model = make_model(20, [2, 3], r_store=8)
-        run_measurement_phase(model, iter([{"x_ng": torch.rand(4, 20), "var_names_g": model.var_names_g}]), n_replicates=4)
+        run_measurement_phase(
+            model, iter([{"x_ng": torch.rand(4, 20), "var_names_g": model.var_names_g}]), n_replicates=4
+        )
 
 
 def test_unsorted_k_values_are_sorted_with_a_warning() -> None:
@@ -472,6 +475,8 @@ def test_solve_returns_valid_factors_and_loadings() -> None:
     noise_rke = torch.randn(r, k, model.latent_dim)
 
     out = model.solve(x_ng, k, noise_rke, n_iterations=10)
+    assert isinstance(out["w_rkg"], torch.Tensor)
+    assert isinstance(out["h_rnk"], torch.Tensor)
     assert out["w_rkg"].shape == (r, k, g)
     assert out["h_rnk"].shape == (r, n, k)
     assert bool((out["w_rkg"] >= 0).all()) and bool((out["h_rnk"] >= 0).all())
@@ -904,6 +909,7 @@ def test_measurement_phase_populates_curves_and_consensus() -> None:
 
 def test_plot_density_histograms_returns_figure_with_correct_panels() -> None:
     import matplotlib
+
     matplotlib.use("Agg")
 
     torch.manual_seed(0)
@@ -925,6 +931,7 @@ def test_plot_density_histograms_returns_figure_with_correct_panels() -> None:
 def test_plot_density_histograms_with_dataloader_needs_no_prior_measurement() -> None:
     """plot_density_histograms with a dataloader works on a never-measured model."""
     import matplotlib
+
     matplotlib.use("Agg")
 
     torch.manual_seed(0)
@@ -972,7 +979,9 @@ def test_measurement_phase_restores_training_mode() -> None:
     torch.manual_seed(0)
     model = make_model(20, [2, 3]).train()
     x_ng, _, _ = make_synthetic_nmf_data(100, 20, 3, seed=0)
-    run_measurement_phase(model, _fake_dataloader(x_ng, model.var_names_g, 40, 2), n_batches=2, n_replicates=4, verbose=False)
+    run_measurement_phase(
+        model, _fake_dataloader(x_ng, model.var_names_g, 40, 2), n_batches=2, n_replicates=4, verbose=False
+    )
     assert model.training
 
 
@@ -981,7 +990,14 @@ def test_infer_loadings_and_reconstruction_error_after_measurement() -> None:
     n, g, k_true = 150, 20, 4
     model = make_model(g, [3, 4])
     x_ng, _, _ = make_synthetic_nmf_data(n, g, k_true, seed=0)
-    run_measurement_phase(model, _fake_dataloader(x_ng, model.var_names_g, 50, 3), n_batches=3, n_replicates=4, fista_iterations=30, verbose=False)
+    run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, 50, 3),
+        n_batches=3,
+        n_replicates=4,
+        fista_iterations=30,
+        verbose=False,
+    )
 
     x_batch = torch.from_numpy(x_ng[:50])
     alpha_nk = model.infer_loadings(x_batch, model.var_names_g, model.consensus_factors, k=4)
@@ -1014,7 +1030,9 @@ def test_predict_requires_a_k() -> None:
     torch.manual_seed(0)
     model = make_model(20, [3])
     x_ng, _, _ = make_synthetic_nmf_data(100, 20, 3, seed=0)
-    run_measurement_phase(model, _fake_dataloader(x_ng, model.var_names_g, 40, 2), n_batches=2, n_replicates=4, verbose=False)
+    run_measurement_phase(
+        model, _fake_dataloader(x_ng, model.var_names_g, 40, 2), n_batches=2, n_replicates=4, verbose=False
+    )
     with pytest.raises(ValueError, match="predict_k"):
         model.predict(torch.from_numpy(x_ng[:20]), model.var_names_g)
     model.predict_k = 3
@@ -1028,7 +1046,9 @@ def test_export_hot_start_shapes_and_normalization() -> None:
     torch.manual_seed(0)
     model = make_model(20, [3, 4])
     x_ng, _, _ = make_synthetic_nmf_data(100, 20, 4, seed=0)
-    run_measurement_phase(model, _fake_dataloader(x_ng, model.var_names_g, 40, 2), n_batches=2, n_replicates=4, verbose=False)
+    run_measurement_phase(
+        model, _fake_dataloader(x_ng, model.var_names_g, 40, 2), n_batches=2, n_replicates=4, verbose=False
+    )
 
     exported = export_hot_start(model, k_values=[4], r=3)
     assert set(exported) == {4}
@@ -1249,3 +1269,141 @@ def test_cross_batch_stability_tracks_within_batch_stability_on_clean_data() -> 
     within = float(curves["stability"][0])
     cross = float(curves["stability_cross"][0])
     assert cross > within - 0.25, f"within={within:.4f} cross={cross:.4f}"
+
+
+# -----------------------------------------------------------------------------------------------
+# Reservoir sampling
+# -----------------------------------------------------------------------------------------------
+
+
+def _make_reservoir_model(n_genes: int, k_values: list[int], **kwargs) -> CNMFTransformer:
+    """Tiny model with reservoir enabled and small bucket parameters for fast tests."""
+    return make_model(
+        n_genes,
+        k_values,
+        use_reservoir=True,
+        reservoir_n_bits=4,
+        reservoir_max_cells_per_bucket=5,
+        **kwargs,
+    )
+
+
+def test_reservoir_is_empty_before_first_forward() -> None:
+    model = _make_reservoir_model(20, [3])
+    assert model.reservoir is not None
+    assert model.reservoir.total_cells == 0
+
+
+def test_reservoir_accumulates_cells_across_steps() -> None:
+    torch.manual_seed(0)
+    n, g = 60, 20
+    model = _make_reservoir_model(g, [3])
+    x_ng = torch.from_numpy(make_synthetic_nmf_data(n, g, 3, seed=0)[0])
+
+    # Step 0: reservoir is empty going in, gets populated after.
+    model(x_ng=x_ng[:30], var_names_g=model.var_names_g)
+    assert model.reservoir is not None
+    cells_after_1 = model.reservoir.total_cells
+    assert cells_after_1 > 0
+
+    # Step 1: reservoir is non-empty going in, may grow further.
+    model(x_ng=x_ng[30:], var_names_g=model.var_names_g)
+    cells_after_2 = model.reservoir.total_cells
+    assert cells_after_2 >= cells_after_1
+
+    # Hard upper bound: 2^n_bits * max_cells_per_bucket = 16 * 5 = 80.
+    assert cells_after_2 <= 2**4 * 5
+
+
+def test_forward_with_populated_reservoir_gives_finite_loss() -> None:
+    torch.manual_seed(0)
+    n, g = 60, 20
+    model = _make_reservoir_model(g, [3])
+    x_ng = torch.from_numpy(make_synthetic_nmf_data(n, g, 3, seed=0)[0])
+
+    # Step 0: populates reservoir.
+    model(x_ng=x_ng[:30], var_names_g=model.var_names_g)
+
+    # Step 1: reservoir augments the conditioning set.
+    out = model(x_ng=x_ng[30:], var_names_g=model.var_names_g)
+    loss = as_tensor(out["loss"])
+    assert torch.isfinite(loss) and float(loss) >= 0.0
+
+
+def test_reservoir_backward_produces_gradients() -> None:
+    torch.manual_seed(0)
+    n, g = 60, 20
+    model = _make_reservoir_model(g, [3])
+    x_ng = torch.from_numpy(make_synthetic_nmf_data(n, g, 3, seed=0)[0])
+
+    # Populate the reservoir.
+    model(x_ng=x_ng[:30], var_names_g=model.var_names_g)
+
+    # Forward + backward with a non-empty reservoir.
+    loss = as_tensor(model(x_ng=x_ng[30:], var_names_g=model.var_names_g)["loss"])
+    loss.backward()
+
+    # Only check learnable parameters; frozen ones (slot_log_sigma, reservoir._dummy_param) are
+    # excluded by the requires_grad filter.
+    without_grad = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and (parameter.grad is None or not bool(parameter.grad.abs().sum() > 0))
+    ]
+    without_grad = [name for name in without_grad if "k_embedding" not in name]
+    assert without_grad == [], f"parameters received no gradient: {without_grad}"
+
+
+def test_reset_parameters_clears_reservoir() -> None:
+    torch.manual_seed(0)
+    model = _make_reservoir_model(20, [3])
+    x_ng = torch.rand(30, 20).abs()
+
+    model(x_ng=x_ng, var_names_g=model.var_names_g)
+    assert model.reservoir is not None and model.reservoir.total_cells > 0
+    assert model._reservoir_cell_counter > 0
+
+    model.reset_parameters()
+    assert model.reservoir.total_cells == 0
+    assert model._reservoir_cell_counter == 0
+
+
+def test_use_reservoir_false_disables_reservoir() -> None:
+    model = make_model(20, [3], use_reservoir=False)
+    assert model.reservoir is None
+
+    out = model(x_ng=torch.rand(40, 20).abs(), var_names_g=model.var_names_g)
+    assert torch.isfinite(as_tensor(out["loss"]))
+
+
+def test_measurement_phase_with_populated_reservoir_gives_finite_curves() -> None:
+    """run_measurement_phase should use the reservoir to augment each batch's conditioning set."""
+    torch.manual_seed(0)
+    n, g, k_true = 200, 20, 3
+    k_values = [2, 3, 4]
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, k_true, seed=0)
+    x_tensor = torch.from_numpy(x_ng)
+
+    model = _make_reservoir_model(g, k_values, r_store=2)
+    generator = torch.Generator().manual_seed(0)
+
+    # Run a few training steps to populate the reservoir.
+    for _ in range(4):
+        rows = torch.randperm(n, generator=generator)[:40]
+        model(x_ng=x_tensor[rows], var_names_g=model.var_names_g)
+
+    assert model.reservoir is not None and model.reservoir.total_cells > 0
+
+    curves = run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, batch_size=40, n_batches=3),
+        n_batches=3,
+        n_replicates=2,
+        fista_iterations=10,
+        verbose=False,
+    )
+
+    assert list(curves["k"]) == k_values
+    for name in model.metric_names:
+        finite = np.isfinite(curves[name])
+        assert finite.any(), f"{name} has no finite entries"

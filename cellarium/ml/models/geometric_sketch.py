@@ -178,6 +178,7 @@ class StreamingGeometricSketch(CellariumModel):
         Returns:
             Number of cells inserted or replaced in this update.
         """
+        self._lazy_init(x_ng)
         x_float = x_ng.float()
         # Materialize a dense view for indexing; sparse indexing is not reliable across formats.
         x_dense = x_float.to_dense() if x_float.is_sparse else x_float
