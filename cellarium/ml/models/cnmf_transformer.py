@@ -973,7 +973,8 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
     #     meaningful), and a fixed noise tensor still gives a bit-for-bit reproducible solve, which
     #     :meth:`_check_drift` relies on to stay rank-consistent without a reduction.
     #     """
-    #     similarity_rkn = torch.einsum("rke,ne->rkn", F.normalize(slot_noise_rke, dim=-1), F.normalize(x_emb_ne, dim=-1))
+    #     similarity_rkn = torch.einsum("rke,ne->rkn",
+    # F.normalize(slot_noise_rke, dim=-1), F.normalize(x_emb_ne, dim=-1))
     #     seed_rke = x_emb_ne.detach()[similarity_rkn.argmax(dim=-1)]
     #     # Jitter, scaled to the embeddings, so two slots seeded on the same cell still diverge.
     #     jitter = _SEED_JITTER * x_emb_ne.detach().std().clamp(min=_EPS)
@@ -997,18 +998,18 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             # Deterministic seed derived from the noise for this replicate
             seed_val = int(abs(slot_noise_rke[r, 0, 0].item() * 1e6))
             gen = torch.Generator(device=x_emb_ne.device).manual_seed(seed_val)
-            
+
             if n_cells >= k:
                 rand_idx = torch.randperm(n_cells, generator=gen, device=x_emb_ne.device)[:k]
             else:
                 rand_idx = torch.randint(0, n_cells, (k,), generator=gen, device=x_emb_ne.device)
-                
+
             seed_rke[r] = x_emb_ne[rand_idx].detach()
 
         jitter = _SEED_JITTER * x_emb_ne.detach().std().clamp(min=_EPS)
         return seed_rke + self.slot_mu + jitter * torch.exp(self.slot_log_sigma) * slot_noise_rke + cond_e
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def hot_start_loadings(self, x_ng: torch.Tensor, x_emb_ne: torch.Tensor, slots_rke: torch.Tensor) -> torch.Tensor:
         """
         Analytic hot start for ``H`` from a slot-competition map over the target cells.
@@ -1094,6 +1095,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             "w_rkg": w_rkg,
             "w_layers_rkg": w_layers_rkg,
             "slots_rke": slots_rke,
+            "x_emb_ne": x_emb_ne,
         }
         if compute_loadings:
             target_ng = x_ng if x_target_ng is None else x_target_ng
@@ -1227,9 +1229,17 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         # Retrieve strictly historical reservoir (empty on step 0; updated after training below).
         x_reservoir_ng: torch.Tensor | None = None
         if self.use_reservoir and self.reservoir is not None and self.reservoir.total_cells > 0:
-            x_reservoir_ng = self.reservoir.get_reservoir()["x_ng"].to_dense().to(device=x_ng.device, dtype=x_ng.dtype)
+            reservoir_ng = self.reservoir.get_reservoir()["x_ng"]
+            assert isinstance(reservoir_ng, torch.Tensor)
+            x_reservoir_ng = reservoir_ng.to_dense().to(device=x_ng.device, dtype=x_ng.dtype)
 
+        recon_losses: list[torch.Tensor] = []
         sc_losses: list[torch.Tensor] = []
+
+        # A hyperparameter to balance the two losses.
+        # Start small, e.g., 0.1, to let the FISTA teacher do the heavy lifting while
+        # the recon loss just acts as a guardrail against collapse.
+        lambda_recon = 0.1
 
         for x_half_ng, r in self._split_batch(x_ng):
             # Both halves of the cross-batch split condition on the same historical reservoir.
@@ -1237,6 +1247,8 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             slot_noise_rke = torch.randn(r, k, self.latent_dim, device=x_ng.device, dtype=x_ng.dtype)
 
             solved = self.solve(x_aug_ng, k, slot_noise_rke, self.fista_iterations_train)
+            assert isinstance(solved["h_rnk"], torch.Tensor)
+            assert isinstance(solved["w_rkg"], torch.Tensor)
             w_target_rkg = self._compute_w_target(x_aug_ng, solved["h_rnk"], solved["w_rkg"])
 
             # # wild attempts to solve collapse, did not work
@@ -1260,13 +1272,25 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             # w_target_rkg = self._compute_w_target(x_aug_ng, h_1_rnk.clamp(min=0.0), w_1_rkg)
             sc_losses.append(
                 sum(
-                    self._iter_weights[i] * (w_l - w_target_rkg).pow(2).mean()
+                    self._iter_weights[i] * (w_l - w_target_rkg).pow(2).sum(dim=-1).mean()
                     for i, w_l in enumerate(solved["w_layers_rkg"])
                 )
             )
 
-        loss = torch.stack(sc_losses).mean()
-        self._last_sc_loss = float(loss.detach())
+            # Use the differentiable routing so gradients flow all the way back to the encoder
+            assert isinstance(solved["x_emb_ne"], torch.Tensor)
+            assert isinstance(solved["slots_rke"], torch.Tensor)
+            h_diff_rnk = self.hot_start_loadings(x_aug_ng, solved["x_emb_ne"], solved["slots_rke"])
+
+            # Use O(r*k*g) trace function. Normalize by numel to keep scales sane.
+            recon_error_r = frobenius_loss_trace(x_aug_ng, h_diff_rnk, solved["w_rkg"])
+            recon_losses.append(recon_error_r.mean() / x_aug_ng.numel())
+
+        total_sc_loss = torch.stack(sc_losses).mean()
+        total_recon_loss = torch.stack(recon_losses).mean()
+        loss = total_sc_loss + (lambda_recon * total_recon_loss)
+        self._last_sc_loss = float(total_sc_loss.detach())
+        self._last_recon_loss = float(total_recon_loss.detach())
 
         # Update reservoir after training so it only ever contains historical cells.
         if self.use_reservoir and self.reservoir is not None:
@@ -1390,6 +1414,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         for k in self.drift_k_values:
             slot_noise_rke = self.drift_slot_noise_rke[:, :k, :].to(x_ng.dtype)
             solved = self.solve(x_ng, k, slot_noise_rke, 0, compute_loadings=False)
+            assert isinstance(solved["w_rkg"], torch.Tensor)
             consensus_kg = self._consensus(solved["w_rkg"])["consensus_kg"]
             assert isinstance(consensus_kg, torch.Tensor)
             previous_kg = getattr(self, f"_drift_previous_w_{k}_kg")
@@ -1525,6 +1550,8 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         pl_module.log("sampled_k", float(self._last_k))
         if not math.isnan(self._last_sc_loss):
             pl_module.log("sc_loss", self._last_sc_loss, prog_bar=True)
+        if not math.isnan(self._last_recon_loss):
+            pl_module.log("recon_loss", self._last_recon_loss, prog_bar=True)
         if self.use_reservoir and self.reservoir is not None:
             pl_module.log("res_cells", int(self.reservoir.total_cells), prog_bar=True)
             pl_module.log("res_fill", self.reservoir.bucket_fill_fraction, prog_bar=True)
@@ -1797,7 +1824,9 @@ def run_measurement_phase(
         # no-op and measurement degrades gracefully to the non-reservoir path.
         x_reservoir_ng: torch.Tensor | None = None
         if model.use_reservoir and model.reservoir is not None and model.reservoir.total_cells > 0:
-            x_reservoir_ng = model.reservoir.get_reservoir()["x_ng"].to_dense().to(device=device, dtype=dtype)
+            reservoir_ng = model.reservoir.get_reservoir()["x_ng"]
+            assert isinstance(reservoir_ng, torch.Tensor)
+            x_reservoir_ng = reservoir_ng.to_dense().to(device=device, dtype=dtype)
 
         iterator: Iterable = enumerate(dataloader)
         if verbose:
@@ -1822,6 +1851,7 @@ def run_measurement_phase(
             for k_index, k in enumerate(k_values):
                 slot_noise_rke = torch.randn(n_replicates, k, model.latent_dim, device=device, dtype=dtype)
                 solved = model.solve(x_aug_ng, k, slot_noise_rke, fista_iterations)
+                assert isinstance(solved["w_rkg"], torch.Tensor)
                 try:
                     kmeans_result = nmf_consensus(
                         solved["w_rkg"].detach().float().cpu(), density_threshold, local_neighborhood_size
@@ -2073,6 +2103,7 @@ def plot_density_histograms(
                     for k in k_values:
                         slot_noise_rke = torch.randn(n_replicates, k, model.latent_dim, device=device_, dtype=dtype)
                         solved = model.solve(x_ng, k, slot_noise_rke, fista_iterations)
+                        assert isinstance(solved["w_rkg"], torch.Tensor)
                         w_batches[k].append(solved["w_rkg"].detach().float().cpu())
         finally:
             model.train(was_training)
