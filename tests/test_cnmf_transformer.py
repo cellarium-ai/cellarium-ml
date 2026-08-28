@@ -109,7 +109,6 @@ def make_model(n_genes: int, k_values: list[int], **kwargs) -> CNMFTransformer:
         drift_eval_n_cells=32,
         drift_check_every_n_steps=0,
         lr_reduction_factor=1.0,
-        r_store=4,
         measure_at_end=False,
         measurement_n_batches=3,
         use_reservoir=False,
@@ -427,13 +426,6 @@ def test_invalid_k_values_are_rejected() -> None:
         make_model(20, [2, 2, 3])
     with pytest.raises(ValueError, match="drift_k_values"):
         make_model(20, [2, 3], drift_k_values=[7])
-    with pytest.raises(ValueError, match="store_replicates_k_values"):
-        make_model(20, [2, 3], store_replicates_k_values=[9])
-    with pytest.raises(ValueError, match="r_store"):
-        model = make_model(20, [2, 3], r_store=8)
-        run_measurement_phase(
-            model, iter([{"x_ng": torch.rand(4, 20), "var_names_g": model.var_names_g}]), n_replicates=4
-        )
 
 
 def test_unsorted_k_values_are_sorted_with_a_warning() -> None:
@@ -880,7 +872,7 @@ def test_measurement_phase_populates_curves_and_consensus() -> None:
     torch.manual_seed(0)
     n, g, k_true = 200, 20, 4
     k_values = [2, 3, 4, 5]
-    model = make_model(g, k_values, store_replicates_k_values=[3], r_store=4)
+    model = make_model(g, k_values)
     x_ng, _, _ = make_synthetic_nmf_data(n, g, k_true, seed=0)
 
     curves = run_measurement_phase(
@@ -888,6 +880,8 @@ def test_measurement_phase_populates_curves_and_consensus() -> None:
         _fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=4),
         n_batches=4,
         n_replicates=4,
+        store_replicates_k_values=[3],
+        r_store=4,
         verbose=False,
     )
 
@@ -904,7 +898,7 @@ def test_measurement_phase_populates_curves_and_consensus() -> None:
         consensus_kg = getattr(model, f"consensus_D_{k}_kg")
         assert bool((consensus_kg > 0).any())
         torch.testing.assert_close(consensus_kg.sum(dim=-1), torch.ones(k), atol=1e-4, rtol=0)
-    assert bool((getattr(model, "D_3_rkg") != 0).any())
+    assert bool((model._buffers["D_3_rkg"] != 0).any())
 
 
 def test_plot_density_histograms_returns_figure_with_correct_panels() -> None:
@@ -914,18 +908,19 @@ def test_plot_density_histograms_returns_figure_with_correct_panels() -> None:
 
     torch.manual_seed(0)
     n, g = 100, 20
-    model = make_model(g, [2, 3, 4], store_replicates_k_values=[2, 4], r_store=4)
+    model = make_model(g, [2, 3, 4])
     x_ng, _, _ = make_synthetic_nmf_data(n, g, 3, seed=0)
     run_measurement_phase(
         model,
         _fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=2),
         n_batches=2,
         n_replicates=4,
+        store_replicates_k_values=[2, 4],
         verbose=False,
     )
     fig = plot_density_histograms(model, density_threshold=0.8, local_neighborhood_size=0.30)
     assert fig is not None
-    assert len(fig.axes) == 2  # one panel per k in store_replicates_k_values
+    assert len(fig.axes) == 2  # one panel per stored replicate k
 
 
 def test_plot_density_histograms_with_dataloader_needs_no_prior_measurement() -> None:
@@ -957,9 +952,9 @@ def test_plot_density_histograms_with_dataloader_needs_no_prior_measurement() ->
     assert int(model._measured_n_batches) == 0
 
 
-def test_plot_density_histograms_raises_before_measurement() -> None:
-    model = make_model(20, [2, 3], store_replicates_k_values=[2], r_store=4)
-    with pytest.raises(RuntimeError, match="run_measurement_phase"):
+def test_plot_density_histograms_raises_without_stored_replicates() -> None:
+    model = make_model(20, [2, 3])
+    with pytest.raises(RuntimeError, match="no replicate buffers"):
         plot_density_histograms(model)
 
 
@@ -969,10 +964,41 @@ def test_measurement_phase_raises_on_an_empty_dataloader() -> None:
         run_measurement_phase(model, iter([]), n_batches=3, n_replicates=4, verbose=False)
 
 
-def test_measurement_phase_rejects_unknown_k() -> None:
-    model = make_model(20, [2, 3])
-    with pytest.raises(ValueError, match="not in model.k_values"):
-        run_measurement_phase(model, iter([]), k_values=[9], n_replicates=4, verbose=False)
+def test_measurement_phase_accepts_untrained_k_values() -> None:
+    """Measurement k_values need not match training k_values."""
+    torch.manual_seed(0)
+    n, g = 100, 20
+    model = make_model(g, [2, 3])
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, 3, seed=0)
+    curves = run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=3),
+        n_batches=3,
+        n_replicates=4,
+        k_values=[4, 5],
+        verbose=False,
+    )
+    assert list(curves["k"]) == [4, 5]
+    assert np.isfinite(curves["stability"]).all()
+    assert np.isfinite(curves["error"]).all()
+
+
+def test_measurement_phase_accepts_trained_k_subset() -> None:
+    """A strict subset of training k_values is a valid measurement target."""
+    torch.manual_seed(0)
+    n, g = 100, 20
+    model = make_model(g, [2, 3, 4, 5])
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, 3, seed=0)
+    curves = run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=3),
+        n_batches=3,
+        n_replicates=4,
+        k_values=[3, 5],
+        verbose=False,
+    )
+    assert list(curves["k"]) == [3, 5]
+    assert np.isfinite(curves["stability"]).all()
 
 
 def test_measurement_phase_restores_training_mode() -> None:
@@ -1017,13 +1043,67 @@ def test_infer_loadings_raises_before_the_measurement_phase() -> None:
         model.infer_loadings(torch.rand(10, 20).abs(), model.var_names_g, model.consensus_factors, k=3)
 
 
+def test_infer_loadings_with_untrained_k_values() -> None:
+    """consensus_factors must include untrained k values measured by run_measurement_phase."""
+    torch.manual_seed(0)
+    n, g = 100, 20
+    model = make_model(g, [2, 3])  # trained on k=2,3 only
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, 4, seed=0)
+    run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=3),
+        n_batches=3,
+        n_replicates=4,
+        k_values=[4, 5],  # neither is a training k
+        verbose=False,
+    )
+    cf = model.consensus_factors
+    assert 4 in cf and 5 in cf, f"untrained k values missing from consensus_factors; keys={set(cf)}"
+    x_batch = torch.from_numpy(x_ng[:20])
+    alpha_nk = model.infer_loadings(x_batch, model.var_names_g, cf, k=4)
+    assert alpha_nk.shape == (20, 4)
+    assert bool((alpha_nk >= 0).all())
+
+
+def test_export_hot_start_with_untrained_k() -> None:
+    """export_hot_start must work for k values not in the training set."""
+    torch.manual_seed(0)
+    n, g = 100, 20
+    model = make_model(g, [2, 3])
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, 4, seed=0)
+    run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, batch_size=50, n_batches=3),
+        n_batches=3,
+        n_replicates=4,
+        k_values=[4],
+        verbose=False,
+    )
+    exported = export_hot_start(model, k_values=[4], r=2)
+    assert set(exported) == {4}
+    assert exported[4].shape == (2, 4, g)
+    torch.testing.assert_close(exported[4].sum(dim=-1), torch.ones(2, 4), atol=1e-4, rtol=0)
+
+
 def test_factors_dict_shapes() -> None:
-    model = make_model(20, [2, 3, 4], store_replicates_k_values=[3], r_store=4)
+    torch.manual_seed(0)
+    n, g = 80, 20
+    model = make_model(g, [2, 3, 4])
+    x_ng, _, _ = make_synthetic_nmf_data(n, g, 3, seed=0)
+    run_measurement_phase(
+        model,
+        _fake_dataloader(x_ng, model.var_names_g, batch_size=40, n_batches=2),
+        n_batches=2,
+        n_replicates=4,
+        store_replicates_k_values=[3],
+        r_store=4,
+        verbose=False,
+    )
     factors = model.factors_dict
     assert set(factors) == {2, 3, 4}
-    assert factors[3].shape == (4, 3, 20)  # genuine replicates
-    assert factors[2].shape == (1, 2, 20)  # consensus fallback
-    assert factors[4].shape == (1, 4, 20)
+    assert factors[3].shape == (4, 3, g)  # genuine replicates
+    assert factors[2].shape == (1, 2, g)  # consensus fallback
+    assert factors[4].shape == (1, 4, g)
 
 
 def test_predict_requires_a_k() -> None:
@@ -1065,7 +1145,7 @@ def test_export_hot_start_raises_before_measurement() -> None:
 
 def test_export_hot_start_rejects_unknown_k() -> None:
     model = make_model(20, [3])
-    with pytest.raises(ValueError, match="not in model.k_values"):
+    with pytest.raises(ValueError, match="no consensus factors"):
         export_hot_start(model, k_values=[11])
 
 
@@ -1179,7 +1259,6 @@ def test_recovers_a_known_number_of_factors() -> None:
         n_iterations=2,
         n_self_attention_heads=4,
         n_replicates=8,
-        r_store=4,
         min_cells_per_split=32,
         fista_iterations_train=20,
         curriculum_warmup_steps=0,
@@ -1244,7 +1323,6 @@ def test_cross_batch_stability_tracks_within_batch_stability_on_clean_data() -> 
         [k_true],
         latent_dim=32,
         n_replicates=8,
-        r_store=4,
         min_cells_per_split=32,
         fista_iterations_train=20,
     )
@@ -1384,7 +1462,7 @@ def test_measurement_phase_with_populated_reservoir_gives_finite_curves() -> Non
     x_ng, _, _ = make_synthetic_nmf_data(n, g, k_true, seed=0)
     x_tensor = torch.from_numpy(x_ng)
 
-    model = _make_reservoir_model(g, k_values, r_store=2)
+    model = _make_reservoir_model(g, k_values)
     generator = torch.Generator().manual_seed(0)
 
     # Run a few training steps to populate the reservoir.

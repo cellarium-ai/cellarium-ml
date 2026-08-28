@@ -638,11 +638,6 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             floor so that ``drift_tol`` becomes reachable.  Set to ``1.0`` to disable (keeps the
             original behavior where the LR is never touched and stopping is allowed from the end of
             the settle window).
-        store_replicates_k_values: ``k`` values for which full replicate factors are persisted, for
-            :func:`~cellarium.ml.models.nmf.plot_density_histograms` and
-            :func:`~cellarium.ml.models.nmf.plot_clustermap`.  Defaults to five values spread over
-            ``k_values``; storing all ``k`` at ``r_store`` replicates would be hundreds of MB.
-        r_store: Number of replicates persisted per entry of ``store_replicates_k_values``.
         measure_at_end: Run the measurement phase automatically in ``on_train_end``.
         measurement_n_batches: Minibatches used by the measurement phase.
         k_sampling_seed: Seed for ``k`` sampling.  ``k`` is drawn from a step-seeded generator so
@@ -684,8 +679,6 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         drift_patience_checks: int = 5,
         drift_settle_steps: int = 1000,
         lr_reduction_factor: float = 10.0,
-        store_replicates_k_values: list[int] | None = None,
-        r_store: int = 20,
         measure_at_end: bool = True,
         measurement_n_batches: int = 50,
         k_sampling_seed: int = 0,
@@ -753,14 +746,6 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         if unknown:
             raise ValueError(f"drift_k_values {unknown} are not in k_values")
 
-        if store_replicates_k_values is None:
-            store_replicates_k_values = self._default_store_k_values()
-        self.store_replicates_k_values = sorted(store_replicates_k_values)
-        unknown = [k for k in self.store_replicates_k_values if k not in self._k_to_index]
-        if unknown:
-            raise ValueError(f"store_replicates_k_values {unknown} are not in k_values")
-        self.r_store = r_store
-
         # --- modules ---
         self.encoder = LinearCellEncoder(g, latent_dim)
         # Keys and values are projected once and shared across iterations and replicates.
@@ -819,14 +804,15 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         for name in self.metric_names:
             self.register_buffer(f"_ema_{name}_k", torch.empty(n_k))
             self.register_buffer(f"_ema_count_{name}_k", torch.empty(n_k))
-            self.register_buffer(f"_measured_{name}_mean_k", torch.empty(n_k))
-            self.register_buffer(f"_measured_{name}_sem_k", torch.empty(n_k))
+        # _measured_{name}_mean_k, _measured_{name}_sem_k, and _measured_k_values are registered
+        # dynamically by run_measurement_phase() because their size depends on measurement-time
+        # k_values, which may differ from the training k_values.
         self.register_buffer("_measured_n_batches", torch.zeros((), dtype=torch.long))
 
         for k in self.k_values:
             self.register_buffer(f"consensus_D_{k}_kg", torch.empty(k, g))
-        for k in self.store_replicates_k_values:
-            self.register_buffer(f"D_{k}_rkg", torch.empty(r_store, k, g))
+        # D_{k}_rkg buffers are registered dynamically by run_measurement_phase() when
+        # store_replicates_k_values is specified there.
 
         self.predict_k: int | None = None
         self._last_k = self.k_values[0]
@@ -856,12 +842,6 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
     def _default_drift_k_values(self) -> list[int]:
         return sorted({self.k_values[0], self.k_values[len(self.k_values) // 2], self.k_values[-1]})
 
-    def _default_store_k_values(self, n: int = 5) -> list[int]:
-        if len(self.k_values) <= n:
-            return list(self.k_values)
-        indices = np.linspace(0, len(self.k_values) - 1, n).round().astype(int)
-        return sorted({self.k_values[i] for i in indices})
-
     def reset_parameters(self) -> None:
         self.apply(_weights_init)
         torch.nn.init.normal_(self.slot_mu, std=0.02)
@@ -889,16 +869,17 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         for name in self.metric_names:
             getattr(self, f"_ema_{name}_k").zero_()
             getattr(self, f"_ema_count_{name}_k").zero_()
-            # NaN marks "never measured", so a partial measurement phase is visible rather than
-            # silently reading as zero.
-            getattr(self, f"_measured_{name}_mean_k").fill_(float("nan"))
-            getattr(self, f"_measured_{name}_sem_k").fill_(float("nan"))
         self._measured_n_batches.zero_()
+        # Drop all dynamically-registered inference buffers so post-reset state is clean.
+        for name in self.metric_names:
+            self._buffers.pop(f"_measured_{name}_mean_k", None)
+            self._buffers.pop(f"_measured_{name}_sem_k", None)
+        self._buffers.pop("_measured_k_values", None)
+        for key in [k for k in self._buffers if k.startswith("D_") and k.endswith("_rkg")]:
+            self._buffers.pop(key, None)
 
         for k in self.k_values:
             getattr(self, f"consensus_D_{k}_kg").zero_()
-        for k in self.store_replicates_k_values:
-            getattr(self, f"D_{k}_rkg").zero_()
 
         if self.use_reservoir and self.reservoir is not None:
             self.reservoir.reset_parameters()
@@ -1613,17 +1594,20 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         """
         Replicate factors per ``k``, shape ``(r, k, g)``.
 
-        Entries in :attr:`store_replicates_k_values` carry ``r_store`` genuine replicates and are
-        suitable for :func:`~cellarium.ml.models.nmf.plot_density_histograms` and
-        :func:`~cellarium.ml.models.nmf.plot_clustermap`.  Every other ``k`` falls back to the
-        batch-averaged consensus as a single replicate, so any stability computed for those ``k`` by
-        :func:`~cellarium.ml.models.nmf.compute_consensus_factors` is trivially 1.0 and meaningless.
-        Use :attr:`consensus_factors` for those.
+        For ``k`` values whose replicate buffer ``D_{k}_rkg`` was stored by
+        :func:`run_measurement_phase` (via ``store_replicates_k_values``), returns genuine
+        replicates suitable for :func:`~cellarium.ml.models.nmf.plot_density_histograms`.
+        Otherwise falls back to the batch-averaged consensus as a single replicate — stability
+        computed from a consensus is trivially 1.0.  Use :attr:`consensus_factors` instead for
+        those entries.
         """
         out: dict[int, torch.Tensor] = {}
         for k in self.k_values:
-            if k in self.store_replicates_k_values:
-                out[k] = getattr(self, f"D_{k}_rkg")
+            buf_name = f"D_{k}_rkg"
+            if buf_name in self._buffers:
+                val = self._buffers[buf_name]
+                assert isinstance(val, torch.Tensor)
+                out[k] = val
             else:
                 out[k] = getattr(self, f"consensus_D_{k}_kg").unsqueeze(0)
         return out
@@ -1632,19 +1616,32 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
     def consensus_factors(self) -> dict[int, dict[str, torch.Tensor | float]]:
         """
         Measured consensus factors in the format expected by :meth:`infer_loadings`,
-        :meth:`reconstruction_error` and :class:`~cellarium.ml.models.nmf.NMFOutput`, for every
-        ``k`` in :attr:`k_values`.
+        :meth:`reconstruction_error` and :class:`~cellarium.ml.models.nmf.NMFOutput`.
+
+        Covers all ``k`` values for which a ``consensus_D_{k}_kg`` buffer exists — both training
+        k values (always present) and any untrained k values measured via
+        :func:`run_measurement_phase`.
         """
-        measured_stability_k = getattr(self, "_measured_stability_mean_k")
+        if "_measured_k_values" in self._buffers:
+            measured_k_list = self._measured_k_values.tolist()
+            measured_stability = getattr(self, "_measured_stability_mean_k")
+            stability_by_k = {k: float(measured_stability[i]) for i, k in enumerate(measured_k_list)}
+        else:
+            stability_by_k = {}
+        all_k = sorted(
+            int(name[len("consensus_D_") : -len("_kg")])
+            for name in self._buffers
+            if name.startswith("consensus_D_") and name.endswith("_kg")
+        )
         return {
             k: {
-                "consensus_D_kg": getattr(self, f"consensus_D_{k}_kg"),
-                "stability": float(measured_stability_k[i]),
+                "consensus_D_kg": self._buffers[f"consensus_D_{k}_kg"],
+                "stability": stability_by_k.get(k, float("nan")),
             }
-            for i, k in enumerate(self.k_values)
+            for k in all_k
         }
 
-    def selection_curves(self) -> dict[str, np.ndarray]:
+    def selection_curves(self, k_values: list[int] | None = None) -> dict[str, np.ndarray]:
         """
         The measured k-selection curves as numpy arrays, keyed by metric name plus ``"k"``.
 
@@ -1655,10 +1652,22 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         errors.  The ``*_sem`` entries are standard errors across measurement batches -- on the full
         integer ``k`` grid these are what let you tell a real discontinuity from measurement noise.
         """
-        curves: dict[str, np.ndarray] = {"k": np.asarray(self.k_values)}
+        if "_measured_k_values" not in self._buffers:
+            raise RuntimeError("selection_curves() called before run_measurement_phase()")
+        measured_k = self._measured_k_values.tolist()
+        if k_values is None:
+            selected = measured_k
+            indices = list(range(len(measured_k)))
+        else:
+            k_set = set(k_values)
+            indices = [i for i, k in enumerate(measured_k) if k in k_set]
+            selected = [measured_k[i] for i in indices]
+        curves: dict[str, np.ndarray] = {"k": np.asarray(selected)}
         for name in self.metric_names:
-            curves[name] = getattr(self, f"_measured_{name}_mean_k").detach().cpu().numpy()
-            curves[f"{name}_sem"] = getattr(self, f"_measured_{name}_sem_k").detach().cpu().numpy()
+            full_mean = getattr(self, f"_measured_{name}_mean_k").detach().cpu().numpy()
+            full_sem = getattr(self, f"_measured_{name}_sem_k").detach().cpu().numpy()
+            curves[name] = full_mean[indices]
+            curves[f"{name}_sem"] = full_sem[indices]
         return curves
 
     @torch.no_grad()
@@ -1736,6 +1745,8 @@ def run_measurement_phase(
     n_batches: int | None = None,
     k_values: list[int] | None = None,
     n_replicates: int = 100,
+    store_replicates_k_values: list[int] | None = None,
+    r_store: int = 20,
     fista_iterations: int = 150,
     density_threshold: float = 1.0,
     local_neighborhood_size: float = 0.30,
@@ -1775,8 +1786,13 @@ def run_measurement_phase(
         n_batches: Number of minibatches.  Defaults to ``model.measurement_n_batches``.
         k_values: Defaults to every ``k`` in ``model.k_values``.
         n_replicates: Number of independent noise seeds per ``(batch, k)`` solve.  A
-            Kotliar-comparable value (50–100) is usually appropriate.  Must be ≥ ``model.r_store``
-            so the replicate storage buffers can be filled.
+            Kotliar-comparable value (50–100) is usually appropriate.
+        store_replicates_k_values: ``k`` values for which raw replicate factors from the first
+            batch are persisted as ``D_{k}_rkg`` buffers on the model, for later use by
+            :func:`plot_density_histograms` without a dataloader.  ``None`` (default) skips
+            replicate storage; any k being measured is a valid choice.
+        r_store: Maximum number of replicates to keep per entry in ``store_replicates_k_values``.
+            Clamped to ``n_replicates`` if larger.
         fista_iterations: FISTA iterations per solve.  More steps give a more converged error axis;
             150 is usually sufficient.
         density_threshold: Mean neighbor distance above which a factor row is excluded before
@@ -1795,18 +1811,11 @@ def run_measurement_phase(
     try:
         k_values = list(model.k_values) if k_values is None else sorted(k_values)
         n_batches = model.measurement_n_batches if n_batches is None else n_batches
-        if n_replicates < model.r_store:
-            raise ValueError(
-                f"n_replicates ({n_replicates}) must be >= model.r_store ({model.r_store}) "
-                "to fill the replicate storage buffers"
-            )
+        store_k_set: set[int] = set(store_replicates_k_values) if store_replicates_k_values is not None else set()
+        r_store_actual = min(r_store, n_replicates)
         device = model.device if device is None else torch.device(device)
         transform_list = list(transforms)
         dtype = model.slot_mu.dtype
-
-        unknown = [k for k in k_values if k not in model._k_to_index]
-        if unknown:
-            raise ValueError(f"k values {unknown} are not in model.k_values")
 
         names = model.metric_names
         n_k = len(k_values)
@@ -1914,43 +1923,50 @@ def run_measurement_phase(
                 previous_consensus[k] = detached_kg
 
                 # Replicate factors for the diagnostic plots, from the first batch only.
-                if batches_used == 1 and k in model.store_replicates_k_values:
-                    stored_rkg = getattr(model, f"D_{k}_rkg")
-                    stored_rkg.copy_(solved["w_rkg"].detach()[: stored_rkg.shape[0]].to(stored_rkg.dtype))
+                if batches_used == 1 and k in store_k_set:
+                    rkg = solved["w_rkg"].detach()[:r_store_actual].cpu()
+                    model.register_buffer(f"D_{k}_rkg", rkg)
 
         if batches_used == 0:
             raise RuntimeError("the measurement dataloader yielded no usable batches")
 
+        # Register measurement-time k_values so selection_curves() knows the layout.
+        model.register_buffer("_measured_k_values", torch.tensor(k_values, dtype=torch.long, device="cpu"))
         for name in names:
-            mean_k = getattr(model, f"_measured_{name}_mean_k")
-            sem_k = getattr(model, f"_measured_{name}_sem_k")
-            mean_k.fill_(float("nan"))
-            sem_k.fill_(float("nan"))
+            mean_k = torch.full((len(k_values),), float("nan"), dtype=dtype, device="cpu")
+            sem_k = torch.full((len(k_values),), float("nan"), dtype=dtype, device="cpu")
             for k_index, k in enumerate(k_values):
                 count = float(counts[name][k_index])
                 if count < 1.0:
                     continue
-                model_index = model._k_to_index[k]
                 mean = sums[name][k_index] / count
-                mean_k[model_index] = mean.to(mean_k.dtype)
+                mean_k[k_index] = mean.to(mean_k.dtype)
                 if count >= 2.0:
                     variance = (sums_of_squares[name][k_index] / count - mean * mean).clamp(min=0.0)
                     variance = variance * count / (count - 1.0)  # sample variance
-                    sem_k[model_index] = (variance / count).sqrt().to(sem_k.dtype)
+                    sem_k[k_index] = (variance / count).sqrt().to(sem_k.dtype)
                 else:
-                    sem_k[model_index] = 0.0
+                    sem_k[k_index] = 0.0
+            model.register_buffer(f"_measured_{name}_mean_k", mean_k)
+            model.register_buffer(f"_measured_{name}_sem_k", sem_k)
 
         for k in k_values:
             if n_consensus[k] == 0:
                 continue
             averaged_kg = (consensus_sums[k] / n_consensus[k]).to(dtype)
-            buffer_kg = getattr(model, f"consensus_D_{k}_kg")
-            buffer_kg.copy_(l1_normalize_rows(averaged_kg).to(buffer_kg.dtype))
+            normalized_kg = l1_normalize_rows(averaged_kg).cpu()
+            buf_name = f"consensus_D_{k}_kg"
+            if buf_name in model._buffers:
+                t = model._buffers[buf_name]
+                assert isinstance(t, torch.Tensor)
+                t.copy_(normalized_kg.to(t.dtype))
+            else:
+                model.register_buffer(buf_name, normalized_kg)
 
         model._measured_n_batches.fill_(batches_used)
         if verbose:
             print(f"measurement phase complete: {batches_used} batches x {len(k_values)} k values")
-        return model.selection_curves()
+        return model.selection_curves(k_values=k_values)
     finally:
         model.train(was_training)
 
@@ -1989,13 +2005,15 @@ def export_hot_start(
         Dict mapping ``k`` to a factor tensor of shape ``(r, k, g)``.
     """
     k_values = list(model.k_values) if k_values is None else sorted(k_values)
-    unknown = [k for k in k_values if k not in model._k_to_index]
-    if unknown:
-        raise ValueError(f"k values {unknown} are not in model.k_values")
+    missing = [k for k in k_values if f"consensus_D_{k}_kg" not in model._buffers]
+    if missing:
+        raise ValueError(
+            f"k values {missing} have no consensus factors; run run_measurement_phase() first"
+        )
 
     out: dict[int, torch.Tensor] = {}
     for k in k_values:
-        consensus_kg = getattr(model, f"consensus_D_{k}_kg").detach()
+        consensus_kg = model._buffers[f"consensus_D_{k}_kg"].detach()
         if bool((consensus_kg == 0).all()):
             raise ValueError(f"consensus factors for k={k} are all zeros; run run_measurement_phase() first")
         row_sums = consensus_kg.sum(dim=-1)
@@ -2061,8 +2079,8 @@ def plot_density_histograms(
             than cross-program distances.
             Range ``(0, 1)``.
         k_values: ``k`` values to plot.  When a dataloader is provided, defaults to all of
-            ``model.k_values``; otherwise defaults to
-            :attr:`~CNMFTransformer.store_replicates_k_values`.
+            ``model.k_values``; otherwise defaults to whatever ``k`` values have stored replicate
+            buffers (set via ``store_replicates_k_values`` in :func:`run_measurement_phase`).
         n_bins: Number of histogram bins.
 
     Returns:
@@ -2077,9 +2095,6 @@ def plot_density_histograms(
             k_values = list(model.k_values)
         else:
             k_values = sorted(k_values)
-            unknown = [k for k in k_values if k not in model._k_to_index]
-            if unknown:
-                raise ValueError(f"k values {unknown} are not in model.k_values")
 
         device_ = model.device if device is None else torch.device(device)
         dtype = model.slot_mu.dtype
@@ -2118,22 +2133,28 @@ def plot_density_histograms(
 
     else:
         # --- buffer mode: read from replicate buffers stored by run_measurement_phase ---
-        if int(model._measured_n_batches) == 0:
-            raise RuntimeError("pass a dataloader to plot_density_histograms(), or call run_measurement_phase() first")
+        stored_k = [int(name[2:-4]) for name in model._buffers if name.startswith("D_") and name.endswith("_rkg")]
+        if not stored_k:
+            raise RuntimeError(
+                "no replicate buffers found; pass a dataloader, or call run_measurement_phase() "
+                "with store_replicates_k_values to pre-store replicates"
+            )
         if k_values is None:
-            k_values = list(model.store_replicates_k_values)
+            k_values = sorted(stored_k)
         else:
             k_values = sorted(k_values)
-            unknown = [k for k in k_values if k not in model.store_replicates_k_values]
-            if unknown:
+            missing = [k for k in k_values if k not in stored_k]
+            if missing:
                 raise ValueError(
-                    f"k values {unknown} are not in model.store_replicates_k_values; "
+                    f"k values {missing} have no stored replicate buffer; "
                     "pass store_replicates_k_values to run_measurement_phase() to cover them"
                 )
-        if not k_values:
-            raise ValueError("no k values to plot; store_replicates_k_values is empty")
 
-        replicate_factors = {k: getattr(model, f"D_{k}_rkg").detach().float() for k in k_values}
+        replicate_factors = {}
+        for k in k_values:
+            t = model._buffers[f"D_{k}_rkg"]
+            assert isinstance(t, torch.Tensor)
+            replicate_factors[k] = t.detach().float()
 
     n_panels = len(k_values)
     fig, axes = plt.subplots(1, n_panels, figsize=(4.5 * n_panels, 3), squeeze=False)
@@ -2180,7 +2201,7 @@ def plot_density_histograms(
     return fig
 
 
-def plot_k_selection(model: CNMFTransformer, use_cross: bool = False) -> None:
+def plot_k_selection(model: CNMFTransformer, k_values: list[int] | None = None, use_cross: bool = False) -> None:
     """
     Plot the measured stability / error trade-off, with error bars from the measurement batches.
 
@@ -2191,7 +2212,7 @@ def plot_k_selection(model: CNMFTransformer, use_cross: bool = False) -> None:
     """
     from matplotlib import pyplot as plt
 
-    curves = model.selection_curves()
+    curves = model.selection_curves(k_values=k_values if k_values is not None else model.k_values)
     stability_key = "stability_cross" if use_cross else "stability"
     error_key = "error_cross" if use_cross else "error"
 
