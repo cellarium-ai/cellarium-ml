@@ -1751,8 +1751,7 @@ class NMFOutput:
             model = module.model
             if not is_subclass_by_name(model, "NonNegativeMatrixFactorization"):
                 raise ValueError(
-                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, "
-                    f"got {type(model).__name__}"
+                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, got {type(model).__name__}"
                 )
 
             if reference_var_names_g is None:
@@ -2030,7 +2029,6 @@ class NMFOutput:
 
         dataloader = self.datamodule.predict_dataloader()
         for full_batch in tqdm(dataloader):
-
             # get the batch used for inference (HVGs, same transforms as used for training)
             inference_batch = copy.deepcopy(full_batch)
             for transform in inference_transforms:
@@ -2053,9 +2051,9 @@ class NMFOutput:
             # incremental OLS fit update
             if ols_solver is None:
                 ols_solver = StreamingOrdinaryLeastSquares(
-                    var_names_g=np.arange(k).astype(str), 
-                    n_targets=len(full_batch["var_names_g"]), 
-                    univariate=False, 
+                    var_names_g=np.arange(k).astype(str),
+                    n_targets=len(full_batch["var_names_g"]),
+                    univariate=False,
                     ridge_penalty=0.0,
                 )
             assert isinstance(ols_solver, StreamingOrdinaryLeastSquares)

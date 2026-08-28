@@ -126,8 +126,9 @@ def test_amortized_nmf_forward_returns_loss(small_adata: anndata.AnnData) -> Non
 
 
 def test_film_block_output_shape() -> None:
-    """FiLMBlock produces (R, N, H) outputs and non-negative activations for both 2D and 3D inputs."""
-    input_dim, output_dim, r, n = 10, 8, 3, 5
+    """FiLMBlock produces (R, N, H) outputs and non-negative activations for both 2D and 3D inputs,
+    and produces (R_active, N, H) when active_replicates is given."""
+    input_dim, output_dim, r, n = 10, 8, 5, 4
     block = FiLMBlock(input_dim=input_dim, output_dim=output_dim, num_replicates=r)
 
     # 2D input (N, input_dim) -> (R, N, output_dim): first layer in the stack
@@ -142,10 +143,18 @@ def test_film_block_output_shape() -> None:
     assert out_3d.shape == (r, n, output_dim), f"Expected ({r}, {n}, {output_dim}), got {out_3d.shape}"
     assert (out_3d >= 0).all()
 
+    # active_replicates subsets the replicate dimension
+    active = [0, 2, 4]
+    out_active = block(x_2d, active_replicates=active)
+    assert out_active.shape == (len(active), n, output_dim)
+    # output for active replicates should match the full forward indexed at those rows
+    assert torch.allclose(out_active, out_2d[active])
+
 
 def test_consensus_nmf_encoder_output_shape() -> None:
-    """ConsensusNMFEncoder produces (R, N, K) outputs that are non-negative."""
-    num_genes, num_factors, r, n = 10, 4, 3, 5
+    """ConsensusNMFEncoder produces (R, N, K) outputs that are non-negative,
+    and (R_active, N, K) when active_replicates is given."""
+    num_genes, num_factors, r, n = 10, 4, 5, 4
     encoder = ConsensusNMFEncoder(
         num_genes=num_genes,
         hidden_dims=[16, 8],
@@ -156,6 +165,12 @@ def test_consensus_nmf_encoder_output_shape() -> None:
     out = encoder(x_ng)
     assert out.shape == (r, n, num_factors), f"Expected ({r}, {n}, {num_factors}), got {out.shape}"
     assert (out >= 0).all(), "Encoder output should be non-negative after ReLU"
+
+    # active_replicates subsets the replicate dimension end-to-end through all FiLM blocks
+    active = [1, 3]
+    out_active = encoder(x_ng, active_replicates=active)
+    assert out_active.shape == (len(active), n, num_factors)
+    assert (out_active >= 0).all()
 
 
 def test_amortized_nmf_infer_loadings(small_adata: anndata.AnnData) -> None:
@@ -181,3 +196,105 @@ def test_amortized_nmf_infer_loadings(small_adata: anndata.AnnData) -> None:
     rec_error = nmf_output.calculate_reconstruction_error(k_values=[k])
     assert k in rec_error
     assert np.isfinite(rec_error[k]), f"Reconstruction error should be finite, got {rec_error[k]}"
+
+
+def test_factor_drift_metric() -> None:
+    """_compute_factor_drift returns the relative Frobenius norm of change."""
+    model = AmortizedOnlineNonNegativeMatrixFactorization(
+        var_names_g=[f"gene_{i}" for i in range(10)],
+        k_values=[3],
+        r=2,
+        encoder_hidden_dims=[8],
+        total_n_cells=100,
+        batch_size=8,
+    )
+    D = torch.rand(3, 10)
+    D_prev = D.clone()
+
+    # identical tensors → zero drift
+    assert model._compute_factor_drift(D, D_prev) == 0.0
+
+    # scale D by a constant: relative drift = ||(c-1)*D||_F / ||D||_F = |c-1|
+    c = 1.05
+    assert abs(model._compute_factor_drift(D * c, D_prev) - abs(c - 1)) < 1e-5
+
+    # zero previous → inf (undefined)
+    assert model._compute_factor_drift(D, torch.zeros_like(D)) == float("inf")
+
+
+def test_converged_replicate_not_updated() -> None:
+    """D buffer rows for converged replicates are not modified by forward()."""
+    g = 10
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    x_ng = torch.rand(8, g)
+    model = AmortizedOnlineNonNegativeMatrixFactorization(
+        var_names_g=var_names_g.tolist(),
+        k_values=[3],
+        r=3,
+        encoder_hidden_dims=[8],
+        total_n_cells=100,
+        batch_size=8,
+    )
+    model.converged_rK[0, model.k_to_idx[3]] = True
+    D_row_before = model.D_3_rkg[0].clone()
+
+    model(x_ng=x_ng, var_names_g=var_names_g)
+
+    assert torch.equal(model.D_3_rkg[0], D_row_before), "Converged replicate's D row must not change"
+
+
+def test_per_replicate_convergence_tracking() -> None:
+    """Patience counter accumulates on low drift and marks replicate converged; large drift resets patience."""
+    model = AmortizedOnlineNonNegativeMatrixFactorization(
+        var_names_g=[f"gene_{i}" for i in range(10)],
+        k_values=[3],
+        r=2,
+        encoder_hidden_dims=[8],
+        total_n_cells=100,
+        batch_size=8,
+        convergence_patience=2,
+    )
+    k_idx = model.k_to_idx[3]
+
+    # Simulate two windows of zero drift → both replicates should be marked converged
+    model._D_snapshots[3] = model.D_3_rkg.clone()
+    for _ in range(2):
+        D_full = model.D_3_rkg.detach()
+        snapshot = model._D_snapshots[3]
+        assert isinstance(snapshot, torch.Tensor)
+        for r in range(2):
+            if model.converged_rK[r, k_idx]:
+                continue
+            drift = model._compute_factor_drift(D_full[r], snapshot[r])
+            if drift < model.factor_drift_threshold:
+                model.patience_counter_rK[r, k_idx] += 1
+                if model.patience_counter_rK[r, k_idx] >= model.convergence_patience:
+                    model.converged_rK[r, k_idx] = True
+            else:
+                model.patience_counter_rK[r, k_idx] = 0
+        model._D_snapshots[3] = D_full.clone()
+
+    assert model.converged_rK[:, k_idx].all(), "Both replicates should be converged after 2 stable windows"
+
+    # Reset and simulate a large-drift window followed by a stable window → patience stays at 1
+    model.converged_rK.zero_()
+    model.patience_counter_rK.zero_()
+    model._D_snapshots[3] = model.D_3_rkg.clone()
+
+    noisy_D = model.D_3_rkg.clone()
+    noisy_D += torch.rand_like(noisy_D) * 10  # large perturbation → drift >> threshold
+    getattr(model, "D_3_rkg")[:] = noisy_D
+
+    # Window 1: large drift → patience stays 0
+    D_full = model.D_3_rkg.detach()
+    snapshot = model._D_snapshots[3]
+    assert isinstance(snapshot, torch.Tensor)
+    for r in range(2):
+        drift = model._compute_factor_drift(D_full[r], snapshot[r])
+        if drift < model.factor_drift_threshold:
+            model.patience_counter_rK[r, k_idx] += 1
+        else:
+            model.patience_counter_rK[r, k_idx] = 0
+    model._D_snapshots[3] = D_full.clone()
+
+    assert model.patience_counter_rK[:, k_idx].sum() == 0, "Large drift should reset patience to 0"
