@@ -79,6 +79,26 @@ class CellariumModule(pl.LightningModule):
             # Thus, we need to use manual optimization for the No Optimizer case.
             self.automatic_optimization = False
 
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path,
+        map_location=None,
+        hparams_file=None,
+        strict=None,
+        weights_only=False,
+        **kwargs,
+    ):
+        """Replace the torch 2.4.0+ default weights_only=True with False"""
+        return super().load_from_checkpoint(
+            checkpoint_path,
+            map_location=map_location,
+            hparams_file=hparams_file,
+            strict=strict,
+            weights_only=weights_only,
+            **kwargs,
+        )
+
     def configure_model(self) -> None:
         """
         .. note::
