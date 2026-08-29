@@ -382,6 +382,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             return
 
         n_active_total = 0
+        drifts = []
 
         for k in self.k_values:
             k_idx = self.k_to_idx[k]
@@ -404,6 +405,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                         self.converged_rK[r, k_idx] = True
                 else:
                     self.patience_counter_rK[r, k_idx] = 0
+                drifts.append(drift)
 
             self._D_snapshots[k] = D_full.clone()
 
@@ -412,8 +414,11 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             assert isinstance(trainer.model, pl.LightningModule)
             trainer.model.log(f"k={k}__n_active_replicates", float(n_active), prog_bar=False)
 
-        assert isinstance(trainer.model, pl.LightningModule)
-        trainer.model.log("n_training", float(n_active_total), prog_bar=True)
+        if n_active_total > 0:  # upon forgetting, the loop is short circuited and this is zero: not real
+            assert isinstance(trainer.model, pl.LightningModule)
+            trainer.model.log("n_training", float(n_active_total), prog_bar=True)
+            if drifts:
+                trainer.model.log("median_drift", float(np.median(drifts)), prog_bar=True)
 
         if self.converged_rK.all():
             trainer.should_stop = True
