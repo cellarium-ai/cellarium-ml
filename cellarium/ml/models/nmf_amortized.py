@@ -225,7 +225,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             getattr(self, f"B_{i}_rkg").zero_()
             init_fn(getattr(self, f"D_{i}_rkg"), k=i, transformed_data_mean=self.transformed_data_mean)
 
-        self._train_nmf_loss_ema: torch.Tensor | None = None
+        # self._train_nmf_loss_ema: torch.Tensor | None = None
         self._val_nmf_loss_ema: torch.Tensor | None = None
         self._D_snapshots: dict[int, torch.Tensor | None] = {k: None for k in self.k_values}
         self.converged_rK.zero_()
@@ -317,7 +317,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         encoder_losses: list[torch.Tensor] = []
-        nmf_reconstruction_errors = []
+        # nmf_reconstruction_errors = []
         for k in self.k_values:
             k_idx = self.k_to_idx[k]
             active_indices = (~self.converged_rK[:, k_idx]).nonzero(as_tuple=True)[0].tolist()
@@ -327,24 +327,24 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             out = self.online_dictionary_update(x_ng=x_ng, k=k, active_replicate_indices=active_indices)
             encoder_losses.append(out["loss"])
 
-            with torch.no_grad():
-                squared_error_r = compute_reconstruction_error_compiled(
-                    x_ng=x_ng,
-                    loadings_rnk=out["solver_loadings_rnk"],
-                    factors_rkg=getattr(self, f"D_{k}_rkg")[active_indices],
-                )
-                nmf_reconstruction_errors.append(squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1]))
+        #     with torch.no_grad():
+        #         squared_error_r = compute_reconstruction_error_compiled(
+        #             x_ng=x_ng,
+        #             loadings_rnk=out["solver_loadings_rnk"],
+        #             factors_rkg=getattr(self, f"D_{k}_rkg")[active_indices],
+        #         )
+        #         nmf_reconstruction_errors.append(squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1]))
 
-        with torch.no_grad():
-            if nmf_reconstruction_errors:
-                minibatch_nmf_loss = sum(nmf_reconstruction_errors) / len(nmf_reconstruction_errors)
-                assert isinstance(minibatch_nmf_loss, torch.Tensor)
-                beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)
-                self._train_nmf_loss_ema = (
-                    beta * self._train_nmf_loss_ema + (1 - beta) * minibatch_nmf_loss
-                    if self._train_nmf_loss_ema is not None
-                    else minibatch_nmf_loss
-                )
+        # with torch.no_grad():
+        #     if nmf_reconstruction_errors:
+        #         minibatch_nmf_loss = sum(nmf_reconstruction_errors) / len(nmf_reconstruction_errors)
+        #         assert isinstance(minibatch_nmf_loss, torch.Tensor)
+        #         beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)
+        #         self._train_nmf_loss_ema = (
+        #             beta * self._train_nmf_loss_ema + (1 - beta) * minibatch_nmf_loss
+        #             if self._train_nmf_loss_ema is not None
+        #             else minibatch_nmf_loss
+        #         )
 
         loss = sum(encoder_losses) / len(encoder_losses) if encoder_losses else None
         assert loss is None or isinstance(loss, torch.Tensor)
@@ -361,11 +361,11 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             )
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
-        # Log reconstruction error EMA every step
-        if self._train_nmf_loss_ema is not None:
-            beta_pow_t = np.exp(-trainer.global_step / self.n_batches_for_forgetting_momentum)
-            assert isinstance(trainer.model, pl.LightningModule)
-            trainer.model.log("reconstruction_error", self._train_nmf_loss_ema / (1 - beta_pow_t), prog_bar=True)
+        # # Log reconstruction error EMA every step
+        # if self._train_nmf_loss_ema is not None:
+        #     beta_pow_t = np.exp(-trainer.global_step / self.n_batches_for_forgetting_momentum)
+        #     assert isinstance(trainer.model, pl.LightningModule)
+        #     trainer.model.log("reconstruction_error", self._train_nmf_loss_ema / (1 - beta_pow_t), prog_bar=True)
 
         # Forgetting reset: zero A and B, then reset convergence state so replicates must
         # re-demonstrate stability after the exploration phase.
@@ -380,6 +380,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         # Convergence check every convergence_window_size steps
         if trainer.global_step % self.convergence_window_size != 0:
             return
+
+        n_active_total = 0
 
         for k in self.k_values:
             k_idx = self.k_to_idx[k]
@@ -406,8 +408,12 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             self._D_snapshots[k] = D_full.clone()
 
             n_active = int((~self.converged_rK[:, k_idx]).sum())
+            n_active_total += n_active
             assert isinstance(trainer.model, pl.LightningModule)
             trainer.model.log(f"k={k}__n_active_replicates", float(n_active), prog_bar=False)
+
+        assert isinstance(trainer.model, pl.LightningModule)
+        trainer.model.log("n_training", float(n_active_total), prog_bar=True)
 
         if self.converged_rK.all():
             trainer.should_stop = True
