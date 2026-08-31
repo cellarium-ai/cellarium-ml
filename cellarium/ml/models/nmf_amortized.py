@@ -158,6 +158,9 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         forgetting_drift_threshold: float = 0.1,
         forgetting_patience: int = 5,
         exploration_epochs: int = 2,
+        cooldown_periods: int | None = None,
+        max_solver_iter_train: int = 100,
+        max_solver_iter_cooldown: int = 100,
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
     ) -> None:
@@ -198,6 +201,13 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self.forgetting_drift_threshold = forgetting_drift_threshold
         self.forgetting_patience = forgetting_patience
         self.exploration_epochs = exploration_epochs
+        self.cooldown_periods = (
+            cooldown_periods
+            if cooldown_periods is not None
+            else int(np.ceil(self.n_batches_per_epoch / self.n_batches_for_forgetting_momentum))
+        )
+        self.max_solver_iter_train = max_solver_iter_train
+        self.max_solver_iter_cooldown = max_solver_iter_cooldown
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -229,7 +239,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         """Return the learned factors for each k value."""
         return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
 
-    def online_dictionary_update(self, x_ng: torch.Tensor, k: int) -> dict[str, torch.Tensor]:
+    def online_dictionary_update(self, x_ng: torch.Tensor, k: int, n_iterations: int = 100) -> dict[str, torch.Tensor]:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
@@ -260,7 +270,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                 loadings_rnk=solver_loadings_rnk,  # hals does inplace update
                 A_rkk=A_rkk,
                 B_rkg=B_rkg,
-                n_iterations=500,
+                n_iterations=n_iterations,
                 alpha_tol=0.01,
                 D_tol=0.05,
                 exponential_decay_rho=self.exponential_decay_rho,
@@ -272,7 +282,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                 loadings_rnk=encoder_loadings_rnk.detach(),
                 A_rkk=A_rkk,
                 B_rkg=B_rkg,
-                n_iterations=100,
+                n_iterations=n_iterations,
                 exponential_decay_rho=self.exponential_decay_rho,
             )
             solver_loadings_rnk = updated_values["loadings_rnk"]  # not inplace like hals
@@ -316,7 +326,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         encoder_losses: list[torch.Tensor] = []
         nmf_reconstruction_errors: list[torch.Tensor] = []
         for k in self.k_values:
-            out = self.online_dictionary_update(x_ng=x_ng, k=k)
+            n_iter = self.max_solver_iter_cooldown if self._k_in_final_epoch[k] else self.max_solver_iter_train
+            out = self.online_dictionary_update(x_ng=x_ng, k=k, n_iterations=n_iter)
             encoder_loss = out["loss"]
             solver_loadings_rnk = out["solver_loadings_rnk"]
             encoder_losses.append(encoder_loss)
@@ -440,18 +451,19 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         all_done = True
         for k in self.k_values:
             # check if a previously started final epoch has completed
+            cooldown_steps = self.cooldown_periods * self.n_batches_for_forgetting_momentum
             if self._k_in_final_epoch[k]:
                 k_start = self._k_final_epoch_start[k]
                 assert k_start is not None
-                if step - k_start >= self.n_batches_per_epoch:
+                if step - k_start >= cooldown_steps:
                     continue  # this k is done; don't touch A/B
                 else:
                     all_done = False
-                    continue  # still in final epoch; don't forget
+                    continue  # still in cooldown; don't forget
             all_done = False
 
-            # force into final epoch if not enough steps remain for another full period + final epoch
-            if steps_remaining < self.n_batches_per_epoch:
+            # force into cooldown if not enough steps remain
+            if steps_remaining < cooldown_steps:
                 self._k_in_final_epoch[k] = True
                 self._k_final_epoch_start[k] = step
                 continue  # don't forget; let A/B accumulate
