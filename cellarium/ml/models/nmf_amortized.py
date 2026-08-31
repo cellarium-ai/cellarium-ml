@@ -23,7 +23,6 @@ from cellarium.ml.models.nmf import (
     online_dictionary_update_nmf_torch_hals,
     solve_nnls_fista,
 )
-from cellarium.ml.utilities.convergence import NoisyConvergenceTracker
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -155,8 +154,9 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         total_n_cells: int,
         batch_size: int,
         solver: Literal["hals", "fista"] = "fista",
-        q75_convergence_threshold: float = 0.15,
-        check_convergence_every_n_steps: int = 5,
+        forgetting_drift_threshold: float = 0.02,
+        forgetting_patience: int = 3,
+        exploration_epochs: int = 2,
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
     ) -> None:
@@ -193,14 +193,10 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         # for training the encoder
         self.encoder_loss_fn = torch.nn.SmoothL1Loss(reduction="mean")
 
-        # self._D_tol = 1e-5
         self._alpha_tol = 1e-5
-        # self._hals_tol = 1e-4
-        # Sentinel parameter used to track the current device (mirrors OnlineNMF pattern)
-        # self._dummy_param = torch.nn.Parameter(torch.empty(()))
-        self.q75_convergence_threshold = q75_convergence_threshold
-        self.check_convergence_every_n_steps = check_convergence_every_n_steps
-        self.convergence_tracker = NoisyConvergenceTracker(window_size=25, patience=20, min_delta=1e-4)
+        self.forgetting_drift_threshold = forgetting_drift_threshold
+        self.forgetting_patience = forgetting_patience
+        self.exploration_epochs = exploration_epochs
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -222,7 +218,10 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
 
         self._train_nmf_loss_ema: torch.Tensor | None = None
         self._val_nmf_loss_ema: torch.Tensor | None = None
-        self.convergence_tracker.reset()
+        self._D_prev_snapshots: dict[int, torch.Tensor | None] = {k: None for k in self.k_values}
+        self._forgetting_patience_counters: dict[int, int] = {k: 0 for k in self.k_values}
+        self._k_in_final_epoch: dict[int, bool] = {k: False for k in self.k_values}
+        self._k_final_epoch_start: dict[int, int | None] = {k: None for k in self.k_values}
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
@@ -313,8 +312,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
-        encoder_losses = []
-        nmf_reconstruction_errors = []
+        encoder_losses: list[torch.Tensor] = []
+        nmf_reconstruction_errors: list[torch.Tensor] = []
         for k in self.k_values:
             out = self.online_dictionary_update(x_ng=x_ng, k=k)
             encoder_loss = out["loss"]
@@ -351,15 +350,18 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                 sum(nmf_reconstruction_errors) / len(nmf_reconstruction_errors) if nmf_reconstruction_errors else None
             )
             beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)  # momentum term for exponential moving average
-            self._train_nmf_loss_ema = (
+            val = (
                 beta * self._train_nmf_loss_ema + (1 - beta) * minibatch_nmf_loss
                 if self._train_nmf_loss_ema is not None
                 else minibatch_nmf_loss
             )
+            assert isinstance(val, torch.Tensor)
+            self._train_nmf_loss_ema = val
 
-        return {
-            "loss": sum(encoder_losses) / len(encoder_losses) if encoder_losses else None,
-        }
+        loss = sum(encoder_losses) / len(encoder_losses) if encoder_losses else None
+        assert isinstance(loss, torch.Tensor) or loss is None
+
+        return {"loss": loss}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
@@ -372,17 +374,20 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             )
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
-        if trainer.global_step % self.check_convergence_every_n_steps != 0:
+        step = trainer.global_step
+        if step == 0 or step % self.n_batches_for_forgetting_momentum != 0:
             return
 
-        beta_pow_t = np.exp(-trainer.global_step / self.n_batches_for_forgetting_momentum)
+        module = trainer.model
+        assert isinstance(module, pl.LightningModule)
 
-        nmf_loss_ema = self._train_nmf_loss_ema
-        nmf_loss_ema_unbiased = nmf_loss_ema / (1 - beta_pow_t)
-        trainer.model.log("reconstruction_error", nmf_loss_ema_unbiased, prog_bar=True)
-        nmf_loss_converged = self.convergence_tracker.check_convergence(nmf_loss_ema_unbiased.item())
+        # --- log reconstruction error EMA ---
+        if self._train_nmf_loss_ema is not None:
+            beta_pow_t = np.exp(-step / self.n_batches_for_forgetting_momentum)
+            nmf_loss_ema_unbiased = self._train_nmf_loss_ema / (1 - beta_pow_t)
+            module.log("reconstruction_error", nmf_loss_ema_unbiased, prog_bar=True)
 
-        # look at the actual consensus procedure histogram
+        # --- log consensus metrics ---
         local_neighborhood_size = 0.3
         for k in self.k_values:
             D_rkg = getattr(self, f"D_{k}_rkg")
@@ -400,62 +405,82 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                         "We want n_neighbors >= 2. Increase local_neighborhood_size."
                     )
 
-                # euclidean distance to every other run
                 euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
-                euclidean_dist_mm.fill_diagonal_(0)  # correct for roundoff errors that may be present
-
-                # top n_neighbors plus self (distance 0)
+                euclidean_dist_mm.fill_diagonal_(0)
                 n_nearest_dist_including_self_mL, _ = torch.topk(euclidean_dist_mm, n_neighbors + 1, largest=False)
-
-                # distances to top n_neighbors
                 n_nearest_dist_ml = n_nearest_dist_including_self_mL[:, 1:]
-
-                # mean distance to top n_neighbors
                 mean_neighbor_distance_m = n_nearest_dist_ml.mean(dim=1)
 
-                # log historgram
                 for logger in trainer.loggers:
                     try:
                         if isinstance(logger, pl.loggers.TensorBoardLogger):
                             logger.experiment.add_histogram(
                                 f"k={k}__consensus_histogram",
                                 mean_neighbor_distance_m,
-                                global_step=trainer.global_step,
+                                global_step=step,
                                 bins=np.linspace(0, 1, 75),
                             )
                     except Exception as e:
-                        warnings.warn(f"Failed to log histogram for k={k} step={trainer.global_step} due to {e}")
+                        warnings.warn(f"Failed to log histogram for k={k} step={step} due to {e}")
 
-                trainer.model.log(f"k={k}__consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
-                # trainer.model.log(f"k={k}__consensus_L2", mean_neighbor_distance_m.pow(2).mean(), prog_bar=False)
-                trainer.model.log(f"k={k}__consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
+                module.log(f"k={k}__consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
+                module.log(f"k={k}__consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
 
-        # implement convergence check: reconstruction error plateaued and consensus_q75 is below the threshold
-        # at least one epoch
-        # do not stop near an A, B reset
-        # look for loss convergence
-        # and look for consensus convergence (q75 of mean distance to neighbors below threshold)
-        converged = (
-            (trainer.global_step > self.n_batches_for_forgetting_momentum)
-            and (
-                trainer.global_step % self.n_batches_for_forgetting_momentum
-                >= min(100, self.n_batches_for_forgetting_momentum * 0.75)
-            )
-            and nmf_loss_converged
-            and (
-                max([trainer.callback_metrics.get(f"k={k}__consensus_q75", float("inf")) for k in self.k_values])
-                <= self.q75_convergence_threshold
-            )
-        )
-        if converged:
+        # --- per-k forgetting convergence check and forgetting ---
+        assert isinstance(trainer.max_epochs, int)
+        steps_remaining = trainer.max_epochs * self.n_batches_per_epoch - step
+        min_steps_before_stop = self.exploration_epochs * self.n_batches_per_epoch
+
+        all_done = True
+        for k in self.k_values:
+            # check if a previously started final epoch has completed
+            if self._k_in_final_epoch[k]:
+                k_start = self._k_final_epoch_start[k]
+                assert k_start is not None
+                if step - k_start >= self.n_batches_per_epoch:
+                    continue  # this k is done; don't touch A/B
+                else:
+                    all_done = False
+                    continue  # still in final epoch; don't forget
+            all_done = False
+
+            # force into final epoch if not enough steps remain for another full period + final epoch
+            if steps_remaining < self.n_batches_per_epoch:
+                self._k_in_final_epoch[k] = True
+                self._k_final_epoch_start[k] = step
+                continue  # don't forget; let A/B accumulate
+
+            # compute drift relative to previous period endpoint
+            D_rkg = getattr(self, f"D_{k}_rkg").detach()
+            prev = self._D_prev_snapshots[k]
+            if prev is not None and step >= min_steps_before_stop:
+                prev_norm = prev.norm()
+                if prev_norm < 1e-8:
+                    drift = float("inf")
+                else:
+                    drift = ((D_rkg - prev).norm() / prev_norm).item()
+                module.log(f"k={k}__forgetting_drift", drift, prog_bar=False)
+
+                if drift < self.forgetting_drift_threshold:
+                    self._forgetting_patience_counters[k] += 1
+                else:
+                    self._forgetting_patience_counters[k] = 0
+
+                if self._forgetting_patience_counters[k] >= self.forgetting_patience:
+                    self._k_in_final_epoch[k] = True
+                    self._k_final_epoch_start[k] = step
+                    continue  # don't forget; let A/B accumulate
+
+            # snapshot current D before forgetting
+            self._D_prev_snapshots[k] = D_rkg.clone()
+
+            # forget
+            getattr(self, f"A_{k}_rkk").zero_()
+            getattr(self, f"B_{k}_rkg").zero_()
+
+        if all_done:
             trainer.should_stop = True
-            print("Stopping early: converged")
-
-        if trainer.global_step % self.n_batches_for_forgetting_momentum == 0:
-            # this hard reset to zero is equivalent to forgetting momentum
-            for i in self.k_values:
-                getattr(self, f"A_{i}_rkk").zero_()
-                getattr(self, f"B_{i}_rkg").zero_()
+            print("Stopping early: all k values have completed their final epoch")
 
     def on_end(self, trainer: pl.Trainer) -> None:
         trainer.save_checkpoint(trainer.default_root_dir + "/NMF.ckpt")
@@ -530,14 +555,17 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             sum(nmf_reconstruction_errors) / len(nmf_reconstruction_errors) if nmf_reconstruction_errors else None
         )
         beta = np.exp(-1 / self.n_batches_for_forgetting_momentum)  # momentum term for exponential moving average
-        self._val_nmf_loss_ema = (
+        val = (
             beta * self._val_nmf_loss_ema + (1 - beta) * minibatch_nmf_loss
             if self._val_nmf_loss_ema is not None
             else minibatch_nmf_loss
         )
+        assert isinstance(val, torch.Tensor) or val is None
+        self._val_nmf_loss_ema = val
 
         # Logging to TensorBoard by default
-        pl_module.log("val_nmf_loss", self._val_nmf_loss_ema, sync_dist=True, on_epoch=True)
+        if self._val_nmf_loss_ema is not None:
+            pl_module.log("val_nmf_loss", self._val_nmf_loss_ema, sync_dist=True, on_epoch=True)
 
     @torch.no_grad()
     def reconstruction_error(
