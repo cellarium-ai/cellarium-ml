@@ -478,6 +478,16 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             getattr(self, f"A_{k}_rkk").zero_()
             getattr(self, f"B_{k}_rkg").zero_()
 
+        n_k_still_training = sum(
+            not (
+                self._k_in_final_epoch[k]
+                and isinstance(self._k_final_epoch_start[k], int)
+                and step - self._k_final_epoch_start[k] >= self.n_batches_per_epoch  # type: ignore[operator]
+            )
+            for k in self.k_values
+        )
+        module.log("k_training", float(n_k_still_training), prog_bar=True)
+
         if all_done:
             trainer.should_stop = True
             print("Stopping early: all k values have completed their final epoch")
