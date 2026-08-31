@@ -385,7 +385,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         if self._train_nmf_loss_ema is not None:
             beta_pow_t = np.exp(-step / self.n_batches_for_forgetting_momentum)
             nmf_loss_ema_unbiased = self._train_nmf_loss_ema / (1 - beta_pow_t)
-            module.log("reconstruction_error", nmf_loss_ema_unbiased, prog_bar=True)
+            module.log("rec_error", nmf_loss_ema_unbiased, prog_bar=True)
 
         # --- log consensus metrics ---
         local_neighborhood_size = 0.3
@@ -415,7 +415,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                     try:
                         if isinstance(logger, pl.loggers.TensorBoardLogger):
                             logger.experiment.add_histogram(
-                                f"k={k}__consensus_histogram",
+                                f"k={k}_consensus_histogram",
                                 mean_neighbor_distance_m,
                                 global_step=step,
                                 bins=np.linspace(0, 1, 75),
@@ -423,8 +423,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                     except Exception as e:
                         warnings.warn(f"Failed to log histogram for k={k} step={step} due to {e}")
 
-                module.log(f"k={k}__consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
-                module.log(f"k={k}__consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
+                module.log(f"k={k}_consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
+                module.log(f"k={k}_consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
 
         # --- per-k forgetting convergence check and forgetting ---
         assert isinstance(trainer.max_epochs, int)
