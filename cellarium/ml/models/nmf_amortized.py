@@ -18,6 +18,7 @@ from cellarium.ml.models.nmf import (
     NMFInitUniformRandom,
     NonNegativeMatrixFactorization,
     compute_reconstruction_error_compiled,
+    frobenius_loss_trace_compiled,
     nmf_frobenius_loss,
     online_dictionary_update_fista,
     online_dictionary_update_nmf_torch_hals,
@@ -154,8 +155,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         total_n_cells: int,
         batch_size: int,
         solver: Literal["hals", "fista"] = "fista",
-        forgetting_drift_threshold: float = 0.02,
-        forgetting_patience: int = 3,
+        forgetting_drift_threshold: float = 0.1,
+        forgetting_patience: int = 5,
         exploration_epochs: int = 2,
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
@@ -336,10 +337,15 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             # if we want to track the NMF loss
             with torch.no_grad():
                 factors_rkg = getattr(self, f"D_{k}_rkg")
-                squared_error_r = compute_reconstruction_error_compiled(
+                # squared_error_r = compute_reconstruction_error_compiled(
+                #     x_ng=x_ng,
+                #     loadings_rnk=solver_loadings_rnk,
+                #     factors_rkg=factors_rkg,
+                # )
+                squared_error_r = frobenius_loss_trace_compiled(
                     x_ng=x_ng,
-                    loadings_rnk=solver_loadings_rnk,
-                    factors_rkg=factors_rkg,
+                    h_rnk=solver_loadings_rnk,
+                    w_rkg=factors_rkg,
                 )
                 nmf_reconstruction_error = squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
                 nmf_reconstruction_errors.append(nmf_reconstruction_error)
