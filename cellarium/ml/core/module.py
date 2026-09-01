@@ -431,6 +431,13 @@ class CellariumModule(pl.LightningModule):
         If the :attr:`model` attribute has ``on_train_start`` method defined, then
         ``on_train_start`` must be called at the beginning of training.
         """
+        # cpu_transforms are dispatched to the dataloader collate_fn and always run on CPU.
+        # Lightning moves the whole module (including cpu_transforms, which are still registered
+        # sub-modules of self.pipeline) to the accelerator device before this hook fires.
+        # Move them back to CPU so their buffers match the CPU tensors they will receive.
+        if not self._cpu_transforms_in_module_pipeline:
+            self.cpu_transforms.cpu()
+
         on_train_start = getattr(self.model, "on_train_start", None)
         if callable(on_train_start):
             on_train_start(self.trainer)
