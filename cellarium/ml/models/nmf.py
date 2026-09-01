@@ -184,6 +184,48 @@ def compute_reconstruction_error_compiled(
     return squared_error_r
 
 
+@torch.compile()
+@torch.no_grad()
+def frobenius_loss_trace_compiled(
+    x_ng: torch.Tensor,
+    h_rnk: torch.Tensor,
+    w_rkg: torch.Tensor,
+    # x_squared_sum: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Per-replicate ``||X - H W||_F^2`` computed *without* materializing the reconstruction.
+
+    Uses :math:`\\|X - HW\\|_F^2 = \\|X\\|^2 - 2\\langle HX, W\\rangle + \\langle H^\\top H,
+    WW^\\top\\rangle`, so the intermediates are ``(r, k, g)`` and ``(r, k, k)`` rather than
+    ``(r, n, g)``.  At ``r=100, n=2048, g=2000`` that is 80 MB instead of 1.6 GB.  And because
+    ``H`` is detached and ``X`` is data, both ``HX`` and ``H^T H`` are autograd constants: the
+    entire backward reduces to :math:`\\nabla_W = -2 HX + 2 (H^\\top H) W`.
+
+    This is why the loss is Frobenius rather than Poisson KL.  KL does not factorize this way, and
+    its Poisson justification does not survive per-gene rescaling of the input anyway.
+
+    Args:
+        x_ng: Data, shape ``(n, g)``.
+        h_rnk: Loadings, shape ``(r, n, k)``.
+        w_rkg: Factors, shape ``(r, k, g)``.
+        x_squared_sum: Optional precomputed ``(x_ng ** 2).sum()``, shared across replicates.
+
+    Returns:
+        Sum of squared errors per replicate, shape ``(r,)``.
+    """
+    # if x_squared_sum is None:
+    #     x_squared_sum = x_ng.pow(2).sum()
+    x_squared_sum = x_ng.pow(2).sum()
+    hx_rkg = torch.einsum("rnk,ng->rkg", h_rnk, x_ng)
+    hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
+    wwt_rkk = torch.einsum("rkg,rjg->rkj", w_rkg, w_rkg)
+    cross_r = (hx_rkg * w_rkg).sum(dim=(-2, -1))
+    quad_r = (hth_rkk * wwt_rkk).sum(dim=(-2, -1))
+    # Upcasting only the three reduced scalars is free and removes any cancellation concern.
+    sse_r = x_squared_sum.double() - 2.0 * cross_r.double() + quad_r.double()
+    return sse_r.clamp(min=0.0).to(w_rkg.dtype)
+
+
 def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
     """
     FISTA algorithm for NNLS solving Ax = B for x >= 0
@@ -1751,8 +1793,7 @@ class NMFOutput:
             model = module.model
             if not is_subclass_by_name(model, "NonNegativeMatrixFactorization"):
                 raise ValueError(
-                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, "
-                    f"got {type(model).__name__}"
+                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, got {type(model).__name__}"
                 )
 
             if reference_var_names_g is None:
@@ -2030,7 +2071,6 @@ class NMFOutput:
 
         dataloader = self.datamodule.predict_dataloader()
         for full_batch in tqdm(dataloader):
-
             # get the batch used for inference (HVGs, same transforms as used for training)
             inference_batch = copy.deepcopy(full_batch)
             for transform in inference_transforms:
@@ -2053,9 +2093,9 @@ class NMFOutput:
             # incremental OLS fit update
             if ols_solver is None:
                 ols_solver = StreamingOrdinaryLeastSquares(
-                    var_names_g=np.arange(k).astype(str), 
-                    n_targets=len(full_batch["var_names_g"]), 
-                    univariate=False, 
+                    var_names_g=np.arange(k).astype(str),
+                    n_targets=len(full_batch["var_names_g"]),
+                    univariate=False,
                     ridge_penalty=0.0,
                 )
             assert isinstance(ols_solver, StreamingOrdinaryLeastSquares)
