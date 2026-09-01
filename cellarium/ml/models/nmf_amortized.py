@@ -30,104 +30,47 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-class FiLMBlock(torch.nn.Module):
+class BilinearLoadingsEncoder(torch.nn.Module):
     """
-    A block containing a shared linear layer, followed by replicate-specific FiLM modulation.
+    Encoder that warm-starts NMF loadings from gene expression data and the current factors.
+
+    Replicates are independent by construction: the factor encoder processes each replicate's
+    factors as an independent batch dimension, and there is no cross-replicate attention.
+
+    The bilinear affinity c_ne · f_rke^T is mechanistically motivated: it measures how much
+    each cell (in latent space) resembles each factor, which is the gradient signal FISTA uses
+    on its first step. Applying log1p to the cell input compresses count-data heavy tails while
+    keeping factors in their natural L1-normalized probability scale.
     """
 
-    def __init__(self, input_dim: int, output_dim: int, num_replicates: int):
+    def __init__(self, n_genes: int, latent_dim: int):
         super().__init__()
+        self.cell_encoder = torch.nn.Linear(n_genes, latent_dim, bias=False)
+        self.factor_encoder = torch.nn.Linear(n_genes, latent_dim, bias=False)
+        self.scale = latent_dim**-0.5
 
-        # shared linear layer
-        self.linear = torch.nn.Linear(input_dim, output_dim)
-
-        # batch norm without affine
-        self.batch_norm = torch.nn.BatchNorm1d(output_dim, affine=False)
-
-        # replicate-specific FiLM parameters: gamma and beta for each replicate
-        self.gamma_rh = torch.nn.Parameter(torch.ones(num_replicates, output_dim))
-        self.beta_rh = torch.nn.Parameter(torch.zeros(num_replicates, output_dim))
-
-        self.relu = torch.nn.ReLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # linear layer
-        h = self.linear(x)
-
-        # batch norm
-        if h.dim() == 3:
-            # collapse first two dimensions r and n to apply batch norm, then un-collapse
-            r, n, h_dim = h.shape
-            h = h.view(r * n, h_dim)
-            h_rnh = self.batch_norm(h.view(r * n, h_dim)).view(r, n, h_dim)
-        else:
-            h_rnh = self.batch_norm(h).unsqueeze(0)  # expand to (1, N, H)
-
-        # expand gamma and beta to broadcast across the batch dimension (n)
-        # from (r, output_dim) -> (r, 1, output_dim)
-        gamma_r1h = self.gamma_rh.unsqueeze(1)
-        beta_r1h = self.beta_rh.unsqueeze(1)
-
-        # apply FiLM modulation
-        h_modulated_rnh = gamma_r1h * h_rnh + beta_r1h
-
-        return self.relu(h_modulated_rnh)
-
-
-class ConsensusNMFEncoder(torch.nn.Module):
-    """
-    Encoder network to predict NMF loadings from gene expression data, with FiLM modulation
-    to handle multiple replicates. This effectively works as if it were num_replicates
-    separate encoders.
-    """
-
-    def __init__(self, num_genes: int, hidden_dims: list[int], num_factors: int, num_replicates: int):
-        super().__init__()
-        self.num_replicates = num_replicates
-        self.num_factors = num_factors
-
-        self.blocks = torch.nn.ModuleList()
-        prev_dim = num_genes
-        for hidden_dim in hidden_dims:
-            self.blocks.append(FiLMBlock(prev_dim, hidden_dim, num_replicates))
-            prev_dim = hidden_dim
-
-        # Final layer to output the K factors.
-        # Standard Linear layer applied to the last dimension.
-        self.output_layer = torch.nn.Linear(prev_dim, num_factors)
-
-        # NMF loadings must be non-negative, so we cap the network with a Softplus
-        self.relu = torch.nn.ReLU()
-
-    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, w_rkg: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x_ng: Input gene expression of shape (N, G)
+            x_ng: Gene counts of shape (N, G).
+            w_rkg: Current NMF factors of shape (R, K, G), L1-normalized by row.
         Returns:
-            loadings_rnk: NMF loadings of shape (R, N, K)
+            h_rnk: Warm-start loadings of shape (R, N, K), non-negative, scaled so each
+                cell's loadings sum approximately to its total count.
         """
-        h = x_ng
-
-        for block in self.blocks:
-            # block 1 takes (N, G) -> outputs (R, N, H1)
-            # block 2+ takes (R, N, H1) -> outputs (R, N, H2)
-            h = block(h)
-
-        # final projection to (R, N, K)
-        loadings_rnk = self.output_layer(h)
-
-        return self.relu(loadings_rnk)
+        c_ne = self.cell_encoder(torch.log1p(x_ng))
+        f_rke = self.factor_encoder(w_rkg)
+        logits_rnk = torch.einsum("ne,rke->rnk", c_ne, f_rke) * self.scale
+        h_sparse_rnk = F.relu(logits_rnk)
+        h_norm_rnk = h_sparse_rnk / h_sparse_rnk.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return h_norm_rnk * x_ng.sum(dim=-1, keepdim=True).unsqueeze(0)
 
 
-def weights_init(m):
+def weights_init(m: torch.nn.Module) -> None:
     if isinstance(m, torch.nn.Linear):
         torch.nn.init.xavier_normal_(m.weight)
-        torch.nn.init.zeros_(m.bias)
-    elif isinstance(m, FiLMBlock):
-        torch.nn.init.xavier_normal_(m.gamma_rh)
-        torch.nn.init.zeros_(m.beta_rh)
-        torch.nn.init.xavier_normal_(m.linear.weight)
-        torch.nn.init.zeros_(m.linear.bias)
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
 
 
 class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization, ValidateMixin):
@@ -151,7 +94,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         var_names_g: Sequence[str],
         k_values: list[int],
         r: int,
-        encoder_hidden_dims: list[int],
+        latent_dim: int,
         total_n_cells: int,
         batch_size: int,
         solver: Literal["hals", "fista"] = "fista",
@@ -184,15 +127,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
 
-            # handle the encoders
-            assert len(encoder_hidden_dims) > 0, "encoder_hidden_dims must be a non-empty list of hidden dimensions"
-            k_encoder = ConsensusNMFEncoder(
-                num_genes=g,
-                hidden_dims=encoder_hidden_dims,
-                num_factors=i,
-                num_replicates=r,
-            )
-            self.add_module(f"encoder_{i}", k_encoder)
+            self.add_module(f"encoder_{i}", BilinearLoadingsEncoder(n_genes=g, latent_dim=latent_dim))
 
         # for training the encoder
         self.encoder_loss_fn = torch.nn.SmoothL1Loss(reduction="mean")
@@ -259,7 +194,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         factors_rkg = getattr(self, f"D_{k}_rkg")
 
         # get seed loading values from encoder (rather than from memory)
-        encoder_loadings_rnk = getattr(self, f"encoder_{k}")(x_ng)
+        encoder_loadings_rnk = getattr(self, f"encoder_{k}")(x_ng, factors_rkg.detach())
 
         # run nmf-torch hals online update
         if self.solver == "hals":
@@ -568,8 +503,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
 
         nmf_reconstruction_errors = []
         for k in self.k_values:
-            encoder_loadings_rnk = getattr(self, f"encoder_{k}")(x_ng)
             factors_rkg = getattr(self, f"D_{k}_rkg")
+            encoder_loadings_rnk = getattr(self, f"encoder_{k}")(x_ng, factors_rkg.detach())
             squared_error_r = compute_reconstruction_error_compiled(
                 x_ng=x_ng,
                 loadings_rnk=encoder_loadings_rnk,

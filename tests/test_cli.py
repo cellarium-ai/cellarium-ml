@@ -782,7 +782,7 @@ TWO_DEVICE_CONFIGS = [
                     "init_args": {
                         "k_values": [5],
                         "r": 2,
-                        "encoder_hidden_dims": [16],
+                        "latent_dim": 16,
                         "check_convergence_every_n_steps": 1,
                     },
                 },
