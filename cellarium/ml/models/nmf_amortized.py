@@ -159,8 +159,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         forgetting_patience: int = 5,
         exploration_epochs: int = 2,
         cooldown_periods: int | None = None,
-        max_solver_iter_train: int = 100,
-        max_solver_iter_cooldown: int = 100,
+        max_solver_iter_train: int = 50,
+        max_solver_iter_cooldown: int = 200,
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
     ) -> None:
