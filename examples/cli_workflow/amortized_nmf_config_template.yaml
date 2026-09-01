@@ -23,6 +23,11 @@ model:
       k_values: ${k_values}
       r: ${num_repeats}
       latent_dim: 256
+      encoder_improvement_threshold: 1.0e-4
+      trigger_patience: 3
+      cooldown_patience: 7
+      max_cooldown_epochs: 1.0
+      trailing_window_fraction: 0.25
       total_n_cells: null
       batch_size: null
   is_initialized: false

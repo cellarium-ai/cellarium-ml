@@ -783,7 +783,6 @@ TWO_DEVICE_CONFIGS = [
                         "k_values": [5],
                         "r": 2,
                         "latent_dim": 16,
-                        "check_convergence_every_n_steps": 1,
                     },
                 },
             },
