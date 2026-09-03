@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+import tqdm as _tqdm_module
 from lightning.pytorch.strategies import DDPStrategy
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
@@ -34,6 +35,13 @@ from cellarium.ml.utilities.testing import (
 )
 
 warnings.filterwarnings("ignore")
+
+
+def _fresh_tqdm(iterable, **kwargs):
+    # Clear any stale tqdm instances left by a previous Lightning interrupt so
+    # that tqdm.auto can properly render a live Jupyter widget for this bar.
+    _tqdm_module.tqdm._instances.clear()
+    return tqdm(iterable, **kwargs)
 
 
 def _get_logger():
@@ -1805,7 +1813,7 @@ class NMFOutput:
         reference_var_names_g: np.ndarray | None = None
         saved_transforms: list | None = None
 
-        for i, path in tqdm(enumerate(checkpoint_paths), total=len(checkpoint_paths)):
+        for i, path in _fresh_tqdm(enumerate(checkpoint_paths), total=len(checkpoint_paths)):
             module = cellarium.ml.CellariumModule.load_from_checkpoint(path, map_location=map_location, strict=False)
 
             model = module.model
@@ -1978,7 +1986,7 @@ class NMFOutput:
         """
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
         rec_error = {k: 0.0 for k in self.nmf_module.model.k_values}
-        for batch in tqdm(self.datamodule.predict_dataloader()):
+        for batch in _fresh_tqdm(self.datamodule.predict_dataloader()):
             for transform in self.nmf_module.transforms:
                 batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
             errors_keyed_by_k = self.nmf_module.model.reconstruction_error(
@@ -2031,7 +2039,7 @@ class NMFOutput:
 
         embedding = []
         index = []
-        for batch in tqdm(datamodule.predict_dataloader()):
+        for batch in _fresh_tqdm(datamodule.predict_dataloader()):
             # apply transforms to the data before inferring loadings
             for transform in transforms:
                 batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
@@ -2088,7 +2096,7 @@ class NMFOutput:
         ols_solver = None
 
         dataloader = self.datamodule.predict_dataloader()
-        for full_batch in tqdm(dataloader):
+        for full_batch in _fresh_tqdm(dataloader):
             # get the batch used for inference (HVGs, same transforms as used for training)
             inference_batch = copy.deepcopy(full_batch)
             for transform in inference_transforms:
@@ -2167,7 +2175,7 @@ class NMFOutput:
                 this fraction of NMF runs.
         """
         logger.info("Computing consensus factors, searching for best density thresholds...")
-        for k in tqdm(self.nmf_module.model.k_values):
+        for k in _fresh_tqdm(self.nmf_module.model.k_values):
             if fast_or_exhaustive == "fast":
                 # try to look for local minima in the density histogram
                 # first compute preliminary consensus to get neighbor distances
