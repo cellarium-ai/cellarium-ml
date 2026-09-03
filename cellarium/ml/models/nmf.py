@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+import tqdm as _tqdm_module
 from lightning.pytorch.strategies import DDPStrategy
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
@@ -34,6 +35,13 @@ from cellarium.ml.utilities.testing import (
 )
 
 warnings.filterwarnings("ignore")
+
+
+def _fresh_tqdm(iterable, **kwargs):
+    # Clear any stale tqdm instances left by a previous Lightning interrupt so
+    # that tqdm.auto can properly render a live Jupyter widget for this bar.
+    _tqdm_module.tqdm._instances.clear()
+    return tqdm(iterable, **kwargs)
 
 
 def _get_logger():
@@ -65,7 +73,8 @@ def solve_nnls_fista_precomputed(
     AtB: torch.Tensor,
     initial_x: torch.Tensor,
     max_iter: int = 100,
-) -> torch.Tensor:
+    return_history: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Highly optimized FISTA core for torch.compile.
     Assumes AtA and AtB are already precomputed.
@@ -76,13 +85,18 @@ def solve_nnls_fista_precomputed(
         Static shape specialization would recompile for every distinct ``k`` and silently
         fall back to eager once ``torch._dynamo.config.cache_size_limit`` is exceeded.
     """
-    # Use eigvalsh for symmetric matrices (much faster/stable)
-    # Take the largest eigenvalue (-1 index)
-    eigenvals = torch.linalg.eigvalsh(AtA)
-    L = eigenvals[..., -1:]
-
-    # Reshape L for broadcasting and prevent division by zero
-    L = torch.clamp(L, min=1e-12).unsqueeze(-1)
+    # Compute the Lipschitz constant L (largest eigenvalue of AtA).
+    # eigvalsh is faster and exact, but not implemented on MPS; power iteration
+    # uses only matmul and works on all devices.
+    if AtA.device.type == "mps":
+        v = torch.ones(*AtA.shape[:-1], 1, device=AtA.device, dtype=AtA.dtype)
+        for _ in range(10):
+            v = AtA @ v
+            v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
+        L = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # [r, 1, 1]
+    else:
+        eigenvals = torch.linalg.eigvalsh(AtA)
+        L = torch.clamp(eigenvals[..., -1:], min=1e-12).unsqueeze(-1)  # [r, 1, 1]
 
     x = initial_x.clone()
     y = initial_x.clone()
@@ -90,8 +104,10 @@ def solve_nnls_fista_precomputed(
     # Initialize momentum scalar
     t = 1.0
 
-    # temporary
-    history = torch.zeros(max_iter, device=AtA.device, dtype=AtA.dtype)
+    # torch.compile specializes on Python booleans, so the False branch generates
+    # a much smaller kernel (no per-iteration tensors kept alive), which is required
+    # to stay within Metal's 31 constant-buffer limit on MPS.
+    history: torch.Tensor | None = torch.zeros(max_iter, device=AtA.device, dtype=AtA.dtype) if return_history else None
 
     # Fixed iteration loop for compilation compatibility
     for i in range(max_iter):
@@ -99,11 +115,9 @@ def solve_nnls_fista_precomputed(
         grad = AtA @ y - AtB
         x_new = torch.clamp(y - grad / L, min=0.0)
 
-        # ---------------------------------------------------------
-        # DIAGNOSTIC: Calculate the max absolute change across the entire batch
-        # This is safe for torch.compile because we are updating a pre-allocated tensor
-        history[i] = (x_new - x).abs().max()
-        # ---------------------------------------------------------
+        if return_history:
+            assert history is not None
+            history[i] = (x_new - x).abs().max()
 
         # Beck & Teboulle Momentum update
         t_new = (1.0 + math.sqrt(1.0 + 4.0 * t**2)) / 2.0
@@ -123,15 +137,17 @@ def nmf_compute_factors_fista(
     A_rkk: torch.Tensor,  # This is H^T H
     B_rkg: torch.Tensor,  # This is H^T X
     max_iter: int = 100,
-) -> torch.Tensor:
+    return_history: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Wrapper to update Factors using FISTA.
     """
     # w_rkg has shape [r, k, g].
     # A_rkk @ w_rkg works directly natively via batched matrix multiplication.
-    w_rkg_new, history = solve_nnls_fista_precomputed(AtA=A_rkk, AtB=B_rkg, initial_x=w_rkg, max_iter=max_iter)
+    w_rkg_new, history = solve_nnls_fista_precomputed(
+        AtA=A_rkk, AtB=B_rkg, initial_x=w_rkg, max_iter=max_iter, return_history=return_history
+    )
 
-    # w_rkg.copy_(w_rkg_new)
     return w_rkg_new, history
 
 
@@ -142,7 +158,8 @@ def nmf_compute_loadings_fista(
     w_rkg: torch.Tensor,
     h_rnk: torch.Tensor,
     max_iter: int = 100,
-) -> torch.Tensor:
+    return_history: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Wrapper to update Loadings using FISTA.
 
@@ -163,11 +180,9 @@ def nmf_compute_loadings_fista(
 
     # Solve for transposed H
     h_new_transposed, history = solve_nnls_fista_precomputed(
-        AtA=wwT_rkk, AtB=wxT_rkn, initial_x=h_transposed_rkn, max_iter=max_iter
+        AtA=wwT_rkk, AtB=wxT_rkn, initial_x=h_transposed_rkn, max_iter=max_iter, return_history=return_history
     )
 
-    # Transpose back to [r, n, k] and update in place
-    # h_rnk.copy_(h_new_transposed.transpose(-2, -1))
     return h_new_transposed.transpose(-2, -1), history
 
 
@@ -195,6 +210,48 @@ def compute_reconstruction_error_compiled(
     return squared_error_r
 
 
+@torch.compile()
+@torch.no_grad()
+def frobenius_loss_trace_compiled(
+    x_ng: torch.Tensor,
+    h_rnk: torch.Tensor,
+    w_rkg: torch.Tensor,
+    # x_squared_sum: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Per-replicate ``||X - H W||_F^2`` computed *without* materializing the reconstruction.
+
+    Uses :math:`\\|X - HW\\|_F^2 = \\|X\\|^2 - 2\\langle HX, W\\rangle + \\langle H^\\top H,
+    WW^\\top\\rangle`, so the intermediates are ``(r, k, g)`` and ``(r, k, k)`` rather than
+    ``(r, n, g)``.  At ``r=100, n=2048, g=2000`` that is 80 MB instead of 1.6 GB.  And because
+    ``H`` is detached and ``X`` is data, both ``HX`` and ``H^T H`` are autograd constants: the
+    entire backward reduces to :math:`\\nabla_W = -2 HX + 2 (H^\\top H) W`.
+
+    This is why the loss is Frobenius rather than Poisson KL.  KL does not factorize this way, and
+    its Poisson justification does not survive per-gene rescaling of the input anyway.
+
+    Args:
+        x_ng: Data, shape ``(n, g)``.
+        h_rnk: Loadings, shape ``(r, n, k)``.
+        w_rkg: Factors, shape ``(r, k, g)``.
+        x_squared_sum: Optional precomputed ``(x_ng ** 2).sum()``, shared across replicates.
+
+    Returns:
+        Sum of squared errors per replicate, shape ``(r,)``.
+    """
+    # if x_squared_sum is None:
+    #     x_squared_sum = x_ng.pow(2).sum()
+    x_squared_sum = x_ng.pow(2).sum()
+    hx_rkg = torch.einsum("rnk,ng->rkg", h_rnk, x_ng)
+    hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
+    wwt_rkk = torch.einsum("rkg,rjg->rkj", w_rkg, w_rkg)
+    cross_r = (hx_rkg * w_rkg).sum(dim=(-2, -1))
+    quad_r = (hth_rkk * wwt_rkk).sum(dim=(-2, -1))
+    # Upcasting only the three reduced scalars is free and removes any cancellation concern.
+    sse_r = x_squared_sum.double() - 2.0 * cross_r.double() + quad_r.double()
+    return sse_r.clamp(min=0.0).to(w_rkg.dtype)
+
+
 def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
     """
     FISTA algorithm for NNLS solving Ax = B for x >= 0
@@ -218,9 +275,17 @@ def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
     AtA = A.transpose(-2, -1) @ A  # (..., n, n)
     AtB = A.transpose(-2, -1) @ B  # (..., n, k)
 
-    # Compute Lipschitz constant (largest eigenvalue of AtA)
-    eigenvals = torch.linalg.eigvals(AtA).real  # (..., n)
-    L = eigenvals.max(dim=-1, keepdim=True)[0].unsqueeze(-1)  # (..., 1, 1)
+    # Compute Lipschitz constant (largest eigenvalue of AtA).
+    # eigvals is not implemented on MPS; power iteration uses only matmul.
+    if AtA.device.type == "mps":
+        v = torch.ones(*AtA.shape[:-1], 1, device=AtA.device, dtype=AtA.dtype)
+        for _ in range(20):
+            v = AtA @ v
+            v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
+        L = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # (..., 1, 1)
+    else:
+        eigenvals = torch.linalg.eigvals(AtA).real  # (..., n)
+        L = eigenvals.max(dim=-1, keepdim=True)[0].unsqueeze(-1)  # (..., 1, 1)
 
     # Initialize variables
     x = torch.zeros(*batch_dims, n, k, device=A.device, dtype=A.dtype)
@@ -843,6 +908,7 @@ def online_dictionary_update_fista(
     B_rkg: torch.Tensor,
     n_iterations: int = 100,
     exponential_decay_rho: float = 1.0,
+    return_history: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     Algorithm adapted from the nmf-torch github library.
@@ -872,6 +938,7 @@ def online_dictionary_update_fista(
         w_rkg=factors_rkg,
         h_rnk=loadings_rnk,
         max_iter=n_iterations,
+        return_history=return_history,
     )
 
     with torch.no_grad():
@@ -885,6 +952,7 @@ def online_dictionary_update_fista(
         A_rkk=A_rkk,
         B_rkg=B_rkg,
         max_iter=n_iterations,
+        return_history=return_history,
     )
 
     return {
@@ -1463,14 +1531,14 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
             if plot_only:
                 import matplotlib.pyplot as plt
 
-                plt.figure(figsize=(5, 2))
-                plt.hist(mean_neighbor_distance_m.cpu().numpy(), bins=75)
-                plt.title(f"Local Neighborhood Distances: k = {num_component}")
-                plt.ylabel("Number of NMF factors\n(total is replicates times k)")
-                plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
-                plt.xlim([-0.05, 1.05])
-                plt.show()
-                return
+            plt.figure(figsize=(5, 2))
+            plt.hist(mean_neighbor_distance_m.cpu().numpy(), bins=75)
+            plt.title(f"Local Neighborhood Distances: k = {num_component}")
+            plt.ylabel("Number of NMF factors\n(total is replicates times k)")
+            plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
+            plt.xlim([-0.05, 1.05])
+            # plt.show()
+            return
 
             logic = mean_neighbor_distance_m < density_threshold
         else:
@@ -1613,7 +1681,7 @@ def k_selection_plot(
     plt.ylabel("Reconstruction error", color="r")
     plt.gca().tick_params(axis="y", colors="r")
     plt.grid(False)
-    plt.show()
+    # plt.show()
 
 
 def plot_clustermap(
@@ -1660,7 +1728,7 @@ def plot_clustermap(
     plt.ylabel("Number of NMF factors\n(total is replicates times k)")
     plt.xlabel(f"Average distance to nearest {consensus_output[k]['n_neighbors']} neighbors")
     plt.xlim([-0.05, 1.05])
-    plt.show()
+    # plt.show()
 
 
 def is_subclass_by_name(instance, class_name):
@@ -1757,7 +1825,7 @@ class NMFOutput:
         reference_var_names_g: np.ndarray | None = None
         saved_transforms: list | None = None
 
-        for i, path in tqdm(enumerate(checkpoint_paths), total=len(checkpoint_paths)):
+        for i, path in _fresh_tqdm(enumerate(checkpoint_paths), total=len(checkpoint_paths)):
             module = cellarium.ml.CellariumModule.load_from_checkpoint(path, map_location=map_location, strict=False)
 
             model = module.model
@@ -1930,7 +1998,7 @@ class NMFOutput:
         """
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
         rec_error = {k: 0.0 for k in self.nmf_module.model.k_values}
-        for batch in tqdm(self.datamodule.predict_dataloader()):
+        for batch in _fresh_tqdm(self.datamodule.predict_dataloader()):
             for transform in self.nmf_module.transforms:
                 batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
             errors_keyed_by_k = self.nmf_module.model.reconstruction_error(
@@ -1983,7 +2051,7 @@ class NMFOutput:
 
         embedding = []
         index = []
-        for batch in tqdm(datamodule.predict_dataloader()):
+        for batch in _fresh_tqdm(datamodule.predict_dataloader()):
             # apply transforms to the data before inferring loadings
             for transform in transforms:
                 batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
@@ -2040,7 +2108,7 @@ class NMFOutput:
         ols_solver = None
 
         dataloader = self.datamodule.predict_dataloader()
-        for full_batch in tqdm(dataloader):
+        for full_batch in _fresh_tqdm(dataloader):
             # get the batch used for inference (HVGs, same transforms as used for training)
             inference_batch = copy.deepcopy(full_batch)
             for transform in inference_transforms:
@@ -2119,7 +2187,7 @@ class NMFOutput:
                 this fraction of NMF runs.
         """
         logger.info("Computing consensus factors, searching for best density thresholds...")
-        for k in tqdm(self.nmf_module.model.k_values):
+        for k in _fresh_tqdm(self.nmf_module.model.k_values):
             if fast_or_exhaustive == "fast":
                 # try to look for local minima in the density histogram
                 # first compute preliminary consensus to get neighbor distances
@@ -2365,7 +2433,7 @@ def kotliar_compute_hvgs(
         plt.title("Gene mean vs. Fano ratio")
         plt.legend()
         plt.tight_layout()
-        plt.show()
+        # plt.show()
 
     df = df.rename(columns={c: c.split("_g")[0] for c in df.columns})
     return df

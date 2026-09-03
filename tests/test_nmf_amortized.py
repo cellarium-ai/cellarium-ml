@@ -13,7 +13,7 @@ import torch
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.models import AmortizedOnlineNonNegativeMatrixFactorization
 from cellarium.ml.models.nmf import NMFOutput
-from cellarium.ml.models.nmf_amortized import ConsensusNMFEncoder, FiLMBlock
+from cellarium.ml.models.nmf_amortized import BilinearLoadingsEncoder
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField
 
@@ -40,7 +40,7 @@ def _make_module(
     small_adata: anndata.AnnData,
     k_values: list[int],
     r: int,
-    encoder_hidden_dims: list[int],
+    latent_dim: int,
     batch_size: int,
 ) -> CellariumModule:
     g = small_adata.shape[1]
@@ -49,7 +49,7 @@ def _make_module(
         var_names_g=var_names_g.tolist(),
         k_values=k_values,
         r=r,
-        encoder_hidden_dims=encoder_hidden_dims,
+        latent_dim=latent_dim,
         total_n_cells=small_adata.shape[0],
         batch_size=batch_size,
     )
@@ -83,7 +83,7 @@ def test_amortized_nmf_single_device(small_adata: anndata.AnnData) -> None:
     n = small_adata.shape[0]
     dm = _make_datamodule(small_adata, batch_size=n // 2)
     dm.setup(stage="fit")
-    module = _make_module(small_adata, k_values=[3], r=2, encoder_hidden_dims=[16], batch_size=n // 2)
+    module = _make_module(small_adata, k_values=[3], r=2, latent_dim=16, batch_size=n // 2)
     trainer = pl.Trainer(barebones=True, accelerator="cpu", devices=1, max_epochs=1)
     trainer.fit(module, dm)
 
@@ -95,7 +95,7 @@ def test_amortized_nmf_multiple_k_values(small_adata: anndata.AnnData) -> None:
     r = 2
     dm = _make_datamodule(small_adata, batch_size=n // 2)
     dm.setup(stage="fit")
-    module = _make_module(small_adata, k_values=k_values, r=r, encoder_hidden_dims=[16], batch_size=n // 2)
+    module = _make_module(small_adata, k_values=k_values, r=r, latent_dim=16, batch_size=n // 2)
     trainer = pl.Trainer(barebones=True, accelerator="cpu", devices=1, max_epochs=1)
     trainer.fit(module, dm)
 
@@ -115,7 +115,7 @@ def test_amortized_nmf_forward_returns_loss(small_adata: anndata.AnnData) -> Non
         var_names_g=var_names_g.tolist(),
         k_values=[3],
         r=2,
-        encoder_hidden_dims=[16],
+        latent_dim=16,
         total_n_cells=small_adata.shape[0],
         batch_size=50,
     )
@@ -125,36 +125,16 @@ def test_amortized_nmf_forward_returns_loss(small_adata: anndata.AnnData) -> Non
     assert result["loss"].item() >= 0
 
 
-def test_film_block_output_shape() -> None:
-    """FiLMBlock produces (R, N, H) outputs and non-negative activations for both 2D and 3D inputs."""
-    input_dim, output_dim, r, n = 10, 8, 3, 5
-    block = FiLMBlock(input_dim=input_dim, output_dim=output_dim, num_replicates=r)
-
-    # 2D input (N, input_dim) -> (R, N, output_dim): first layer in the stack
-    x_2d = torch.randn(n, input_dim)
-    out_2d = block(x_2d)
-    assert out_2d.shape == (r, n, output_dim), f"Expected ({r}, {n}, {output_dim}), got {out_2d.shape}"
-    assert (out_2d >= 0).all(), "Output should be non-negative after ReLU"
-
-    # 3D input (R, N, input_dim) -> (R, N, output_dim): subsequent layers in the stack
-    x_3d = torch.randn(r, n, input_dim)
-    out_3d = block(x_3d)
-    assert out_3d.shape == (r, n, output_dim), f"Expected ({r}, {n}, {output_dim}), got {out_3d.shape}"
-    assert (out_3d >= 0).all()
-
-
-def test_consensus_nmf_encoder_output_shape() -> None:
-    """ConsensusNMFEncoder produces (R, N, K) outputs that are non-negative."""
-    num_genes, num_factors, r, n = 10, 4, 3, 5
-    encoder = ConsensusNMFEncoder(
-        num_genes=num_genes,
-        hidden_dims=[16, 8],
-        num_factors=num_factors,
-        num_replicates=r,
-    )
-    x_ng = torch.randn(n, num_genes)
-    out = encoder(x_ng)
-    assert out.shape == (r, n, num_factors), f"Expected ({r}, {n}, {num_factors}), got {out.shape}"
+def test_bilinear_loadings_encoder_output_shape() -> None:
+    """BilinearLoadingsEncoder produces (R, N, K) outputs that are non-negative."""
+    n_genes, latent_dim, r, n, k = 10, 16, 3, 5, 4
+    encoder = BilinearLoadingsEncoder(n_genes=n_genes, latent_dim=latent_dim)
+    x_ng = torch.rand(n, n_genes)
+    # L1-normalize rows of w_rkg to match the convention used during training
+    w_rkg = torch.rand(r, k, n_genes)
+    w_rkg = w_rkg / w_rkg.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+    out = encoder(x_ng, w_rkg)
+    assert out.shape == (r, n, k), f"Expected ({r}, {n}, {k}), got {out.shape}"
     assert (out >= 0).all(), "Encoder output should be non-negative after ReLU"
 
 
@@ -166,7 +146,7 @@ def test_amortized_nmf_infer_loadings(small_adata: anndata.AnnData) -> None:
     r = 1
     dm = _make_datamodule(small_adata, batch_size=n // 2)
     dm.setup(stage="fit")
-    module = _make_module(small_adata, k_values=[k], r=r, encoder_hidden_dims=[16], batch_size=n // 2)
+    module = _make_module(small_adata, k_values=[k], r=r, latent_dim=16, batch_size=n // 2)
     trainer = pl.Trainer(barebones=True, accelerator="cpu", devices=1, max_epochs=2)
     trainer.fit(module, dm)
 
