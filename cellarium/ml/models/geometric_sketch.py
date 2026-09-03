@@ -206,14 +206,14 @@ class StreamingGeometricSketch(CellariumModel):
                 if count < self.max_cells_per_bucket:
                     self._bucket_obs_names[b_idx].append(obs_name)
                     if self.store_cell_data:
-                        self._bucket_cells[b_idx].append(x_dense[i].to_sparse())
+                        self._bucket_cells[b_idx].append(x_dense[i].to_sparse().cpu())
                     inserted_count += 1
                 else:
                     r = int(torch.randint(0, seen + 1, (1,)).item())
                     if r < self.max_cells_per_bucket:
                         self._bucket_obs_names[b_idx][r] = obs_name
                         if self.store_cell_data:
-                            self._bucket_cells[b_idx][r] = x_dense[i].to_sparse()
+                            self._bucket_cells[b_idx][r] = x_dense[i].to_sparse().cpu()
                         inserted_count += 1
 
         return inserted_count
