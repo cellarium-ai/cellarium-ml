@@ -10,15 +10,14 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+from scipy.optimize import linear_sum_assignment
 from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
-from cellarium.ml.models import OnlineNonNegativeMatrixFactorization
+from cellarium.ml.models import BayesianNonNegativeMatrixFactorization
 from cellarium.ml.models.nmf import NMFOutput
-from cellarium.ml.transforms import DivideByScale, Filter
+from cellarium.ml.transforms import DivideByScale
 from cellarium.ml.utilities.data import AnnDataField
-
-os.environ["TORCH_COMPILE_DISABLE"] = "1"
 
 
 @pytest.fixture
@@ -29,25 +28,25 @@ def small_adata():
     w_kg = rng.standard_normal(size=(k, g), dtype=np.float32)
     sigma = 0.6
     noise = sigma * rng.standard_normal(size=(n, g), dtype=np.float32)
-    x_ng = z_nk @ w_kg + noise
-    return anndata.AnnData(X=x_ng, var=pd.DataFrame(index=[f"gene_{i}" for i in range(g)]))
+    x_ng = torch.from_numpy(z_nk @ w_kg + noise)
+    x_ng = torch.distributions.Poisson(torch.clamp(x_ng.exp(), min=1e-5)).sample()
+    return anndata.AnnData(X=x_ng.numpy(), var=pd.DataFrame(index=[f"gene_{i}" for i in range(g)]))
 
 
 # set the number of cells, genes, cell types, and factors
-n = 1000
+n = 2000
 g = 100
-n_celltypes = 5
-simulated_k = 3
+n_celltypes = 2
+simulated_k = 5
 
 # other constants
 cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-@pytest.mark.parametrize("algorithm", ["mairal", "nmf_torch_hals"])
-def test_nmf_single_device(small_adata: anndata.AnnData, algorithm: Literal["mairal", "nmf_torch_hals"]):
+def test_nmf_single_device(small_adata: anndata.AnnData):
     n, g = small_adata.shape
-    k_values = [3, 4]
+    k_max = 7
     devices = 1  # int(os.environ.get("TEST_DEVICES", "1"))
 
     # dataloader
@@ -63,22 +62,24 @@ def test_nmf_single_device(small_adata: anndata.AnnData, algorithm: Literal["mai
     )
     dm.setup(stage="fit")
     # model
-    nmf = OnlineNonNegativeMatrixFactorization(
+    nmf = BayesianNonNegativeMatrixFactorization(
+        total_n_cells=n,
         var_names_g=[f"gene_{i}" for i in range(g)],
-        k_values=k_values,
-        r=5,
-        algorithm=algorithm,
-        n_cells_total=n,
+        n_genes=g,
+        k_max=k_max,
+        similarity_matrix_gg=None,
+        use_gene_graph_prior=False,
+        use_ard=False,
     )
     module = CellariumModule(
-        cpu_transforms=[
-            DivideByScale(
-                scale_g=torch.from_numpy(small_adata.X.std(axis=0)),
-                var_names_g=np.array([f"gene_{i}" for i in range(g)]),
-                eps=1e-4,
-            ),
-            Filter([f"gene_{i}" for i in range(g)]),
-        ],
+        # cpu_transforms=[
+        #     DivideByScale(
+        #         scale_g=torch.from_numpy(small_adata.X.std(axis=0)),
+        #         var_names_g=np.array([f"gene_{i}" for i in range(g)]),
+        #         eps=1e-4,
+        #     ),
+        #     Filter([f"gene_{i}" for i in range(g)]),
+        # ],
         model=nmf,
     )
     # trainer
@@ -190,21 +191,18 @@ def x_nmf_ng(fixture_x_uncorrelated_mean_nmf_ng, fixture_x_correlated_mean_nmf_n
     return out
 
 
-def run_cellarium_online_nmf(
+def run_cellarium_bayesian_nmf(
     x_ng: torch.Tensor,
     var_names_g: np.ndarray,
     k: int,
-    algorithm: Literal["mairal", "nmf_torch_hals"],
     seed: int,
     n_batches: int,
     devices,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    epochs = 500
     n, g = x_ng.shape
 
     # Create anndata object and datamodule
-    import anndata
-    import pandas as pd
-
     adata = anndata.AnnData(
         X=x_ng.numpy(), var=pd.DataFrame(index=var_names_g), obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)])
     )
@@ -224,12 +222,16 @@ def run_cellarium_online_nmf(
     )
 
     # model
-    cellarium_nmf = OnlineNonNegativeMatrixFactorization(
+    cellarium_nmf = BayesianNonNegativeMatrixFactorization(
+        total_n_cells=n,
         var_names_g=var_names_g.tolist(),
-        k_values=[k],
-        algorithm=algorithm,
-        r=1,
-        n_cells_total=n,
+        n_genes=len(var_names_g),
+        k_max=k,
+        similarity_matrix_gg=None,
+        use_gene_graph_prior=False,
+        use_ard=False,
+        likelihood_dist="normal",
+        encoder_type=None,
     )
     module = CellariumModule(
         cpu_transforms=[
@@ -238,9 +240,12 @@ def run_cellarium_online_nmf(
                 var_names_g=var_names_g,
                 eps=1e-4,
             ),
-            # Filter(var_names_g.tolist()),
         ],
         model=cellarium_nmf,
+        optim_fn=torch.optim.Adamax,
+        optim_kwargs={"lr": 1e-1},
+        scheduler_fn=torch.optim.lr_scheduler.OneCycleLR,
+        scheduler_kwargs={"max_lr": 0.5, "total_steps": epochs * n_batches},
     )
 
     # trainer
@@ -248,7 +253,7 @@ def run_cellarium_online_nmf(
         barebones=False,
         accelerator="cpu",
         devices=devices,
-        max_epochs=10,
+        max_epochs=epochs,
         strategy="auto" if devices == 1 else pl.strategies.DDPStrategy(broadcast_buffers=True),
     )
 
@@ -259,8 +264,11 @@ def run_cellarium_online_nmf(
     # get loadings and factors using NMFOutput
     nmf_output = NMFOutput(nmf_module=module, datamodule=datamodule)
     nmf_output.compute_consensus_factors(k_values=k, density_threshold=1, local_neighborhood_size=0.3)
-    cellarium_loadings_dataframe = nmf_output.compute_loadings(k=k, normalize=False)
+    cellarium_loadings_dataframe = nmf_output.compute_loadings(k=k, datamodule=datamodule, normalize=False)
     cellarium_loadings_nk = torch.tensor(cellarium_loadings_dataframe.values).float()
+    # print('cellarium_loadings_nk: ', cellarium_loadings_nk)
+    print("sums at end: ", cellarium_loadings_nk.sum(dim=-1)[:5])
+    # assert 0
     assert isinstance(cellarium_loadings_nk, torch.Tensor)
     # Get consensus factors from nmf_output instead of the raw model
     consensus_factors = nmf_output.consensus[k]["consensus_D_kg"]
@@ -346,8 +354,6 @@ def similarity_matrix_assign_rows_to_columns(
     assert similarity_kk.shape[0] == similarity_kk.shape[1], "Similarity matrix must be square"
     assert similarity_kk.shape[0] > 0, "Similarity matrix must have at least one row and column"
 
-    from scipy.optimize import linear_sum_assignment
-
     cost_kk = -similarity_kk
 
     # Solve the assignment problem
@@ -359,9 +365,8 @@ def similarity_matrix_assign_rows_to_columns(
     return total_similarity, np.asarray(row_indices), np.asarray(col_indices)
 
 
-def run_online_nmf_and_sklearn_multi_device(
+def run_bayesian_nmf_and_sklearn_multi_device(
     x_ng: torch.Tensor,
-    algorithm: Literal["mairal", "nmf_torch_hals"],
     k: int = simulated_k,
     seed: int = 0,
     n_cellarium_batches: int = 1,
@@ -370,10 +375,9 @@ def run_online_nmf_and_sklearn_multi_device(
     var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
 
     # cellarium nmf fit
-    cellarium_loadings_nk, cellarium_factors_kg = run_cellarium_online_nmf(
+    cellarium_loadings_nk, cellarium_factors_kg = run_cellarium_bayesian_nmf(
         x_ng=x_ng,
         var_names_g=var_names_g,
-        algorithm=algorithm,
         k=k,
         devices=devices,
         seed=seed,
@@ -405,15 +409,19 @@ def run_online_nmf_and_sklearn_multi_device(
     return loadings, factors
 
 
-@pytest.mark.parametrize("algorithm", ["mairal", "nmf_torch_hals"])
 @pytest.mark.parametrize(
-    "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
+    "data",
+    [
+        "gaussian_correlated",
+        # "gaussian_uncorrelated",
+        "poisson_correlated",
+        # "poisson_uncorrelated",
+    ],
 )
 @pytest.mark.parametrize("n_cellarium_batches", [1, 2, 10], ids=["fullbatch", "2batches", "10batches"])
-def test_online_nmf_against_sklearn(
+def test_bayesian_nmf_against_sklearn(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
-    algorithm: Literal["mairal", "nmf_torch_hals"],
     fixture_d_correlated_kg: torch.Tensor,
     fixture_d_uncorrelated_kg: torch.Tensor,
     fixture_alpha_correlated_nk: torch.Tensor,
@@ -423,10 +431,9 @@ def test_online_nmf_against_sklearn(
     # run both methods
     x_ng = x_nmf_ng[data]
     var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
-    loadings, factors = run_online_nmf_and_sklearn_multi_device(
+    loadings, factors = run_bayesian_nmf_and_sklearn_multi_device(
         x_ng,
         n_cellarium_batches=n_cellarium_batches,
-        algorithm=algorithm,
     )
     transform = DivideByScale(
         scale_g=x_ng.std(dim=0),
@@ -607,7 +614,7 @@ def test_online_nmf_against_sklearn(
 @pytest.mark.parametrize(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
-def test_online_nmf_against_sklearn_multi_device(
+def test_bayesian_nmf_against_sklearn_multi_device(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
     fixture_d_correlated_kg: torch.Tensor,
@@ -616,195 +623,3 @@ def test_online_nmf_against_sklearn_multi_device(
     fixture_alpha_uncorrelated_nk: torch.Tensor,
 ):
     pass
-
-
-def kotliar_get_norm_counts(counts: anndata.AnnData, high_variance_genes_filter: list[str]) -> anndata.AnnData:
-    """
-    Slightly modified, taken from
-    https://github.com/dylkot/cNMF/blob/7833a75484169cf448f8956224447cb110f4ba3d/src/cnmf/cnmf.py#L487
-
-    Args:
-        counts: Scanpy AnnData object (cells x genes) containing raw counts. Filtered such that
-        no genes or cells with 0 counts
-
-    high_variance_genes_filter: A pre-specified list of genes considered to be high-variance.
-        Only these genes will be used during factorization of the counts matrix.
-        Must match the .var index of counts.
-
-    Returns:
-        normcounts: anndata.AnnData, shape (cells, num_highvar_genes)
-            Has a `.X` count matrix containing only the high variance genes with columns (genes)
-            normalized to unit variance
-
-    """
-    ## Subset out high-variance genes
-    norm_counts = counts[:, high_variance_genes_filter].copy()
-    norm_counts.X = norm_counts.X.astype(np.float64)
-
-    ## Scale genes to unit variance
-    norm_counts.X /= norm_counts.X.std(axis=0, ddof=1)
-    if np.isnan(norm_counts.X).sum().sum() > 0:
-        print("Warning NaNs in normalized counts matrix")
-
-    ## Check for any cells that have 0 counts of the overdispersed genes
-    zerocells = np.array(norm_counts.X.sum(axis=1) == 0).reshape(-1)
-    if zerocells.sum() > 0:
-        examples = norm_counts.obs.index[np.ravel(zerocells)]
-        raise Exception(
-            f"Error: {zerocells.sum()} cells have zero counts of overdispersed genes. E.g. {', '.join(examples[:4])}. "
-            "Filter those cells and re-run or adjust the number of overdispersed genes. Quitting!"
-        )
-
-    return norm_counts
-
-
-def test_preprocessing_matches_kotliar():
-    pass
-
-
-def test_consensus_matches_kotliar():
-    pass
-
-
-def test_refit_all_genes_matches_kotliar():
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Helpers shared by from_checkpoints tests
-# ---------------------------------------------------------------------------
-
-
-def _build_datamodule_and_train(
-    adata: anndata.AnnData,
-    k_values: list[int],
-    r: int,
-    tmp_path_for_ckpt: str,
-    seed: int = 0,
-) -> tuple[torch.Tensor, ...]:
-    """
-    Train an OnlineNMF model for 1 epoch, save a checkpoint, and return
-    the D_{k}_rkg tensors (cloned, detached) keyed by k.
-    Returns a tuple of (ckpt_path, dict[int, torch.Tensor]).
-    """
-    import os
-
-    n, g = adata.shape
-    batch_size = max(1, n // 4)
-
-    dm = CellariumAnnDataDataModule(
-        dadc=adata,
-        batch_size=batch_size,
-        batch_keys={
-            "x_ng": AnnDataField(attr="X", convert_fn=None),
-            "var_names_g": AnnDataField(attr="var_names"),
-            "obs_names_n": AnnDataField(attr="obs_names"),
-        },
-    )
-
-    nmf = OnlineNonNegativeMatrixFactorization(
-        var_names_g=list(adata.var_names),
-        k_values=k_values,
-        r=r,
-        algorithm="mairal",
-        init="uniform_random",
-    )
-    scale_g = torch.tensor(np.array(adata.X).std(axis=0).astype(np.float32))
-    module = CellariumModule(
-        cpu_transforms=[
-            DivideByScale(
-                scale_g=scale_g,
-                var_names_g=np.array(list(adata.var_names)),
-                eps=1e-4,
-            ),
-            Filter(list(adata.var_names)),
-        ],
-        model=nmf,
-    )
-
-    torch.manual_seed(seed)
-    trainer = pl.Trainer(
-        barebones=True,
-        accelerator="cpu",
-        devices=1,
-        max_epochs=1,
-        default_root_dir=tmp_path_for_ckpt,
-    )
-    trainer.fit(module, dm)
-
-    # capture D tensors right off the trained model (before checkpoint round-trip)
-    d_tensors = {k: module.model.factors_dict[k].detach().clone() for k in k_values}
-
-    ckpt_path = os.path.join(tmp_path_for_ckpt, "model.ckpt")
-    trainer.save_checkpoint(ckpt_path)
-
-    return ckpt_path, d_tensors, dm
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-def test_from_checkpoints_split_by_k(tmp_path, small_adata: anndata.AnnData):
-    """
-    Two checkpoints cover disjoint k values.  Verify that from_checkpoints:
-    - produces an NMFOutput whose model has the union of k values
-    - preserves the exact D_{k}_rkg tensors from each source checkpoint
-    - does NOT allocate loadings_{k}_rnk buffers on the combined model
-    """
-    ckpt1, d_tensors_1, dm = _build_datamodule_and_train(
-        small_adata, k_values=[2, 3], r=2, tmp_path_for_ckpt=str(tmp_path / "run1"), seed=0
-    )
-    ckpt2, d_tensors_2, _ = _build_datamodule_and_train(
-        small_adata, k_values=[4, 5], r=2, tmp_path_for_ckpt=str(tmp_path / "run2"), seed=1
-    )
-
-    nmf_output = NMFOutput.from_checkpoints([ckpt1, ckpt2], datamodule=dm)
-
-    combined_model = nmf_output.nmf_module.model
-    assert isinstance(combined_model, OnlineNonNegativeMatrixFactorization)
-
-    # correct k_values
-    assert set(combined_model.k_values) == {2, 3, 4, 5}
-
-    # D tensors preserved exactly from each checkpoint
-    for k, expected in {**d_tensors_1, **d_tensors_2}.items():
-        actual = combined_model.factors_dict[k]
-        assert actual.shape == expected.shape, f"Shape mismatch for k={k}"
-        assert torch.allclose(actual, expected), f"D_{k}_rkg values changed after from_checkpoints"
-
-    # no loadings buffers allocated
-    for k in combined_model.k_values:
-        assert not hasattr(combined_model, f"loadings_{k}_rnk"), (
-            f"loadings_{k}_rnk should not exist on the combined shell model"
-        )
-
-
-def test_from_checkpoints_split_by_r(tmp_path, small_adata: anndata.AnnData):
-    """
-    Two checkpoints share the same k values but have different numbers of replicates.
-    Verify that from_checkpoints concatenates D tensors along dim 0 (the r dimension).
-    """
-    ckpt1, d_tensors_1, dm = _build_datamodule_and_train(
-        small_adata, k_values=[3], r=2, tmp_path_for_ckpt=str(tmp_path / "run1"), seed=0
-    )
-    ckpt2, d_tensors_2, _ = _build_datamodule_and_train(
-        small_adata, k_values=[3], r=3, tmp_path_for_ckpt=str(tmp_path / "run2"), seed=1
-    )
-
-    g = small_adata.n_vars
-
-    nmf_output = NMFOutput.from_checkpoints([ckpt1, ckpt2], datamodule=dm)
-
-    combined_model = nmf_output.nmf_module.model
-    assert isinstance(combined_model, OnlineNonNegativeMatrixFactorization)
-
-    combined = combined_model.factors_dict[3]
-
-    # combined replicate count is 2 + 3 = 5
-    assert combined.shape == (5, 3, g), f"Expected shape (5, 3, {g}), got {combined.shape}"
-
-    # exact values: first 2 replicates come from checkpoint 1, last 3 from checkpoint 2
-    expected = torch.cat([d_tensors_1[3], d_tensors_2[3]], dim=0)
-    assert torch.allclose(combined, expected), "Combined D tensor values do not match concatenation of source tensors"

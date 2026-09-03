@@ -9,7 +9,9 @@ from cellarium.ml.models.hvg_seurat_v3 import HVGSeuratV3
 from cellarium.ml.models.incremental_pca import IncrementalPCA
 from cellarium.ml.models.logistic_regression import LogisticRegression
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TestMixin, ValidateMixin
-from cellarium.ml.models.nmf import NonNegativeMatrixFactorization
+from cellarium.ml.models.nmf import OnlineNonNegativeMatrixFactorization
+from cellarium.ml.models.nmf_amortized import AmortizedOnlineNonNegativeMatrixFactorization
+from cellarium.ml.models.nmf_bayesian import BayesianNonNegativeMatrixFactorization
 from cellarium.ml.models.ols import StreamingOrdinaryLeastSquares
 from cellarium.ml.models.onepass_mean_var_std import OnePassMeanVarStd
 from cellarium.ml.models.probabilistic_pca import ProbabilisticPCA
@@ -18,6 +20,8 @@ from cellarium.ml.models.socam import SOCAM
 from cellarium.ml.models.tdigest import TDigest
 
 __all__ = [
+    "AmortizedOnlineNonNegativeMatrixFactorization",
+    "BayesianNonNegativeMatrixFactorization",
     "CellariumGPT",
     "CellariumModel",
     "ContrastiveMLP",
@@ -25,8 +29,8 @@ __all__ = [
     "HVGSeuratV3",
     "IncrementalPCA",
     "LogisticRegression",
-    "NonNegativeMatrixFactorization",
     "OnePassMeanVarStd",
+    "OnlineNonNegativeMatrixFactorization",
     "PredictMixin",
     "ProbabilisticPCA",
     "TDigest",

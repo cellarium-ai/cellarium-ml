@@ -70,6 +70,13 @@ class CellariumModule(pl.LightningModule):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="Attribute 'model' is an instance of `nn.Module`")
             self.save_hyperparameters(logger=False)
+        # Lightning may silently drop nn.Module arguments from hparams; ensure they're present.
+        if "model" not in self.hparams:
+            self.hparams["model"] = model
+        if "cpu_transforms" not in self.hparams:
+            self.hparams["cpu_transforms"] = cpu_transforms
+        if "transforms" not in self.hparams:
+            self.hparams["transforms"] = transforms
         self.pipeline: CellariumPipeline | None = None
         self._cpu_transforms_in_module_pipeline: bool = True
 
@@ -431,6 +438,13 @@ class CellariumModule(pl.LightningModule):
         If the :attr:`model` attribute has ``on_train_start`` method defined, then
         ``on_train_start`` must be called at the beginning of training.
         """
+        # cpu_transforms are dispatched to the dataloader collate_fn and always run on CPU.
+        # Lightning moves the whole module (including cpu_transforms, which are still registered
+        # sub-modules of self.pipeline) to the accelerator device before this hook fires.
+        # Move them back to CPU so their buffers match the CPU tensors they will receive.
+        if not self._cpu_transforms_in_module_pipeline:
+            self.cpu_transforms.cpu()
+
         on_train_start = getattr(self.model, "on_train_start", None)
         if callable(on_train_start):
             on_train_start(self.trainer)
@@ -537,7 +551,7 @@ class CellariumModule(pl.LightningModule):
                 checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["completed"] += 1
                 checkpoint["CellariumAnnDataDataModule"]["epoch"] += 1
 
-    def on_train_end(self) -> None:
+    def on_end(self) -> None:
         """
         Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
         If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
@@ -549,9 +563,9 @@ class CellariumModule(pl.LightningModule):
 
     def on_predict_end(self) -> None:
         """
-        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
-        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
-        ``on_epoch_end`` must be called at the end of every epoch.
+        Calls the ``on_predict_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_predict_end`` method defined, then
+        ``on_predict_end`` must be called at the end of every prediction.
         """
         on_prediction_end = getattr(self.model, "on_prediction_end", None)
         if callable(on_prediction_end):
