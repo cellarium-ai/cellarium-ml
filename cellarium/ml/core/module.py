@@ -70,6 +70,13 @@ class CellariumModule(pl.LightningModule):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="Attribute 'model' is an instance of `nn.Module`")
             self.save_hyperparameters(logger=False)
+        # Lightning may silently drop nn.Module arguments from hparams; ensure they're present.
+        if "model" not in self.hparams:
+            self.hparams["model"] = model
+        if "cpu_transforms" not in self.hparams:
+            self.hparams["cpu_transforms"] = cpu_transforms
+        if "transforms" not in self.hparams:
+            self.hparams["transforms"] = transforms
         self.pipeline: CellariumPipeline | None = None
         self._cpu_transforms_in_module_pipeline: bool = True
 
