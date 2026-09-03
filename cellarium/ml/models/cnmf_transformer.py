@@ -367,8 +367,10 @@ def frobenius_loss_trace(
     wwt_rkk = torch.einsum("rkg,rjg->rkj", w_rkg, w_rkg)
     cross_r = (hx_rkg * w_rkg).sum(dim=(-2, -1))
     quad_r = (hth_rkk * wwt_rkk).sum(dim=(-2, -1))
-    # Upcasting only the three reduced scalars is free and removes any cancellation concern.
-    sse_r = x_squared_sum.double() - 2.0 * cross_r.double() + quad_r.double()
+    # Upcast the three reduced scalars to float64 to avoid catastrophic cancellation.
+    # MPS doesn't support float64, so fall back to float32 there.
+    upcast = torch.float64 if x_squared_sum.device.type != "mps" else torch.float32
+    sse_r = x_squared_sum.to(upcast) - 2.0 * cross_r.to(upcast) + quad_r.to(upcast)
     return sse_r.clamp(min=0.0).to(w_rkg.dtype)
 
 
@@ -855,7 +857,8 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         # Fixed, reproducible drift noise.  Generated here rather than in __init__ because __init__
         # runs on the meta device; a CPU generator keeps it identical across devices and runs.
         generator = torch.Generator().manual_seed(self.noise_seed)
-        self.drift_slot_noise_rke.copy_(torch.randn(tuple(self.drift_slot_noise_rke.shape), generator=generator))
+        noise_cpu = torch.randn(tuple(self.drift_slot_noise_rke.shape), generator=generator, device="cpu")
+        self.drift_slot_noise_rke.copy_(noise_cpu)
         self._drift_x_ng.zero_()
         self._drift_n_captured.zero_()
         self._drift_cells_full = False
