@@ -30,104 +30,47 @@ from cellarium.ml.utilities.testing import (
 )
 
 
-class FiLMBlock(torch.nn.Module):
+class BilinearLoadingsEncoder(torch.nn.Module):
     """
-    A block containing a shared linear layer, followed by replicate-specific FiLM modulation.
+    Encoder that warm-starts NMF loadings from gene expression data and the current factors.
+
+    Replicates are independent by construction: the factor encoder processes each replicate's
+    factors as an independent batch dimension, and there is no cross-replicate attention.
+
+    The bilinear affinity c_ne · f_rke^T is mechanistically motivated: it measures how much
+    each cell (in latent space) resembles each factor, which is the gradient signal FISTA uses
+    on its first step. Applying log1p to the cell input compresses count-data heavy tails while
+    keeping factors in their natural L1-normalized probability scale.
     """
 
-    def __init__(self, input_dim: int, output_dim: int, num_replicates: int):
+    def __init__(self, n_genes: int, latent_dim: int):
         super().__init__()
+        self.cell_encoder = torch.nn.Linear(n_genes, latent_dim, bias=False)
+        self.factor_encoder = torch.nn.Linear(n_genes, latent_dim, bias=False)
+        self.scale = latent_dim**-0.5
 
-        # shared linear layer
-        self.linear = torch.nn.Linear(input_dim, output_dim)
-
-        # batch norm without affine
-        self.batch_norm = torch.nn.BatchNorm1d(output_dim, affine=False)
-
-        # replicate-specific FiLM parameters: gamma and beta for each replicate
-        self.gamma_rh = torch.nn.Parameter(torch.ones(num_replicates, output_dim))
-        self.beta_rh = torch.nn.Parameter(torch.zeros(num_replicates, output_dim))
-
-        self.relu = torch.nn.ReLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # linear layer
-        h = self.linear(x)
-
-        # batch norm
-        if h.dim() == 3:
-            # collapse first two dimensions r and n to apply batch norm, then un-collapse
-            r, n, h_dim = h.shape
-            h = h.view(r * n, h_dim)
-            h_rnh = self.batch_norm(h.view(r * n, h_dim)).view(r, n, h_dim)
-        else:
-            h_rnh = self.batch_norm(h).unsqueeze(0)  # expand to (1, N, H)
-
-        # expand gamma and beta to broadcast across the batch dimension (n)
-        # from (r, output_dim) -> (r, 1, output_dim)
-        gamma_r1h = self.gamma_rh.unsqueeze(1)
-        beta_r1h = self.beta_rh.unsqueeze(1)
-
-        # apply FiLM modulation
-        h_modulated_rnh = gamma_r1h * h_rnh + beta_r1h
-
-        return self.relu(h_modulated_rnh)
-
-
-class ConsensusNMFEncoder(torch.nn.Module):
-    """
-    Encoder network to predict NMF loadings from gene expression data, with FiLM modulation
-    to handle multiple replicates. This effectively works as if it were num_replicates
-    separate encoders.
-    """
-
-    def __init__(self, num_genes: int, hidden_dims: list[int], num_factors: int, num_replicates: int):
-        super().__init__()
-        self.num_replicates = num_replicates
-        self.num_factors = num_factors
-
-        self.blocks = torch.nn.ModuleList()
-        prev_dim = num_genes
-        for hidden_dim in hidden_dims:
-            self.blocks.append(FiLMBlock(prev_dim, hidden_dim, num_replicates))
-            prev_dim = hidden_dim
-
-        # Final layer to output the K factors.
-        # Standard Linear layer applied to the last dimension.
-        self.output_layer = torch.nn.Linear(prev_dim, num_factors)
-
-        # NMF loadings must be non-negative, so we cap the network with a Softplus
-        self.relu = torch.nn.ReLU()
-
-    def forward(self, x_ng: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_ng: torch.Tensor, w_rkg: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x_ng: Input gene expression of shape (N, G)
+            x_ng: Gene counts of shape (N, G).
+            w_rkg: Current NMF factors of shape (R, K, G), L1-normalized by row.
         Returns:
-            loadings_rnk: NMF loadings of shape (R, N, K)
+            h_rnk: Warm-start loadings of shape (R, N, K), non-negative, scaled so each
+                cell's loadings sum approximately to its total count.
         """
-        h = x_ng
-
-        for block in self.blocks:
-            # block 1 takes (N, G) -> outputs (R, N, H1)
-            # block 2+ takes (R, N, H1) -> outputs (R, N, H2)
-            h = block(h)
-
-        # final projection to (R, N, K)
-        loadings_rnk = self.output_layer(h)
-
-        return self.relu(loadings_rnk)
+        c_ne = self.cell_encoder(torch.log1p(x_ng))
+        f_rke = self.factor_encoder(w_rkg)
+        logits_rnk = torch.einsum("ne,rke->rnk", c_ne, f_rke) * self.scale
+        h_sparse_rnk = F.relu(logits_rnk)
+        h_norm_rnk = h_sparse_rnk / h_sparse_rnk.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+        return h_norm_rnk * x_ng.sum(dim=-1, keepdim=True).unsqueeze(0)
 
 
-def weights_init(m):
+def weights_init(m: torch.nn.Module) -> None:
     if isinstance(m, torch.nn.Linear):
         torch.nn.init.xavier_normal_(m.weight)
-        torch.nn.init.zeros_(m.bias)
-    elif isinstance(m, FiLMBlock):
-        torch.nn.init.xavier_normal_(m.gamma_rh)
-        torch.nn.init.zeros_(m.beta_rh)
-        torch.nn.init.xavier_normal_(m.linear.weight)
-        torch.nn.init.zeros_(m.linear.bias)
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
 
 
 class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization, ValidateMixin):
@@ -139,11 +82,21 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
     However, this algorithm requires storage of the full loadings matrix, which is not feasible for large datasets,
     since the loadings matrix has shape (n_cells, n_components, n_replicates).
     This amortized version is a minimal change, which trains an encoder neural network to predict the loadings matrix
-    from gene expression data. The trick is to handle the fact that each replicate should have an independent
-    loadings matrix. Instead of training n_replicates separate encoders, we train a single encoder that takes as
-    input the gene expression data and the replicate index, and uses FiLM layers to modulate activations
-    based on the replicate index. This allows us to train a single encoder that can predict loadings for all
-    independent replicates.
+    from gene expression data. The encoder conditions on both the cell expression and the current factor matrix,
+    using a bilinear dot product to compute loadings affinities. Replicates are kept independent by construction
+    since each replicate's factors are processed as an independent batch dimension with no cross-replicate attention.
+
+    Stopping uses a dual-signal AND criterion based on two independent per-k signals: the encoder loss and the
+    NMF reconstruction loss. Both are measured as trailing-window averages over the last
+    ``trailing_window_fraction`` of each monitoring period, which avoids contaminating estimates with the
+    transient spike that follows each catastrophic-forgetting reset. The per-step relative improvement rate is
+    computed for each signal independently, with separate patience counters (``_encoder_trigger_patience_counters``
+    and ``_recon_trigger_patience_counters``). Cooldown begins only when **both** signals have failed to improve
+    for ``trigger_patience`` consecutive periods — whichever signal is slower is the trailing condition.
+    Cooldown (A/B accumulation without forgetting) ends when **both** signals again plateau for
+    ``cooldown_patience`` consecutive periods, or when ``max_cooldown_epochs`` elapses, whichever comes first.
+    Thresholds are independently tunable via ``encoder_improvement_threshold`` and
+    ``reconstruction_improvement_threshold``.
     """
 
     def __init__(
@@ -151,14 +104,17 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         var_names_g: Sequence[str],
         k_values: list[int],
         r: int,
-        encoder_hidden_dims: list[int],
+        latent_dim: int,
         total_n_cells: int,
         batch_size: int,
         solver: Literal["hals", "fista"] = "fista",
-        forgetting_drift_threshold: float = 0.1,
-        forgetting_patience: int = 5,
+        encoder_improvement_threshold: float = 2e-3,
+        reconstruction_improvement_threshold: float = 2e-3,
+        trigger_patience: int = 3,
+        cooldown_patience: int = 5,
+        max_cooldown_epochs: float = 1.0,
+        trailing_window_fraction: float = 0.25,
         exploration_epochs: int = 2,
-        cooldown_periods: int | None = None,
         max_solver_iter_train: int = 50,
         max_solver_iter_cooldown: int = 200,
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
@@ -170,42 +126,32 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self.r = r
         self.solver = solver
         self.transformed_data_mean = transformed_data_mean
-        # self.exponential_decay_rho = 1.0 - (batch_size / total_n_cells)  # decay factor for A and B updates, tuned
         self.exponential_decay_rho = 1.0
         self.n_batches_per_epoch = int(np.ceil(total_n_cells / batch_size))
         self.n_batches_for_forgetting_momentum = int(np.ceil(min(total_n_cells, 1e6) / batch_size))
+        self.trailing_window_size = max(5, int(self.n_batches_for_forgetting_momentum * trailing_window_fraction))
         self.init = init
         if init == "sklearn_random":
             if transformed_data_mean is None:
                 raise ValueError("transformed_data_mean must be provided when using the sklearn_random initialization")
+
+        self.encoder = BilinearLoadingsEncoder(n_genes=g, latent_dim=latent_dim)
 
         for i in self.k_values:
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
 
-            # handle the encoders
-            assert len(encoder_hidden_dims) > 0, "encoder_hidden_dims must be a non-empty list of hidden dimensions"
-            k_encoder = ConsensusNMFEncoder(
-                num_genes=g,
-                hidden_dims=encoder_hidden_dims,
-                num_factors=i,
-                num_replicates=r,
-            )
-            self.add_module(f"encoder_{i}", k_encoder)
-
         # for training the encoder
         self.encoder_loss_fn = torch.nn.SmoothL1Loss(reduction="mean")
 
         self._alpha_tol = 1e-5
-        self.forgetting_drift_threshold = forgetting_drift_threshold
-        self.forgetting_patience = forgetting_patience
+        self.encoder_improvement_threshold = encoder_improvement_threshold
+        self.reconstruction_improvement_threshold = reconstruction_improvement_threshold
+        self.trigger_patience = trigger_patience
+        self.cooldown_patience = cooldown_patience
+        self.max_cooldown_epochs = max_cooldown_epochs
         self.exploration_epochs = exploration_epochs
-        self.cooldown_periods = (
-            cooldown_periods
-            if cooldown_periods is not None
-            else int(np.ceil(self.n_batches_per_epoch / self.n_batches_for_forgetting_momentum))
-        )
         self.max_solver_iter_train = max_solver_iter_train
         self.max_solver_iter_cooldown = max_solver_iter_cooldown
         self.reset_parameters()
@@ -230,9 +176,21 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self._train_nmf_loss_ema: torch.Tensor | None = None
         self._val_nmf_loss_ema: torch.Tensor | None = None
         self._D_prev_snapshots: dict[int, torch.Tensor | None] = {k: None for k in self.k_values}
-        self._forgetting_patience_counters: dict[int, int] = {k: 0 for k in self.k_values}
+        self._last_encoder_loss: dict[int, float | None] = {k: None for k in self.k_values}
+        self._encoder_loss_window_sum: dict[int, float] = {k: 0.0 for k in self.k_values}
+        self._encoder_loss_window_count: dict[int, int] = {k: 0 for k in self.k_values}
+        self._encoder_loss_snapshot: dict[int, float | None] = {k: None for k in self.k_values}
+        self._last_recon_loss: dict[int, float | None] = {k: None for k in self.k_values}
+        self._recon_loss_window_sum: dict[int, float] = {k: 0.0 for k in self.k_values}
+        self._recon_loss_window_count: dict[int, int] = {k: 0 for k in self.k_values}
+        self._recon_loss_snapshot: dict[int, float | None] = {k: None for k in self.k_values}
+        self._encoder_trigger_patience_counters: dict[int, int] = {k: 0 for k in self.k_values}
+        self._recon_trigger_patience_counters: dict[int, int] = {k: 0 for k in self.k_values}
+        self._encoder_cooldown_patience_counters: dict[int, int] = {k: 0 for k in self.k_values}
+        self._recon_cooldown_patience_counters: dict[int, int] = {k: 0 for k in self.k_values}
         self._k_in_final_epoch: dict[int, bool] = {k: False for k in self.k_values}
         self._k_final_epoch_start: dict[int, int | None] = {k: None for k in self.k_values}
+        self._k_done: dict[int, bool] = {k: False for k in self.k_values}
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
@@ -259,7 +217,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         factors_rkg = getattr(self, f"D_{k}_rkg")
 
         # get seed loading values from encoder (rather than from memory)
-        encoder_loadings_rnk = getattr(self, f"encoder_{k}")(x_ng)
+        encoder_loadings_rnk = self.encoder(x_ng, factors_rkg.detach())
 
         # run nmf-torch hals online update
         if self.solver == "hals":
@@ -326,33 +284,20 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         encoder_losses: list[torch.Tensor] = []
         nmf_reconstruction_errors: list[torch.Tensor] = []
         for k in self.k_values:
+            if self._k_done[k]:
+                continue
             n_iter = self.max_solver_iter_cooldown if self._k_in_final_epoch[k] else self.max_solver_iter_train
             out = self.online_dictionary_update(x_ng=x_ng, k=k, n_iterations=n_iter)
             encoder_loss = out["loss"]
             solver_loadings_rnk = out["solver_loadings_rnk"]
             encoder_losses.append(encoder_loss)
 
-            # import matplotlib.pyplot as plt
-            # import hashlib
-            # fig = plt.figure(figsize=(10, 5))
-            # plt.plot(out["loadings_history"], label="Loadings Loss")
-            # plt.xlabel("Iteration")
-            # plt.ylabel("Loss")
-            # plt.legend()
-            # plt.twinx()
-            # plt.plot(out["factors_history"], label="Factors Loss", color='r')
-            # md5hash_for_filename_salt = hashlib.md5(f"{torch.rand(1).item()}_{k}".encode()).hexdigest()[:12]
-            # fig.savefig(f"nmf_loss_history_k{k}_{md5hash_for_filename_salt}.png")
-            # plt.close(fig)
-
-            # if we want to track the NMF loss
             with torch.no_grad():
+                # store latest encoder loss for trailing-window accumulation in on_train_batch_end
+                self._last_encoder_loss[k] = encoder_loss.detach().item()
+
+                # track NMF reconstruction error
                 factors_rkg = getattr(self, f"D_{k}_rkg")
-                # squared_error_r = compute_reconstruction_error_compiled(
-                #     x_ng=x_ng,
-                #     loadings_rnk=solver_loadings_rnk,
-                #     factors_rkg=factors_rkg,
-                # )
                 squared_error_r = frobenius_loss_trace_compiled(
                     x_ng=x_ng,
                     h_rnk=solver_loadings_rnk,
@@ -360,6 +305,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                 )
                 nmf_reconstruction_error = squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
                 nmf_reconstruction_errors.append(nmf_reconstruction_error)
+                self._last_recon_loss[k] = nmf_reconstruction_error.item()
 
         # for error computation to assess convergence
         with torch.no_grad():
@@ -392,7 +338,29 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         step = trainer.global_step
-        if step == 0 or step % self.n_batches_for_forgetting_momentum != 0:
+        if step == 0:
+            return
+
+        step_within_period = step % self.n_batches_for_forgetting_momentum
+        in_trailing_window = step_within_period >= self.n_batches_for_forgetting_momentum - self.trailing_window_size
+        at_period_boundary = step_within_period == 0
+
+        if in_trailing_window:
+            for k in self.k_values:
+                if self._k_done[k]:
+                    continue
+                if self._last_encoder_loss[k] is not None:
+                    local_loss = self._last_encoder_loss[k]
+                    assert isinstance(local_loss, float)
+                    self._encoder_loss_window_sum[k] += local_loss
+                    self._encoder_loss_window_count[k] += 1
+                if self._last_recon_loss[k] is not None:
+                    local_recon_loss = self._last_recon_loss[k]
+                    assert isinstance(local_recon_loss, float)
+                    self._recon_loss_window_sum[k] += local_recon_loss
+                    self._recon_loss_window_count[k] += 1
+
+        if not at_period_boundary:
             return
 
         module = trainer.model
@@ -443,72 +411,130 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                 module.log(f"k={k}_consensus_L1", mean_neighbor_distance_m.mean(), prog_bar=False)
                 module.log(f"k={k}_consensus_q75", mean_neighbor_distance_m.quantile(0.75), prog_bar=True)
 
-        # --- per-k forgetting convergence check and forgetting ---
-        assert isinstance(trainer.max_epochs, int)
-        steps_remaining = trainer.max_epochs * self.n_batches_per_epoch - step
+        # --- per-k dual-signal AND stopping and forgetting ---
         min_steps_before_stop = self.exploration_epochs * self.n_batches_per_epoch
+        # Maximum cooldown: at least max_cooldown_epochs full data passes, but never fewer steps
+        # than cooldown_patience monitoring periods (so the patience counter always has room to fire).
+        max_cooldown_steps = max(
+            int(self.max_cooldown_epochs * self.n_batches_per_epoch),
+            self.cooldown_patience * self.n_batches_for_forgetting_momentum,
+        )
 
-        all_done = True
+        all_done = all(self._k_done[k] for k in self.k_values)
         for k in self.k_values:
-            # check if a previously started final epoch has completed
-            cooldown_steps = self.cooldown_periods * self.n_batches_for_forgetting_momentum
-            if self._k_in_final_epoch[k]:
-                k_start = self._k_final_epoch_start[k]
-                assert k_start is not None
-                if step - k_start >= cooldown_steps:
-                    continue  # this k is done; don't touch A/B
-                else:
-                    all_done = False
-                    continue  # still in cooldown; don't forget
-            all_done = False
+            if self._k_done[k]:
+                continue
 
-            # force into cooldown if not enough steps remain
-            if steps_remaining < cooldown_steps:
-                self._k_in_final_epoch[k] = True
-                self._k_final_epoch_start[k] = step
-                continue  # don't forget; let A/B accumulate
-
-            # compute drift relative to previous period endpoint
+            # compute and log drift for monitoring (decision-free)
             D_rkg = getattr(self, f"D_{k}_rkg").detach()
-            prev = self._D_prev_snapshots[k]
-            if prev is not None and step >= min_steps_before_stop:
-                prev_norm = prev.norm()
-                if prev_norm < 1e-8:
-                    drift = float("inf")
-                else:
-                    drift = ((D_rkg - prev).norm() / prev_norm).item()
+            prev_D = self._D_prev_snapshots[k]
+            if prev_D is not None:
+                prev_norm = prev_D.norm()
+                drift = ((D_rkg - prev_D).norm() / prev_norm).item() if prev_norm > 1e-8 else float("inf")
                 module.log(f"k={k}__forgetting_drift", drift, prog_bar=False)
 
-                if drift < self.forgetting_drift_threshold:
-                    self._forgetting_patience_counters[k] += 1
+            # --- encoder loss: compute trailing-window average and improvement rate ---
+            enc_window_count = self._encoder_loss_window_count[k]
+            current_encoder_loss = self._encoder_loss_window_sum[k] / enc_window_count if enc_window_count > 0 else None
+            self._encoder_loss_window_sum[k] = 0.0
+            self._encoder_loss_window_count[k] = 0
+
+            # --- reconstruction loss: compute trailing-window average and improvement rate ---
+            recon_window_count = self._recon_loss_window_count[k]
+            current_recon_loss = self._recon_loss_window_sum[k] / recon_window_count if recon_window_count > 0 else None
+            self._recon_loss_window_sum[k] = 0.0
+            self._recon_loss_window_count[k] = 0
+
+            # log per-k reconstruction loss (raw window average)
+            if current_recon_loss is not None:
+                module.log(f"k={k}_rec_error", current_recon_loss, prog_bar=False)
+
+            encoder_rate: float | None = None
+            recon_rate: float | None = None
+
+            if current_encoder_loss is not None:
+                prev_encoder_loss = self._encoder_loss_snapshot[k]
+                if prev_encoder_loss is not None and prev_encoder_loss > 1e-8 and step >= min_steps_before_stop:
+                    encoder_rate = (prev_encoder_loss - current_encoder_loss) / (
+                        prev_encoder_loss * self.n_batches_for_forgetting_momentum
+                    )
+                    module.log(f"k={k}_encoder_improvement_rate", encoder_rate, prog_bar=False)
+                self._encoder_loss_snapshot[k] = current_encoder_loss
+
+            if current_recon_loss is not None:
+                prev_recon_loss = self._recon_loss_snapshot[k]
+                if prev_recon_loss is not None and prev_recon_loss > 1e-8 and step >= min_steps_before_stop:
+                    recon_rate = (prev_recon_loss - current_recon_loss) / (
+                        prev_recon_loss * self.n_batches_for_forgetting_momentum
+                    )
+                    module.log(f"k={k}_recon_improvement_rate", recon_rate, prog_bar=False)
+                self._recon_loss_snapshot[k] = current_recon_loss
+
+            if encoder_rate is not None and recon_rate is not None:
+                if not self._k_in_final_epoch[k]:
+                    # exploration phase: update independent patience counters for each signal
+                    if encoder_rate < self.encoder_improvement_threshold:
+                        self._encoder_trigger_patience_counters[k] += 1
+                    else:
+                        self._encoder_trigger_patience_counters[k] = 0
+
+                    if recon_rate < self.reconstruction_improvement_threshold:
+                        self._recon_trigger_patience_counters[k] += 1
+                    else:
+                        self._recon_trigger_patience_counters[k] = 0
+
+                    # AND: both signals must reach patience before entering cooldown
+                    if (
+                        self._encoder_trigger_patience_counters[k] >= self.trigger_patience
+                        and self._recon_trigger_patience_counters[k] >= self.trigger_patience
+                    ):
+                        self._k_in_final_epoch[k] = True
+                        self._k_final_epoch_start[k] = step
+                        print(f"Triggering cooldown for k={k} at step={step}")
                 else:
-                    self._forgetting_patience_counters[k] = 0
+                    # cooldown phase: check hard cap first
+                    k_start = self._k_final_epoch_start[k]
+                    assert k_start is not None
+                    if step - k_start >= max_cooldown_steps:
+                        self._k_done[k] = True
+                        continue
 
-                if self._forgetting_patience_counters[k] >= self.forgetting_patience:
-                    self._k_in_final_epoch[k] = True
-                    self._k_final_epoch_start[k] = step
-                    continue  # don't forget; let A/B accumulate
+                    # update independent patience counters for each signal
+                    if encoder_rate < self.encoder_improvement_threshold:
+                        self._encoder_cooldown_patience_counters[k] += 1
+                    else:
+                        self._encoder_cooldown_patience_counters[k] = 0
 
-            # snapshot current D before forgetting
-            self._D_prev_snapshots[k] = D_rkg.clone()
+                    if recon_rate < self.reconstruction_improvement_threshold:
+                        self._recon_cooldown_patience_counters[k] += 1
+                    else:
+                        self._recon_cooldown_patience_counters[k] = 0
 
-            # forget
-            getattr(self, f"A_{k}_rkk").zero_()
-            getattr(self, f"B_{k}_rkg").zero_()
+                    # AND: both signals must reach patience before marking done
+                    if (
+                        self._encoder_cooldown_patience_counters[k] >= self.cooldown_patience
+                        and self._recon_cooldown_patience_counters[k] >= self.cooldown_patience
+                    ):
+                        self._k_done[k] = True
+                        continue
 
-        n_k_still_training = sum(
-            not (
-                self._k_in_final_epoch[k]
-                and isinstance(self._k_final_epoch_start[k], int)
-                and step - self._k_final_epoch_start[k] >= self.n_batches_per_epoch  # type: ignore[operator]
-            )
-            for k in self.k_values
-        )
+            if not self._k_in_final_epoch[k]:
+                # snapshot D then forget; log the forgetting event
+                self._D_prev_snapshots[k] = D_rkg.clone()
+                getattr(self, f"A_{k}_rkk").zero_()
+                getattr(self, f"B_{k}_rkg").zero_()
+                module.log(f"k={k}_forgetting", 1.0, prog_bar=False)
+            else:
+                module.log(f"k={k}_forgetting", 0.0, prog_bar=False)
+            # during cooldown: do not forget; A/B accumulate
+
+        all_done = all(self._k_done[k] for k in self.k_values)
+        n_k_still_training = sum(not self._k_done[k] for k in self.k_values)
         module.log("k_training", float(n_k_still_training), prog_bar=True)
 
         if all_done:
             trainer.should_stop = True
-            print("Stopping early: all k values have completed their final epoch")
+            print("Stopping early: all k values have completed cooldown")
 
     def on_end(self, trainer: pl.Trainer) -> None:
         trainer.save_checkpoint(trainer.default_root_dir + "/NMF.ckpt")
@@ -568,8 +594,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
 
         nmf_reconstruction_errors = []
         for k in self.k_values:
-            encoder_loadings_rnk = getattr(self, f"encoder_{k}")(x_ng)
             factors_rkg = getattr(self, f"D_{k}_rkg")
+            encoder_loadings_rnk = self.encoder(x_ng, factors_rkg.detach())
             squared_error_r = compute_reconstruction_error_compiled(
                 x_ng=x_ng,
                 loadings_rnk=encoder_loadings_rnk,

@@ -25,3 +25,4 @@ output/
 *.tsv.gz
 *.ckpt
 CLAUDE.md
+benchmarking/
