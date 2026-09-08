@@ -1822,9 +1822,10 @@ def run_measurement_phase(
 
         names = model.metric_names
         n_k = len(k_values)
-        sums = {name: torch.zeros(n_k, dtype=torch.float64, device=device) for name in names}
-        sums_of_squares = {name: torch.zeros(n_k, dtype=torch.float64, device=device) for name in names}
-        counts = {name: torch.zeros(n_k, dtype=torch.float64, device=device) for name in names}
+        upcast = torch.float64 if device.type != "mps" else torch.float32
+        sums = {name: torch.zeros(n_k, dtype=upcast, device=device) for name in names}
+        sums_of_squares = {name: torch.zeros(n_k, dtype=upcast, device=device) for name in names}
+        counts = {name: torch.zeros(n_k, dtype=upcast, device=device) for name in names}
 
         consensus_sums: dict[int, torch.Tensor] = {}
         consensus_reference: dict[int, torch.Tensor] = {}
@@ -1904,7 +1905,7 @@ def run_measurement_phase(
                     )
 
                 for name, value in observations.items():
-                    scalar = value.detach().double()
+                    scalar = value.detach().to(upcast)
                     sums[name][k_index] += scalar
                     sums_of_squares[name][k_index] += scalar * scalar
                     counts[name][k_index] += 1.0
@@ -1913,7 +1914,7 @@ def run_measurement_phase(
                 detached_kg = consensus_kg.detach()
                 if k not in consensus_reference:
                     consensus_reference[k] = detached_kg.clone()
-                    consensus_sums[k] = detached_kg.double().clone()
+                    consensus_sums[k] = detached_kg.to(upcast).clone()
                 else:
                     aligned_1kg, _, _, _ = align_factors(
                         detached_kg.unsqueeze(0),
@@ -1921,7 +1922,7 @@ def run_measurement_phase(
                         model.sinkhorn_epsilon,
                         model.sinkhorn_iterations,
                     )
-                    consensus_sums[k] += aligned_1kg.squeeze(0).double()
+                    consensus_sums[k] += aligned_1kg.squeeze(0).to(upcast)
                 n_consensus[k] += 1
                 previous_consensus[k] = detached_kg
 
