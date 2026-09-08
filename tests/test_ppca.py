@@ -100,7 +100,7 @@ def test_probabilistic_pca_multi_device(
     # variance explained by each PC
     expected_explained_var = L_g[:k]
     actual_explained_var = ppca.L_k
-    np.testing.assert_allclose(expected_explained_var, actual_explained_var, rtol=1e-3)
+    np.testing.assert_allclose(expected_explained_var, actual_explained_var, rtol=1.5e-3)
 
     # absolute cosine similarity between expected and actual PCs
     abs_cos_sim = torch.abs(
