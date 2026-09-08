@@ -334,25 +334,15 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.b_c = torch.nn.Parameter(torch.empty(self.n_active_cats, dtype=torch.float))
 
         # Class weights for cross-entropy loss
-        if class_counts is not None:
-            provided_counts = {c: class_counts[c] for c in active_cl_names if c in class_counts.index}
-            if any(v < 0 for v in provided_counts.values()):
-                raise ValueError("All class_counts values must be >= 0.")
-            counts = torch.tensor([float(provided_counts.get(c, 0.0)) for c in active_cl_names], dtype=torch.float)
-            if propagate_class_counts:
-                counts = active_descendant_tensor_cc @ counts
-            nonzero = counts > 0
-            weights = torch.ones(self.n_active_cats, dtype=torch.float)
-            if nonzero.any():
-                total = counts[nonzero].sum()
-                n_nonzero = nonzero.sum().float()
-                raw = total / (n_nonzero * counts[nonzero])
-                weights[nonzero] = raw / raw.mean()
-            self._class_weights: torch.Tensor | None = weights
-            self.register_buffer("class_weights", weights.clone())
-        else:
-            self._class_weights = None
-            self.register_buffer("class_weights", None)
+        weights = compute_class_weights(
+            active_cl_names=active_cl_names,
+            class_counts=class_counts,
+            active_descendant_tensor_cc=active_descendant_tensor_cc,
+            propagate_class_counts=propagate_class_counts,
+            normalize="class_mean",
+        )
+        self._class_weights: torch.Tensor | None = weights
+        self.register_buffer("class_weights", weights.clone() if weights is not None else None)
 
         self.reset_parameters()
 
