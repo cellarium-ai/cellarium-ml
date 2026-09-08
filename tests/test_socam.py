@@ -12,7 +12,13 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.socam import SOCAM, _build_nonleaf_info, _expand_with_ancestors, _logsumexp_propagated
+from cellarium.ml.models.socam import (
+    SOCAM,
+    _build_nonleaf_info,
+    _expand_with_ancestors,
+    _logsumexp_propagated,
+    compute_class_weights,
+)
 from cellarium.ml.utilities.data import collate_fn
 
 
@@ -671,6 +677,85 @@ def test_logsumexp_propagated_mixed_extreme_logits():
     result.sum().backward()
     assert isinstance(logits_nc.grad, torch.Tensor)
     assert torch.all(torch.isfinite(logits_nc.grad)), f"Non-finite gradient: {logits_nc.grad}"
+
+
+# ---------------------------------------------------------------------------
+# compute_class_weights direct unit tests
+# ---------------------------------------------------------------------------
+
+
+def _flat_desc(c: int) -> torch.Tensor:
+    """Identity descendant tensor (all leaves, no hierarchy)."""
+    return torch.eye(c, dtype=torch.float)
+
+
+def test_compute_class_weights_none_returns_none():
+    result = compute_class_weights(
+        active_cl_names=["A", "B"],
+        class_counts=None,
+        active_descendant_tensor_cc=_flat_desc(2),
+    )
+    assert result is None
+
+
+def test_compute_class_weights_class_mean_matches_socam():
+    """compute_class_weights(normalize='class_mean') must equal SOCAM's stored class_weights."""
+    c = 5
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    counts = pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(c)})
+    desc = _flat_desc(c)
+    model = _make_socam(c=c, class_counts=counts)
+    direct = compute_class_weights(
+        active_cl_names=cl_names,
+        class_counts=counts,
+        active_descendant_tensor_cc=desc,
+        normalize="class_mean",
+    )
+    assert direct is not None
+    assert model.class_weights is not None
+    assert torch.allclose(model.class_weights, direct, atol=1e-6)
+
+
+def test_compute_class_weights_data_mean_has_weighted_mean_one():
+    """normalize='data_mean': the data-frequency-weighted mean of weights over nonzero classes is 1."""
+    c = 5
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    raw_counts = torch.tensor([(i + 1) * 10.0 for i in range(c)])
+    counts = pd.Series({f"cell_type_{i}": float(raw_counts[i]) for i in range(c)})
+    weights = compute_class_weights(
+        active_cl_names=cl_names,
+        class_counts=counts,
+        active_descendant_tensor_cc=_flat_desc(c),
+        normalize="data_mean",
+    )
+    assert weights is not None
+    # data-frequency-weighted mean: sum(w_i * n_i) / sum(n_i) == 1
+    weighted_mean = (weights * raw_counts).sum() / raw_counts.sum()
+    assert torch.allclose(weighted_mean, torch.tensor(1.0), atol=1e-6)
+
+
+def test_compute_class_weights_data_mean_vs_class_mean_same_ordering():
+    """Both normalizations must produce identical relative weight ordering."""
+    c = 5
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    counts = pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(c)})
+    desc = _flat_desc(c)
+    w_cm = compute_class_weights(cl_names, counts, desc, normalize="class_mean")
+    w_dm = compute_class_weights(cl_names, counts, desc, normalize="data_mean")
+    assert w_cm is not None and w_dm is not None
+    # Ratios between any two nonzero-count classes must be identical across both normalizations.
+    for i in range(c - 1):
+        ratio_cm = (w_cm[i] / w_cm[i + 1]).item()
+        ratio_dm = (w_dm[i] / w_dm[i + 1]).item()
+        assert abs(ratio_cm - ratio_dm) < 1e-5, f"Ratio mismatch at i={i}: {ratio_cm} vs {ratio_dm}"
+
+
+def test_compute_class_weights_invalid_normalize_raises():
+    c = 3
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    counts = pd.Series({f"cell_type_{i}": 10 for i in range(c)})
+    with pytest.raises(ValueError, match="normalize"):
+        compute_class_weights(cl_names, counts, _flat_desc(c), normalize="bogus")
 
 
 # ---------------------------------------------------------------------------
