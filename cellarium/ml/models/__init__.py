@@ -15,6 +15,7 @@ from cellarium.ml.models.nmf_bayesian import BayesianNonNegativeMatrixFactorizat
 from cellarium.ml.models.ols import StreamingOrdinaryLeastSquares
 from cellarium.ml.models.onepass_mean_var_std import OnePassMeanVarStd
 from cellarium.ml.models.probabilistic_pca import ProbabilisticPCA
+from cellarium.ml.models.scanvi import SCANVI
 from cellarium.ml.models.scvi import SingleCellVariationalInference
 from cellarium.ml.models.socam import SOCAM
 from cellarium.ml.models.tdigest import TDigest
@@ -25,6 +26,7 @@ __all__ = [
     "CellariumGPT",
     "CellariumModel",
     "ContrastiveMLP",
+    "SCANVI",
     "Geneformer",
     "HVGSeuratV3",
     "IncrementalPCA",
