@@ -430,6 +430,26 @@ def compute_var_names_g(
     return output["var_names_g"]
 
 
+def compute_n_targets(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of target columns in the ``y_nk`` batch key.
+
+    Reads the ``y_nk`` field from the first shard (including its ``convert_fn``) and returns
+    ``shape[1]`` for 2D arrays (e.g. an ``obsm`` embedding) or ``1`` for 1D arrays
+    (e.g. a single ``obs`` column converted with :func:`~cellarium.ml.utilities.data.to_float_column`).
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        The number of target columns.
+    """
+    field = data.batch_keys["y_nk"]
+    assert isinstance(field, AnnDataField)
+    y = field(data.dadc[0])
+    return 1 if y.ndim == 1 else y.shape[1]
+
+
 def compute_batch_index_n_categories(data: CellariumAnnDataDataModule) -> int:
     """
     Compute the number of categories in batch_index_n.
@@ -778,6 +798,57 @@ def geneformer(args: ArgsType = None) -> None:
                 compute_var_names_g,
             )
         ],
+    )
+    cli(args=args)
+
+
+@register_model
+def geometric_sketch(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.StreamingGeometricSketch` model.
+
+    Streams cells in a single pass and retains a geometrically diverse sketch by
+    partitioning gene-expression space with locality-sensitive hashing (LSH).  At most
+    ``max_cells_per_bucket`` cells are kept per LSH bucket via reservoir sampling.
+    Training stops after one epoch regardless of ``max_epochs``.
+
+    The ``obs_names_n`` batch key is required so that cell IDs are stored alongside
+    expression data.  ``var_names_g`` is derived automatically from the data
+    configuration.
+
+    Example run::
+
+        cellarium-ml geometric_sketch fit \
+            --data.filenames "gs://my-bucket/cells_{0..9}.h5ad" \
+            --data.shard_size 10000 \
+            --data.max_cache_size 2 \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
+            --data.batch_keys.var_names_g.attr var_names \
+            --data.batch_keys.obs_names_n.attr obs_names \
+            --data.batch_size 512 \
+            --data.num_workers 4 \
+            --model.model.init_args.n_bits 12 \
+            --model.model.init_args.max_cells_per_bucket 100 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/sketch
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.StreamingGeometricSketch",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            )
+        ],
+        trainer_defaults={
+            "max_epochs": 1,  # one pass; the model also enforces this via trainer.should_stop
+        },
     )
     cli(args=args)
 
@@ -1270,6 +1341,62 @@ def socam(args: ArgsType = None) -> None:
             LinkArguments("data", "model.model.init_args.n_obs", compute_n_obs),
             LinkArguments("data", "model.model.init_args.cl_name_subset", compute_cl_name_subset),
         ],
+    )
+    cli(args=args)
+
+
+@register_model
+def ols(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.StreamingOrdinaryLeastSquares` model.
+
+    Accumulates sufficient statistics (X^T X and X^T Y) over minibatches in a single pass and
+    solves the normal equations at the end of epoch 1. Training always stops after one epoch
+    regardless of ``max_epochs``.
+
+    The model accepts:
+
+    * ``x_ng`` — feature matrix (e.g. log-normalised gene expression)
+    * ``y_nk`` — target matrix (e.g. a neighbourhood embedding from ``obsm``, or a single
+      continuous ``obs`` column converted with
+      :func:`~cellarium.ml.utilities.data.to_float_column`)
+
+    ``var_names_g`` (number of features) and ``n_targets`` (number of target columns) are
+    derived automatically from the data configuration.
+
+    Example run (predicting a cell-neighbourhood embedding from gene expression)::
+
+        cellarium-ml ols fit \
+            --data.filenames "gs://my-bucket/cells_{0..9}.h5ad" \
+            --data.shard_size 10000 \
+            --data.max_cache_size 2 \
+            --data.batch_keys.x_ng.attr X \
+            --data.batch_keys.x_ng.convert_fn cellarium.ml.utilities.data.densify \
+            --data.batch_keys.var_names_g.attr var_names \
+            --data.batch_keys.y_nk.attr obsm \
+            --data.batch_keys.y_nk.key X_neighborhood \
+            --data.batch_size 512 \
+            --data.num_workers 4 \
+            --trainer.accelerator gpu \
+            --trainer.devices 1 \
+            --trainer.default_root_dir runs/ols
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.StreamingOrdinaryLeastSquares",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.n_targets", compute_n_targets),
+        ],
+        trainer_defaults={
+            "max_epochs": 1,  # one pass; the model also enforces this via trainer.should_stop
+        },
     )
     cli(args=args)
 

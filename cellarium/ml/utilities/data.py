@@ -273,6 +273,22 @@ def get_categories(x: pd.Series) -> np.ndarray:
     return np.asarray(x.cat.categories)
 
 
+def to_float_column(x: pd.Series) -> np.ndarray:
+    """
+    Convert a pandas Series to a float32 numpy column vector of shape ``(n, 1)``.
+
+    Useful as a ``convert_fn`` when a single continuous ``obs`` column is used as a
+    regression target (``y_nk`` with ``k=1``).
+
+    Args:
+        x: Pandas Series object.
+
+    Returns:
+        Float32 numpy array of shape ``(n, 1)``.
+    """
+    return x.to_numpy(dtype=np.float32)[:, None]
+
+
 def get_var_names_g_indices(
     input_var_names_g: np.ndarray,
     stored_var_names_g: np.ndarray,
