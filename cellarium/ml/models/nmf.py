@@ -1,7 +1,10 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
+import gc
 import logging
+import math
 import sys
 import warnings
 from abc import ABC, abstractmethod
@@ -16,19 +19,29 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+import tqdm as _tqdm_module
 from lightning.pytorch.strategies import DDPStrategy
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from tqdm.auto import tqdm
 
 from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.transforms import Filter, NormalizeTotal
+from cellarium.ml.models.ols import StreamingOrdinaryLeastSquares
+from cellarium.ml.transforms import DivideByScale, Filter, NormalizeTotal, ZScore
+from cellarium.ml.utilities.core import call_func_with_batch
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 warnings.filterwarnings("ignore")
+
+
+def _fresh_tqdm(iterable, **kwargs):
+    # Clear any stale tqdm instances left by a previous Lightning interrupt so
+    # that tqdm.auto can properly render a live Jupyter widget for this bar.
+    _tqdm_module.tqdm._instances.clear()
+    return tqdm(iterable, **kwargs)
 
 
 def _get_logger():
@@ -53,9 +66,179 @@ def _get_logger():
 logger = _get_logger()
 
 
+@torch.compile()
+@torch.no_grad()
+def solve_nnls_fista_precomputed(
+    AtA: torch.Tensor,
+    AtB: torch.Tensor,
+    initial_x: torch.Tensor,
+    max_iter: int = 100,
+    return_history: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """
+    Highly optimized FISTA core for torch.compile.
+    Assumes AtA and AtB are already precomputed.
+    """
+    # Compute the Lipschitz constant L (largest eigenvalue of AtA).
+    # eigvalsh is faster and exact, but not implemented on MPS; power iteration
+    # uses only matmul and works on all devices.
+    if AtA.device.type == "mps":
+        v = torch.ones(*AtA.shape[:-1], 1, device=AtA.device, dtype=AtA.dtype)
+        for _ in range(10):
+            v = AtA @ v
+            v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
+        L = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # [r, 1, 1]
+    else:
+        eigenvals = torch.linalg.eigvalsh(AtA)
+        L = torch.clamp(eigenvals[..., -1:], min=1e-12).unsqueeze(-1)  # [r, 1, 1]
+
+    x = initial_x.clone()
+    y = initial_x.clone()
+
+    # Initialize momentum scalar
+    t = 1.0
+
+    # torch.compile specializes on Python booleans, so the False branch generates
+    # a much smaller kernel (no per-iteration tensors kept alive), which is required
+    # to stay within Metal's 31 constant-buffer limit on MPS.
+    history: torch.Tensor | None = torch.zeros(max_iter, device=AtA.device, dtype=AtA.dtype) if return_history else None
+
+    # Fixed iteration loop for compilation compatibility
+    for i in range(max_iter):
+        # Gradient step
+        grad = AtA @ y - AtB
+        x_new = torch.clamp(y - grad / L, min=0.0)
+
+        if return_history:
+            assert history is not None
+            history[i] = (x_new - x).abs().max()
+
+        # Beck & Teboulle Momentum update
+        t_new = (1.0 + math.sqrt(1.0 + 4.0 * t**2)) / 2.0
+        momentum = (t - 1.0) / t_new
+        y = x_new + momentum * (x_new - x)
+
+        x = x_new
+        t = t_new
+
+    return x, history
+
+
+@torch.compile()
+@torch.no_grad()
+def nmf_compute_factors_fista(
+    w_rkg: torch.Tensor,
+    A_rkk: torch.Tensor,  # This is H^T H
+    B_rkg: torch.Tensor,  # This is H^T X
+    max_iter: int = 100,
+    return_history: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """
+    Wrapper to update Factors using FISTA.
+    """
+    # w_rkg has shape [r, k, g].
+    # A_rkk @ w_rkg works directly natively via batched matrix multiplication.
+    w_rkg_new, history = solve_nnls_fista_precomputed(
+        AtA=A_rkk, AtB=B_rkg, initial_x=w_rkg, max_iter=max_iter, return_history=return_history
+    )
+
+    return w_rkg_new, history
+
+
+@torch.compile()
+@torch.no_grad()
+def nmf_compute_loadings_fista(
+    x_ng: torch.Tensor,
+    w_rkg: torch.Tensor,
+    h_rnk: torch.Tensor,
+    max_iter: int = 100,
+    return_history: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """
+    Wrapper to update Loadings using FISTA.
+    """
+    # Precompute the transposed equivalents: W W^T and W X^T
+    # W W^T shape: [r, k, k]
+    wwT_rkk = torch.einsum("rkg,rhg->rkh", w_rkg, w_rkg)
+
+    # W X^T shape: [r, k, n]
+    wxT_rkn = torch.einsum("rkg,ng->rkn", w_rkg, x_ng)
+
+    # h_rnk is [r, n, k]. We transpose to [r, k, n] to match FISTA's Ax=B expectation
+    h_transposed_rkn = h_rnk.transpose(-2, -1)
+
+    # Solve for transposed H
+    h_new_transposed, history = solve_nnls_fista_precomputed(
+        AtA=wwT_rkk, AtB=wxT_rkn, initial_x=h_transposed_rkn, max_iter=max_iter, return_history=return_history
+    )
+
+    return h_new_transposed.transpose(-2, -1), history
+
+
 def nmf_frobenius_loss(x_ng: torch.Tensor, loadings_nk: torch.Tensor, factors_kg: torch.Tensor):
     # compute prediction error as the frobenius norm
     return F.mse_loss(torch.matmul(loadings_nk, factors_kg), x_ng, reduction="sum")
+
+
+@torch.compile()
+@torch.no_grad()
+def compute_reconstruction_error_compiled(
+    x_ng: torch.Tensor, loadings_rnk: torch.Tensor, factors_rkg: torch.Tensor
+) -> torch.Tensor:
+    # Compute reconstruction: WH for current batch using einsum
+    # loadings_rnk: (r, batch_size, k), factors_rkg: (r, k, g)
+    # -> reconstruction_rng: (r, batch_size, g)
+    reconstruction_rng = torch.einsum("rnk,rkg->rng", loadings_rnk, factors_rkg)
+
+    # Compute squared reconstruction error using einsum
+    # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
+    x_expanded_rng = x_ng.unsqueeze(0).expand(loadings_rnk.shape[0], -1, -1)  # (r, batch_size, g)
+
+    # Compute squared Frobenius norm for each replicate
+    squared_error_r = F.mse_loss(x_expanded_rng, reconstruction_rng, reduction="none").sum(dim=[1, 2])
+    return squared_error_r
+
+
+@torch.compile()
+@torch.no_grad()
+def frobenius_loss_trace_compiled(
+    x_ng: torch.Tensor,
+    h_rnk: torch.Tensor,
+    w_rkg: torch.Tensor,
+    # x_squared_sum: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    Per-replicate ``||X - H W||_F^2`` computed *without* materializing the reconstruction.
+
+    Uses :math:`\\|X - HW\\|_F^2 = \\|X\\|^2 - 2\\langle HX, W\\rangle + \\langle H^\\top H,
+    WW^\\top\\rangle`, so the intermediates are ``(r, k, g)`` and ``(r, k, k)`` rather than
+    ``(r, n, g)``.  At ``r=100, n=2048, g=2000`` that is 80 MB instead of 1.6 GB.  And because
+    ``H`` is detached and ``X`` is data, both ``HX`` and ``H^T H`` are autograd constants: the
+    entire backward reduces to :math:`\\nabla_W = -2 HX + 2 (H^\\top H) W`.
+
+    This is why the loss is Frobenius rather than Poisson KL.  KL does not factorize this way, and
+    its Poisson justification does not survive per-gene rescaling of the input anyway.
+
+    Args:
+        x_ng: Data, shape ``(n, g)``.
+        h_rnk: Loadings, shape ``(r, n, k)``.
+        w_rkg: Factors, shape ``(r, k, g)``.
+        x_squared_sum: Optional precomputed ``(x_ng ** 2).sum()``, shared across replicates.
+
+    Returns:
+        Sum of squared errors per replicate, shape ``(r,)``.
+    """
+    # if x_squared_sum is None:
+    #     x_squared_sum = x_ng.pow(2).sum()
+    x_squared_sum = x_ng.pow(2).sum()
+    hx_rkg = torch.einsum("rnk,ng->rkg", h_rnk, x_ng)
+    hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
+    wwt_rkk = torch.einsum("rkg,rjg->rkj", w_rkg, w_rkg)
+    cross_r = (hx_rkg * w_rkg).sum(dim=(-2, -1))
+    quad_r = (hth_rkk * wwt_rkk).sum(dim=(-2, -1))
+    # Upcasting only the three reduced scalars is free and removes any cancellation concern.
+    sse_r = x_squared_sum.double() - 2.0 * cross_r.double() + quad_r.double()
+    return sse_r.clamp(min=0.0).to(w_rkg.dtype)
 
 
 def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
@@ -81,9 +264,17 @@ def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
     AtA = A.transpose(-2, -1) @ A  # (..., n, n)
     AtB = A.transpose(-2, -1) @ B  # (..., n, k)
 
-    # Compute Lipschitz constant (largest eigenvalue of AtA)
-    eigenvals = torch.linalg.eigvals(AtA).real  # (..., n)
-    L = eigenvals.max(dim=-1, keepdim=True)[0].unsqueeze(-1)  # (..., 1, 1)
+    # Compute Lipschitz constant (largest eigenvalue of AtA).
+    # eigvals is not implemented on MPS; power iteration uses only matmul.
+    if AtA.device.type == "mps":
+        v = torch.ones(*AtA.shape[:-1], 1, device=AtA.device, dtype=AtA.dtype)
+        for _ in range(20):
+            v = AtA @ v
+            v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
+        L = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # (..., 1, 1)
+    else:
+        eigenvals = torch.linalg.eigvals(AtA).real  # (..., n)
+        L = eigenvals.max(dim=-1, keepdim=True)[0].unsqueeze(-1)  # (..., 1, 1)
 
     # Initialize variables
     x = torch.zeros(*batch_dims, n, k, device=A.device, dtype=A.dtype)
@@ -175,7 +366,7 @@ def nmf_torch_update_loadings_hals(
         print("NMF HALS loadings update reached max iterations without convergence.")
 
 
-@torch.compile
+@torch.compile()
 @torch.no_grad()
 def nmf_torch_update_loadings_hals_compiled(
     x_ng: torch.Tensor,
@@ -201,14 +392,10 @@ def nmf_torch_update_loadings_hals_compiled(
         for k in range(h_rnk.shape[-1]):
             numer_rn = xwT_rnk[..., k] - torch.einsum("rnk,rk->rn", h_rnk, wwT_rkk[..., k])
             h_rn = h_rnk[..., k]
-            
+
             # Avoid division by zero using torch.where instead of manual checks
             denom = wwT_rkk[:, k, k].unsqueeze(-1)
-            hvec_rn = torch.where(
-                denom > 1e-12,
-                torch.clamp(h_rn + numer_rn / denom, min=0.0),
-                torch.zeros_like(h_rn)
-            )
+            hvec_rn = torch.where(denom > 1e-12, torch.clamp(h_rn + numer_rn / denom, min=0.0), torch.zeros_like(h_rn))
             h_rnk[..., k] = hvec_rn
 
     return h_rnk, max_iter
@@ -228,24 +415,22 @@ def nmf_torch_update_loadings_hals_with_compile(
     # Use smaller chunks of iterations with convergence checks
     chunk_size = 10
     total_iterations = 0
-    
+
     while total_iterations < max_iter:
         h_old = h_rnk.clone()
         current_chunk = min(chunk_size, max_iter - total_iterations)
-        
+
         # Run compiled function for a chunk of iterations
-        h_rnk_new, _ = nmf_torch_update_loadings_hals_compiled(
-            x_ng, w_rkg, h_rnk, current_chunk, h_tol
-        )
+        h_rnk_new, _ = nmf_torch_update_loadings_hals_compiled(x_ng, w_rkg, h_rnk, current_chunk, h_tol)
         h_rnk.copy_(h_rnk_new)
-        
+
         total_iterations += current_chunk
-        
+
         # Check convergence
         max_change = (h_rnk - h_old).abs().max()
         mean_h = h_rnk.mean(dim=(-2, -1))
-        relative_change = (max_change / torch.clamp(mean_h.max(), min=1e-12))
-        
+        relative_change = max_change / torch.clamp(mean_h.max(), min=1e-12)
+
         if relative_change < h_tol:
             # print(f"NMF HALS loadings update converged in {total_iterations} iterations.")
             break
@@ -306,7 +491,7 @@ def nmf_torch_update_factors_hals(
         print("NMF HALS factors update reached max iterations without convergence.")
 
 
-@torch.compile
+@torch.compile()
 @torch.no_grad()
 def nmf_torch_update_factors_hals_compiled(
     w_rkg: torch.Tensor,
@@ -325,13 +510,9 @@ def nmf_torch_update_factors_hals_compiled(
         for k in range(A_rkk.shape[-1]):
             numer_rg = B_rkg[:, k, :] - torch.einsum("rk,rkg->rg", A_rkk[:, k, :], w_rkg)
             w_new_rg = w_rkg[:, k, :] + numer_rg / A_rkk[:, k, k].unsqueeze(-1)
-            
+
             # Avoid division by zero using torch.where instead of manual checks
-            w_new_rg = torch.where(
-                torch.isnan(w_new_rg),
-                torch.zeros_like(w_new_rg),
-                torch.clamp(w_new_rg, min=0.0)
-            )
+            w_new_rg = torch.where(torch.isnan(w_new_rg), torch.zeros_like(w_new_rg), torch.clamp(w_new_rg, min=0.0))
             w_rkg[:, k, :] = w_new_rg
 
     return w_rkg, max_iter
@@ -351,24 +532,22 @@ def nmf_torch_update_factors_hals_with_compile(
     # Use smaller chunks of iterations with convergence checks
     chunk_size = 10
     total_iterations = 0
-    
+
     while total_iterations < max_iter:
         w_old = w_rkg.clone()
         current_chunk = min(chunk_size, max_iter - total_iterations)
-        
+
         # Run compiled function for a chunk of iterations
-        w_rkg_new, _ = nmf_torch_update_factors_hals_compiled(
-            w_rkg, A_rkk, B_rkg, current_chunk, w_tol
-        )
+        w_rkg_new, _ = nmf_torch_update_factors_hals_compiled(w_rkg, A_rkk, B_rkg, current_chunk, w_tol)
         w_rkg.copy_(w_rkg_new)
-        
+
         total_iterations += current_chunk
-        
+
         # Check convergence
         max_change = (w_rkg - w_old).abs().max()
         mean_w = w_rkg.mean(dim=(-2, -1))
-        relative_change = (max_change / torch.clamp(mean_w.max(), min=1e-12))
-        
+        relative_change = max_change / torch.clamp(mean_w.max(), min=1e-12)
+
         if relative_change < w_tol:
             # print(f"NMF HALS factors update converged in {total_iterations} iterations.")
             break
@@ -822,6 +1001,7 @@ def online_dictionary_update_nmf_torch_hals(
     n_iterations: int = 200,
     alpha_tol: float = 0.05,
     D_tol: float = 0.05,
+    exponential_decay_rho: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     """
     Algorithm adapted from the nmf-torch github library.
@@ -835,6 +1015,7 @@ def online_dictionary_update_nmf_torch_hals(
         n_iterations: The number of iterations to perform.
         alpha_tol: The tolerance for the change in alpha for stopping.
         D_tol: The tolerance for the change in D for stopping.
+        exponential_decay_rho: The exponential decay factor for A and B updates (default: 1, no decay).
 
     Returns:
         dict with keys:
@@ -845,8 +1026,6 @@ def online_dictionary_update_nmf_torch_hals(
 
     n, g = x_ng.shape
     r, _, _ = factors_rkg.shape
-
-    # TODO: need access to local latent loadings_rnk for nmf-torch hals update
 
     # inplace update loadings_rnk
     nmf_torch_update_loadings_hals_with_compile(
@@ -859,8 +1038,8 @@ def online_dictionary_update_nmf_torch_hals(
 
     with torch.no_grad():
         # update A and B, Mairal Algorithm 1 step 5 and 6
-        A_rkk = A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
-        B_rkg = B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+        A_rkk = exponential_decay_rho * A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
+        B_rkg = exponential_decay_rho * B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
 
     # inplace update factors_rkg
     nmf_torch_update_factors_hals_with_compile(
@@ -872,6 +1051,71 @@ def online_dictionary_update_nmf_torch_hals(
     )
 
     return {"factors_rkg": factors_rkg, "A_rkk": A_rkk, "B_rkg": B_rkg}
+
+
+def online_dictionary_update_fista(
+    x_ng: torch.Tensor,
+    factors_rkg: torch.Tensor,
+    loadings_rnk: torch.Tensor,
+    A_rkk: torch.Tensor,
+    B_rkg: torch.Tensor,
+    n_iterations: int = 100,
+    exponential_decay_rho: float = 1.0,
+    return_history: bool = False,
+) -> dict[str, torch.Tensor]:
+    """
+    Algorithm adapted from the nmf-torch github library.
+
+    Args:
+        x_ng: The data.
+        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+        loadings_rnk: The matrix of cell loadings (Mairal's coefficients alpha).
+        A_rkk: Mairal's matrix A.
+        B_rkg: Mairal's matrix B.
+        n_iterations: The number of iterations to perform.
+        exponential_decay_rho: The exponential decay factor for A and B updates (default: 1, no decay).
+
+    Returns:
+        dict with keys:
+            "factors_rkg": The updated dictionary factors_rkg.
+            "A_rkk": The updated matrix A.
+            "B_rkg": The updated matrix B.
+    """
+
+    n, g = x_ng.shape
+    r, _, _ = factors_rkg.shape
+
+    # update loadings_rnk
+    loadings_rnk, loadings_history = nmf_compute_loadings_fista(
+        x_ng=x_ng,
+        w_rkg=factors_rkg,
+        h_rnk=loadings_rnk,
+        max_iter=n_iterations,
+        return_history=return_history,
+    )
+
+    with torch.no_grad():
+        # update A and B, Mairal Algorithm 1 step 5 and 6
+        A_rkk = exponential_decay_rho * A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
+        B_rkg = exponential_decay_rho * B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+
+    # update factors_rkg
+    factors_rkg, factors_history = nmf_compute_factors_fista(
+        w_rkg=factors_rkg,
+        A_rkk=A_rkk,
+        B_rkg=B_rkg,
+        max_iter=n_iterations,
+        return_history=return_history,
+    )
+
+    return {
+        "factors_rkg": factors_rkg,
+        "A_rkk": A_rkk,
+        "B_rkg": B_rkg,
+        "loadings_rnk": loadings_rnk,
+        "loadings_history": loadings_history,
+        "factors_history": factors_history,
+    }
 
 
 def online_dictionary_update_mairal(
@@ -991,8 +1235,6 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
         self.k_values = k_values
-        # Create the HVG filter transform that all implementations will need
-        self.transform__filter_to_hvgs = Filter([str(s) for s in self.var_names_g])
 
     @property
     @abstractmethod
@@ -1062,7 +1304,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
     **References:**
 
-    1. `Online learning for matrix factorization and sparse coding. Mairal, Bach, Ponce, Sapiro. JMLR 2009.
+    1. `Online learning for matrix factorization and sparse coding. Mairal, Bach, Ponce, Sapiro. JMLR 2009.`
 
     Args:
         var_names_g: The variable names schema for the input data: should be highly variable genes.
@@ -1072,8 +1314,8 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         init: The initialization method to use for the NMF factors, in ["sklearn_random", "uniform_random"].
         transformed_data_mean: The mean of the transformed data, used for initialization if an only if
             `init` is "sklearn_random".
-        n_cells_total: The total number of cells in the dataset. Required if algorithm is "nmf_torch_hals".
-        early_stopping: Whether to use early stopping based on reconstruction error.
+        n_cells_total: The total number of cells in the dataset, used for initialization if and only if
+            `algorithm` is "nmf_torch_hals".
     """
 
     def __init__(
@@ -1244,40 +1486,28 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
         return {}
 
-    @torch.compile
+    # @torch.compile()
     @torch.no_grad()
     def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
         """
         Simple and efficient NMF reconstruction loss computation.
         Computes ||X - WH||_F^2 for the current batch.
         """
-        with torch.no_grad():
-            for i, k in enumerate(self.k_values):
-                factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
-                loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
-                
-                # Compute reconstruction: WH for current batch using einsum
-                # loadings_rnk: (r, batch_size, k), factors_rkg: (r, k, g)
-                # -> reconstruction_rng: (r, batch_size, g)
-                reconstruction_rng = torch.einsum("rnk,rkg->rng", loadings_rnk, factors_rkg)
-                
-                # Compute squared reconstruction error using einsum
-                # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
-                x_expanded_rng = x_ng.unsqueeze(0).expand(self.r, -1, -1)  # (r, batch_size, g)
-                
-                # Compute squared Frobenius norm for each replicate
-                squared_error_r = F.mse_loss(
-                    x_expanded_rng, 
-                    reconstruction_rng, 
-                    reduction='none'
-                ).sum(dim=[1, 2])
-                # print(f"squared_error_r: {squared_error_r[:5]}")
-                
-                # Accumulate the squared error
-                self._err_running_sum_rk[:, i] += squared_error_r
-            
-            # Track cells seen in this epoch
-            self._cells_seen_in_epoch += x_ng.shape[0]
+        for i, k in enumerate(self.k_values):
+            factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
+            loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
+
+            squared_error_r = compute_reconstruction_error_compiled(
+                x_ng=x_ng,
+                loadings_rnk=loadings_rnk,
+                factors_rkg=factors_rkg,
+            )  # (r,)
+
+            # Accumulate the squared error
+            self._err_running_sum_rk[:, i] += squared_error_r
+
+        # Track cells seen in this epoch
+        self._cells_seen_in_epoch += x_ng.shape[0]
 
     # def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
     #     with torch.no_grad():
@@ -1318,9 +1548,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             assert isinstance(self._init_err_rk, torch.Tensor)
 
             current_overall_err_rk = torch.abs((self._prev_err_rk - cur_err_rk) / self._init_err_rk)
-            if (
-                self.early_stopping and (current_overall_err_rk.max() < self._hals_tol)
-            ):
+            if current_overall_err_rk.max() < self._hals_tol:
                 trainer.should_stop = True
                 print(f"Stopping early: converged, loss={cur_err_rk}")
 
@@ -1353,21 +1581,20 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         Infer the loadings of each program for the input count matrix.
         To be run after the model has been trained.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        x_filtered_ng = self.transform__filter_to_hvgs(x_ng, var_names_g)["x_ng"]
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         D_kg = consensus_factors[k]["consensus_D_kg"]
         assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
 
         # compute loadings, Mairal Algorithm 1 step 4
         # alpha_nk = compute_loadings(
-        #     x_ng=x_filtered_ng,
-        #     factors_rkg=D_kg.to(x_filtered_ng.device).unsqueeze(0),
+        #     x_ng=x_ng,
+        #     factors_rkg=D_kg.to(x_ng.device).unsqueeze(0),
         #     n_iterations=1000,
         #     alpha_tol=self._alpha_tol,
         # ).squeeze(0)
         alpha_nk = (
             solve_nnls_fista(
-                D_kg.to(x_filtered_ng.device).unsqueeze(0).transpose(1, 2),
+                D_kg.to(x_ng.device).unsqueeze(0).transpose(1, 2),
                 x_ng.t(),
                 tol=self._alpha_tol * 0.1,
                 max_iter=1000,
@@ -1399,8 +1626,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         Returns:
             A dictionary mapping each k_value to its reconstruction error.
         """
-        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
-        x_filtered_ng = self.transform__filter_to_hvgs(x_ng, var_names_g)["x_ng"]
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         rec_error = {}
         for k in consensus_factors.keys():
@@ -1410,7 +1636,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 raise ValueError("D_kg is all zeros, please train the model and run compute_consensus_factors() first")
 
             alpha_nk = self.infer_loadings(
-                x_ng=x_filtered_ng,
+                x_ng=x_ng,
                 var_names_g=var_names_g,
                 consensus_factors=consensus_factors,
                 k=k,
@@ -1419,9 +1645,9 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
             rec_error[k] = (
                 nmf_frobenius_loss(
-                    x_ng=x_filtered_ng,
-                    loadings_nk=alpha_nk.to(x_filtered_ng.device),
-                    factors_kg=D_kg.to(x_filtered_ng.device),
+                    x_ng=x_ng,
+                    loadings_nk=alpha_nk.to(x_ng.device),
+                    factors_kg=D_kg.to(x_ng.device),
                 )
                 .sum()
                 .item()
@@ -1676,7 +1902,7 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
             plt.ylabel("Number of NMF factors\n(total is replicates times k)")
             plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
             plt.xlim([-0.05, 1.05])
-            plt.show()
+            # plt.show()
             return
 
         # filter out runs considered outliers based on threshold
@@ -1815,7 +2041,7 @@ def k_selection_plot(
     plt.ylabel("Reconstruction error", color="r")
     plt.gca().tick_params(axis="y", colors="r")
     plt.grid(False)
-    plt.show()
+    # plt.show()
 
 
 def plot_clustermap(
@@ -1862,13 +2088,171 @@ def plot_clustermap(
     plt.ylabel("Number of NMF factors\n(total is replicates times k)")
     plt.xlabel(f"Average distance to nearest {consensus_output[k]['n_neighbors']} neighbors")
     plt.xlim([-0.05, 1.05])
-    plt.show()
+    # plt.show()
+
+
+def is_subclass_by_name(instance, class_name):
+    # Search the Method Resolution Order for the target class name
+    return any(c.__name__ == class_name for c in type(instance).__mro__)
 
 
 class NMFOutput:
     """
     A class to facilitate interaction with a trained NMF model and computation of downstream outputs.
     """
+
+    @staticmethod
+    def combine_nmf_modules(nmf_modules: list["cellarium.ml.CellariumModule"]) -> "cellarium.ml.CellariumModule":
+        """
+        Combine multiple NMF modules trained with different k into a single module for consensus analysis.
+
+        Args:
+            nmf_modules: A list of NMF modules trained with different k.
+        Returns:
+            A single NMF module with the same model architecture but with factors from all input modules.
+        """
+        if len(nmf_modules) == 0:
+            raise ValueError("nmf_modules list cannot be empty")
+
+        base_module = nmf_modules[0]
+        for module in nmf_modules[1:]:
+            if not isinstance(module.model, NonNegativeMatrixFactorization):
+                raise ValueError("All modules must have a NonNegativeMatrixFactorization model")
+            if module.datamodule != base_module.datamodule:
+                raise ValueError("All modules must have the same datamodule")
+
+        combined_model = NonNegativeMatrixFactorization(
+            var_names_g=base_module.model.var_names_g,
+            k_values=[k for module in nmf_modules for k in module.model.k_values],
+            r=nmf_modules[0].model.r,
+            algorithm=nmf_modules[0].model.algorithm,
+            init=nmf_modules[0].model.init,
+            transformed_data_mean=nmf_modules[0].model.transformed_data_mean,
+        )
+
+        # copy factors from each module into combined model
+        for module in nmf_modules:
+            for k in module.model.k_values:
+                setattr(combined_model, f"D_{k}_rkg", getattr(module.model, f"D_{k}_rkg").clone())
+
+        combined_module = cellarium.ml.CellariumModule(model=combined_model, datamodule=base_module.datamodule)
+        return combined_module
+
+    @classmethod
+    def from_checkpoints(
+        cls,
+        checkpoint_paths: list[str],
+        datamodule: "cellarium.ml.CellariumAnnDataDataModule",
+        map_location: str | torch.device = "cpu",
+    ) -> "NMFOutput":
+        """
+        Construct an :class:`NMFOutput` from a list of checkpoint files, loading one checkpoint
+        at a time to avoid holding all model weights in memory simultaneously.
+
+        Two checkpoint splitting strategies are supported (and may be freely mixed):
+
+        - **Split-by-k**: each checkpoint was trained on a disjoint set of k values.  The
+          ``D_{k}_rkg`` tensors are placed directly into the combined model.
+        - **Split-by-r**: each checkpoint was trained on the same k values but with a different
+          (possibly smaller) number of replicates.  The ``D_{k}_rkg`` tensors are concatenated
+          along the replicate dimension (dim 0).
+
+        .. note::
+            All checkpoints are assumed to have been trained with identical transforms and the
+            same set of HVGs (``var_names_g``).  Only ``var_names_g`` is validated for
+            consistency across checkpoints; transform agreement is not checked.
+
+        Args:
+            checkpoint_paths: Ordered list of paths to ``.ckpt`` files produced by training an
+                :class:`OnlineNonNegativeMatrixFactorization` model.
+            datamodule: The datamodule to use for consensus and downstream analyses.
+            map_location: Device onto which checkpoint tensors are loaded.  Defaults to
+                ``"cpu"`` to keep peak memory low regardless of GPU availability.
+
+        Returns:
+            A fully constructed :class:`NMFOutput` instance whose ``nmf_module.model`` carries
+            the union of all ``D_{k}_rkg`` factor tensors from every checkpoint.
+        """
+        import cellarium.ml
+
+        if not checkpoint_paths:
+            raise ValueError("checkpoint_paths must not be empty")
+
+        # d_tensors_per_k accumulates a list of (r_i, k, g) tensors for each k value seen.
+        # Multiple checkpoints may contribute tensors for the same k (split-by-r scenario);
+        # they will be concatenated along dim 0.
+        d_tensors_per_k: dict[int, list[torch.Tensor]] = {}
+        reference_var_names_g: np.ndarray | None = None
+        saved_transforms: list | None = None
+
+        for i, path in _fresh_tqdm(enumerate(checkpoint_paths), total=len(checkpoint_paths)):
+            module = cellarium.ml.CellariumModule.load_from_checkpoint(path, map_location=map_location, strict=False)
+
+            model = module.model
+            if not is_subclass_by_name(model, "NonNegativeMatrixFactorization"):
+                raise ValueError(
+                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, got {type(model).__name__}"
+                )
+
+            if reference_var_names_g is None:
+                reference_var_names_g = model.var_names_g.copy()
+                # Fold cpu_transforms in front of transforms so the combined module
+                # needs no cpu_transforms machinery.
+                saved_transforms = list(module.cpu_transforms) + list(module.transforms)
+            else:
+                if not np.array_equal(model.var_names_g, reference_var_names_g):
+                    raise ValueError(
+                        f"var_names_g mismatch between checkpoint 0 and checkpoint {i} ({path!r}). "
+                        "All checkpoints must have been trained on the same set of HVGs."
+                    )
+
+            for k in model.k_values:
+                d_tensor = model.factors_dict[k].cpu().clone()  # shape (r_i, k, g)
+                if k not in d_tensors_per_k:
+                    d_tensors_per_k[k] = []
+                d_tensors_per_k[k].append(d_tensor)
+
+            del module
+            gc.collect()
+
+        assert reference_var_names_g is not None
+        assert saved_transforms is not None
+
+        # For split-by-r: concatenate tensors along the replicate dimension.
+        final_d_per_k: dict[int, torch.Tensor] = {
+            k: torch.cat(tensors, dim=0) for k, tensors in d_tensors_per_k.items()
+        }
+        all_k_values = sorted(final_d_per_k.keys())
+
+        # Build a shell model.  algorithm="mairal" avoids allocating loadings_{k}_rnk buffers
+        # (which would be (r, n_cells_total, k) and are the root cause of the memory problem).
+        # r=1 is a placeholder; every D buffer is overwritten immediately below.
+        combined_model = OnlineNonNegativeMatrixFactorization(
+            var_names_g=list(reference_var_names_g),
+            k_values=all_k_values,
+            r=1,
+            algorithm="mairal",
+            init="uniform_random",
+        )
+        for k, d_tensor in final_d_per_k.items():
+            # PyTorch routes setattr through _buffers when the name is a registered buffer,
+            # so this correctly replaces the (1, k, g) placeholder with (r_combined, k, g).
+            setattr(combined_model, f"D_{k}_rkg", d_tensor)
+
+        # is_initialized=True prevents configure_model() from calling reset_parameters(),
+        # which would overwrite the D tensors we just set.
+        # cpu_transforms are folded into transforms to avoid the cpu_transforms machinery.
+        combined_module = cellarium.ml.CellariumModule(
+            cpu_transforms=None,
+            transforms=saved_transforms if saved_transforms else None,
+            model=combined_model,
+            is_initialized=True,
+        )
+        # configure_model() sets up the pipeline so that nmf_module.model is accessible.
+        # With is_initialized=True it is a no-op with respect to parameter initialisation.
+        combined_module.configure_model()
+
+        return cls(nmf_module=combined_module, datamodule=datamodule)
 
     def __init__(
         self,
@@ -1893,6 +2277,14 @@ class NMFOutput:
         self._tpm_B_kg: torch.Tensor | None = None
         if not isinstance(self.nmf_module.model, NonNegativeMatrixFactorization):
             raise ValueError("NMFOutput requires nmf_module with a NonNegativeMatrixFactorization in nmf_module.model")
+        # Extract Filter and DivideByScale from the full transform list (cpu + gpu).
+        # These are used by _refit, which receives raw data and must filter and normalize
+        # internally (because it also needs the raw all-gene data for the TPM branch).
+        _all_transforms = list(nmf_module.cpu_transforms) + list(nmf_module.transforms)
+        self._hvg_filter: Filter | None = next((t for t in _all_transforms if isinstance(t, Filter)), None)
+        self._scale_normalizer: DivideByScale | None = next(
+            (t for t in _all_transforms if isinstance(t, DivideByScale)), None
+        )
 
     def __repr__(self) -> str:
         indent = "    "
@@ -1966,7 +2358,9 @@ class NMFOutput:
         """
         assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
         rec_error = {k: 0.0 for k in self.nmf_module.model.k_values}
-        for batch in tqdm(self.datamodule.train_dataloader()):
+        for batch in _fresh_tqdm(self.datamodule.predict_dataloader()):
+            for transform in self.nmf_module.transforms:
+                batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
             errors_keyed_by_k = self.nmf_module.model.reconstruction_error(
                 x_ng=batch["x_ng"],
                 var_names_g=batch["var_names_g"],
@@ -2006,7 +2400,8 @@ class NMFOutput:
         else:
             datamodule.setup(stage="predict")  # as this may not have been called... cpu_transforms are tricky here
 
-        # TODO fix this hacky manual stuff
+        # TODO fix this hacky manual stuff (appropriate fix would be to call predict on the module
+        # and have model predict be infer_loadings)
         # grab the transforms
         transforms = []
         # for transform in self.nmf_module.cpu_transforms:
@@ -2016,7 +2411,7 @@ class NMFOutput:
 
         embedding = []
         index = []
-        for batch in tqdm(datamodule.predict_dataloader()):
+        for batch in _fresh_tqdm(datamodule.predict_dataloader()):
             # apply transforms to the data before inferring loadings
             for transform in transforms:
                 batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
@@ -2035,109 +2430,78 @@ class NMFOutput:
         return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
 
     @torch.no_grad()
-    def refit_consensus_factor_for_all_genes(
+    def refit_consensus_factors_zscored_tpm_all_genes(
         self,
         k: int,
-        normalize_tpm_spectra: bool,
-    ) -> dict[str, torch.Tensor]:
-        print("WARNING: at this point, the cellarium implmentation may differ from Kotliar cNMF")
+        normalize_loadings: bool = False,
+        mean_g: torch.Tensor | None = None,
+        std_g: torch.Tensor | None = None,
+        var_names_g: np.ndarray | None = None,
+    ) -> dict[str, torch.Tensor | np.ndarray]:
+        """
+        Refit the consensus factors using all genes, after TPM normalization, and Z-scoring.
+
+        Args:
+            k: The run identifier, i.e. the number of factors to use from self.consensus to refit.
+            normalize_loadings: Whether to normalize the inferred loadings. False for Kotliar default.
+            mean_g: The mean expression of each gene for Z-scoring.
+                NOTE: should be TPM normalized stats.
+            std_g: The standard deviation of each gene for Z-scoring.
+            var_names_g: The names of the genes for Z-scoring.
+
+        Returns:
+            A dictionary mapping factor indices to their refitted loadings.
+        """
         if k not in self.consensus:
             raise KeyError(f"Missing consensus_factors key k={k}. Choose from {list(self.consensus.keys())}")
-        # self.datamodule.setup(stage="predict")
+        assert self.datamodule is not None, "datamodule must be present to refit consensus factors"
+        self.datamodule.setup(stage="predict")
 
-        # Initialize tensors if needed
-        if self._tpm_D_kg is None:
-            consensus_D_kg = self.consensus[k]["consensus_D_kg"]
-            assert isinstance(consensus_D_kg, torch.Tensor)
-            self._tpm_D_kg = consensus_D_kg.clone()
-            self._tpm_A_kk = torch.zeros(k, k, device=consensus_D_kg.device)
-            self._tpm_B_kg = torch.zeros(k, consensus_D_kg.shape[1], device=consensus_D_kg.device)
+        # set up transforms
+        refit_transforms = [
+            NormalizeTotal(target_count=1_000_000),
+            ZScore(mean_g=mean_g, std_g=std_g, var_names_g=var_names_g, eps=1e-12),
+        ]
+        inference_transforms = self.nmf_module.transforms
 
-        for batch in tqdm(self.datamodule.predict_dataloader()):
-            # Get std_g for normalization
-            x_ng = batch["x_ng"]
-            std_g = torch.std(x_ng, dim=0) + 1e-4
+        # set up streaming OLS solver
+        ols_solver = None
 
-            consensus_D_kg = self.consensus[k]["consensus_D_kg"]
-            assert isinstance(consensus_D_kg, torch.Tensor)
-            assert self._tpm_D_kg is not None
-            assert self._tpm_A_kk is not None
-            assert self._tpm_B_kg is not None
+        dataloader = self.datamodule.predict_dataloader()
+        for full_batch in _fresh_tqdm(dataloader):
+            # get the batch used for inference (HVGs, same transforms as used for training)
+            inference_batch = copy.deepcopy(full_batch)
+            for transform in inference_transforms:
+                inference_batch |= call_func_with_batch(transform.forward, batch=inference_batch)
 
-            refit = self._refit(
-                x_ng=x_ng,
-                var_names_g=batch["var_names_g"],
-                std_g=std_g.numpy(),
-                consensus_D_kg=consensus_D_kg,
-                refit_D_kg=self._tpm_D_kg,
-                A_kk=self._tpm_A_kk,
-                B_kg=self._tpm_B_kg,
-                normalize_tpm_spectra=normalize_tpm_spectra,
-            )
-            self._tpm_D_kg = refit["D_kg"]
-            self._tpm_A_kk = refit["A_kk"]
-            self._tpm_B_kg = refit["B_kg"]
-
-        # Ensure all return values are tensors
-        assert self._tpm_D_kg is not None
-        assert self._tpm_A_kk is not None
-        assert self._tpm_B_kg is not None
-        return {"D_kg": self._tpm_D_kg, "A_kk": self._tpm_A_kk, "B_kg": self._tpm_B_kg}
-
-    def _refit(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        std_g: np.ndarray,
-        consensus_D_kg: torch.Tensor,
-        refit_D_kg: torch.Tensor,
-        A_kk: torch.Tensor,
-        B_kg: torch.Tensor,
-        normalize_tpm_spectra: bool,
-    ) -> dict[str, torch.Tensor]:
-        # filter to HVGs to compute the loadings according to the model
-        assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
-        x_filtered_ng = self.nmf_module.model.transform__filter_to_hvgs(x_ng, var_names_g)["x_ng"]
-
-        # get the final alpha_nk - no log_variational attribute, use std normalization
-        x_ = x_filtered_ng / torch.from_numpy(std_g).to(x_filtered_ng.device)
-
-        # compute loadings, called "norm_usages" in Kotliar, based on consensus factors
-        k = consensus_D_kg.shape[0]
-        alpha_rnk = self.nmf_module.model.infer_loadings(
-            x_ng=x_,
-            var_names_g=var_names_g,
-            consensus_factors={k: {"consensus_D_kg": consensus_D_kg}},
-            k=k,
-            normalize=False,
-        )
-
-        # normalize counts to TPM
-        if normalize_tpm_spectra:
-            tpm_transform = NormalizeTotal(target_count=1_000_000)
-            x_ng = tpm_transform(x_ng)
-        n, g = x_ng.shape
-        r = 1
-
-        with torch.no_grad():
-            # update A and B, Mairal Algorithm 1 step 5 and 6
-            A_rkk = A_kk.unsqueeze(0) + torch.bmm(alpha_rnk.transpose(1, 2), alpha_rnk) / n
-            B_rkg = B_kg.unsqueeze(0) + torch.bmm(alpha_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
-
-            # update D, Mairal Algorithm 1 step 7
-            updated_factors_rkg = compute_factors(
-                factors_rkg=refit_D_kg.unsqueeze(0),
-                A_rkk=A_rkk,
-                B_rkg=B_rkg,
-                n_iterations=1000,
-                D_tol=self.nmf_module.model._D_tol,
+            # infer per-cell loadings for consensus factors for this minibatch
+            loadings_nk = self.nmf_module.model.infer_loadings(
+                x_ng=inference_batch["x_ng"],
+                var_names_g=inference_batch["var_names_g"],
+                obs_names_n=inference_batch.get("obs_names_n", None),
+                consensus_factors=self.consensus,
+                k=k,
+                normalize=normalize_loadings,
             )
 
-        # # update A and B
-        # D_kg, A_kk, B_kg = efficient_ols_all_cols(
-        #     alpha_nk.cpu().numpy(), x_ng.cpu().numpy(), A_kk.cpu().numpy(), B_kg.cpu().numpy()
-        # )
-        return {"D_kg": updated_factors_rkg.squeeze(0), "A_kk": A_rkk.squeeze(0), "B_kg": B_rkg.squeeze(0)}
+            # get the batch used for refitting (all genes, TPM normalized, Z-scored globally - different from training)
+            for transform in refit_transforms:
+                full_batch |= call_func_with_batch(transform.forward, batch=full_batch)
+
+            # incremental OLS fit update
+            if ols_solver is None:
+                ols_solver = StreamingOrdinaryLeastSquares(
+                    var_names_g=np.arange(k).astype(str),
+                    n_targets=len(full_batch["var_names_g"]),
+                    univariate=False,
+                    ridge_penalty=0.0,
+                )
+            assert isinstance(ols_solver, StreamingOrdinaryLeastSquares)
+            ols_solver.update(x_ng=loadings_nk, y_nk=full_batch["x_ng"])
+
+        # finalize OLS fit
+        factors_kg = ols_solver.solve()
+        return {"factors_kg": factors_kg, "var_names_g": full_batch["var_names_g"]}
 
     def default_k_selection_plot(self):
         """
@@ -2183,7 +2547,7 @@ class NMFOutput:
                 this fraction of NMF runs.
         """
         logger.info("Computing consensus factors, searching for best density thresholds...")
-        for k in tqdm(self.nmf_module.model.k_values):
+        for k in _fresh_tqdm(self.nmf_module.model.k_values):
             if fast_or_exhaustive == "fast":
                 # try to look for local minima in the density histogram
                 # first compute preliminary consensus to get neighbor distances
@@ -2297,3 +2661,139 @@ class NMFOutput:
                 consensus_output=self.consensus,
                 k=k_val,
             )
+
+
+def kotliar_compute_hvgs(
+    mean_g: np.array,
+    var_g: np.array,
+    var_names_g: np.array,
+    num_genes: int | None = 2000,
+    expected_fano_threshold: float | None = None,
+    minimal_mean: float = 0.5,
+    plot: bool = False,
+):
+    """
+    Helper function to run the highly variable gene selection procedure from Kotliar et al. 2019,
+    implemented in the function ``get_highvar_genes_sparse`` in the dylkot/cNMF repository.
+    Modified to work in cellarium based on a run of a onepass_mean_var_std model on the data.
+
+    NOTE: taken from
+    https://github.com/dylkot/cNMF/blob/5dbc5baaa0b9079b55bce554d801caa235a50457/src/cnmf/cnmf.py#L136-L188
+
+    Args:
+        mean_g: The mean expression levels of genes
+        var_g: The variance of expression levels of genes
+        var_names_g: The names of the genes
+        num_genes: The number of highly variable genes to select. If None, uses a threshold-based approach
+        expected_fano_threshold: If num_genes is None, this threshold is used to select highly variable genes
+            based on their Fano factor relative to the expected Fano factor. If None, a default threshold is
+            computed based on the standard deviation of the Fano factors of genes that pass a winsorized box filter.
+        minimal_mean: The minimum mean expression level for a gene to be considered highly variable.
+            This is used only in the threshold-based approach (i.e. when num_genes is None)
+        plot: Whether to plot the mean-variance relationship and the Fano factor distribution. Useful for debugging.
+
+    Returns:
+        A DataFrame with columns
+        - mean: The mean expression level of each gene
+        - var: The variance of each gene
+        - fano: The Fano factor of each gene (variance / mean)
+        - fano_fit: The expected Fano factor of each gene based on the fitted line
+        - fano_ratio: The ratio of the observed Fano factor to the expected Fano factor
+        - highly_variable: A boolean indicating whether the gene is selected as highly variable
+    """
+
+    df = pd.DataFrame({"mean_g": mean_g, "var_g": var_g, "fano_g": var_g / mean_g}, index=var_names_g)
+
+    # Find parameters for expected fano line
+    top_genes = df["mean_g"].sort_values(ascending=False)[:20].index
+    A = (np.sqrt(df["var_g"]) / df["mean_g"])[top_genes].min()
+
+    w_mean_low, w_mean_high = df["mean_g"].quantile([0.10, 0.90])
+    w_fano_low, w_fano_high = df["fano_g"].quantile([0.10, 0.90])
+    winsor_box_logic = (
+        (df["fano_g"] > w_fano_low)
+        & (df["fano_g"] < w_fano_high)
+        & (df["mean_g"] > w_mean_low)
+        & (df["mean_g"] < w_mean_high)
+    )
+    fano_median = df["fano_g"][winsor_box_logic].median()
+    B = np.sqrt(fano_median)
+
+    df["fano_fit_g"] = (A**2) * df["mean_g"] + (B**2)
+    df["fano_ratio_g"] = df["fano_g"] / df["fano_fit_g"]
+
+    # Identify high var genes
+    if num_genes is not None:
+        hvg_var_names = df["fano_ratio_g"].sort_values(ascending=False).index[:num_genes]
+        hvg_logic_g = df.index.isin(hvg_var_names)
+        T = None
+    else:
+        if not expected_fano_threshold:
+            T = 1.0 + df["fano_g"][winsor_box_logic].std()
+        else:
+            T = expected_fano_threshold
+        hvg_logic_g = (df["fano_ratio_g"] > T) & (df["mean_g"] > minimal_mean)
+
+    df["highly_variable_g"] = hvg_logic_g
+
+    if plot:
+        import matplotlib.pyplot as plt
+
+        plt.figure(figsize=(12, 3.5))
+        plt.subplot(1, 3, 1)
+        plt.scatter(df["mean_g"], df["var_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["var_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Mean expression")
+        plt.ylabel("Variance of expression")
+        plt.title("Gene mean vs. variance")
+        plt.legend()
+
+        plt.subplot(1, 3, 2)
+        plt.scatter(df["mean_g"], df["fano_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["fano_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
+        order = np.argsort(df["mean_g"])
+        plt.plot(df["mean_g"][order], df["fano_fit_g"][order], color="k", linestyle="--")
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Mean expression")
+        plt.ylabel("Fano factor")
+        plt.title("Gene mean vs. Fano factor")
+        plt.legend()
+
+        plt.subplot(1, 3, 3)
+        plt.scatter(df["mean_g"], df["fano_ratio_g"], s=2, alpha=1, color="lightgray", label="All genes")
+        plt.scatter(
+            df["mean_g"][hvg_logic_g],
+            df["fano_ratio_g"][hvg_logic_g],
+            s=4,
+            alpha=0.2,
+            color="r",
+            label="Highly variable genes",
+        )
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Mean expression")
+        plt.ylabel("Fano ratio")
+        plt.title("Gene mean vs. Fano ratio")
+        plt.legend()
+        plt.tight_layout()
+        # plt.show()
+
+    df = df.rename(columns={c: c.split("_g")[0] for c in df.columns})
+    return df

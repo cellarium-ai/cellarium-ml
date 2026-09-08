@@ -98,6 +98,9 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         persistent_workers:
             If ``True``, the data loader will not shut down the worker processes after a dataset has been consumed once.
             This allows to maintain the workers ``Dataset`` instances alive.
+        pin_memory:
+            If ``True``, the data loader will copy Tensors into device/CUDA pinned memory before returning them.
+            This enables faster host-to-device transfers when training on GPU.
     """
 
     def __init__(
@@ -113,12 +116,14 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         drop_incomplete_batch: bool = False,
         train_size: float | int | None = None,
         val_size: float | int | None = None,
+        pred_size: float | int | None = None,
         worker_seed: int | None = None,
         test_mode: bool = False,
         # DataLoader args
         num_workers: int = 0,
         prefetch_factor: int | None = None,
         persistent_workers: bool = False,
+        pin_memory: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(logger=False)
@@ -134,6 +139,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.shuffle_seed = shuffle_seed
         self.drop_last_indices = drop_last_indices
         self.n_train, self.n_val = train_val_split(len(dadc), train_size, val_size)
+        if pred_size is not None:
+            _, self.n_pred = train_val_split(len(dadc), None, pred_size)
+        else:
+            self.n_pred = len(dadc)
         self.worker_seed = worker_seed
         self.test_mode = test_mode
         # DataLoader args
@@ -142,6 +151,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.drop_incomplete_batch = drop_incomplete_batch
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
+        self.pin_memory = pin_memory
 
     def setup(self, stage: str | None = None) -> None:
         """
@@ -196,6 +206,8 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                start_idx=len(self.dadc) - self.n_pred,
+                end_idx=len(self.dadc),
             )
 
         if stage == "test":
@@ -220,6 +232,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
         )
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
@@ -230,6 +243,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
         )
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
@@ -240,6 +254,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
         )
 
     def test_dataloader(self) -> torch.utils.data.DataLoader:
@@ -250,6 +265,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
         )
 
     def state_dict(self) -> dict[str, Any]:

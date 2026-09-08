@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
-from collections.abc import Sequence
+import shutil
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
@@ -18,6 +19,7 @@ def write_prediction(
     obs_names_n: np.ndarray,
     output_dir: Path | str,
     postfix: int | str,
+    fields: Mapping[str, np.ndarray | torch.Tensor] | None = None,
     gzip: bool = True,
     executor: ThreadPoolExecutor | None = None,
 ) -> None:
@@ -33,6 +35,10 @@ def write_prediction(
             The directory to write the prediction to.
         postfix:
             A postfix to add to the CSV file name.
+        fields:
+            Additional fields to write to the CSV file. The keys of the mapping will be used as
+            column names, and the values will be written as columns in the CSV file. The values
+            must have the same number of rows as the prediction. If ``None``, no additional fields will be written.
         gzip:
             Whether to compress the CSV file using gzip.
         executor:
@@ -41,6 +47,9 @@ def write_prediction(
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     df = pd.DataFrame(prediction.cpu())
+    if fields is not None:
+        for field_name, field_data in fields.items():
+            df.insert(0, field_name, field_data)
     df.insert(0, "obs_names_n", obs_names_n)
     output_path = os.path.join(output_dir, f"batch_{postfix}.csv" + (".gz" if gzip else ""))
     to_csv_kwargs: dict[str, str | bool] = {"header": False, "index": False}
@@ -122,20 +131,44 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
         key: str = "x_ng",
         gzip: bool = True,
         max_threadpool_workers: int = 8,
+        field_names: Sequence[str] | None = None,
     ) -> None:
         super().__init__(write_interval="batch")
         self.output_dir = output_dir
         self.prediction_size = prediction_size
+        self.field_names = field_names
         self.key = key
         self.executor = BoundedThreadPoolExecutor(
             max_workers=max_threadpool_workers,
             max_queue_size=max_threadpool_workers * 2,
         )
         self.gzip = gzip
+        self.sufficient_disk_space_exists: bool | None = None
 
     def __del__(self):
         """Ensure the executor shuts down on object deletion."""
         self.executor.shutdown(wait=True)
+
+    def check_disk_space(self, num_files: int | float) -> bool | None:
+        """Check if there is enough disk space to write all predictions.
+
+        Args:
+            num_files:
+                The total number of files to be written (num_predict_batches).
+
+        Returns:
+            bool | None:
+                True if there is enough disk space to write all predictions, False otherwise.
+                None if the first output file does not exist yet.
+        """
+        first_file_path = os.path.join(self.output_dir, "batch_0.csv" + (".gz" if self.gzip else ""))
+        if not os.path.isfile(first_file_path):
+            return None
+        first_file_size = os.path.getsize(first_file_path)  # single file in bytes
+        total_required_space = first_file_size * num_files  # total required space in bytes
+        usage = shutil.disk_usage(self.output_dir)
+        available_space = usage.free  # free space in bytes
+        return total_required_space <= available_space
 
     def write_on_batch_end(
         self,
@@ -162,11 +195,22 @@ class PredictionWriter(pl.callbacks.BasePredictionWriter):
                 "PredictionWriter callback requires the batch_key 'obs_names_n'. Add this to the YAML config."
             )
         assert isinstance(batch["obs_names_n"], np.ndarray)
+        if self.field_names is None:
+            fields = None
+        else:
+            fields = {field_name: batch[field_name] for field_name in self.field_names}
         write_prediction(
             prediction=prediction_np,
             obs_names_n=batch["obs_names_n"],
             output_dir=self.output_dir,
             postfix=batch_idx * trainer.world_size + trainer.global_rank,
+            fields=fields,
             gzip=self.gzip,
             executor=self.executor,
         )
+
+        # check output directory for sufficient disk space once
+        if self.sufficient_disk_space_exists is None:
+            self.sufficient_disk_space_exists = self.check_disk_space(num_files=trainer.num_predict_batches[0])
+            if self.sufficient_disk_space_exists is False:
+                raise RuntimeError(f"Insufficient disk space at {self.output_dir} to write all predictions")

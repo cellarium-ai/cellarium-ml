@@ -63,7 +63,7 @@ class NormalizeTotal(nn.Module):
         """
         if total_mrna_umis_n is None:
             total_mrna_umis_n = x_ng.sum(dim=-1)
-        x_ng = self.target_count * x_ng / (total_mrna_umis_n[:, None] + self.eps)
+        x_ng = self.target_count * x_ng / (total_mrna_umis_n[:, None].float() + self.eps)
         return {"x_ng": x_ng}
 
     def __repr__(self) -> str:

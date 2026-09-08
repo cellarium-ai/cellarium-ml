@@ -58,27 +58,26 @@ trainer:
   default_root_dir: /tmp/test_examples/ipca
 model:
   transforms:
+    - cellarium.ml.transforms.Densify
     - class_path: cellarium.ml.transforms.NormalizeTotal
       init_args:
         target_count: 10_000
     - cellarium.ml.transforms.Log1p
     - class_path: cellarium.ml.transforms.ZScore
-      init_args:
-        mean_g:
-          !CheckpointLoader
-          file_path: /tmp/test_examples/onepass/lightning_logs/version_0/checkpoints/epoch=0-step=2.ckpt
-          attr: model.mean_g
-          convert_fn: null
-        std_g:
-          !CheckpointLoader
-          file_path: /tmp/test_examples/onepass/lightning_logs/version_0/checkpoints/epoch=0-step=2.ckpt
-          attr: model.std_g
-          convert_fn: null
-        var_names_g:
-          !CheckpointLoader
-          file_path: /tmp/test_examples/onepass/lightning_logs/version_0/checkpoints/epoch=0-step=2.ckpt
-          attr: model.var_names_g
-          convert_fn: null
+      init_args: 
+        !FileMultiLoader
+        file_path: /tmp/test_examples/onepass/onepass.csv
+        loader_fn: pandas.read_csv
+        fields:
+          mean_g:
+            attr: mean_g.values
+            convert_fn: torch.FloatTensor
+          std_g:
+            attr: std_g.values
+            convert_fn: torch.FloatTensor
+          var_names_g:
+            attr: var_names_g
+            convert_fn: pandas.Series.to_numpy
   model:
     class_path: cellarium.ml.models.IncrementalPCA
     init_args:
@@ -110,7 +109,7 @@ data:
   batch_keys:
     x_ng:
       attr: X
-      convert_fn: cellarium.ml.utilities.data.densify
+      convert_fn: cellarium.ml.utilities.data.to_torch_sparse_csr
     var_names_g:
       attr: var_names
     total_mrna_umis_n:

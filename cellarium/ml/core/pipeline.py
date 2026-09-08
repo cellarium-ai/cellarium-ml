@@ -52,6 +52,7 @@ class CellariumPipeline(torch.nn.ModuleList):
     def predict(
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
     ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
+        batch["_predict_mode"] = True  # type: ignore[assignment]
         for module in self[:-1]:
             batch |= call_func_with_batch(module.forward, batch)
 

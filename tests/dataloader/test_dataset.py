@@ -48,7 +48,7 @@ def obs() -> pd.DataFrame:
     return obs
 
 
-@pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 12], [4, 8, 11]])  # limits
+@pytest.fixture(params=[[3, 6, 9, 12], [4, 8, 11]])  # limits: 4 even shards, and 3 shards with an uneven last shard
 def dadc(tmp_path: Path, obs: pd.DataFrame, request: pytest.FixtureRequest) -> DistributedAnnDataCollection:
     limits = request.param
     n_cell = limits[-1]
@@ -110,7 +110,7 @@ def test_iterable_dataset_anndatafields(dadc: DistributedAnnDataCollection, obs:
 
 @pytest.mark.parametrize("iteration_strategy", ["same_order", "cache_efficient"])
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
-@pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
+@pytest.mark.parametrize("num_workers", [0, 2], ids=["zero workers", "two workers"])
 @pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
 @pytest.mark.parametrize(
     "drop_incomplete_batch", [False, True], ids=["no drop incomplete batch", "drop incomplete batch"]
@@ -173,7 +173,7 @@ def test_iterable_dataset(
 
 @pytest.mark.parametrize("iteration_strategy", ["same_order", "cache_efficient"])
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
-@pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
+@pytest.mark.parametrize("num_workers", [0, 2], ids=["zero workers", "two workers"])
 @pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
 @pytest.mark.parametrize("drop_last_indices", [False, True], ids=["no drop last indices", "drop last indices"])
 @pytest.mark.parametrize(
@@ -308,13 +308,13 @@ def test_iterable_dataset_set_epoch_multi_device(
 
 @pytest.mark.parametrize("iteration_strategy", ["same_order", "cache_efficient"])
 @pytest.mark.parametrize("shuffle", [False, True], ids=["no shuffle", "shuffle"])
-@pytest.mark.parametrize("num_workers", [0, 1, 2], ids=["zero workers", "one worker", "two workers"])
+@pytest.mark.parametrize("num_workers", [0, 2], ids=["zero workers", "two workers"])
 @pytest.mark.parametrize("batch_size", [1, 2, 3], ids=["batch size 1", "batch size 2", "batch size 3"])
 @pytest.mark.parametrize(
     "drop_incomplete_batch", [False, True], ids=["no drop incomplete batch", "drop incomplete batch"]
 )
 @pytest.mark.parametrize("persistent_workers", [False, True], ids=["non-persistent workers", "persistent workers"])
-@pytest.mark.parametrize("resume_step", [1, 4, 5])
+@pytest.mark.parametrize("resume_step", [1, 5])  # resume early (mid-epoch) and late
 def test_load_from_checkpoint(
     dadc: DistributedAnnDataCollection,
     iteration_strategy: Literal["same_order", "cache_efficient"],

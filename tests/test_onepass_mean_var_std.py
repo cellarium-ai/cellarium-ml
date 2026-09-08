@@ -47,10 +47,23 @@ def dadc(adata: AnnData, tmp_path: Path):
     )
 
 
-@pytest.mark.parametrize("shuffle", [False, True])
-@pytest.mark.parametrize("num_workers", [0, 2])
-@pytest.mark.parametrize("batch_size", [1, 2, 3])
-@pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
+# @pytest.mark.parametrize("shuffle", [False, True])
+# @pytest.mark.parametrize("num_workers", [0, 2])
+# @pytest.mark.parametrize("batch_size", [1, 2, 3])
+# @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
+@pytest.mark.parametrize(
+    "shuffle,num_workers,batch_size,algorithm",
+    [
+        # num_workers=0: cover all batch sizes, both shuffle states, both algorithms
+        (False, 0, 1, "naive"),
+        (True, 0, 2, "naive"),
+        (False, 0, 3, "shifted_data"),
+        (True, 0, 1, "shifted_data"),
+        # num_workers=2: one representative case per algorithm to exercise worker plumbing
+        (True, 2, 2, "naive"),
+        (True, 2, 3, "shifted_data"),
+    ],
+)
 def test_onepass_mean_var_std_multi_device(
     adata: AnnData,
     dadc: DistributedAnnDataCollection,

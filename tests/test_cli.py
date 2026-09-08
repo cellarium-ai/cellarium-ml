@@ -7,188 +7,15 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pytest
+import torch
 
 from cellarium.ml.cli import main
 
 devices = os.environ.get("TEST_DEVICES", "1")
 
-CONFIGS = [
-    {
-        "model_name": "geneformer",
-        "subcommand": "fit",
-        "fit": {
-            "model": {
-                "model": {
-                    "class_path": "cellarium.ml.models.Geneformer",
-                    "init_args": {
-                        "hidden_size": "2",
-                        "num_hidden_layers": "1",
-                        "num_attention_heads": "1",
-                        "intermediate_size": "4",
-                        "max_position_embeddings": "2",
-                    },
-                },
-                "optim_fn": "torch.optim.Adam",
-            },
-            "data": {
-                "dadc": {
-                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
-                    "init_args": {
-                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
-                        "shard_size": "100",
-                        "max_cache_size": "2",
-                        "obs_columns_to_validate": [],
-                    },
-                },
-                "batch_keys": {
-                    "x_ng": {
-                        "attr": "X",
-                        "convert_fn": "cellarium.ml.utilities.data.densify",
-                    },
-                    "var_names_g": {"attr": "var_names"},
-                },
-                "batch_size": "5",
-                "num_workers": "1",
-            },
-            "trainer": {
-                "accelerator": "cpu",
-                "devices": devices,
-                "max_steps": "1",
-            },
-        },
-    },
-    {
-        "model_name": "geneformer",
-        "subcommand": "predict",
-        "predict": {
-            "model": {
-                "model": {
-                    "class_path": "cellarium.ml.models.Geneformer",
-                    "init_args": {
-                        "hidden_size": "2",
-                        "num_hidden_layers": "1",
-                        "num_attention_heads": "1",
-                        "intermediate_size": "4",
-                        "max_position_embeddings": "2",
-                    },
-                },
-            },
-            "data": {
-                "dadc": {
-                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
-                    "init_args": {
-                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
-                        "shard_size": "100",
-                        "max_cache_size": "2",
-                        "obs_columns_to_validate": [],
-                    },
-                },
-                "batch_keys": {
-                    "x_ng": {
-                        "attr": "X",
-                        "convert_fn": "cellarium.ml.utilities.data.densify",
-                    },
-                    "var_names_g": {"attr": "var_names"},
-                },
-                "batch_size": "5",
-                "num_workers": "1",
-            },
-            "trainer": {
-                "accelerator": "cpu",
-                "devices": devices,
-                "max_steps": "1",
-                "limit_predict_batches": "1",
-            },
-            "return_predictions": "false",
-        },
-    },
-    {
-        "model_name": "probabilistic_pca",
-        "subcommand": "fit",
-        "fit": {
-            "model": {
-                "model": {
-                    "class_path": "cellarium.ml.models.ProbabilisticPCA",
-                    "init_args": {
-                        "n_components": "2",
-                        "ppca_flavor": "marginalized",
-                    },
-                },
-                "optim_fn": "torch.optim.Adam",
-            },
-            "data": {
-                "dadc": {
-                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
-                    "init_args": {
-                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
-                        "shard_size": "100",
-                        "max_cache_size": "2",
-                        "obs_columns_to_validate": [],
-                    },
-                },
-                "batch_keys": {
-                    "x_ng": {
-                        "attr": "X",
-                        "convert_fn": "cellarium.ml.utilities.data.densify",
-                    },
-                    "var_names_g": {"attr": "var_names"},
-                },
-                "batch_size": "50",
-                "shuffle": "true",
-                "num_workers": "2",
-            },
-            "trainer": {
-                "accelerator": "cpu",
-                "devices": devices,
-                "max_steps": "4",
-            },
-        },
-    },
-    {
-        "model_name": "onepass_mean_var_std",
-        "subcommand": "fit",
-        "fit": {
-            "model": {
-                "transforms": [
-                    {
-                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
-                        "init_args": {"target_count": "10_000"},
-                    },
-                    "cellarium.ml.transforms.Log1p",
-                ],
-                "model": "cellarium.ml.models.OnePassMeanVarStd",
-            },
-            "data": {
-                "dadc": {
-                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
-                    "init_args": {
-                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
-                        "shard_size": "100",
-                        "max_cache_size": "2",
-                        "obs_columns_to_validate": ["total_mrna_umis"],
-                    },
-                },
-                "batch_keys": {
-                    "x_ng": {
-                        "attr": "X",
-                        "convert_fn": "cellarium.ml.utilities.data.densify",
-                    },
-                    "var_names_g": {"attr": "var_names"},
-                    "total_mrna_umis_n": {
-                        "attr": "obs",
-                        "key": "total_mrna_umis",
-                    },
-                },
-                "batch_size": "50",
-                "num_workers": "2",
-            },
-            "trainer": {
-                "accelerator": "cpu",
-                "devices": devices,
-            },
-        },
-    },
+THREE_DEVICE_CONFIGS = [
     {
         "model_name": "incremental_pca",
         "subcommand": "fit",
@@ -228,7 +55,7 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -276,7 +103,7 @@ CONFIGS = [
                     },
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -287,6 +114,378 @@ CONFIGS = [
                 },
             },
             "return_predictions": "false",
+        },
+    },
+]
+
+TWO_DEVICE_CONFIGS = [
+    {
+        "model_name": "geneformer",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.Geneformer",
+                    "init_args": {
+                        "hidden_size": "2",
+                        "num_hidden_layers": "1",
+                        "num_attention_heads": "1",
+                        "intermediate_size": "4",
+                        "max_position_embeddings": "2",
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                },
+                "batch_size": "5",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "1",
+            },
+        },
+    },
+    {
+        "model_name": "geneformer",
+        "subcommand": "predict",
+        "predict": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.Geneformer",
+                    "init_args": {
+                        "hidden_size": "2",
+                        "num_hidden_layers": "1",
+                        "num_attention_heads": "1",
+                        "intermediate_size": "4",
+                        "max_position_embeddings": "2",
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                },
+                "batch_size": "5",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "1",
+                "limit_predict_batches": "1",
+            },
+            "return_predictions": "false",
+        },
+    },
+    {
+        "model_name": "contrastive_mlp",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "transforms": [{"class_path": "cellarium.ml.transforms.Duplicate"}],
+                "model": {
+                    "class_path": "cellarium.ml.models.ContrastiveMLP",
+                    "init_args": {
+                        "n_obs": "36601",
+                        "embed_dim": "4",
+                        "hidden_size": [8],
+                        "temperature": "1.0",
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                },
+                "batch_size": "5",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "1",
+            },
+        },
+    },
+    {
+        "model_name": "contrastive_mlp",
+        "subcommand": "predict",
+        "predict": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.ContrastiveMLP",
+                    "init_args": {
+                        "n_obs": "36601",
+                        "embed_dim": "4",
+                        "hidden_size": [8],
+                        "temperature": "1.0",
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                },
+                "batch_size": "5",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "1",
+                "limit_predict_batches": "1",
+            },
+            "return_predictions": "false",
+        },
+    },
+    {
+        "model_name": "probabilistic_pca",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.ProbabilisticPCA",
+                    "init_args": {
+                        "n_components": "2",
+                        "ppca_flavor": "marginalized",
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                },
+                "batch_size": "50",
+                "shuffle": "true",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_steps": "4",
+            },
+        },
+    },
+    {
+        "model_name": "onepass_mean_var_std",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
+                "model": "cellarium.ml.models.OnePassMeanVarStd",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
+        },
+    },
+    {
+        "model_name": "onepass_mean_var_std",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "transforms": [
+                    "cellarium.ml.transforms.Densify",
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
+                "model": "cellarium.ml.models.OnePassMeanVarStd",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.to_torch_sparse_csr",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
+        },
+    },
+    {
+        "model_name": "onepass_mean_var_std",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "transforms": [
+                    "cellarium.ml.transforms.Densify",
+                    {
+                        "class_path": "cellarium.ml.transforms.NormalizeTotal",
+                        "init_args": {"target_count": "10_000"},
+                    },
+                    "cellarium.ml.transforms.Log1p",
+                ],
+                "model": "cellarium.ml.models.OnePassMeanVarStd",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.keep_sparse",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "total_mrna_umis_n": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
         },
     },
     {
@@ -346,7 +545,7 @@ CONFIGS = [
                 },
                 "batch_size": "50",
                 "shuffle": "true",
-                "num_workers": "2",
+                "num_workers": "0",
                 "val_size": "0.1",
             },
             "trainer": {
@@ -354,6 +553,100 @@ CONFIGS = [
                 "devices": devices,
                 "max_steps": "4",
                 "val_check_interval": "2",
+            },
+        },
+    },
+    {
+        "model_name": "hvg_seurat_v3",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.HVGSeuratV3",
+                    "init_args": {
+                        "n_top_genes": "10",
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+            },
+        },
+    },
+    {
+        "model_name": "ols",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "model": "cellarium.ml.models.StreamingOrdinaryLeastSquares",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["total_mrna_umis"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "y_nk": {
+                        "attr": "obs",
+                        "key": "total_mrna_umis",
+                        "convert_fn": "cellarium.ml.utilities.data.to_float_column",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
             },
         },
     },
@@ -380,7 +673,7 @@ CONFIGS = [
                     "var_names_g": {"attr": "var_names"},
                 },
                 "batch_size": "50",
-                "num_workers": "2",
+                "num_workers": "0",
             },
             "trainer": {
                 "accelerator": "cpu",
@@ -462,15 +755,896 @@ CONFIGS = [
             },
         },
     },
+    {
+        "model_name": "amortized_nmf",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "model": {
+                    "class_path": "cellarium.ml.models.AmortizedOnlineNonNegativeMatrixFactorization",
+                    "init_args": {
+                        "k_values": [5],
+                        "r": 2,
+                        "latent_dim": 16,
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                },
+                "batch_size": "50",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 2,
+            },
+        },
+    },
 ]
+
+SINGLE_DEVICE_CONFIGS = [
+    {
+        "model_name": "scvi",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.SingleCellVariationalInference",
+                    "init_args": {
+                        "n_batch": None,
+                        "use_size_factor_key": False,
+                        "input_gene_dropout_rate": 0.1,
+                        "encoder": {
+                            "hidden_layers": [],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "output_bias": True,
+                        },
+                        "decoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "label_to_bias_hidden_layers": []},
+                                }
+                            ],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "final_additive_bias": True,
+                        },
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+                "optim_kwargs": {"lr": "1e-3"},
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "batch_index_n": {
+                        "attr": "obs",
+                        "key": "dataset_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+                "val_size": "0.1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 3,
+            },
+        },
+    },
+    {
+        "model_name": "scvi",
+        "_display_id": "scvi_use_flow",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.SingleCellVariationalInference",
+                    "init_args": {
+                        "n_batch": None,
+                        "use_size_factor_key": False,
+                        "encoder": {
+                            "hidden_layers": [],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "output_bias": True,
+                        },
+                        "decoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "label_to_bias_hidden_layers": []},
+                                }
+                            ],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "final_additive_bias": True,
+                        },
+                        "use_flow": True,
+                        "flow_hidden_features": [32, 32],
+                        "kl_warmup_epochs": 3,
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+                "optim_kwargs": {"lr": "1e-3"},
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "batch_index_n": {
+                        "attr": "obs",
+                        "key": "dataset_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 3,
+                "gradient_clip_algorithm": "norm",
+                "gradient_clip_val": 10.0,
+            },
+        },
+    },
+    {
+        "model_name": "scvi",
+        "_display_id": "scvi_swiglu_resnet",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.SingleCellVariationalInference",
+                    "init_args": {
+                        "n_batch": None,
+                        "use_size_factor_key": False,
+                        "use_batch_norm": "none",
+                        "use_layer_norm": "both",
+                        "encoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
+                                    "dressing_init_args": {
+                                        "activation_fn": "cellarium.ml.layers.SwiGLUActivation",
+                                    },
+                                },
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 32, "label_to_bias_hidden_layers": []},
+                                    "dressing_init_args": {
+                                        "activation_fn": "cellarium.ml.layers.SwiGLUActivation",
+                                        "use_residual": True,
+                                    },
+                                },
+                            ],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "output_bias": True,
+                        },
+                        "decoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 64, "label_to_bias_hidden_layers": []},
+                                    "dressing_init_args": {
+                                        "activation_fn": "cellarium.ml.layers.SwiGLUActivation",
+                                    },
+                                },
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 64, "label_to_bias_hidden_layers": []},
+                                    "dressing_init_args": {
+                                        "activation_fn": "cellarium.ml.layers.SwiGLUActivation",
+                                        "use_residual": True,
+                                    },
+                                },
+                            ],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "final_additive_bias": False,
+                        },
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+                "optim_kwargs": {"lr": "1e-3"},
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "batch_index_n": {
+                        "attr": "obs",
+                        "key": "dataset_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 3,
+            },
+        },
+    },
+    {
+        "model_name": "socam",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "transforms": [
+                    "cellarium.ml.transforms.Densify",
+                ],
+                "model": {
+                    "class_path": "cellarium.ml.models.SOCAM",
+                    "init_args": {
+                        "n_obs": "200",
+                        "descendant_tensor": torch.eye(125),
+                        "cl_names": [
+                            "CL:0000003",
+                            "CL:0000034",
+                            "CL:0000050",
+                            "CL:0000057",
+                            "CL:0000066",
+                            "CL:0000071",
+                            "CL:0000079",
+                            "CL:0000082",
+                            "CL:0000084",
+                            "CL:0000097",
+                            "CL:0000115",
+                            "CL:0000126",
+                            "CL:0000127",
+                            "CL:0000128",
+                            "CL:0000129",
+                            "CL:0000150",
+                            "CL:0000158",
+                            "CL:0000160",
+                            "CL:0000165",
+                            "CL:0000171",
+                            "CL:0000187",
+                            "CL:0000212",
+                            "CL:0000216",
+                            "CL:0000232",
+                            "CL:0000235",
+                            "CL:0000236",
+                            "CL:0000312",
+                            "CL:0000498",
+                            "CL:0000499",
+                            "CL:0000540",
+                            "CL:0000556",
+                            "CL:0000561",
+                            "CL:0000576",
+                            "CL:0000583",
+                            "CL:0000584",
+                            "CL:0000586",
+                            "CL:0000604",
+                            "CL:0000617",
+                            "CL:0000623",
+                            "CL:0000624",
+                            "CL:0000625",
+                            "CL:0000632",
+                            "CL:0000636",
+                            "CL:0000669",
+                            "CL:0000679",
+                            "CL:0000738",
+                            "CL:0000740",
+                            "CL:0000750",
+                            "CL:0000751",
+                            "CL:0000765",
+                            "CL:0000775",
+                            "CL:0000786",
+                            "CL:0000789",
+                            "CL:0000794",
+                            "CL:0000810",
+                            "CL:0000814",
+                            "CL:0000815",
+                            "CL:0000816",
+                            "CL:0000817",
+                            "CL:0000826",
+                            "CL:0000827",
+                            "CL:0000843",
+                            "CL:0000860",
+                            "CL:0000875",
+                            "CL:0000878",
+                            "CL:0000893",
+                            "CL:0000895",
+                            "CL:0000896",
+                            "CL:0000897",
+                            "CL:0000899",
+                            "CL:0000900",
+                            "CL:0000904",
+                            "CL:0000913",
+                            "CL:0000921",
+                            "CL:0000938",
+                            "CL:0000940",
+                            "CL:0000970",
+                            "CL:0000980",
+                            "CL:0000986",
+                            "CL:0000987",
+                            "CL:0001054",
+                            "CL:0001063",
+                            "CL:0001082",
+                            "CL:0002063",
+                            "CL:0002064",
+                            "CL:0002079",
+                            "CL:0002117",
+                            "CL:0002132",
+                            "CL:0002154",
+                            "CL:0002187",
+                            "CL:0002193",
+                            "CL:0002306",
+                            "CL:0002319",
+                            "CL:0002340",
+                            "CL:0002341",
+                            "CL:0002393",
+                            "CL:0002399",
+                            "CL:0002453",
+                            "CL:0002553",
+                            "CL:0002563",
+                            "CL:0002629",
+                            "CL:0008019",
+                            "CL:0009010",
+                            "CL:0009011",
+                            "CL:0009099",
+                            "CL:0011019",
+                            "CL:0011026",
+                            "CL:0019019",
+                            "CL:0019026",
+                            "CL:0019028",
+                            "CL:1000271",
+                            "CL:1000272",
+                            "CL:1000296",
+                            "CL:1000334",
+                            "CL:1000413",
+                            "CL:1000495",
+                            "CL:1000692",
+                            "CL:1000768",
+                            "CL:1001106",
+                            "CL:1001107",
+                            "CL:2000002",
+                            "CL:2000006",
+                            "CL:2000059",
+                            "CL:4028006",
+                            "extra_category",
+                        ],
+                        "cl_name_subset": [
+                            "CL:0000003",
+                            "CL:0000034",
+                            "CL:0000050",
+                            "CL:0000057",
+                            "CL:0000066",
+                            "CL:0000071",
+                            "CL:0000079",
+                            "CL:0000082",
+                            "CL:0000084",
+                            "CL:0000097",
+                            "CL:0000115",
+                            "CL:0000126",
+                            "CL:0000127",
+                            "CL:0000128",
+                            "CL:0000129",
+                            "CL:0000150",
+                            "CL:0000158",
+                            "CL:0000160",
+                            "CL:0000165",
+                            "CL:0000171",
+                            "CL:0000187",
+                            "CL:0000212",
+                            "CL:0000216",
+                            "CL:0000232",
+                            "CL:0000235",
+                            "CL:0000236",
+                            "CL:0000312",
+                            "CL:0000498",
+                            "CL:0000499",
+                            "CL:0000540",
+                            "CL:0000556",
+                            "CL:0000561",
+                            "CL:0000576",
+                            "CL:0000583",
+                            "CL:0000584",
+                            "CL:0000586",
+                            "CL:0000604",
+                            "CL:0000617",
+                            "CL:0000623",
+                            "CL:0000624",
+                            "CL:0000625",
+                            "CL:0000632",
+                            "CL:0000636",
+                            "CL:0000669",
+                            "CL:0000679",
+                            "CL:0000738",
+                            "CL:0000740",
+                            "CL:0000750",
+                            "CL:0000751",
+                            "CL:0000765",
+                            "CL:0000775",
+                            "CL:0000786",
+                            "CL:0000789",
+                            "CL:0000794",
+                            "CL:0000810",
+                            "CL:0000814",
+                            "CL:0000815",
+                            "CL:0000816",
+                            "CL:0000817",
+                            "CL:0000826",
+                            "CL:0000827",
+                            "CL:0000843",
+                            "CL:0000860",
+                            "CL:0000875",
+                            "CL:0000878",
+                            "CL:0000893",
+                            "CL:0000895",
+                            "CL:0000896",
+                            "CL:0000897",
+                            "CL:0000899",
+                            "CL:0000900",
+                            "CL:0000904",
+                            "CL:0000913",
+                            "CL:0000921",
+                            "CL:0000938",
+                            "CL:0000940",
+                            "CL:0000970",
+                            "CL:0000980",
+                            "CL:0000986",
+                            "CL:0000987",
+                            "CL:0001054",
+                            "CL:0001063",
+                            "CL:0001082",
+                            "CL:0002063",
+                            "CL:0002064",
+                            "CL:0002079",
+                            "CL:0002117",
+                            "CL:0002132",
+                            "CL:0002154",
+                            "CL:0002187",
+                            "CL:0002193",
+                            "CL:0002306",
+                            "CL:0002319",
+                            "CL:0002340",
+                            "CL:0002341",
+                            "CL:0002393",
+                            "CL:0002399",
+                            "CL:0002453",
+                            "CL:0002553",
+                            "CL:0002563",
+                            "CL:0002629",
+                            "CL:0008019",
+                            "CL:0009010",
+                            "CL:0009011",
+                            "CL:0009099",
+                            "CL:0011019",
+                            "CL:0011026",
+                            "CL:0019019",
+                            "CL:0019026",
+                            "CL:0019028",
+                            "CL:1000271",
+                            "CL:1000272",
+                            "CL:1000296",
+                            "CL:1000334",
+                            "CL:1000413",
+                            "CL:1000495",
+                            "CL:1000692",
+                            "CL:1000768",
+                            "CL:1001106",
+                            "CL:1001107",
+                            "CL:2000002",
+                            "CL:2000006",
+                            "CL:2000059",
+                            "CL:4028006",
+                        ],
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["cell_type_ontology_term_id"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.keep_sparse",
+                    },
+                    "var_names_g": {
+                        "attr": "var_names",
+                    },
+                    "cl_names_n": {
+                        "attr": "obs",
+                        "key": "cell_type_ontology_term_id",
+                    },
+                },
+                "batch_size": "50",
+                "shuffle": "true",
+                "num_workers": "0",
+                "val_size": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": "1",
+                "max_steps": "4",
+                "val_check_interval": "2",
+            },
+        },
+    },
+    {
+        "model_name": "geometric_sketch",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.StreamingGeometricSketch",
+                    "init_args": {
+                        "n_bits": "4",
+                        "max_cells_per_bucket": "10",
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "obs_names_n": {"attr": "obs_names"},
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": "1",
+            },
+        },
+    },
+    {
+        "model_name": "scanvi",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.SCANVI",
+                    "init_args": {
+                        "classifier_type": "flat",
+                        "n_batch": None,
+                        "use_size_factor_key": False,
+                        "encoder": {
+                            "hidden_layers": [],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                        },
+                        "decoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "label_to_bias_hidden_layers": []},
+                                }
+                            ],
+                            "final_layer": {
+                                "class_path": "torch.nn.Linear",
+                                "init_args": {},
+                            },
+                            "final_additive_bias": True,
+                        },
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+                "optim_kwargs": {"lr": "1e-3"},
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": [],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "batch_index_n": {
+                        "attr": "obs",
+                        "key": "dataset_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                    "cell_type_labels_n": {
+                        "attr": "obs",
+                        "key": "cell_type",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+                "val_size": "0.1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 3,
+            },
+        },
+    },
+]
+
+
+def _build_scanvi_ontology_inputs() -> tuple[torch.Tensor, list[str], pd.Series]:
+    """Build a small hierarchical ontology for the SCANVI ``classifier_type="ontology"`` CLI test.
+
+    Reuses the SOCAM CL-ID leaves (which cover the labels present in the public test shards) and
+    stacks a synthetic two-level hierarchy on top: ``CL_ROOT -> GROUP_i -> leaves``. Counts are
+    chosen so that the last group's leaves are individually under-supported and roll up to their
+    ``GROUP_*`` node, exercising the frontier cut, finer-than-frontier binning, and propagation
+    over internal active nodes.
+    """
+    socam_cfg = next(c for c in SINGLE_DEVICE_CONFIGS if c["model_name"] == "socam")
+    leaves: list[str] = list(socam_cfg["fit"]["model"]["model"]["init_args"]["cl_names"])  # type: ignore[index]
+    groups = [f"GROUP_{i}" for i in range(5)]
+    root = "CL_ROOT"
+    cl_names = [root] + groups + leaves
+    index = {name: i for i, name in enumerate(cl_names)}
+    desc = torch.eye(len(cl_names))
+    per_group = -(-len(leaves) // len(groups))  # ceil division
+    counts: dict[str, float] = {}
+    for name in groups + leaves:
+        desc[index[root], index[name]] = 1.0  # root is an ancestor of every node
+    for li, leaf in enumerate(leaves):
+        group = groups[min(li // per_group, len(groups) - 1)]
+        desc[index[group], index[leaf]] = 1.0
+        # last group's leaves are sparse -> the GROUP node becomes the frontier and they bin up
+        counts[leaf] = 5.0 if group == groups[-1] else 100.0
+    return desc, cl_names, pd.Series(counts)
+
+
+_SCANVI_ONT_DESC, _SCANVI_ONT_CL_NAMES, _SCANVI_ONT_COUNTS = _build_scanvi_ontology_inputs()
+
+SINGLE_DEVICE_CONFIGS.append(
+    {
+        "model_name": "scanvi",
+        "_display_id": "scanvi_ontology",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "model": {
+                    "class_path": "cellarium.ml.models.SCANVI",
+                    "init_args": {
+                        "classifier_type": "ontology",
+                        "descendant_tensor": _SCANVI_ONT_DESC,
+                        "cl_names": _SCANVI_ONT_CL_NAMES,
+                        "class_counts": _SCANVI_ONT_COUNTS,
+                        "frontier_min_cells": 50,
+                        "propagate_class_counts": True,
+                        "classifier_n_hidden": [32],
+                        "secondary_n_hidden": [32],
+                        "n_batch": None,
+                        "use_size_factor_key": False,
+                        "encoder": {
+                            "hidden_layers": [],
+                            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+                        },
+                        "decoder": {
+                            "hidden_layers": [
+                                {
+                                    "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
+                                    "init_args": {"out_features": 128, "label_to_bias_hidden_layers": []},
+                                }
+                            ],
+                            "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
+                            "final_additive_bias": True,
+                        },
+                    },
+                },
+                "optim_fn": "torch.optim.Adam",
+                "optim_kwargs": {"lr": "1e-3"},
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["cell_type_ontology_term_id"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "batch_index_n": {
+                        "attr": "obs",
+                        "key": "dataset_id",
+                        "convert_fn": "cellarium.ml.utilities.data.categories_to_codes",
+                    },
+                    "cell_type_labels_n": {
+                        "attr": "obs",
+                        "key": "cell_type_ontology_term_id",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "0",
+                "val_size": "0.1",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 3,
+            },
+        },
+    }
+)
 
 
 @pytest.mark.parametrize(
     "config",
-    CONFIGS,
-    ids=[config["model_name"] + "-" + config["subcommand"] for config in CONFIGS],  # type: ignore[operator]
+    THREE_DEVICE_CONFIGS,
+    ids=[
+        config.get("_display_id", config["model_name"]) + "-" + config["subcommand"]  # type: ignore[operator]
+        for config in THREE_DEVICE_CONFIGS
+    ],
 )
-def test_cpu_multi_device(config: dict[str, Any]):
+def test_cpu_three_device(config: dict[str, Any]):
+    config = {k: v for k, v in config.items() if not k.startswith("_")}
+    if config["subcommand"] == "predict":
+        assert config["predict"]["return_predictions"] == "false"
+    main(config)
+
+
+@pytest.mark.parametrize(
+    "config",
+    TWO_DEVICE_CONFIGS,
+    ids=[config.get("_display_id", config["model_name"]) + "-" + config["subcommand"] for config in TWO_DEVICE_CONFIGS],  # type: ignore[operator]
+)
+def test_cpu_two_device(config: dict[str, Any]):
+    config = {k: v for k, v in config.items() if not k.startswith("_")}
+    if config["subcommand"] == "predict":
+        assert config["predict"]["return_predictions"] == "false"
+    main(config)
+
+
+@pytest.mark.parametrize(
+    "config",
+    SINGLE_DEVICE_CONFIGS,
+    ids=[
+        config.get("_display_id", config["model_name"]) + "-" + config["subcommand"]  # type: ignore[operator]
+        for config in SINGLE_DEVICE_CONFIGS
+    ],
+)
+def test_cpu_single_device(config: dict[str, Any]):
+    config = {k: v for k, v in config.items() if not k.startswith("_")}
     if config["subcommand"] == "predict":
         assert config["predict"]["return_predictions"] == "false"
     main(config)

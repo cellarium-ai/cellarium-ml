@@ -12,6 +12,7 @@ import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import transform_to
 
+from cellarium.ml.utilities.core import call_func_with_batch
 from cellarium.ml.utilities.mup import LRAdjustmentGroup
 
 
@@ -104,11 +105,17 @@ class ValidateMixin:
         Default validation method for models. This method logs the validation loss to TensorBoard.
         Override this method to customize the validation behavior.
         """
-        output = self(*args, **kwargs)
+        output = call_func_with_batch(func=self.forward, batch=kwargs)  # type: ignore[attr-defined]
         loss = output.get("loss")
         if loss is not None:
             # Logging to TensorBoard by default
-            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True)
+            pl_module.log(
+                "val_loss",
+                loss,
+                sync_dist=True,
+                on_epoch=True,
+                batch_size=None if "x_ng" not in kwargs else kwargs["x_ng"].shape[0],
+            )
 
 
 class TestMixin(metaclass=ABCMeta):

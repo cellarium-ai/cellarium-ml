@@ -2,21 +2,33 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from cellarium.ml.models.cellarium_gpt import CellariumGPT
+from cellarium.ml.models.contrastive_mlp import ContrastiveMLP
 from cellarium.ml.models.geneformer import Geneformer
+from cellarium.ml.models.geometric_sketch import StreamingGeometricSketch
+from cellarium.ml.models.hvg_seurat_v3 import HVGSeuratV3
 from cellarium.ml.models.incremental_pca import IncrementalPCA
 from cellarium.ml.models.logistic_regression import LogisticRegression
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TestMixin, ValidateMixin
 from cellarium.ml.models.nmf import OnlineNonNegativeMatrixFactorization, OnlineStructureAwareNMF
+from cellarium.ml.models.nmf_amortized import AmortizedOnlineNonNegativeMatrixFactorization
 from cellarium.ml.models.nmf_bayesian import BayesianNonNegativeMatrixFactorization
+from cellarium.ml.models.ols import StreamingOrdinaryLeastSquares
 from cellarium.ml.models.onepass_mean_var_std import OnePassMeanVarStd
 from cellarium.ml.models.probabilistic_pca import ProbabilisticPCA
+from cellarium.ml.models.scanvi import SCANVI
+from cellarium.ml.models.scvi import SingleCellVariationalInference
+from cellarium.ml.models.socam import SOCAM
 from cellarium.ml.models.tdigest import TDigest
 
 __all__ = [
+    "AmortizedOnlineNonNegativeMatrixFactorization",
     "BayesianNonNegativeMatrixFactorization",
     "CellariumGPT",
     "CellariumModel",
+    "ContrastiveMLP",
+    "SCANVI",
     "Geneformer",
+    "HVGSeuratV3",
     "IncrementalPCA",
     "LogisticRegression",
     "OnePassMeanVarStd",
@@ -27,4 +39,8 @@ __all__ = [
     "TDigest",
     "TestMixin",
     "ValidateMixin",
+    "SingleCellVariationalInference",
+    "SOCAM",
+    "StreamingGeometricSketch",
+    "StreamingOrdinaryLeastSquares",
 ]
