@@ -126,9 +126,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         pin_memory: bool = False,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(logger=False)
-        # Don't save dadc to the checkpoint
-        self.hparams["dadc"] = None
+        self.save_hyperparameters(logger=False, ignore=["dadc"])
 
         self.dadc = dadc
         # IterableDistributedAnnDataCollectionDataset args
