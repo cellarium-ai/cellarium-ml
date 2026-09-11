@@ -58,32 +58,32 @@ def fixture_structure_aware_data() -> tuple[torch.Tensor, torch.Tensor, torch.Te
     """
     torch.manual_seed(42)
     n, g, k = 1000, 100, 3
-    
+
     # 1. Metadata: 50% healthy (0), 50% disease (1)
     metadata_m_nd = torch.zeros(n, 1)
-    metadata_m_nd[n//2:] = 1.0
-    
+    metadata_m_nd[n // 2 :] = 1.0
+
     # 2. Factors: Uncorrelated Dirichlet
     d_kg = torch.distributions.Dirichlet(0.1 * torch.ones(g)).sample([k])
-    
-    # 3. Loadings: 
+
+    # 3. Loadings:
     # Factors 0 & 1 are random background
     w_nk = torch.distributions.Dirichlet(torch.ones(k)).sample([n])
-    
+
     # Factor 2 is strongly driven by Disease
     # Disease cells get a boost in Factor 2 usage
     disease_factor_idx = 2
-    w_nk[:, disease_factor_idx] = w_nk[:, disease_factor_idx] * 0.1 # Suppress background usage
-    w_nk[n//2:, disease_factor_idx] += 2.0 # Add "dose" to disease cells
-    
+    w_nk[:, disease_factor_idx] = w_nk[:, disease_factor_idx] * 0.1  # Suppress background usage
+    w_nk[n // 2 :, disease_factor_idx] += 2.0  # Add "dose" to disease cells
+
     # Normalize W to reasonable scale
     w_nk = F.relu(w_nk)
-    
+
     # 4. Generate X
     x_mean = w_nk @ d_kg
     # Add some noise (Poisson-like)
     x_ng = torch.poisson(x_mean * 100.0) / 100.0
-    
+
     return x_ng, metadata_m_nd, w_nk, d_kg, disease_factor_idx
 
 
@@ -95,7 +95,7 @@ def test_structure_aware_nmf_collapse_to_standard(small_adata):
     """
     n, g = small_adata.shape
     k = 3
-    
+
     # 1. Run Standard NMF
     nmf_std = OnlineNonNegativeMatrixFactorization(
         var_names_g=[f"gene_{i}" for i in range(g)],
@@ -117,19 +117,20 @@ def test_structure_aware_nmf_collapse_to_standard(small_adata):
         ],
     )
     dm = CellariumAnnDataDataModule(
-        dadc=small_adata, batch_size=n,
+        dadc=small_adata,
+        batch_size=n,
         batch_keys={
-            "x_ng": AnnDataField("X"), 
+            "x_ng": AnnDataField("X"),
             "var_names_g": AnnDataField("var_names"),
-            "obs_names_n": AnnDataField("obs_names")
-        }
+            "obs_names_n": AnnDataField("obs_names"),
+        },
     )
-    
+
     # Train Standard
     trainer_std = pl.Trainer(accelerator="cpu", devices=1, max_epochs=5, enable_checkpointing=False, logger=False)
     trainer_std.fit(module_std, dm)
     loss_std = nmf_std._err_running_sum_rk.sum().item()
-    
+
     # 2. Run Structure Aware NMF (Disabled)
     nmf_struct = OnlineStructureAwareNMF(
         var_names_g=[f"gene_{i}" for i in range(g)],
@@ -138,15 +139,15 @@ def test_structure_aware_nmf_collapse_to_standard(small_adata):
         n_cells_total=n,
         n_metadata=1,
         lambda_align=0.0,
-        lambda_select=1e5, # Huge penalty -> Beta should be 0
+        lambda_select=1e5,  # Huge penalty -> Beta should be 0
         algorithm="nmf_torch_hals",
     )
-    
+
     # Structure data with metadata in obsm
     n_samples = small_adata.shape[0]
     metadata = np.zeros((n_samples, 1), dtype=np.float32)
     small_adata.obsm["metadata"] = metadata
-    
+
     module_struct = CellariumModule(
         model=nmf_struct,
         cpu_transforms=[
@@ -158,30 +159,33 @@ def test_structure_aware_nmf_collapse_to_standard(small_adata):
         ],
     )
     dm_struct = CellariumAnnDataDataModule(
-        dadc=small_adata, batch_size=n,
+        dadc=small_adata,
+        batch_size=n,
         batch_keys={
-            "x_ng": AnnDataField("X"), 
+            "x_ng": AnnDataField("X"),
             "var_names_g": AnnDataField("var_names"),
             "obs_names_n": AnnDataField("obs_names"),
-            "metadata_m_nd": AnnDataField(attr="obsm", key="metadata")
-        }
+            "metadata_m_nd": AnnDataField(attr="obsm", key="metadata"),
+        },
     )
-    
+
     trainer_struct = pl.Trainer(accelerator="cpu", devices=1, max_epochs=5, enable_checkpointing=False, logger=False)
     trainer_struct.fit(module_struct, dm_struct)
 
     loss_struct = nmf_struct._err_running_sum_rk.sum().item()
-    
+
     # Check Beta is zero
     beta_val = getattr(nmf_struct, f"beta_{k}_rdk")
-    assert torch.allclose(beta_val, torch.zeros_like(beta_val), atol=1e-4), "Beta should be zero with high lambda_select"
-    
+    assert torch.allclose(beta_val, torch.zeros_like(beta_val), atol=1e-4), (
+        "Beta should be zero with high lambda_select"
+    )
+
     # Losses should be roughly comparable (same order of magnitude)
     # They won't be identical due to random init differences, but should be close.
     # Actually, let's just assert it learned *something* useful.
     x_ng = torch.from_numpy(small_adata.X).float()
-    assert loss_struct < x_ng.norm()**2, "Model failed to learn anything"
-    
+    assert loss_struct < x_ng.norm() ** 2, "Model failed to learn anything"
+
     print(f"Standard Loss: {loss_std}, Struct Loss: {loss_struct}")
 
 
@@ -192,7 +196,7 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
     x_ng, metadata_m_nd, true_w_nk, true_d_kg, disease_factor_idx = fixture_structure_aware_data
     n, g = x_ng.shape
     k = 3
-    
+
     # Train Structure Aware NMF
     # Low sparsity on Beta (lambda_select=0.01) to allow it to grow
     # High alignment penalty (lambda_align=100.0) to force W_raw to offload to Beta
@@ -204,22 +208,22 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
         n_cells_total=n,
         n_metadata=1,
         lambda_align=1.0,
-        lambda_select=0.01, # permissive
+        lambda_select=0.01,  # permissive
         beta_lr=0.25,  # Higher learning rate for faster convergence
         algorithm="nmf_torch_hals",
         early_stopping=False,  # the structure stuff takes longer to converge than the HALS loss check
     )
 
     # good results
-        # lambda_align=10.0,
-        # lambda_select=0.01, # permissive
-        # beta_lr=0.25,  # Higher learning rate for faster convergence
-    
+    # lambda_align=10.0,
+    # lambda_select=0.01, # permissive
+    # beta_lr=0.25,  # Higher learning rate for faster convergence
+
     # Create AnnData
     adata = anndata.AnnData(
-        X=x_ng.numpy(), 
+        X=x_ng.numpy(),
         var=pd.DataFrame(index=[f"g{i}" for i in range(g)]),
-        obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)])
+        obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)]),
     )
     adata.obsm["metadata"] = metadata_m_nd.numpy().astype(np.float32)
 
@@ -235,37 +239,37 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
         ],
     )
     dm = CellariumAnnDataDataModule(
-        dadc=adata, 
+        dadc=adata,
         batch_size=n,
         batch_keys={
-            "x_ng": AnnDataField("X"), 
+            "x_ng": AnnDataField("X"),
             "var_names_g": AnnDataField("var_names"),
             "obs_names_n": AnnDataField("obs_names"),
-            "metadata_m_nd": AnnDataField(attr="obsm", key="metadata")
-        }
+            "metadata_m_nd": AnnDataField(attr="obsm", key="metadata"),
+        },
     )
 
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=20, enable_checkpointing=False, logger=False)
     trainer.fit(module, dm)
-        
+
     # Analyze Beta
     # Beta shape: (R, D, K) -> (1, 1, 3)
-    beta = getattr(nmf, f"beta_{k}_rdk").squeeze() # (K,)
-    
+    beta = getattr(nmf, f"beta_{k}_rdk").squeeze()  # (K,)
+
     # We expect ONE element of beta to be significantly larger than others
     # corresponding to the disease factor. Note: Factor indices might permute.
     # So we check if the max value of beta correlates with the factor that looks like true_d_kg[disease_idx]
-    
-    learned_factors = getattr(nmf, f"D_{k}_rkg").squeeze() # (K, G)
-    
+
+    learned_factors = getattr(nmf, f"D_{k}_rkg").squeeze()  # (K, G)
+
     # Check correlation with true disease factor
     true_disease_factor = true_d_kg[disease_factor_idx]
-    
+
     correlations = []
     for i in range(k):
         # Pearson corr with NaN handling
         f = learned_factors[i]
-        
+
         # Check if factor has zero variance (constant values)
         if torch.std(f) < 1e-8:
             # If factor is essentially constant, correlation is undefined
@@ -278,13 +282,13 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
                 correlations.append(-1.0)
             else:
                 correlations.append(corr.item())
-        
+
     print(f"Correlations with True Disease Factor: {correlations}")
     print(f"Beta Values: {beta.tolist()}")
-    
+
     # Finds best match
     best_match_idx = np.argmax(correlations)
-    
+
     # Assert that the factor most correlated with disease (best_match_idx)
     # is also the one with the highest Beta weight.
     assert np.argmax(beta.tolist()) == best_match_idx, "Beta did not identify the disease factor"
@@ -300,7 +304,7 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
 #     x_ng, metadata_m_nd, _, _, _ = fixture_structure_aware_data
 #     n, g = x_ng.shape
 #     k = 3
-    
+
 #     def train_and_get_cov(l_align):
 #         nmf = OnlineStructureAwareNMF(
 #             var_names_g=[f"g{i}" for i in range(g)],
@@ -319,7 +323,7 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
 
 #         # Create AnnData
 #         adata = anndata.AnnData(
-#             X=x_ng.numpy(), 
+#             X=x_ng.numpy(),
 #             var=pd.DataFrame(index=[f"g{i}" for i in range(g)]),
 #             obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)])
 #         )
@@ -329,7 +333,7 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
 #         dm = CellariumAnnDataDataModule(
 #             dadc=adata, batch_size=n,
 #             batch_keys={
-#                 "x_ng": AnnDataField("X"), 
+#                 "x_ng": AnnDataField("X"),
 #                 "var_names_g": AnnDataField("var_names"),
 #                 "obs_names_n": AnnDataField("obs_names"),
 #                 "metadata_m_nd": AnnDataField(attr="obsm", key="metadata")
@@ -348,7 +352,7 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
 #         correlations = []
 #         for i in range(k):
 #             factor_loadings = loadings_raw[:, i]
-            
+
 #             # Check for zero variance
 #             if torch.std(factor_loadings) < 1e-8 or torch.std(metadata_vec) < 1e-8:
 #                 correlations.append(0.0)
@@ -358,27 +362,27 @@ def test_structure_aware_nmf_finds_disease_factor(fixture_structure_aware_data):
 #                     correlations.append(0.0)
 #                 else:
 #                     correlations.append(abs(corr.item()))
-        
+
 #         # Return correlation statistics and beta values
 #         max_abs_corr = max(correlations)
 #         mean_abs_corr = sum(correlations) / len(correlations)
 #         return max_abs_corr, mean_abs_corr, beta, correlations
-    
+
 #     (max_corr_low, mean_corr_low, beta_low, corrs_low) = train_and_get_cov(0.0)
 #     (max_corr_high, mean_corr_high, beta_high, corrs_high) = train_and_get_cov(100.0)
-    
+
 #     print(f"\nLambda=0:")
 #     print(f"  Max |correlation|: {max_corr_low:.4f}")
 #     print(f"  Mean |correlation|: {mean_corr_low:.4f}")
 #     print(f"  All correlations: {[f'{c:.4f}' for c in corrs_low]}")
 #     print(f"  Beta values: {[f'{b:.4f}' for b in beta_low.tolist()]}")
-    
+
 #     print(f"\nLambda=100:")
 #     print(f"  Max |correlation|: {max_corr_high:.4f}")
 #     print(f"  Mean |correlation|: {mean_corr_high:.4f}")
 #     print(f"  All correlations: {[f'{c:.4f}' for c in corrs_high]}")
 #     print(f"  Beta values: {[f'{b:.4f}' for b in beta_high.tolist()]}")
-    
+
 #     # Test that lambda_align doesn't significantly increase correlation
 #     # We use mean correlation as it's more stable than max
 #     # Allow for some stochasticity in optimization
@@ -394,7 +398,7 @@ def test_structure_aware_nmf_beta_sparsity(fixture_structure_aware_data):
     x_ng, metadata_m_nd, _, _, _ = fixture_structure_aware_data
     n, g = x_ng.shape
     k = 3
-    
+
     def train_and_get_beta_norm(l_select):
         nmf = OnlineStructureAwareNMF(
             var_names_g=[f"g{i}" for i in range(g)],
@@ -402,18 +406,18 @@ def test_structure_aware_nmf_beta_sparsity(fixture_structure_aware_data):
             r=1,
             n_cells_total=n,
             n_metadata=1,
-            lambda_align=1.0, # some alignment pressure
+            lambda_align=1.0,  # some alignment pressure
             lambda_select=l_select,
             algorithm="nmf_torch_hals",
         )
         torch.manual_seed(0)
         nmf.reset_parameters()
-        
+
         # Create AnnData
         adata = anndata.AnnData(
-            X=x_ng.numpy(), 
+            X=x_ng.numpy(),
             var=pd.DataFrame(index=[f"g{i}" for i in range(g)]),
-            obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)])
+            obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)]),
         )
         adata.obsm["metadata"] = metadata_m_nd.numpy().astype(np.float32)
 
@@ -429,26 +433,27 @@ def test_structure_aware_nmf_beta_sparsity(fixture_structure_aware_data):
             ],
         )
         dm = CellariumAnnDataDataModule(
-            dadc=adata, batch_size=n,
+            dadc=adata,
+            batch_size=n,
             batch_keys={
-                "x_ng": AnnDataField("X"), 
+                "x_ng": AnnDataField("X"),
                 "var_names_g": AnnDataField("var_names"),
                 "obs_names_n": AnnDataField("obs_names"),
-                "metadata_m_nd": AnnDataField(attr="obsm", key="metadata")
-            }
+                "metadata_m_nd": AnnDataField(attr="obsm", key="metadata"),
+            },
         )
 
         trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=10, enable_checkpointing=False, logger=False)
         trainer.fit(module, dm)
         beta = getattr(nmf, f"beta_{k}_rdk").squeeze()
         return torch.norm(beta, p=1).item()
-        
+
     beta_norm_low = train_and_get_beta_norm(0.0)
     beta_norm_high = train_and_get_beta_norm(1.0)
-    
+
     print(f"Beta Norm (lambda=0): {beta_norm_low}")
     print(f"Beta Norm (lambda=1): {beta_norm_high}")
-    
+
     assert beta_norm_high < beta_norm_low, "Sparsity penalty failed to reduce Beta norm"
 
 
