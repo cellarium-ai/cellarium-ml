@@ -26,7 +26,7 @@ from cellarium.ml.utilities.testing import (
 
 
 @torch.no_grad()
-def group_lasso_prox(beta_rdk: torch.Tensor, lambda_select: float, lr: float) -> torch.Tensor:
+def group_lasso_prox(beta_rdk: torch.Tensor, lambda_select: float, lr: float | torch.Tensor) -> torch.Tensor:
     """
     Block soft-thresholding proximal operator for the Group Lasso penalty.
 
@@ -115,28 +115,31 @@ def update_beta_group_lasso(
     # underestimates L by a factor of std(M), causing gradient steps that overshoot
     # by the same factor and diverge from the correct solution.
     MztM = M_z_nd.T @ M_nd  # (D, D): cross-product of z-scored and raw metadata
-    lambda_max_MztM = torch.linalg.matrix_norm(MztM, ord=2).item()  # max singular value
-    WaWaT = torch.einsum("rkg,rhg->rkh", W_active, W_active)  # (R, P, P)
-    lambda_max_WaWaT = torch.linalg.eigvalsh(WaWaT)[..., -1].max().item()
+    lambda_max_MztM = torch.linalg.matrix_norm(MztM, ord=2)  # scalar tensor, no CPU sync
+    # WaWaT is precomputed here and reused for both the Lipschitz bound and the loop gradient.
+    WaWaT_rpp = torch.einsum("rpg,rqg->rpq", W_active, W_active)  # (R, P, P)
+    # Trace upper-bounds lambda_max for a PSD matrix; avoids eigvalsh and its CPU sync.
+    lambda_max_WaWaT = WaWaT_rpp.diagonal(dim1=-2, dim2=-1).sum(dim=-1).max()  # scalar tensor
     L = (2.0 / n) * lambda_max_MztM * lambda_max_WaWaT
-    effective_lr = min(beta_lr, 1.0 / max(L, 1e-10))
+    effective_lr = torch.minimum(
+        torch.tensor(beta_lr, device=L.device, dtype=L.dtype),
+        1.0 / L.clamp(min=1e-10),
+    )  # 0-d tensor, no CPU sync
 
-    # Residual that Beta needs to explain: X - H_raw @ W
-    X_res_rng = X_ng.unsqueeze(0) - torch.einsum("rnk,rkg->rng", H_raw_rnk, W_rkg)
+    # Precompute G-space projections into the latent space so the hot loop never touches G.
+    # X_res @ Wa.T = (X - H_raw @ W_all) @ Wa.T = X @ Wa.T - H_raw @ (W_all @ Wa.T)
+    X_WaT_rnp = torch.einsum("ng,rpg->rnp", X_ng, W_active)  # (R, N, P)
+    WWaT_rkp = torch.einsum("rkg,rpg->rkp", W_rkg, W_active)  # (R, K, P)
+    X_res_WaT_rnp = X_WaT_rnp - torch.einsum("rnk,rkp->rnp", H_raw_rnk, WWaT_rkp)  # (R, N, P)
 
     beta_active = beta_rdk[:, :, :n_metadata_programs].clone()
 
     for _ in range(n_iter):
-        # Forward pass uses raw M (H_struct = M @ Beta, must remain non-negative)
-        M_beta_rnk_active = torch.einsum("nd,rdk->rnk", M_nd, beta_active)
-        pred_rng = torch.einsum("rnk,rkg->rng", M_beta_rnk_active, W_active)
-
-        # Gradient uses z-scored M_z so that only correlation structure drives Beta.
-        # For a column starting at zero, if X_res is uncorrelated with M_z, the gradient
-        # magnitude ≈ (2/sqrt(n)) * ||W_k||, which the group-lasso threshold can suppress.
-        err_rng = pred_rng - X_res_rng
-        err_W_rnk_active = torch.einsum("rng,rkg->rnk", err_rng, W_active)
-        grad_active = (2.0 / n) * torch.einsum("nd,rnk->rdk", M_z_nd, err_W_rnk_active)
+        # All operations in (R, N, P) space — G dimension eliminated from the loop.
+        M_beta_rnp = torch.einsum("nd,rdp->rnp", M_nd, beta_active)  # (R, N, P)
+        pred_W_rnp = torch.einsum("rnp,rpq->rnq", M_beta_rnp, WaWaT_rpp)  # (R, N, P)
+        err_W_rnp = pred_W_rnp - X_res_WaT_rnp  # (R, N, P)
+        grad_active = (2.0 / n) * torch.einsum("nd,rnp->rdp", M_z_nd, err_W_rnp)  # (R, D, P)
 
         beta_active = beta_active - effective_lr * grad_active
         beta_active = group_lasso_prox(beta_active, lambda_select, effective_lr)
@@ -570,13 +573,12 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         with torch.no_grad():
             H_struct_rnk = torch.einsum("nd,rdk->rnk", m_nd, beta_rdk)
 
-            # --- Step 3: effective residual X_eff = X - H_struct @ W ---
-            X_eff_rng = x_ng.unsqueeze(0) - torch.einsum("rnk,rkg->rng", H_struct_rnk, W_rkg)
-
-            # --- Step 4: FISTA solver for H_raw on X_eff ---
-            # Use solve_nnls_fista_precomputed directly since X_eff is replicate-varying (R, N, G).
+            # --- Step 3 & 4: FISTA solver setup (no (R, N, G) materialization) ---
+            # W @ X_eff.T = W @ X.T - (W @ W.T) @ H_struct.T, avoiding explicit X_eff.
             wwT_rkk = torch.einsum("rkg,rhg->rkh", W_rkg, W_rkg)  # (R, K, K)
-            wxT_eff_rkn = torch.einsum("rkg,rng->rkn", W_rkg, X_eff_rng)  # (R, K, N)
+            WxT_rkn = torch.einsum("rkg,ng->rkn", W_rkg, x_ng)  # (R, K, N)
+            wwT_Hstruct_rkn = torch.einsum("rkh,rnh->rkn", wwT_rkk, H_struct_rnk)  # (R, K, N)
+            wxT_eff_rkn = WxT_rkn - wwT_Hstruct_rkn  # (R, K, N)
 
         H_raw_solver_kn, _ = solve_nnls_fista_precomputed(
             AtA=wwT_rkk,
@@ -607,14 +609,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
             # --- Step 7: accumulate A, B using H_total (Mairal update with rho decay) ---
             A_rkk_new = self.exponential_decay_rho * A_rkk + torch.bmm(H_total_rnk.transpose(1, 2), H_total_rnk) / n
-            B_rkg_new = (
-                self.exponential_decay_rho * B_rkg
-                + torch.bmm(
-                    H_total_rnk.transpose(1, 2),
-                    x_ng.unsqueeze(0).expand(self.r, n, -1),
-                )
-                / n
-            )
+            B_rkg_new = self.exponential_decay_rho * B_rkg + torch.einsum("rnk,ng->rkg", H_total_rnk, x_ng) / n
 
         # --- Step 8: update W via FISTA factors ---
         W_rkg_new, _ = nmf_compute_factors_fista(
