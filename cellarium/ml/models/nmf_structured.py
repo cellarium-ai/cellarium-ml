@@ -651,7 +651,9 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             setattr(self, f"mu_H_ema_{k}_rk", mu_H_ema_new)
 
         # --- Step 11: encoder loss ---
-        encoder_loss = self.encoder_loss_fn(H_raw_warm_rnk, H_raw_solver_rnk.detach()) + cov_penalty
+        encoder_loss = (
+            self.encoder_loss_fn(H_raw_warm_rnk.contiguous(), H_raw_solver_rnk.detach().contiguous()) + cov_penalty
+        )
 
         return {
             "loss": encoder_loss,
