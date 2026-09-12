@@ -77,6 +77,8 @@ def metadata_sim_adata() -> anndata.AnnData:
     ols_coeff_dg = np.linalg.solve(MtM + 1e-6 * np.eye(D), MtX).astype(np.float32)  # (1, g)
 
     metadata_mean_d = M_nd.mean(axis=0).astype(np.float32)  # (1,)
+    metadata_min_d = M_nd.min(axis=0).astype(np.float32)  # (1,)
+    metadata_max_d = M_nd.max(axis=0).astype(np.float32)  # (1,)
 
     adata = anndata.AnnData(
         X=X_ng,
@@ -89,6 +91,8 @@ def metadata_sim_adata() -> anndata.AnnData:
         "beta_true": beta_true,
         "ols_coeff_dg": ols_coeff_dg,
         "metadata_mean_d": metadata_mean_d,
+        "metadata_min_d": metadata_min_d,
+        "metadata_max_d": metadata_max_d,
         "M_nd": M_nd,
     }
     return adata
@@ -125,6 +129,8 @@ def large_sim_adata() -> anndata.AnnData:
     MtX = M_nd.T @ X_ng
     ols_coeff_dg = np.linalg.solve(MtM + 1e-6 * np.eye(D), MtX).astype(np.float32)
     metadata_mean_d = M_nd.mean(axis=0).astype(np.float32)
+    metadata_min_d = M_nd.min(axis=0).astype(np.float32)
+    metadata_max_d = M_nd.max(axis=0).astype(np.float32)
 
     adata = anndata.AnnData(
         X=X_ng,
@@ -137,6 +143,8 @@ def large_sim_adata() -> anndata.AnnData:
         "beta_true": beta_true,
         "ols_coeff_dg": ols_coeff_dg,
         "metadata_mean_d": metadata_mean_d,
+        "metadata_min_d": metadata_min_d,
+        "metadata_max_d": metadata_max_d,
         "M_nd": M_nd,
     }
     return adata
@@ -153,6 +161,8 @@ def _make_structured_module(
     r: int,
     n_metadata: int,
     metadata_mean_d: np.ndarray,
+    metadata_min_d: np.ndarray | None = None,
+    metadata_max_d: np.ndarray | None = None,
     ols_coeff_dg: np.ndarray | None = None,
     n_metadata_programs: int = 1,
     latent_dim: int = 16,
@@ -164,6 +174,11 @@ def _make_structured_module(
     exploration_epochs: int = 2,
 ) -> CellariumModule:
     var_names_g = np.array([f"gene_{i}" for i in range(adata.shape[1])])
+    M = adata.obsm["metadata"].astype(np.float32)
+    if metadata_min_d is None:
+        metadata_min_d = M.min(axis=0)
+    if metadata_max_d is None:
+        metadata_max_d = M.max(axis=0)
     model = AmortizedOnlineStructureAwareNMF(
         var_names_g=var_names_g.tolist(),
         k_values=k_values,
@@ -173,6 +188,8 @@ def _make_structured_module(
         batch_size=batch_size,
         n_metadata=n_metadata,
         metadata_mean_d=metadata_mean_d,
+        metadata_min_d=metadata_min_d,
+        metadata_max_d=metadata_max_d,
         n_metadata_programs=n_metadata_programs,
         ols_coeff_dg=ols_coeff_dg,
         mean_total_count=mean_total_count,
@@ -245,13 +262,13 @@ def test_compute_metadata_nmf_init_shapes() -> None:
     torch.manual_seed(0)
     D, G, n_progs, n_reps, n_comp = 2, 30, 3, 4, 8
     ols = torch.randn(D, G)
-    mean_M = torch.ones(D) * 50.0
+    range_M = torch.ones(D) * 60.0  # e.g. age range 20-80
     W_out, Beta_out = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=n_progs,
         n_replicates=n_reps,
         n_components=n_comp,
-        mean_M_d=mean_M,
+        range_M_d=range_M,
         mean_total_count=5000.0,
     )
     assert W_out.shape == (n_reps, n_progs, G)
@@ -263,13 +280,13 @@ def test_compute_metadata_nmf_init_l1_norms() -> None:
     torch.manual_seed(1)
     D, G = 1, 50
     ols = torch.randn(D, G)
-    mean_M = torch.tensor([40.0])
+    range_M = torch.tensor([60.0])
     W_out, _ = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=2,
         n_replicates=3,
         n_components=5,
-        mean_M_d=mean_M,
+        range_M_d=range_M,
         mean_total_count=8000.0,
     )
     assert (W_out >= 0).all(), "W factors must be non-negative"
@@ -282,13 +299,13 @@ def test_compute_metadata_nmf_init_replicate_diversity() -> None:
     torch.manual_seed(2)
     D, G = 1, 40
     ols = torch.randn(D, G)
-    mean_M = torch.tensor([50.0])
+    range_M = torch.tensor([60.0])
     W_out, _ = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=1,
         n_replicates=4,
         n_components=6,
-        mean_M_d=mean_M,
+        range_M_d=range_M,
         mean_total_count=5000.0,
         noise_scale=0.1,
     )
@@ -328,6 +345,8 @@ def test_structured_nmf_forward_returns_loss(metadata_sim_adata: anndata.AnnData
         batch_size=64,
         n_metadata=1,
         metadata_mean_d=sim["metadata_mean_d"],
+        metadata_min_d=sim["metadata_min_d"],
+        metadata_max_d=sim["metadata_max_d"],
         n_metadata_programs=1,
     )
     n_batch = 32
@@ -441,6 +460,8 @@ def test_ols_init_beta_sparsity(metadata_sim_adata: anndata.AnnData) -> None:
         batch_size=64,
         n_metadata=1,
         metadata_mean_d=sim["metadata_mean_d"],
+        metadata_min_d=sim["metadata_min_d"],
+        metadata_max_d=sim["metadata_max_d"],
         n_metadata_programs=n_progs,
         ols_coeff_dg=sim["ols_coeff_dg"],
         mean_total_count=float(metadata_sim_adata.X.sum(axis=1).mean()),
@@ -554,7 +575,8 @@ def test_metadata_factor_recovery(large_sim_adata: anndata.AnnData) -> None:
 
     model.eval()
     with torch.no_grad():
-        H_struct_rnk = torch.einsum("nd,rdk->rnk", m_all, beta_rdk)
+        m_scaled_all = ((m_all - model.min_M_global_d) / model.range_M_global_d).clamp(0.0, 1.0)
+        H_struct_rnk = torch.einsum("nd,rdk->rnk", m_scaled_all, beta_rdk)  # linear
         X_eff_rng = x_all.unsqueeze(0) - torch.einsum("rnk,rkg->rng", H_struct_rnk, W_rkg)
         wwT_rkk = torch.einsum("rkg,rhg->rkh", W_rkg, W_rkg)
         wxT_rkn = torch.einsum("rkg,rng->rkn", W_rkg, X_eff_rng)
@@ -576,7 +598,7 @@ def test_metadata_factor_recovery(large_sim_adata: anndata.AnnData) -> None:
 
     # --- Assertion 3: No NaN/Inf in encoder output ---
     with torch.no_grad():
-        H_raw_warm_rnk = model.encoder(x_all, W_rkg, m_all)
+        H_raw_warm_rnk = model.encoder(x_all, W_rkg, m_scaled_all)
     assert not H_raw_warm_rnk.isnan().any(), "Encoder output must not contain NaN"
     assert not H_raw_warm_rnk.isinf().any(), "Encoder output must not contain Inf"
 
@@ -615,25 +637,30 @@ def test_group_lasso_prunes_excess_nominated_beta(large_sim_adata: anndata.AnnDa
         start = fac * 5
         W_rkg[:, fac, start : start + 5] = 1.0 / 5  # L1-normalized, 5 genes each
 
-    # Metadata (age): take first 1024 cells from fixture
+    # Metadata (age): take first 1024 cells from fixture; min-max scale to [0, 1].
     M_nd = torch.from_numpy(large_sim_adata.obsm["metadata"][:n]).float()  # (1024, 1)
+    M_min = M_nd.min(dim=0).values
+    M_range = (M_nd.max(dim=0).values - M_min).clamp(min=1e-8)
+    M_scaled_nd = ((M_nd - M_min) / M_range).clamp(0.0, 1.0)  # in [0, 1]
 
-    # X is ONLY driven by factor 0 through the age metadata (H_raw = 0 for simplicity)
+    # X is ONLY driven by factor 0 through the age metadata (H_raw = 0 for simplicity).
+    # We generate X in raw-age space; M_scaled is only used in the gradient update.
     beta_true_0 = 2.0
-    H_struct_factor0 = M_nd * beta_true_0  # (1024, 1): age * beta_true
+    H_struct_factor0 = M_nd * beta_true_0  # (1024, 1): raw ages * beta_true
     X_ng = H_struct_factor0 @ W_rkg[0, :1, :]  # (1024, g): age signal through factor 0 only
 
-    # Beta starts at zero — no OLS init. The gradient drives selection:
-    #   gradient(col=0) = 2 * std_M * beta_true * overlap_0 = 2 * 17.3 * 2.0 * 1.0 ≈ 69.2
-    #   gradient(col=1-3) = 2 * std_M * beta_true * overlap_1:3 = 0 (exactly orthogonal)
-    # With lambda_select=5: col 0 grows (69.2 >> 5), cols 1-3 stay at zero (0 < 5) ✓
+    # Beta starts at zero. With min-max scaled M and linear H_struct, at beta=0:
+    #   H_struct=0, err_W = -X_res_WaT
+    #   grad(col=0) ≈ -(2/n) * (M_scaled^T @ M_nd) * 2.0 * WaWaT[0,0] ≈ -24
+    #   grad(col=1-3) = 0 (exactly orthogonal W factors)
+    # With lambda_select=5: col 0 grows (24 >> 5), cols 1-3 stay at zero ✓
     beta_rdk = torch.zeros(r, D, k)
 
     beta_updated = update_beta_group_lasso(
         H_raw_rnk=torch.zeros(r, n, k),  # H_raw = 0 → X_res = X_ng exactly
         W_rkg=W_rkg,
         X_ng=X_ng,
-        M_nd=M_nd,
+        M_scaled_nd=M_scaled_nd,
         beta_rdk=beta_rdk,
         lambda_select=5.0,
         beta_lr=1.0,
@@ -645,7 +672,7 @@ def test_group_lasso_prunes_excess_nominated_beta(large_sim_adata: anndata.AnnDa
     beta_0_norm = beta_updated[:, :, 0].norm().item()
     assert beta_0_norm > 0.1, (
         f"Nominated Beta column 0 should be non-zero (group norm = {beta_0_norm:.4f}). "
-        f"Factor 0 is the age gene direction; its gradient (≈69) >> lambda_select (5.0)."
+        f"Factor 0 is the age gene direction; its gradient (≈24) >> lambda_select (5.0)."
     )
 
     # Nominated factors 1-3 should stay exactly at zero (zero gradient from orthogonal W)

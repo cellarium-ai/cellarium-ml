@@ -55,7 +55,7 @@ def update_beta_group_lasso(
     H_raw_rnk: torch.Tensor,
     W_rkg: torch.Tensor,
     X_ng: torch.Tensor,
-    M_nd: torch.Tensor,
+    M_scaled_nd: torch.Tensor,
     beta_rdk: torch.Tensor,
     lambda_select: float,
     beta_lr: float,
@@ -71,18 +71,18 @@ def update_beta_group_lasso(
     ``n_metadata_programs`` was over-specified, unnecessary nominated columns are
     driven to zero; only those with genuine metadata-correlation survive.
 
-    The gradient is computed with z-scored metadata so the gradient magnitude is
-    unit-free (not sensitive to metadata units or scale). The step size is set by
-    the Lipschitz constant of the gradient, which accounts for the mixed raw-M
-    forward / z-scored-M gradient computation.
+    The forward is linear: ``H_struct = M_scaled @ Beta``. Since ``M_scaled`` is
+    min-max scaled to ``[0, 1]`` and ``Beta >= 0`` (enforced by clamping), H_struct
+    is guaranteed non-negative. The gradient is the standard linear least-squares
+    gradient with no chain-rule correction needed.
 
     Args:
         H_raw_rnk: Idiosyncratic loadings of shape (R, N, K).
         W_rkg: Gene factors of shape (R, K, G).
         X_ng: Gene counts of shape (N, G).
-        M_nd: Metadata matrix of shape (N, D), raw (uncentered).
+        M_scaled_nd: Min-max scaled metadata of shape (N, D), values in [0, 1].
         beta_rdk: Current Beta of shape (R, D, K).
-        lambda_select: Group Lasso strength (in z-scored gradient units).
+        lambda_select: Group Lasso strength.
         beta_lr: Upper bound on the proximal gradient step size. The actual step is
             ``min(beta_lr, 1/L)`` where L is the per-batch Lipschitz constant.
             Setting ``beta_lr=1.0`` uses the Lipschitz-optimal step when L≥1.
@@ -96,31 +96,15 @@ def update_beta_group_lasso(
     n = X_ng.shape[0]
     W_active = W_rkg[:, :n_metadata_programs, :]  # (R, P, G), P = n_metadata_programs
 
-    # Z-score metadata to remove mean-level bias from the gradient.
-    # Without centering, large mean(M) (e.g. age ≈ 50) creates a constant gradient term
-    # proportional to mean(M) * mean(X_res), which would drive all nominated columns positive
-    # regardless of whether they correlate with M. Centering removes this bias.
-    # Dividing by std(M) additionally makes the gradient magnitude unit-free, so
-    # lambda_select is interpretable across different metadata scales.
-    # Note: the Lipschitz constant still scales with std(M) because the forward uses raw M.
-    M_z_nd = M_nd - M_nd.mean(dim=0, keepdim=True)  # center
-    M_z_nd = M_z_nd / M_z_nd.std(dim=0, keepdim=True).clamp(min=1e-8)  # scale to unit variance
-
-    # Lipschitz constant of the (mixed) beta gradient.
-    # The gradient uses M_z but the forward uses raw M, so the gradient function is:
-    #   grad(beta) = (2/n) * M_z^T @ (M @ beta @ W - X) @ W^T
-    # Its Hessian is (2/n) * (M_z^T @ M) ⊗ (W W^T), with Lipschitz constant:
-    #   L = (2/n) * ||M_z^T @ M||_op * lambda_max(WaWaT)
-    # Using M_z^T @ M_z ≈ n (the self-product) instead of the cross-product M_z^T @ M
-    # underestimates L by a factor of std(M), causing gradient steps that overshoot
-    # by the same factor and diverge from the correct solution.
-    MztM = M_z_nd.T @ M_nd  # (D, D): cross-product of z-scored and raw metadata
-    lambda_max_MztM = torch.linalg.matrix_norm(MztM, ord=2)  # scalar tensor, no CPU sync
+    # Lipschitz constant of the linear beta gradient:
+    #   ||grad(beta)||_2 <= (2/n) * ||M_sc^T M_sc||_op * lambda_max(WaWaT) * ||delta_beta||_2
+    MscTMsc = M_scaled_nd.T @ M_scaled_nd  # (D, D): self-product of scaled metadata
+    lambda_max_MscTMsc = torch.linalg.matrix_norm(MscTMsc, ord=2)  # scalar tensor, no CPU sync
     # WaWaT is precomputed here and reused for both the Lipschitz bound and the loop gradient.
     WaWaT_rpp = torch.einsum("rpg,rqg->rpq", W_active, W_active)  # (R, P, P)
     # Trace upper-bounds lambda_max for a PSD matrix; avoids eigvalsh and its CPU sync.
     lambda_max_WaWaT = WaWaT_rpp.diagonal(dim1=-2, dim2=-1).sum(dim=-1).max()  # scalar tensor
-    L = (2.0 / n) * lambda_max_MztM * lambda_max_WaWaT
+    L = (2.0 / n) * lambda_max_MscTMsc * lambda_max_WaWaT
     effective_lr = torch.minimum(
         torch.tensor(beta_lr, device=L.device, dtype=L.dtype),
         1.0 / L.clamp(min=1e-10),
@@ -136,10 +120,10 @@ def update_beta_group_lasso(
 
     for _ in range(n_iter):
         # All operations in (R, N, P) space — G dimension eliminated from the loop.
-        M_beta_rnp = torch.einsum("nd,rdp->rnp", M_nd, beta_active)  # (R, N, P)
-        pred_W_rnp = torch.einsum("rnp,rpq->rnq", M_beta_rnp, WaWaT_rpp)  # (R, N, P)
+        H_struct_rnp = torch.einsum("nd,rdp->rnp", M_scaled_nd, beta_active)  # (R, N, P): linear
+        pred_W_rnp = torch.einsum("rnp,rpq->rnq", H_struct_rnp, WaWaT_rpp)  # (R, N, P)
         err_W_rnp = pred_W_rnp - X_res_WaT_rnp  # (R, N, P)
-        grad_active = (2.0 / n) * torch.einsum("nd,rnp->rdp", M_z_nd, err_W_rnp)  # (R, D, P)
+        grad_active = (2.0 / n) * torch.einsum("nd,rnp->rdp", M_scaled_nd, err_W_rnp)  # linear
 
         beta_active = beta_active - effective_lr * grad_active
         beta_active = group_lasso_prox(beta_active, lambda_select, effective_lr)
@@ -156,18 +140,20 @@ def compute_metadata_nmf_init(
     n_metadata_programs: int,
     n_replicates: int,
     n_components: int,
-    mean_M_d: torch.Tensor,
+    range_M_d: torch.Tensor,
     mean_total_count: float,
     noise_scale: float = 0.05,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Derives NMF initialization for nominated metadata-capturing factors from OLS coefficients.
 
-    Runs truncated SVD on the OLS coefficient matrix to extract the dominant modes of
-    metadata-gene co-variation. Applies a sign convention so the primary gene direction
-    is positive, then ReLU-projects to non-negative (upregulation only) and L1-normalizes
-    to match the NMF factor convention. Beta columns are calibrated so that
-    ``mean(M) @ Beta_j ≈ mean_total_count / n_components``.
+    Runs truncated SVD on the range-scaled OLS coefficient matrix (rows scaled by range_M_d)
+    to extract dominant modes of metadata-gene co-variation in min-max scaled space. Applies
+    a sign convention so the primary gene direction is positive, then ReLU-projects to
+    non-negative and L1-normalizes. Beta columns are calibrated so that a cell at the maximum
+    metadata value contributes approximately ``mean_total_count / n_components`` to its
+    H_struct loading: ``sum(Beta_j) ≈ mean_total_count / n_components`` (since M_scaled=1
+    at maximum for each covariate).
 
     Recommended workflow:
         1. Run ``StreamingOrdinaryLeastSquares(var_names_g=gene_names, n_targets=n_genes)``
@@ -176,11 +162,12 @@ def compute_metadata_nmf_init(
         3. Pass ``ols_coeff_dg`` to this function.
 
     Args:
-        ols_coeff_dg: OLS coefficient matrix of shape (D, G).
+        ols_coeff_dg: OLS coefficient matrix of shape (D, G), in raw metadata units.
         n_metadata_programs: Number of metadata factors to initialize.
         n_replicates: Number of NMF replicates.
         n_components: Total NMF components k (for loading scale calibration).
-        mean_M_d: Global metadata mean of shape (D,).
+        range_M_d: Global metadata range (max - min) of shape (D,). Used to convert OLS
+            directions to min-max scaled space and to calibrate Beta scale.
         mean_total_count: Expected total UMI count per cell.
         noise_scale: Relative noise std for replicate diversity (default 0.05).
 
@@ -191,7 +178,9 @@ def compute_metadata_nmf_init(
     D, G = ols_coeff_dg.shape
     n_singular = min(n_metadata_programs, D)
 
-    U, S, Vh = torch.linalg.svd(ols_coeff_dg, full_matrices=False)
+    # Scale OLS rows by range_M_d to get scaled-space directions: dX/dM_scaled = range_M * dX/dM
+    ols_coeff_dg_scaled = range_M_d.unsqueeze(1) * ols_coeff_dg  # (D, G)
+    U, S, Vh = torch.linalg.svd(ols_coeff_dg_scaled, full_matrices=False)
     # U: (D, min(D,G)), S: (min(D,G),), Vh: (min(D,G), G)
     U = U[:, :n_singular]  # (D, n_singular)
     S = S[:n_singular]  # (n_singular,)
@@ -204,27 +193,28 @@ def compute_metadata_nmf_init(
             Vh[j] = -Vh[j]
             U[:, j] = -U[:, j]
 
-    # Build base W and Beta for each nominated program
+    # Build base W and Beta for each nominated program.
+    # Beta calibration: at full range (M_scaled=1 for all d), contribution = beta_j.sum().
+    # Target: beta_j.sum() ≈ target_loading. Fallback: uniform target_loading / D per entry.
     W_base: list[torch.Tensor] = []
     Beta_base: list[torch.Tensor] = []
     target_loading = mean_total_count / max(n_components, 1)
-    mean_M_sum = mean_M_d.abs().sum().clamp(min=1e-8).item()
 
     for j in range(n_metadata_programs):
         if j < n_singular:
             w_j = F.relu(Vh[j]) + 1e-8  # (G,)
             w_j = F.normalize(w_j, p=1, dim=0)
 
-            beta_j = F.relu(U[:, j])  # (D,) non-negative
-            mean_loading = (mean_M_d * beta_j).sum().item()
-            if mean_loading > 1e-8:
-                beta_j = beta_j * (target_loading / mean_loading)
+            beta_j = F.relu(U[:, j])  # (D,) non-negative, in scaled space
+            full_range_loading = beta_j.sum().item()
+            if full_range_loading > 1e-8:
+                beta_j = beta_j * (target_loading / full_range_loading)
             else:
-                beta_j = torch.ones(D, device=ols_coeff_dg.device) * (target_loading / mean_M_sum)
+                beta_j = torch.ones(D, device=ols_coeff_dg.device) * (target_loading / max(D, 1))
         else:
             # More programs than SVD modes: random init for extras
             w_j = F.normalize(torch.rand(G, device=ols_coeff_dg.device) + 1e-8, p=1, dim=0)
-            beta_j = torch.ones(D, device=ols_coeff_dg.device) * (target_loading / mean_M_sum)
+            beta_j = torch.ones(D, device=ols_coeff_dg.device) * (target_loading / max(D, 1))
 
         W_base.append(w_j)
         Beta_base.append(beta_j)
@@ -324,9 +314,12 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
     the consensus step.
 
     **Metadata convention:**
-    ``m_nd`` should contain **raw (uncentered) non-negative** metadata values (e.g., donor
-    age in years). Non-negativity ensures H_struct = M * Beta >= 0 (since Beta >= 0),
-    keeping H_total >= 0.
+    ``m_nd`` should contain **raw non-negative** metadata values (e.g., donor age in years).
+    The model internally applies min-max scaling: ``M_scaled = (M - min) / (max - min)``,
+    clipped to ``[0, 1]``. This guarantees ``H_struct = M_scaled * Beta >= 0`` (since
+    ``Beta >= 0``), keeping ``H_total >= 0``. Provide ``metadata_min_d`` and
+    ``metadata_max_d`` computed from the training set (or representative percentiles for
+    robustness to outliers).
 
     **Recommended workflow:**
 
@@ -337,14 +330,18 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         # train ols with x_ng=M_metadata, y_nk=X_genes for one epoch
         ols_coeff_dg = ols.solve().numpy()   # (D, G)
 
-        # Step 2: metadata mean
+        # Step 2: metadata statistics
         metadata_mean_d = M.mean(axis=0)    # (D,)
+        metadata_min_d  = M.min(axis=0)     # (D,)
+        metadata_max_d  = M.max(axis=0)     # (D,)
 
         # Step 3: train structured NMF
         model = AmortizedOnlineStructureAwareNMF(
             ...,
             n_metadata=D,
             metadata_mean_d=metadata_mean_d,
+            metadata_min_d=metadata_min_d,
+            metadata_max_d=metadata_max_d,
             ols_coeff_dg=ols_coeff_dg,
             n_metadata_programs=2,          # or 2 * D as a starting point
         )
@@ -362,7 +359,10 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         total_n_cells: Total dataset size (for EMA period computation).
         batch_size: Training batch size.
         n_metadata: Number of metadata columns (D).
-        metadata_mean_d: Precomputed global metadata mean, shape (D,). Required.
+        metadata_mean_d: Precomputed global metadata mean, shape (D,). Used for
+            covariance penalty centering in scaled space.
+        metadata_min_d: Precomputed global metadata minimum, shape (D,). Required.
+        metadata_max_d: Precomputed global metadata maximum, shape (D,). Required.
         n_metadata_programs: Number of nominated metadata factors. Defaults to
             ``2 * n_metadata``. Must be < min(k_values).
         ols_coeff_dg: OLS coefficient matrix (D, G) from StreamingOrdinaryLeastSquares.
@@ -392,6 +392,8 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         batch_size: int,
         n_metadata: int,
         metadata_mean_d: np.ndarray,
+        metadata_min_d: np.ndarray,
+        metadata_max_d: np.ndarray,
         n_metadata_programs: int | None = None,
         ols_coeff_dg: np.ndarray | None = None,
         mean_total_count: float | None = None,
@@ -460,14 +462,20 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             torch.from_numpy(np.array(ols_coeff_dg)).float() if ols_coeff_dg is not None else None
         )
         self._metadata_mean_d_init = torch.from_numpy(np.array(metadata_mean_d)).float()
+        self._metadata_min_d_init = torch.from_numpy(np.array(metadata_min_d)).float()
+        self._metadata_max_d_init = torch.from_numpy(np.array(metadata_max_d)).float()
         self._mean_total_count = mean_total_count
         self._metadata_noise_scale = metadata_noise_scale
 
         # Replace encoder with metadata-augmented version
         self.encoder = MetadataAugmentedLoadingsEncoder(n_genes=g, latent_dim=latent_dim, n_metadata=n_metadata)
 
-        # Fixed global metadata mean (never updated during training)
-        self.register_buffer("mu_M_global_d", self._metadata_mean_d_init.clone())
+        # Fixed global metadata min-max scaling stats (never updated during training)
+        range_M = (self._metadata_max_d_init - self._metadata_min_d_init).clamp(min=1e-8)
+        mu_M_scaled = (self._metadata_mean_d_init - self._metadata_min_d_init) / range_M
+        self.register_buffer("min_M_global_d", self._metadata_min_d_init.clone())
+        self.register_buffer("range_M_global_d", range_M)
+        self.register_buffer("mu_M_scaled_d", mu_M_scaled)
 
         # Per-k Beta and H_raw EMA buffers
         for k in k_values:
@@ -510,7 +518,11 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             return
 
         # OLS-based initialization
-        mu_M = getattr(self, "mu_M_global_d", self._metadata_mean_d_init)
+        range_M = getattr(
+            self,
+            "range_M_global_d",
+            (self._metadata_max_d_init - self._metadata_min_d_init).clamp(min=1e-8),
+        )
 
         for k in self.k_values:
             D_rkg = getattr(self, f"D_{k}_rkg")
@@ -522,7 +534,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
                 n_metadata_programs=self.n_metadata_programs,
                 n_replicates=self.r,
                 n_components=k,
-                mean_M_d=mu_M.to(device),
+                range_M_d=range_M.to(device),
                 mean_total_count=mean_count,
                 noise_scale=self._metadata_noise_scale,
             )
@@ -566,12 +578,15 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         B_rkg = getattr(self, f"B_{k}_rkg")
         mu_H_ema_rk = getattr(self, f"mu_H_ema_{k}_rk")
 
-        # --- Step 1: encoder warm-start for H_raw (has gradients) ---
-        H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_nd)
+        # --- Step 0: min-max scale metadata to [0, 1] ---
+        m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)  # (N, D)
 
-        # --- Step 2: structural component H_struct = M * Beta ---
+        # --- Step 1: encoder warm-start for H_raw (has gradients) ---
+        H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
+
+        # --- Step 2: structural component H_struct = M_scaled @ Beta (linear, non-negative) ---
         with torch.no_grad():
-            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_nd, beta_rdk)
+            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk)
 
             # --- Step 3 & 4: FISTA solver setup (no (R, N, G) materialization) ---
             # W @ X_eff.T = W @ X.T - (W @ W.T) @ H_struct.T, avoiding explicit X_eff.
@@ -594,7 +609,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
                 H_raw_rnk=H_raw_solver_rnk,
                 W_rkg=W_rkg,
                 X_ng=x_ng,
-                M_nd=m_nd,
+                M_scaled_nd=m_scaled_nd,
                 beta_rdk=beta_rdk,
                 lambda_select=self.lambda_select,
                 beta_lr=self.beta_lr,
@@ -604,7 +619,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             setattr(self, f"beta_{k}_rdk", beta_rdk_updated)
 
             # --- Step 6: recompute H_struct and H_total ---
-            H_struct_updated_rnk = torch.einsum("nd,rdk->rnk", m_nd, beta_rdk_updated)
+            H_struct_updated_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk_updated)
             H_total_rnk = H_raw_solver_rnk + H_struct_updated_rnk
 
             # --- Step 7: accumulate A, B using H_total (Mairal update with rho decay) ---
@@ -626,7 +641,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
         # --- Step 9: anchored covariance penalty on encoder output (pre-EMA-update) ---
         # Uses historical mu_H_ema (before this batch) to avoid circularity.
-        M_c_nd = m_nd - self.mu_M_global_d  # (N, D), exact centering
+        M_c_nd = m_scaled_nd - self.mu_M_scaled_d  # (N, D), centered scaled metadata
         ema_rho = float(np.exp(-1.0 / self.n_batches_for_forgetting_momentum))
         if self._n_ema_updates > 0:
             bias_correction = max(1.0 - ema_rho**self._n_ema_updates, 1e-8)
@@ -730,12 +745,13 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         if m_nd is None:
             raise ValueError("m_nd must be provided for AmortizedOnlineStructureAwareNMF.validate")
 
+        m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)  # (N, D)
         nmf_reconstruction_errors = []
         for k in self.k_values:
             W_rkg = getattr(self, f"D_{k}_rkg")
             beta_rdk = getattr(self, f"beta_{k}_rdk")
-            H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_nd)
-            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_nd, beta_rdk.detach())
+            H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
+            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk.detach())
             H_total_rnk = H_raw_warm_rnk + H_struct_rnk
             squared_error_r = compute_reconstruction_error_compiled(
                 x_ng=x_ng, loadings_rnk=H_total_rnk, factors_rkg=W_rkg
