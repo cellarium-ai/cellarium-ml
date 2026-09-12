@@ -289,6 +289,30 @@ def to_float_column(x: pd.Series) -> np.ndarray:
     return x.to_numpy(dtype=np.float32)[:, None]
 
 
+def to_codes_column(x: pd.Series) -> np.ndarray:
+    """
+    Convert a categorical pandas Series to a float32 numpy column vector of integer codes.
+
+    Codes are assigned in alphabetical order of the category labels (pandas default),
+    so the mapping is deterministic across runs. For a binary variable with categories
+    ``['healthy', 'sick']`` the codes are ``{'healthy': 0, 'sick': 1}``, giving values
+    in ``{0.0, 1.0}`` — identical to min-max scaling with min=0, max=1.
+
+    Useful as a ``convert_fn`` for :class:`~cellarium.ml.utilities.data.AnnDataField`
+    when a single binary categorical ``obs`` column is used as metadata (``m_nd``).
+    For binary categoricals, pass ``metadata_min_d=[0.]``, ``metadata_max_d=[1.]``,
+    and ``metadata_mean_d=[prevalence_of_code_1]`` to the model constructor.
+
+    Args:
+        x: Categorical pandas Series. Must have dtype ``category``; call
+           ``adata.obs[col] = adata.obs[col].astype('category')`` first if needed.
+
+    Returns:
+        Float32 numpy array of shape ``(n, 1)``.
+    """
+    return np.asarray(x.cat.codes, dtype=np.float32)[:, None]
+
+
 def get_var_names_g_indices(
     input_var_names_g: np.ndarray,
     stored_var_names_g: np.ndarray,

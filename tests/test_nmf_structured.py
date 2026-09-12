@@ -21,7 +21,7 @@ from cellarium.ml.models.nmf_structured import (
     update_beta_group_lasso,
 )
 from cellarium.ml.transforms import DivideByScale, Filter
-from cellarium.ml.utilities.data import AnnDataField
+from cellarium.ml.utilities.data import AnnDataField, to_codes_column
 
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
 
@@ -80,10 +80,19 @@ def metadata_sim_adata() -> anndata.AnnData:
     metadata_min_d = M_nd.min(axis=0).astype(np.float32)  # (1,)
     metadata_max_d = M_nd.max(axis=0).astype(np.float32)  # (1,)
 
+    # Binary categorical: 'healthy' (age < 50) vs 'sick' (age >= 50).
+    # Alphabetical ordering → codes: healthy=0, sick=1. Both are in {0.0, 1.0}.
+    disease_labels = ["sick" if a >= 50 else "healthy" for a in age_n]
+    disease_cat = pd.Categorical(disease_labels, categories=["healthy", "sick"])
+    metadata_mean_binary_d = np.array([disease_cat.codes.mean()], dtype=np.float32)
+
     adata = anndata.AnnData(
         X=X_ng,
         var=pd.DataFrame(index=[f"gene_{i}" for i in range(g)]),
-        obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)], data={"age": age_n}),
+        obs=pd.DataFrame(
+            index=[f"cell_{i}" for i in range(n)],
+            data={"age": age_n, "disease": disease_cat},
+        ),
     )
     adata.obsm["metadata"] = M_nd  # (n, 1) float32
     adata.uns["sim"] = {
@@ -93,6 +102,7 @@ def metadata_sim_adata() -> anndata.AnnData:
         "metadata_mean_d": metadata_mean_d,
         "metadata_min_d": metadata_min_d,
         "metadata_max_d": metadata_max_d,
+        "metadata_mean_binary_d": metadata_mean_binary_d,
         "M_nd": M_nd,
     }
     return adata
@@ -331,11 +341,32 @@ def test_metadata_encoder_output_shape() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_structured_nmf_forward_returns_loss(metadata_sim_adata: anndata.AnnData) -> None:
-    """forward() returns a dict with a non-negative scalar loss tensor."""
+@pytest.mark.parametrize("metadata_route", ["obsm_continuous", "obs_binary_cat"])
+def test_structured_nmf_forward_returns_loss(metadata_route: str, metadata_sim_adata: anndata.AnnData) -> None:
+    """forward() returns a dict with a non-negative scalar loss tensor.
+
+    Exercises two metadata routes:
+    - obsm_continuous: continuous age loaded from adata.obsm['metadata']
+    - obs_binary_cat: binary 'disease' column loaded from adata.obs via to_codes_column
+    """
     sim = metadata_sim_adata.uns["sim"]
     g = metadata_sim_adata.shape[1]
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    n_batch = 32
+    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
+
+    if metadata_route == "obsm_continuous":
+        metadata_mean_d = sim["metadata_mean_d"]
+        metadata_min_d = sim["metadata_min_d"]
+        metadata_max_d = sim["metadata_max_d"]
+        m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
+    else:
+        # Binary categorical: codes are {0.0, 1.0} — identical to min-max with min=0, max=1.
+        metadata_mean_d = sim["metadata_mean_binary_d"]
+        metadata_min_d = np.array([0.0], dtype=np.float32)
+        metadata_max_d = np.array([1.0], dtype=np.float32)
+        m_nd = torch.from_numpy(to_codes_column(metadata_sim_adata.obs["disease"][:n_batch])).float()
+
     model = AmortizedOnlineStructureAwareNMF(
         var_names_g=var_names_g.tolist(),
         k_values=[4],
@@ -344,19 +375,71 @@ def test_structured_nmf_forward_returns_loss(metadata_sim_adata: anndata.AnnData
         total_n_cells=metadata_sim_adata.shape[0],
         batch_size=64,
         n_metadata=1,
-        metadata_mean_d=sim["metadata_mean_d"],
-        metadata_min_d=sim["metadata_min_d"],
-        metadata_max_d=sim["metadata_max_d"],
+        metadata_mean_d=metadata_mean_d,
+        metadata_min_d=metadata_min_d,
+        metadata_max_d=metadata_max_d,
         n_metadata_programs=1,
     )
-    n_batch = 32
-    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
-    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
     result = model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)
     assert "loss" in result
     assert isinstance(result["loss"], torch.Tensor)
     assert result["loss"].ndim == 0
     assert result["loss"].item() >= 0
+
+
+def test_binary_categorical_metadata_from_obs(metadata_sim_adata: anndata.AnnData) -> None:
+    """Binary categorical obs column ('disease') used as metadata via to_codes_column.
+
+    AnnDataField(attr='obs', key='disease', convert_fn=to_codes_column) produces an
+    (N, 1) float32 array of codes {0.0, 1.0} — equivalent to min-max scaling with
+    min=0, max=1.  Training for one epoch must complete without error and loss must be
+    non-negative.
+    """
+    sim = metadata_sim_adata.uns["sim"]
+    g = metadata_sim_adata.shape[1]
+    k, r = 4, 2
+
+    dm = CellariumAnnDataDataModule(
+        dadc=metadata_sim_adata,
+        batch_size=64,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),
+            "var_names_g": AnnDataField(attr="var_names"),
+            "m_nd": AnnDataField(attr="obs", key="disease", convert_fn=to_codes_column),
+        },
+    )
+
+    module = CellariumModule(
+        model=AmortizedOnlineStructureAwareNMF(
+            var_names_g=[f"gene_{i}" for i in range(g)],
+            k_values=[k],
+            r=r,
+            latent_dim=16,
+            total_n_cells=metadata_sim_adata.shape[0],
+            batch_size=64,
+            n_metadata=1,
+            metadata_mean_d=sim["metadata_mean_binary_d"],
+            metadata_min_d=np.array([0.0], dtype=np.float32),
+            metadata_max_d=np.array([1.0], dtype=np.float32),
+            n_metadata_programs=1,
+        ),
+    )
+
+    trainer = pl.Trainer(max_epochs=1, accelerator="cpu", devices=1, logger=False, enable_checkpointing=False)
+    trainer.fit(module, datamodule=dm)
+
+    # After training the model must have produced a valid (non-NaN) loss.
+    dm.setup(stage="fit")
+    dl = dm.train_dataloader()
+    batch = next(iter(dl))
+    x_ng = batch["x_ng"].float()
+    m_nd = batch["m_nd"].float()
+    var_names_g = batch["var_names_g"]
+    with torch.no_grad():
+        result = module.model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)
+    assert isinstance(result["loss"], torch.Tensor)
+    assert result["loss"].item() >= 0
+    assert not torch.isnan(result["loss"])
 
 
 def test_structured_nmf_single_device(metadata_sim_adata: anndata.AnnData) -> None:
