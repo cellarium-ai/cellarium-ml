@@ -519,6 +519,68 @@ def test_non_nominated_beta_always_zero(metadata_sim_adata: anndata.AnnData) -> 
     )
 
 
+def test_nan_metadata_produces_finite_loss(metadata_sim_adata: anndata.AnnData) -> None:
+    """
+    forward() returns a finite loss when m_nd contains NaN for ~25% of cells.
+
+    Exercises:
+    - nan_to_num(0.0) on m_scaled_nd → H_struct = 0 and Beta gradient = 0 for NaN cells
+    - M_c_nd.masked_fill → NaN cells excluded from the covariance penalty numerator
+    - n_valid normalization in both the covariance penalty and update_beta_group_lasso
+    - EMA mean computed over valid cells only (second call has _n_ema_updates > 0)
+    """
+    rng = np.random.default_rng(7)
+    sim = metadata_sim_adata.uns["sim"]
+    g = metadata_sim_adata.shape[1]
+    n_batch = 64
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+
+    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
+    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
+
+    # Inject NaN into ~25% of cells
+    nan_indices = rng.choice(n_batch, size=n_batch // 4, replace=False)
+    m_nd[nan_indices] = float("nan")
+    assert torch.isnan(m_nd).any(), "Sanity: m_nd must have NaN before the model sees it"
+
+    model = AmortizedOnlineStructureAwareNMF(
+        var_names_g=var_names_g.tolist(),
+        k_values=[4],
+        r=2,
+        latent_dim=16,
+        total_n_cells=metadata_sim_adata.shape[0],
+        batch_size=64,
+        n_metadata=1,
+        metadata_mean_d=sim["metadata_mean_d"],
+        metadata_min_d=sim["metadata_min_d"],
+        metadata_max_d=sim["metadata_max_d"],
+        n_metadata_programs=1,
+        ols_coeff_dg=sim["ols_coeff_dg"],
+    )
+
+    # First call: _n_ema_updates=0, mu_H_corrected=0
+    loss1 = model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)["loss"]
+    assert loss1 is not None
+    assert torch.isfinite(loss1), (
+        f"Loss must be finite on first call with NaN metadata; got {loss1.item()}"
+    )
+
+    # Second call: _n_ema_updates=1, exercises the EMA-centering path in the covariance penalty
+    loss2 = model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)["loss"]
+    assert loss2 is not None
+    assert torch.isfinite(loss2), (
+        f"Loss must be finite on second call (EMA path) with NaN metadata; got {loss2.item()}"
+    )
+
+    # Beta and W buffers must remain finite after both updates
+    k = 4
+    beta = getattr(model, f"beta_{k}_rdk")
+    W = getattr(model, f"D_{k}_rkg")
+    assert not beta.isnan().any(), "Beta must not contain NaN after forward with NaN metadata"
+    assert torch.isfinite(beta).all(), "Beta must be finite after forward with NaN metadata"
+    assert not W.isnan().any(), "W must not contain NaN after forward with NaN metadata"
+
+
 # ---------------------------------------------------------------------------
 # Recovery test
 # ---------------------------------------------------------------------------

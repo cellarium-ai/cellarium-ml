@@ -61,6 +61,7 @@ def update_beta_group_lasso(
     beta_lr: float,
     n_iter: int,
     n_metadata_programs: int,
+    n_valid: int | None = None,
 ) -> torch.Tensor:
     """
     Proximal gradient update for Beta under Group Lasso regularization.
@@ -81,6 +82,8 @@ def update_beta_group_lasso(
         W_rkg: Gene factors of shape (R, K, G).
         X_ng: Gene counts of shape (N, G).
         M_scaled_nd: Min-max scaled metadata of shape (N, D), values in [0, 1].
+            Cells with missing metadata should have their rows pre-filled with 0
+            before this call; their gradient contribution is then exactly zero.
         beta_rdk: Current Beta of shape (R, D, K).
         lambda_select: Group Lasso strength.
         beta_lr: Upper bound on the proximal gradient step size. The actual step is
@@ -89,22 +92,27 @@ def update_beta_group_lasso(
         n_iter: Number of proximal gradient iterations per forward call.
         n_metadata_programs: Number of nominated metadata columns to update.
             Non-nominated columns (``n_metadata_programs:K``) are never updated.
+        n_valid: Number of cells with non-missing metadata. When provided, the
+            Lipschitz constant and gradient are normalized by ``n_valid`` instead
+            of the total batch size, so missing-metadata cells do not dilute the
+            effective step size. Defaults to the total batch size.
 
     Returns:
         Updated beta_rdk of shape (R, D, K).
     """
     n = X_ng.shape[0]
+    n_eff = max(n_valid, 1) if n_valid is not None else n
     W_active = W_rkg[:, :n_metadata_programs, :]  # (R, P, G), P = n_metadata_programs
 
     # Lipschitz constant of the linear beta gradient:
-    #   ||grad(beta)||_2 <= (2/n) * ||M_sc^T M_sc||_op * lambda_max(WaWaT) * ||delta_beta||_2
+    #   ||grad(beta)||_2 <= (2/n_eff) * ||M_sc^T M_sc||_op * lambda_max(WaWaT) * ||delta_beta||_2
     MscTMsc = M_scaled_nd.T @ M_scaled_nd  # (D, D): self-product of scaled metadata
     lambda_max_MscTMsc = torch.linalg.matrix_norm(MscTMsc, ord=2)  # scalar tensor, no CPU sync
     # WaWaT is precomputed here and reused for both the Lipschitz bound and the loop gradient.
     WaWaT_rpp = torch.einsum("rpg,rqg->rpq", W_active, W_active)  # (R, P, P)
     # Trace upper-bounds lambda_max for a PSD matrix; avoids eigvalsh and its CPU sync.
     lambda_max_WaWaT = WaWaT_rpp.diagonal(dim1=-2, dim2=-1).sum(dim=-1).max()  # scalar tensor
-    L = (2.0 / n) * lambda_max_MscTMsc * lambda_max_WaWaT
+    L = (2.0 / n_eff) * lambda_max_MscTMsc * lambda_max_WaWaT
     effective_lr = torch.minimum(
         torch.tensor(beta_lr, device=L.device, dtype=L.dtype),
         1.0 / L.clamp(min=1e-10),
@@ -123,7 +131,7 @@ def update_beta_group_lasso(
         H_struct_rnp = torch.einsum("nd,rdp->rnp", M_scaled_nd, beta_active)  # (R, N, P): linear
         pred_W_rnp = torch.einsum("rnp,rpq->rnq", H_struct_rnp, WaWaT_rpp)  # (R, N, P)
         err_W_rnp = pred_W_rnp - X_res_WaT_rnp  # (R, N, P)
-        grad_active = (2.0 / n) * torch.einsum("nd,rnp->rdp", M_scaled_nd, err_W_rnp)  # linear
+        grad_active = (2.0 / n_eff) * torch.einsum("nd,rnp->rdp", M_scaled_nd, err_W_rnp)  # linear
 
         beta_active = beta_active - effective_lr * grad_active
         beta_active = group_lasso_prox(beta_active, lambda_select, effective_lr)
@@ -579,7 +587,10 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         mu_H_ema_rk = getattr(self, f"mu_H_ema_{k}_rk")
 
         # --- Step 0: min-max scale metadata to [0, 1] ---
+        nan_mask_n = m_nd.isnan().any(dim=1)  # (N,) True where any metadata dim is NaN
+        n_valid = int((~nan_mask_n).sum().item())
         m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)  # (N, D)
+        m_scaled_nd = m_scaled_nd.nan_to_num(0.0)  # NaN cells → 0; H_struct=0, Beta grad=0
 
         # --- Step 1: encoder warm-start for H_raw (has gradients) ---
         H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
@@ -615,6 +626,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
                 beta_lr=self.beta_lr,
                 n_iter=self.beta_n_iter,
                 n_metadata_programs=self.n_metadata_programs,
+                n_valid=n_valid,
             )
             setattr(self, f"beta_{k}_rdk", beta_rdk_updated)
 
@@ -641,7 +653,10 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
         # --- Step 9: anchored covariance penalty on encoder output (pre-EMA-update) ---
         # Uses historical mu_H_ema (before this batch) to avoid circularity.
+        # NaN cells are masked out: their M_c rows are zeroed so they contribute nothing
+        # to the covariance estimate, and the normalization uses n_valid (not n).
         M_c_nd = m_scaled_nd - self.mu_M_scaled_d  # (N, D), centered scaled metadata
+        M_c_nd = M_c_nd.masked_fill(nan_mask_n.unsqueeze(1), 0.0)  # zero out NaN-cell rows
         ema_rho = float(np.exp(-1.0 / self.n_batches_for_forgetting_momentum))
         if self._n_ema_updates > 0:
             bias_correction = max(1.0 - ema_rho**self._n_ema_updates, 1e-8)
@@ -651,12 +666,16 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
         # H_raw_warm_c is centered by the historical mean; gradient flows through H_raw_warm_rnk
         H_raw_warm_c_rnk = H_raw_warm_rnk - mu_H_corrected_rk.detach().unsqueeze(1)  # (R, N, K)
-        cov_rdk = torch.einsum("nd,rnk->rdk", M_c_nd, H_raw_warm_c_rnk) / n  # (R, D, K)
+        n_valid_cov = max(n_valid, 1)
+        cov_rdk = torch.einsum("nd,rnk->rdk", M_c_nd, H_raw_warm_c_rnk) / n_valid_cov  # (R, D, K)
         cov_penalty = self.lambda_align * (cov_rdk**2).sum()
 
-        # --- Step 10: update mu_H_ema with solver H_raw (after penalty computation) ---
+        # --- Step 10: update mu_H_ema with solver H_raw over valid cells only ---
         with torch.no_grad():
-            batch_mean_rk = H_raw_solver_rnk.mean(dim=1)  # (R, K)
+            if n_valid > 0:
+                batch_mean_rk = H_raw_solver_rnk[:, ~nan_mask_n, :].mean(dim=1)  # (R, K)
+            else:
+                batch_mean_rk = H_raw_solver_rnk.mean(dim=1)  # fallback: all cells
             mu_H_ema_new = ema_rho * mu_H_ema_rk + (1.0 - ema_rho) * batch_mean_rk
             setattr(self, f"mu_H_ema_{k}_rk", mu_H_ema_new)
 
@@ -746,6 +765,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             raise ValueError("m_nd must be provided for AmortizedOnlineStructureAwareNMF.validate")
 
         m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)  # (N, D)
+        m_scaled_nd = m_scaled_nd.nan_to_num(0.0)  # NaN cells → 0; H_struct=0 for missing metadata
         nmf_reconstruction_errors = []
         for k in self.k_values:
             W_rkg = getattr(self, f"D_{k}_rkg")
