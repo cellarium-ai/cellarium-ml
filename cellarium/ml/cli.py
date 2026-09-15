@@ -1059,6 +1059,67 @@ def amortized_nmf(args: ArgsType = None) -> None:
     cli(args=args)
 
 
+def compute_n_metadata(data: CellariumAnnDataDataModule) -> int:
+    """
+    Compute the number of metadata columns from the ``m_nd`` batch key.
+
+    Reads the first shard and applies the configured ``convert_fn`` to determine the
+    number of metadata dimensions.  This is safe to derive from a single shard because
+    the column count is identical across all shards.
+
+    ``metadata_mean_d``, ``metadata_min_d``, and ``metadata_max_d`` cannot be derived
+    this way — they must be pre-computed over the full dataset and supplied explicitly
+    in the model config.
+
+    Args:
+        data: A :class:`CellariumAnnDataDataModule` instance.
+
+    Returns:
+        Number of metadata columns (``D``).
+    """
+    field = data.batch_keys["m_nd"]
+    assert isinstance(field, AnnDataField)
+    m = field(data.dadc[0])
+    return 1 if m.ndim == 1 else m.shape[1]
+
+
+@register_model
+def structured_nmf(args: ArgsType = None) -> None:
+    r"""
+    CLI to run the :class:`cellarium.ml.models.AmortizedOnlineStructureAwareNMF` model.
+
+    ``var_names_g``, ``total_n_cells``, ``batch_size``, and ``n_metadata`` are derived
+    automatically from the data configuration.
+
+    ``metadata_mean_d``, ``metadata_min_d``, and ``metadata_max_d`` **must be supplied
+    explicitly** in the model config — they require a full pass over the dataset and cannot
+    be derived from a single shard at config-parse time.
+
+    The ``m_nd`` batch key should point to a continuous or categorical ``obs`` column (or an
+    ``obsm`` embedding).  For a binary categorical column use
+    ``convert_fn: cellarium.ml.utilities.data.to_codes_column`` and set
+    ``metadata_min_d=[0.0]``, ``metadata_max_d=[1.0]``.
+
+    Args:
+        args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
+    """
+
+    cli = lightning_cli_factory(
+        "cellarium.ml.models.AmortizedOnlineStructureAwareNMF",
+        link_arguments=[
+            LinkArguments(
+                ("model.cpu_transforms", "model.transforms", "data"),
+                "model.model.init_args.var_names_g",
+                compute_var_names_g,
+            ),
+            LinkArguments("data", "model.model.init_args.total_n_cells", compute_n_obs),
+            LinkArguments("data", "model.model.init_args.batch_size", compute_batch_size),
+            LinkArguments("data", "model.model.init_args.n_metadata", compute_n_metadata),
+        ],
+    )
+    cli(args=args)
+
+
 @register_model
 def onepass_mean_var_std(args: ArgsType = None) -> None:
     r"""

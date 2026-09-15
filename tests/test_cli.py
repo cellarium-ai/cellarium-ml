@@ -1496,6 +1496,77 @@ SINGLE_DEVICE_CONFIGS = [
             },
         },
     },
+    {
+        "model_name": "structured_nmf",
+        "subcommand": "fit",
+        "fit": {
+            "model": {
+                "cpu_transforms": [
+                    {
+                        "class_path": "cellarium.ml.transforms.Filter",
+                        "init_args": {
+                            "filter_list": [
+                                "ENSG00000187642",
+                                "ENSG00000078808",
+                                "ENSG00000272106",
+                                "ENSG00000162585",
+                                "ENSG00000272088",
+                                "ENSG00000204624",
+                                "ENSG00000162490",
+                                "ENSG00000177000",
+                                "ENSG00000011021",
+                            ]
+                        },
+                    }
+                ],
+                "model": {
+                    "class_path": "cellarium.ml.models.AmortizedOnlineStructureAwareNMF",
+                    "init_args": {
+                        "k_values": [3],
+                        "r": 2,
+                        "latent_dim": 8,
+                        "n_metadata_programs": 1,
+                        # suspension_type codes: cell=0, nucleus=1 → always in [0, 1].
+                        # metadata_mean_d is approximate (0.5); exact value requires a full
+                        # dataset pass and must be pre-computed by the user in production.
+                        "metadata_mean_d": [0.5],
+                        "metadata_min_d": [0.0],
+                        "metadata_max_d": [1.0],
+                    },
+                },
+            },
+            "data": {
+                "dadc": {
+                    "class_path": "cellarium.ml.data.DistributedAnnDataCollection",
+                    "init_args": {
+                        "filenames": "https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..1}.h5ad",
+                        "shard_size": "100",
+                        "max_cache_size": "2",
+                        "obs_columns_to_validate": ["suspension_type"],
+                    },
+                },
+                "batch_keys": {
+                    "x_ng": {
+                        "attr": "X",
+                        "convert_fn": "cellarium.ml.utilities.data.densify",
+                    },
+                    "var_names_g": {"attr": "var_names"},
+                    "m_nd": {
+                        "attr": "obs",
+                        "key": "suspension_type",
+                        "convert_fn": "cellarium.ml.utilities.data.to_codes_column",
+                    },
+                },
+                "batch_size": "50",
+                "num_workers": "2",
+            },
+            "trainer": {
+                "accelerator": "cpu",
+                "devices": devices,
+                "max_epochs": 2,
+            },
+        },
+    },
 ]
 
 

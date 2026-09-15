@@ -79,18 +79,16 @@ def solve_nnls_fista_precomputed(
     Highly optimized FISTA core for torch.compile.
     Assumes AtA and AtB are already precomputed.
     """
-    # Compute the Lipschitz constant L (largest eigenvalue of AtA).
-    # eigvalsh is faster and exact, but not implemented on MPS; power iteration
-    # uses only matmul and works on all devices.
-    if AtA.device.type == "mps":
-        v = torch.ones(*AtA.shape[:-1], 1, device=AtA.device, dtype=AtA.dtype)
-        for _ in range(10):
-            v = AtA @ v
-            v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
-        L = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # [r, 1, 1]
-    else:
-        eigenvals = torch.linalg.eigvalsh(AtA)
-        L = torch.clamp(eigenvals[..., -1:], min=1e-12).unsqueeze(-1)  # [r, 1, 1]
+    # Compute the Lipschitz constant L (largest eigenvalue of AtA) via power iteration.
+    # Power iteration uses only matmul, works on all devices, and is numerically robust
+    # on ill-conditioned matrices (e.g. near-degenerate W early in training or with
+    # small datasets).  eigvalsh is faster for well-conditioned matrices but fails with
+    # LAPACK error code 2 when eigenvalues are nearly repeated or close to zero.
+    v = torch.ones(*AtA.shape[:-1], 1, device=AtA.device, dtype=AtA.dtype)
+    for _ in range(10):
+        v = AtA @ v
+        v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
+    L = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # [r, 1, 1]
 
     x = initial_x.clone()
     y = initial_x.clone()
