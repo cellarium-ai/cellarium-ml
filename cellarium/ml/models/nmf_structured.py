@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import math
 from collections.abc import Sequence
 from typing import Literal
 
@@ -13,7 +14,6 @@ from cellarium.ml.models.nmf import (
     compute_reconstruction_error_compiled,
     frobenius_loss_trace_compiled,
     nmf_compute_factors_fista,
-    solve_nnls_fista_precomputed,
 )
 from cellarium.ml.models.nmf_amortized import (
     AmortizedOnlineNonNegativeMatrixFactorization,
@@ -23,6 +23,85 @@ from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
+
+
+@torch.compile()
+@torch.no_grad()
+def solve_structure_aware_nnls_fista(
+    AtA: torch.Tensor,
+    AtB: torch.Tensor,
+    initial_x: torch.Tensor,
+    M_c_nd: torch.Tensor,
+    mu_H_rk: torch.Tensor,
+    lambda_align: float,
+    max_iter: int = 100,
+) -> torch.Tensor:
+    """
+    FISTA solver for structure-aware NMF that includes the covariance decorrelation penalty
+    directly in the gradient, so ``H_solver`` genuinely balances reconstruction with
+    metadata-decorrelation.
+
+    Minimizes::
+
+        (1/2) ||X_eff - H W||_F^2  +  lambda_align * ||M_c^T (H - mu_H)||_F^2
+
+    subject to H >= 0.
+
+    Args:
+        AtA: (R, K, K) — W W^T, precomputed.
+        AtB: (R, K, N) — W X_eff^T, precomputed.
+        initial_x: (R, K, N) — warm-start (H^T in FISTA convention).
+        M_c_nd: (N, D) — batch-centered scaled metadata, NaN rows zeroed.
+        mu_H_rk: (R, K) — bias-corrected EMA mean of H_raw, used for H centering.
+        lambda_align: Covariance penalty strength.
+        max_iter: Number of FISTA iterations.
+
+    Returns:
+        x: (R, K, N) — solved H^T.
+    """
+    # --- Lipschitz constant: reconstruction term via power iteration ---
+    # Avoids eigvalsh / SVD (which can fail on ill-conditioned matrices and trigger
+    # CPU-GPU sync).  Same strategy as solve_nnls_fista_precomputed.
+    v = torch.ones(*AtA.shape[:-1], 1, device=AtA.device, dtype=AtA.dtype)
+    for _ in range(10):
+        v = AtA @ v
+        v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
+    L_A = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # (R, 1, 1)
+
+    # --- Lipschitz constant: penalty term ---
+    # Gradient of lambda_align * ||M_c^T (H - mu_H)||_F^2 w.r.t. H has Lipschitz constant
+    # 2 * lambda_align * ||M_c M_c^T||_op.  For a rank-D matrix M_c the Frobenius norm
+    # squared is an upper bound on the spectral norm (exact when D=1), and avoids SVD.
+    L_M = (2.0 * lambda_align) * (M_c_nd**2).sum()  # scalar
+
+    L = L_A + L_M  # (R, 1, 1), broadcasts correctly
+
+    # mu_H broadcast shape: (R, K, 1) so it subtracts from (R, K, N) without forming NxN
+    mu_H_rk1 = mu_H_rk.unsqueeze(-1)  # (R, K, 1)
+
+    x = initial_x.clone()
+    y = initial_x.clone()
+    t = 1.0
+
+    for _ in range(max_iter):
+        grad = AtA @ y - AtB
+
+        if lambda_align > 0:
+            # Right-to-left: avoids forming the N×N matrix M_c M_c^T.
+            # Cost: O(NKD) per iteration — negligible for small D.
+            tmp = (y - mu_H_rk1) @ M_c_nd  # (R, K, D)
+            grad = grad + (2.0 * lambda_align) * (tmp @ M_c_nd.mT)  # (R, K, N)
+
+        x_new = torch.clamp(y - grad / L, min=0.0)
+
+        t_new = (1.0 + math.sqrt(1.0 + 4.0 * t**2)) / 2.0
+        momentum = (t - 1.0) / t_new
+        y = x_new + momentum * (x_new - x)
+
+        x = x_new
+        t = t_new
+
+    return x
 
 
 @torch.no_grad()
@@ -562,8 +641,8 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
         Solves for H_raw on the effective residual X - H_struct * W, updates Beta
         via Group Lasso proximal gradient, accumulates A/B using H_total = H_raw + H_struct,
-        and updates W via FISTA. Computes the encoder loss (SmoothL1 + anchored covariance
-        penalty) but does NOT call encoder.backward() — that is handled by Lightning.
+        and updates W via FISTA. Computes the encoder loss (SmoothL1 warm-start loss) but
+        does NOT call encoder.backward() — that is handled by Lightning.
 
         Args:
             x_ng: Gene counts (N, G).
@@ -573,7 +652,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
         Returns:
             dict with keys:
-                ``loss``: encoder loss (SmoothL1 + covariance penalty), has gradients.
+                ``loss``: encoder loss (SmoothL1 warm-start loss), has gradients.
                 ``solver_loadings_rnk``: H_total detached (R, N, K), for recon error tracking.
                 ``encoder_loadings_rnk``: H_raw_warm detached (R, N, K).
         """
@@ -606,10 +685,26 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             wwT_Hstruct_rkn = torch.einsum("rkh,rnh->rkn", wwT_rkk, H_struct_rnk)  # (R, K, N)
             wxT_eff_rkn = WxT_rkn - wwT_Hstruct_rkn  # (R, K, N)
 
-        H_raw_solver_kn, _ = solve_nnls_fista_precomputed(
+            # --- Precompute M_c and mu_H for the structure-aware FISTA solver ---
+            M_c_nd = m_scaled_nd - self.mu_M_scaled_d  # (N, D), centered scaled metadata
+            M_c_nd = M_c_nd.masked_fill(nan_mask_n.unsqueeze(1), 0.0)  # zero out NaN-cell rows
+            # Normalize by sqrt(n_valid) so the penalty scales as an average over valid cells,
+            # making lambda_align batch-size independent (comparable to E[m_c^2] * 2*lambda).
+            M_c_nd = M_c_nd / math.sqrt(max(n_valid, 1))
+            ema_rho = float(np.exp(-1.0 / self.n_batches_for_forgetting_momentum))
+            if self._n_ema_updates > 0:
+                bias_correction = max(1.0 - ema_rho**self._n_ema_updates, 1e-8)
+                mu_H_corrected_rk = mu_H_ema_rk / bias_correction
+            else:
+                mu_H_corrected_rk = torch.zeros_like(mu_H_ema_rk)
+
+        H_raw_solver_kn = solve_structure_aware_nnls_fista(
             AtA=wwT_rkk,
             AtB=wxT_eff_rkn,
             initial_x=H_raw_warm_rnk.detach().transpose(-2, -1),  # (R, K, N)
+            M_c_nd=M_c_nd,
+            mu_H_rk=mu_H_corrected_rk,
+            lambda_align=self.lambda_align,
             max_iter=n_iterations,
         )
         H_raw_solver_rnk = H_raw_solver_kn.transpose(-2, -1)  # (R, N, K)
@@ -651,26 +746,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         setattr(self, f"B_{k}_rkg", B_rkg_new)
         setattr(self, f"D_{k}_rkg", W_rkg_new)
 
-        # --- Step 9: anchored covariance penalty on encoder output (pre-EMA-update) ---
-        # Uses historical mu_H_ema (before this batch) to avoid circularity.
-        # NaN cells are masked out: their M_c rows are zeroed so they contribute nothing
-        # to the covariance estimate, and the normalization uses n_valid (not n).
-        M_c_nd = m_scaled_nd - self.mu_M_scaled_d  # (N, D), centered scaled metadata
-        M_c_nd = M_c_nd.masked_fill(nan_mask_n.unsqueeze(1), 0.0)  # zero out NaN-cell rows
-        ema_rho = float(np.exp(-1.0 / self.n_batches_for_forgetting_momentum))
-        if self._n_ema_updates > 0:
-            bias_correction = max(1.0 - ema_rho**self._n_ema_updates, 1e-8)
-            mu_H_corrected_rk = mu_H_ema_rk / bias_correction
-        else:
-            mu_H_corrected_rk = torch.zeros_like(mu_H_ema_rk)
-
-        # H_raw_warm_c is centered by the historical mean; gradient flows through H_raw_warm_rnk
-        H_raw_warm_c_rnk = H_raw_warm_rnk - mu_H_corrected_rk.detach().unsqueeze(1)  # (R, N, K)
-        n_valid_cov = max(n_valid, 1)
-        cov_rdk = torch.einsum("nd,rnk->rdk", M_c_nd, H_raw_warm_c_rnk) / n_valid_cov  # (R, D, K)
-        cov_penalty = self.lambda_align * (cov_rdk**2).sum()
-
-        # --- Step 10: update mu_H_ema with solver H_raw over valid cells only ---
+        # --- Step 9: update mu_H_ema with solver H_raw over valid cells only ---
         with torch.no_grad():
             if n_valid > 0:
                 batch_mean_rk = H_raw_solver_rnk[:, ~nan_mask_n, :].mean(dim=1)  # (R, K)
@@ -679,10 +755,10 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             mu_H_ema_new = ema_rho * mu_H_ema_rk + (1.0 - ema_rho) * batch_mean_rk
             setattr(self, f"mu_H_ema_{k}_rk", mu_H_ema_new)
 
-        # --- Step 11: encoder loss ---
-        encoder_loss = (
-            self.encoder_loss_fn(H_raw_warm_rnk.contiguous(), H_raw_solver_rnk.detach().contiguous()) + cov_penalty
-        )
+        # --- Step 10: encoder loss ---
+        # The encoder is trained purely as a warm-start predictor; structure is enforced
+        # directly inside the FISTA solver via the covariance penalty on H_solver.
+        encoder_loss = self.encoder_loss_fn(H_raw_warm_rnk.contiguous(), H_raw_solver_rnk.detach().contiguous())
 
         return {
             "loss": encoder_loss,

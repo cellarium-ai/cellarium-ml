@@ -561,16 +561,12 @@ def test_nan_metadata_produces_finite_loss(metadata_sim_adata: anndata.AnnData) 
     # First call: _n_ema_updates=0, mu_H_corrected=0
     loss1 = model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)["loss"]
     assert loss1 is not None
-    assert torch.isfinite(loss1), (
-        f"Loss must be finite on first call with NaN metadata; got {loss1.item()}"
-    )
+    assert torch.isfinite(loss1), f"Loss must be finite on first call with NaN metadata; got {loss1.item()}"
 
     # Second call: _n_ema_updates=1, exercises the EMA-centering path in the covariance penalty
     loss2 = model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)["loss"]
     assert loss2 is not None
-    assert torch.isfinite(loss2), (
-        f"Loss must be finite on second call (EMA path) with NaN metadata; got {loss2.item()}"
-    )
+    assert torch.isfinite(loss2), f"Loss must be finite on second call (EMA path) with NaN metadata; got {loss2.item()}"
 
     # Beta and W buffers must remain finite after both updates
     k = 4
