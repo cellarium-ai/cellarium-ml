@@ -338,10 +338,10 @@ class MetadataAugmentedLoadingsEncoder(BilinearLoadingsEncoder):
     predict the idiosyncratic component H_raw — which should be uncorrelated with metadata M —
     by seeing M and learning to subtract the structured variance.
 
-    The encoder is trained with two signals:
-    1. SmoothL1 matching loss: match the FISTA solver's H_raw output.
-    2. Covariance penalty: ``lambda_align * ||anchored_cov(H_raw_encoder, M)||_F^2``,
-       which directly teaches the encoder to produce decorrelated warm-starts.
+    The encoder is trained with a single signal: SmoothL1 matching loss against the FISTA
+    solver's H_raw output. The FISTA solver is itself penalized (via ``lambda_align``) to
+    produce H_raw solutions that are decorrelated from M, so the encoder indirectly learns
+    decorrelated warm-starts by chasing H_solver.
     """
 
     def __init__(self, n_genes: int, latent_dim: int, n_metadata: int):
@@ -382,13 +382,23 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
     Objective (implicit, enforced by training signals):
 
-        L_recon = ||X - H_total * W||_F^2
-        L_align = lambda_align * ||anchored_cov(H_raw_encoder, M)||_F^2
-        L_select = lambda_select * sum_k ||Beta[:, k]||_2   (Group Lasso)
+        L_recon   = ||X - H_total * W||_F^2
+        L_select  = lambda_select * sum_k ||Beta[:, k]||_2   (Group Lasso on Beta)
+
+    The FISTA solver for H_raw minimizes an augmented objective that includes a covariance
+    decorrelation penalty directly in the gradient steps::
+
+        min_{H>=0} (1/2)||X_eff - H W||_F^2
+                   + lambda_align * ||M_c^T (H - mu_H) / sqrt(n_valid)||_F^2
+
+    where ``X_eff = X - H_struct @ W``, ``M_c`` is batch-centered scaled metadata with NaN
+    rows zeroed, and ``mu_H`` is a bias-corrected EMA of the mean H_raw loading.  Dividing
+    by ``sqrt(n_valid)`` makes ``lambda_align`` batch-size independent (comparable to
+    ``E[m_c^2]`` rather than ``N * E[m_c^2]``).  The encoder then learns decorrelated
+    warm-starts indirectly by chasing the FISTA H_solver via the SmoothL1 matching loss.
 
     Group Lasso on Beta achieves **factor-level sparsity**: only a few nominated factors
-    become metadata-driven; the rest stay free. Lambda_align teaches the encoder to
-    produce H_raw warm-starts that are already decorrelated from M.
+    become metadata-driven; the rest stay free.
 
     **Nominated factors and initialization:**
     The first ``n_metadata_programs`` factors are "nominated" as metadata factors.
@@ -457,8 +467,10 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         mean_total_count: Expected total UMI count per cell, used for Beta scale
             calibration. If None, a rough estimate of ``10 * min(k_values)`` is used.
         metadata_noise_scale: Relative noise std for replicate diversity (default 0.05).
-        lambda_align: Strength of the anchored covariance decorrelation penalty on
-            the encoder output.
+        lambda_align: Strength of the covariance decorrelation penalty applied to H_raw
+            inside the FISTA solver. The penalty is normalized by ``sqrt(n_valid)`` so its
+            effective strength is batch-size independent. A value of 0.1–1.0 is a gentle
+            nudge relative to the reconstruction term.
         lambda_select: Group Lasso strength on Beta columns.
         beta_lr: Upper bound on the Beta proximal gradient step size. The actual step is
             ``min(beta_lr, 1/L)`` where L is the per-batch Lipschitz constant of the
