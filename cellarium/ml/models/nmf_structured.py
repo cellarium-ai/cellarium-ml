@@ -34,18 +34,29 @@ def solve_structure_aware_nnls_fista(
     M_c_nd: torch.Tensor,
     mu_H_rk: torch.Tensor,
     lambda_align: float,
+    lambda_L1: float = 0.0,
+    n_metadata_programs: int = 0,
     max_iter: int = 100,
 ) -> torch.Tensor:
     """
-    FISTA solver for structure-aware NMF that includes the covariance decorrelation penalty
-    directly in the gradient, so ``H_solver`` genuinely balances reconstruction with
-    metadata-decorrelation.
+    FISTA solver for structure-aware NMF that includes a covariance decorrelation penalty
+    and an optional L1 sparsity penalty directly in the gradient steps.
 
     Minimizes::
 
-        (1/2) ||X_eff - H W||_F^2  +  lambda_align * ||M_c^T (H - mu_H)||_F^2
+        (1/2) ||X_eff - H W||_F^2
+        + lambda_align * ||M_c^T (H_free - mu_H_free)||_F^2
+        + lambda_L1 * ||H_free||_1
 
-    subject to H >= 0.
+    subject to H >= 0, H_nominated = 0.
+
+    where ``H_free = H[:, n_metadata_programs:]`` are the unconstrained biological programs
+    and ``H_nominated = H[:, :n_metadata_programs]`` are forced to zero so that their
+    variance is explained entirely via ``H_struct = M_scaled @ Beta``.
+
+    The L1 term with H >= 0 is linear (``sum(H)``), so its gradient is the constant
+    ``+lambda_L1``.  It folds into the existing gradient step without changing the
+    Lipschitz constant.
 
     Args:
         AtA: (R, K, K) — W W^T, precomputed.
@@ -54,10 +65,14 @@ def solve_structure_aware_nnls_fista(
         M_c_nd: (N, D) — batch-centered scaled metadata, NaN rows zeroed.
         mu_H_rk: (R, K) — bias-corrected EMA mean of H_raw, used for H centering.
         lambda_align: Covariance penalty strength.
+        lambda_L1: L1 sparsity penalty strength on H_raw. Default 0 (disabled).
+        n_metadata_programs: Number of nominated metadata programs whose H_raw is
+            clamped to zero. The alignment and L1 penalties are applied only to the
+            remaining ``K - n_metadata_programs`` free programs. Default 0 (disabled).
         max_iter: Number of FISTA iterations.
 
     Returns:
-        x: (R, K, N) — solved H^T.
+        x: (R, K, N) — solved H^T, with x[:, :n_metadata_programs, :] = 0.
     """
     # --- Lipschitz constant: reconstruction term via power iteration ---
     # Avoids eigvalsh / SVD (which can fail on ill-conditioned matrices and trigger
@@ -81,22 +96,40 @@ def solve_structure_aware_nnls_fista(
 
     x = initial_x.clone()
     y = initial_x.clone()
+    # Nominated programs are always zero in H_raw; zero the warm-start so momentum
+    # never carries non-zero values into the nominated rows.
+    if n_metadata_programs > 0:
+        x[:, :n_metadata_programs, :] = 0.0
+        y[:, :n_metadata_programs, :] = 0.0
     t = 1.0
 
     for _ in range(max_iter):
         grad = AtA @ y - AtB
 
-        if lambda_align > 0:
+        if lambda_align > 0 and n_metadata_programs < grad.shape[1]:
+            # Penalty applied only to free (non-nominated) programs to avoid interfering
+            # with the structural zero constraint on nominated rows.
             # Right-to-left: avoids forming the N×N matrix M_c M_c^T.
             # Cost: O(NKD) per iteration — negligible for small D.
-            tmp = (y - mu_H_rk1) @ M_c_nd  # (R, K, D)
-            grad = grad + (2.0 * lambda_align) * (tmp @ M_c_nd.mT)  # (R, K, N)
+            y_free = y[:, n_metadata_programs:, :]  # (R, K_free, N)
+            mu_free = mu_H_rk1[:, n_metadata_programs:, :]  # (R, K_free, 1)
+            tmp_rkd = (y_free - mu_free) @ M_c_nd  # (R, K_free, D)
+            grad[:, n_metadata_programs:, :] += (2.0 * lambda_align) * (tmp_rkd @ M_c_nd.mT)
+
+        if lambda_L1 > 0:
+            # With H >= 0, ||H||_1 = sum(H) is linear; its gradient is the constant
+            # +lambda_L1.  Folds into the gradient step with no change to L.
+            grad = grad + lambda_L1
 
         x_new = torch.clamp(y - grad / L, min=0.0)
+        if n_metadata_programs > 0:
+            x_new[:, :n_metadata_programs, :] = 0.0
 
         t_new = (1.0 + math.sqrt(1.0 + 4.0 * t**2)) / 2.0
         momentum = (t - 1.0) / t_new
         y = x_new + momentum * (x_new - x)
+        if n_metadata_programs > 0:
+            y[:, :n_metadata_programs, :] = 0.0
 
         x = x_new
         t = t_new
@@ -386,10 +419,11 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         L_select  = lambda_select * sum_k ||Beta[:, k]||_2   (Group Lasso on Beta)
 
     The FISTA solver for H_raw minimizes an augmented objective that includes a covariance
-    decorrelation penalty directly in the gradient steps::
+    decorrelation penalty and an optional L1 sparsity penalty directly in the gradient steps::
 
         min_{H>=0} (1/2)||X_eff - H W||_F^2
                    + lambda_align * ||M_c^T (H - mu_H) / sqrt(n_valid)||_F^2
+                   + lambda_L1 * ||H||_1
 
     where ``X_eff = X - H_struct @ W``, ``M_c`` is batch-centered scaled metadata with NaN
     rows zeroed, and ``mu_H`` is a bias-corrected EMA of the mean H_raw loading.  Dividing
@@ -471,6 +505,9 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             inside the FISTA solver. The penalty is normalized by ``sqrt(n_valid)`` so its
             effective strength is batch-size independent. A value of 0.1–1.0 is a gentle
             nudge relative to the reconstruction term.
+        lambda_L1: L1 sparsity penalty on H_raw inside the FISTA solver. Discourages
+            the model from over-explaining variance with H_raw when metadata (via Beta)
+            could account for it instead. Default 0.0 (disabled).
         lambda_select: Group Lasso strength on Beta columns.
         beta_lr: Upper bound on the Beta proximal gradient step size. The actual step is
             ``min(beta_lr, 1/L)`` where L is the per-batch Lipschitz constant of the
@@ -498,6 +535,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         mean_total_count: float | None = None,
         metadata_noise_scale: float = 0.05,
         lambda_align: float = 0.1,
+        lambda_L1: float = 0.0,
         lambda_select: float = 0.05,
         beta_lr: float = 1.0,
         beta_n_iter: int = 20,
@@ -552,6 +590,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         self.n_metadata = n_metadata
         self.n_metadata_programs = n_metadata_programs
         self.lambda_align = lambda_align
+        self.lambda_L1 = lambda_L1
         self.lambda_select = lambda_select
         self.beta_lr = beta_lr
         self.beta_n_iter = beta_n_iter
@@ -717,6 +756,8 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             M_c_nd=M_c_nd,
             mu_H_rk=mu_H_corrected_rk,
             lambda_align=self.lambda_align,
+            lambda_L1=self.lambda_L1,
+            n_metadata_programs=self.n_metadata_programs,
             max_iter=n_iterations,
         )
         H_raw_solver_rnk = H_raw_solver_kn.transpose(-2, -1)  # (R, N, K)

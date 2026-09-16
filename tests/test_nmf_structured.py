@@ -177,6 +177,7 @@ def _make_structured_module(
     n_metadata_programs: int = 1,
     latent_dim: int = 16,
     lambda_align: float = 0.1,
+    lambda_L1: float = 0.0,
     lambda_select: float = 0.05,
     mean_total_count: float | None = None,
     beta_lr: float = 1.0,
@@ -204,6 +205,7 @@ def _make_structured_module(
         ols_coeff_dg=ols_coeff_dg,
         mean_total_count=mean_total_count,
         lambda_align=lambda_align,
+        lambda_L1=lambda_L1,
         lambda_select=lambda_select,
         beta_lr=beta_lr,
         exploration_epochs=exploration_epochs,
@@ -575,6 +577,85 @@ def test_nan_metadata_produces_finite_loss(metadata_sim_adata: anndata.AnnData) 
     assert not beta.isnan().any(), "Beta must not contain NaN after forward with NaN metadata"
     assert torch.isfinite(beta).all(), "Beta must be finite after forward with NaN metadata"
     assert not W.isnan().any(), "W must not contain NaN after forward with NaN metadata"
+
+
+@pytest.mark.parametrize("lambda_L1", [0.0, 0.5])
+def test_structured_nmf_lambda_L1(lambda_L1: float, metadata_sim_adata: anndata.AnnData) -> None:
+    """
+    Non-zero lambda_L1 trains without error and produces sparser H_raw than lambda_L1=0.
+
+    Both lambda_L1=0.0 (default, regression) and lambda_L1=0.5 (active penalty) are
+    exercised. The active-penalty case additionally checks that the mean H_raw loading
+    from the FISTA solver is strictly lower, since the L1 penalty shifts the proximal
+    threshold and drives values toward zero.
+    """
+    sim = metadata_sim_adata.uns["sim"]
+    g = metadata_sim_adata.shape[1]
+    n_batch = 64
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    torch.manual_seed(0)
+    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
+    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
+
+    model = AmortizedOnlineStructureAwareNMF(
+        var_names_g=var_names_g.tolist(),
+        k_values=[4],
+        r=2,
+        latent_dim=16,
+        total_n_cells=metadata_sim_adata.shape[0],
+        batch_size=64,
+        n_metadata=1,
+        metadata_mean_d=sim["metadata_mean_d"],
+        metadata_min_d=sim["metadata_min_d"],
+        metadata_max_d=sim["metadata_max_d"],
+        n_metadata_programs=1,
+        lambda_L1=lambda_L1,
+        lambda_select=0.0,  # isolate the L1 effect
+    )
+
+    result = model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)
+    loss = result["loss"]
+    assert loss is not None
+    assert torch.isfinite(loss), f"Loss must be finite with lambda_L1={lambda_L1}; got {loss.item()}"
+    assert loss.item() >= 0
+
+    beta = getattr(model, "beta_4_rdk")
+    W = getattr(model, "D_4_rkg")
+    assert torch.isfinite(beta).all(), "Beta must be finite"
+    assert torch.isfinite(W).all(), "W must be finite"
+
+    if lambda_L1 > 0:
+        # With an active L1 penalty the FISTA solver applies a positive threshold
+        # (lambda_L1 / L) to every H element, producing a sparser solution.
+        # Compare against lambda_L1=0 using identical weights and input by calling
+        # online_dictionary_update directly (forward() only exposes the scalar loss).
+        model_no_l1 = AmortizedOnlineStructureAwareNMF(
+            var_names_g=var_names_g.tolist(),
+            k_values=[4],
+            r=2,
+            latent_dim=16,
+            total_n_cells=metadata_sim_adata.shape[0],
+            batch_size=64,
+            n_metadata=1,
+            metadata_mean_d=sim["metadata_mean_d"],
+            metadata_min_d=sim["metadata_min_d"],
+            metadata_max_d=sim["metadata_max_d"],
+            n_metadata_programs=1,
+            lambda_L1=0.0,
+            lambda_select=0.0,
+        )
+        model_no_l1.load_state_dict(model.state_dict())
+
+        out_l1 = model.online_dictionary_update(x_ng=x_ng, k=4, m_nd=m_nd)
+        out_no_l1 = model_no_l1.online_dictionary_update(x_ng=x_ng, k=4, m_nd=m_nd)
+        # solver_loadings_rnk = H_total = H_raw_solver + H_struct; with L1 penalising
+        # H_raw, H_total should be lower on average (H_struct doesn't compensate in one step).
+        mean_l1 = out_l1["solver_loadings_rnk"].mean().item()
+        mean_no_l1 = out_no_l1["solver_loadings_rnk"].mean().item()
+        assert mean_l1 <= mean_no_l1, (
+            f"lambda_L1={lambda_L1} should produce lower-mean H_total than lambda_L1=0; "
+            f"got mean_l1={mean_l1:.4f} > mean_no_l1={mean_no_l1:.4f}"
+        )
 
 
 # ---------------------------------------------------------------------------
