@@ -73,9 +73,14 @@ def solve_structure_aware_nnls_fista(
         v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
     L_A = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # (R, 1, 1)
 
-    # Lipschitz constant: penalty term
+    # Lipschitz constant: penalty term (only applies to free programs)
     L_M = (2.0 * lambda_align) * (M_c_nd**2).sum()  # scalar
-    L = L_A + L_M  # (R, 1, 1), broadcasts correctly
+
+    # Per-program step sizes: nominated programs use L_A, free programs use L_A + L_M.
+    K = AtA.shape[1]
+    L = L_A.expand(-1, K, 1).clone()  # (R, K, 1)
+    if lambda_align > 0 and n_metadata_programs < K:
+        L[:, n_metadata_programs:, :] += L_M
 
     mu_H_rk1 = mu_H_rk.unsqueeze(-1)  # (R, K, 1)
 
