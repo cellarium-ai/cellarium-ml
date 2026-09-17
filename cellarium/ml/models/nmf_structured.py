@@ -34,103 +34,71 @@ def solve_structure_aware_nnls_fista(
     M_c_nd: torch.Tensor,
     mu_H_rk: torch.Tensor,
     lambda_align: float,
-    lambda_L1: float = 0.0,
     n_metadata_programs: int = 0,
     max_iter: int = 100,
 ) -> torch.Tensor:
     """
-    FISTA solver for structure-aware NMF that includes a covariance decorrelation penalty
-    and an optional L1 sparsity penalty directly in the gradient steps.
+    FISTA solver for structure-aware NMF with a covariance decorrelation penalty on
+    non-nominated programs only.
 
     Minimizes::
 
-        (1/2) ||X_eff - H W||_F^2
+        (1/2) ||X - H W||_F^2
         + lambda_align * ||M_c^T (H_free - mu_H_free)||_F^2
-        + lambda_L1 * ||H_free||_1
 
-    subject to H >= 0, H_nominated = 0.
+    subject to H >= 0.
 
-    where ``H_free = H[:, n_metadata_programs:]`` are the unconstrained biological programs
-    and ``H_nominated = H[:, :n_metadata_programs]`` are forced to zero so that their
-    variance is explained entirely via ``H_struct = M_scaled @ Beta``.
-
-    The L1 term with H >= 0 is linear (``sum(H)``), so its gradient is the constant
-    ``+lambda_L1``.  It folds into the existing gradient step without changing the
-    Lipschitz constant.
+    ``H_free = H[:, n_metadata_programs:]`` receives the alignment penalty, making it
+    expensive for those programs to absorb metadata variance.  The first
+    ``n_metadata_programs`` columns are exempt — they are the "tax-free haven" where FISTA
+    naturally routes metadata-correlated variance.
 
     Args:
         AtA: (R, K, K) — W W^T, precomputed.
-        AtB: (R, K, N) — W X_eff^T, precomputed.
-        initial_x: (R, K, N) — warm-start (H^T in FISTA convention).
+        AtB: (R, K, N) — W X^T, precomputed (full X, not a residual).
+        initial_x: (R, K, N) — warm-start H^T.
         M_c_nd: (N, D) — batch-centered scaled metadata, NaN rows zeroed.
-        mu_H_rk: (R, K) — bias-corrected EMA mean of H_raw, used for H centering.
-        lambda_align: Covariance penalty strength.
-        lambda_L1: L1 sparsity penalty strength on H_raw. Default 0 (disabled).
-        n_metadata_programs: Number of nominated metadata programs whose H_raw is
-            clamped to zero. The alignment and L1 penalties are applied only to the
-            remaining ``K - n_metadata_programs`` free programs. Default 0 (disabled).
+        mu_H_rk: (R, K) — bias-corrected EMA mean of H_total, for centering.
+        lambda_align: Covariance penalty strength on non-nominated programs.
+        n_metadata_programs: Number of nominated programs exempt from the penalty.
         max_iter: Number of FISTA iterations.
 
     Returns:
-        x: (R, K, N) — solved H^T, with x[:, :n_metadata_programs, :] = 0.
+        x: (R, K, N) — solved H_total^T, non-negative.
     """
     # --- Lipschitz constant: reconstruction term via power iteration ---
-    # Avoids eigvalsh / SVD (which can fail on ill-conditioned matrices and trigger
-    # CPU-GPU sync).  Same strategy as solve_nnls_fista_precomputed.
     v = torch.ones(*AtA.shape[:-1], 1, device=AtA.device, dtype=AtA.dtype)
     for _ in range(10):
         v = AtA @ v
         v = v / v.norm(dim=-2, keepdim=True).clamp(min=1e-8)
     L_A = (v.transpose(-2, -1) @ AtA @ v).clamp(min=1e-12)  # (R, 1, 1)
 
-    # --- Lipschitz constant: penalty term ---
-    # Gradient of lambda_align * ||M_c^T (H - mu_H)||_F^2 w.r.t. H has Lipschitz constant
-    # 2 * lambda_align * ||M_c M_c^T||_op.  For a rank-D matrix M_c the Frobenius norm
-    # squared is an upper bound on the spectral norm (exact when D=1), and avoids SVD.
+    # Lipschitz constant: penalty term
     L_M = (2.0 * lambda_align) * (M_c_nd**2).sum()  # scalar
-
     L = L_A + L_M  # (R, 1, 1), broadcasts correctly
 
-    # mu_H broadcast shape: (R, K, 1) so it subtracts from (R, K, N) without forming NxN
     mu_H_rk1 = mu_H_rk.unsqueeze(-1)  # (R, K, 1)
 
     x = initial_x.clone()
     y = initial_x.clone()
-    # Nominated programs are always zero in H_raw; zero the warm-start so momentum
-    # never carries non-zero values into the nominated rows.
-    if n_metadata_programs > 0:
-        x[:, :n_metadata_programs, :] = 0.0
-        y[:, :n_metadata_programs, :] = 0.0
     t = 1.0
 
     for _ in range(max_iter):
         grad = AtA @ y - AtB
 
         if lambda_align > 0 and n_metadata_programs < grad.shape[1]:
-            # Penalty applied only to free (non-nominated) programs to avoid interfering
-            # with the structural zero constraint on nominated rows.
-            # Right-to-left: avoids forming the N×N matrix M_c M_c^T.
-            # Cost: O(NKD) per iteration — negligible for small D.
+            # Penalty applied only to free (non-nominated) programs.
+            # Right-to-left order avoids forming the N×N matrix M_c M_c^T.
             y_free = y[:, n_metadata_programs:, :]  # (R, K_free, N)
             mu_free = mu_H_rk1[:, n_metadata_programs:, :]  # (R, K_free, 1)
             tmp_rkd = (y_free - mu_free) @ M_c_nd  # (R, K_free, D)
             grad[:, n_metadata_programs:, :] += (2.0 * lambda_align) * (tmp_rkd @ M_c_nd.mT)
 
-        if lambda_L1 > 0:
-            # With H >= 0, ||H||_1 = sum(H) is linear; its gradient is the constant
-            # +lambda_L1.  Folds into the gradient step with no change to L.
-            grad = grad + lambda_L1
-
         x_new = torch.clamp(y - grad / L, min=0.0)
-        if n_metadata_programs > 0:
-            x_new[:, :n_metadata_programs, :] = 0.0
 
         t_new = (1.0 + math.sqrt(1.0 + 4.0 * t**2)) / 2.0
         momentum = (t - 1.0) / t_new
         y = x_new + momentum * (x_new - x)
-        if n_metadata_programs > 0:
-            y[:, :n_metadata_programs, :] = 0.0
-
         x = x_new
         t = t_new
 
@@ -138,173 +106,40 @@ def solve_structure_aware_nnls_fista(
 
 
 @torch.no_grad()
-def group_lasso_prox(beta_rdk: torch.Tensor, lambda_select: float, lr: float | torch.Tensor) -> torch.Tensor:
-    """
-    Block soft-thresholding proximal operator for the Group Lasso penalty.
-
-    For each factor column k, computes the L2 norm across the metadata dimension d
-    and shrinks the entire column toward zero. Columns whose group norm falls below
-    ``lambda_select * lr`` are zeroed out exactly, achieving factor-level sparsity:
-    only a few factors are metadata-driven.
-
-    Args:
-        beta_rdk: Beta tensor of shape (R, D, K).
-        lambda_select: Group Lasso regularization strength.
-        lr: Proximal gradient step size.
-
-    Returns:
-        Updated beta_rdk with group-sparse columns.
-    """
-    group_norms_r1k = beta_rdk.norm(dim=1, keepdim=True)  # (R, 1, K)
-    threshold = lambda_select * lr
-    scale = (1.0 - threshold / group_norms_r1k.clamp(min=1e-10)).clamp(min=0.0)
-    scale = torch.where(group_norms_r1k > threshold, scale, torch.zeros_like(scale))
-    return beta_rdk * scale
-
-
-@torch.no_grad()
-def update_beta_group_lasso(
-    H_raw_rnk: torch.Tensor,
-    W_rkg: torch.Tensor,
-    X_ng: torch.Tensor,
-    M_scaled_nd: torch.Tensor,
-    beta_rdk: torch.Tensor,
-    lambda_select: float,
-    beta_lr: float,
-    n_iter: int,
-    n_metadata_programs: int,
-    n_valid: int | None = None,
-) -> torch.Tensor:
-    """
-    Proximal gradient update for Beta under Group Lasso regularization.
-
-    Updates only the nominated columns ``0:n_metadata_programs`` of Beta.
-    Non-nominated columns are never touched — they stay at exactly zero by design.
-    This means the Group Lasso prunes *among* nominated columns: if
-    ``n_metadata_programs`` was over-specified, unnecessary nominated columns are
-    driven to zero; only those with genuine metadata-correlation survive.
-
-    The forward is linear: ``H_struct = M_scaled @ Beta``. Since ``M_scaled`` is
-    min-max scaled to ``[0, 1]`` and ``Beta >= 0`` (enforced by clamping), H_struct
-    is guaranteed non-negative. The gradient is the standard linear least-squares
-    gradient with no chain-rule correction needed.
-
-    Args:
-        H_raw_rnk: Idiosyncratic loadings of shape (R, N, K).
-        W_rkg: Gene factors of shape (R, K, G).
-        X_ng: Gene counts of shape (N, G).
-        M_scaled_nd: Min-max scaled metadata of shape (N, D), values in [0, 1].
-            Cells with missing metadata should have their rows pre-filled with 0
-            before this call; their gradient contribution is then exactly zero.
-        beta_rdk: Current Beta of shape (R, D, K).
-        lambda_select: Group Lasso strength.
-        beta_lr: Upper bound on the proximal gradient step size. The actual step is
-            ``min(beta_lr, 1/L)`` where L is the per-batch Lipschitz constant.
-            Setting ``beta_lr=1.0`` uses the Lipschitz-optimal step when L≥1.
-        n_iter: Number of proximal gradient iterations per forward call.
-        n_metadata_programs: Number of nominated metadata columns to update.
-            Non-nominated columns (``n_metadata_programs:K``) are never updated.
-        n_valid: Number of cells with non-missing metadata. When provided, the
-            Lipschitz constant and gradient are normalized by ``n_valid`` instead
-            of the total batch size, so missing-metadata cells do not dilute the
-            effective step size. Defaults to the total batch size.
-
-    Returns:
-        Updated beta_rdk of shape (R, D, K).
-    """
-    n = X_ng.shape[0]
-    n_eff = max(n_valid, 1) if n_valid is not None else n
-    W_active = W_rkg[:, :n_metadata_programs, :]  # (R, P, G), P = n_metadata_programs
-
-    # Lipschitz constant of the linear beta gradient:
-    #   ||grad(beta)||_2 <= (2/n_eff) * ||M_sc^T M_sc||_op * lambda_max(WaWaT) * ||delta_beta||_2
-    MscTMsc = M_scaled_nd.T @ M_scaled_nd  # (D, D): self-product of scaled metadata
-    lambda_max_MscTMsc = torch.linalg.matrix_norm(MscTMsc, ord=2)  # scalar tensor, no CPU sync
-    # WaWaT is precomputed here and reused for both the Lipschitz bound and the loop gradient.
-    WaWaT_rpp = torch.einsum("rpg,rqg->rpq", W_active, W_active)  # (R, P, P)
-    # Trace upper-bounds lambda_max for a PSD matrix; avoids eigvalsh and its CPU sync.
-    lambda_max_WaWaT = WaWaT_rpp.diagonal(dim1=-2, dim2=-1).sum(dim=-1).max()  # scalar tensor
-    L = (2.0 / n_eff) * lambda_max_MscTMsc * lambda_max_WaWaT
-    effective_lr = torch.minimum(
-        torch.tensor(beta_lr, device=L.device, dtype=L.dtype),
-        1.0 / L.clamp(min=1e-10),
-    )  # 0-d tensor, no CPU sync
-
-    # Precompute G-space projections into the latent space so the hot loop never touches G.
-    # X_res @ Wa.T = (X - H_raw @ W_all) @ Wa.T = X @ Wa.T - H_raw @ (W_all @ Wa.T)
-    X_WaT_rnp = torch.einsum("ng,rpg->rnp", X_ng, W_active)  # (R, N, P)
-    WWaT_rkp = torch.einsum("rkg,rpg->rkp", W_rkg, W_active)  # (R, K, P)
-    X_res_WaT_rnp = X_WaT_rnp - torch.einsum("rnk,rkp->rnp", H_raw_rnk, WWaT_rkp)  # (R, N, P)
-
-    beta_active = beta_rdk[:, :, :n_metadata_programs].clone()
-
-    for _ in range(n_iter):
-        # All operations in (R, N, P) space — G dimension eliminated from the loop.
-        H_struct_rnp = torch.einsum("nd,rdp->rnp", M_scaled_nd, beta_active)  # (R, N, P): linear
-        pred_W_rnp = torch.einsum("rnp,rpq->rnq", H_struct_rnp, WaWaT_rpp)  # (R, N, P)
-        err_W_rnp = pred_W_rnp - X_res_WaT_rnp  # (R, N, P)
-        grad_active = (2.0 / n_eff) * torch.einsum("nd,rnp->rdp", M_scaled_nd, err_W_rnp)  # linear
-
-        beta_active = beta_active - effective_lr * grad_active
-        beta_active = group_lasso_prox(beta_active, lambda_select, effective_lr)
-        beta_active = beta_active.clamp(min=0.0)
-
-    result = beta_rdk.clone()
-    result[:, :, :n_metadata_programs] = beta_active
-    return result
-
-
-@torch.no_grad()
 def compute_metadata_nmf_init(
     ols_coeff_dg: torch.Tensor,
     n_metadata_programs: int,
     n_replicates: int,
-    n_components: int,
     range_M_d: torch.Tensor,
-    mean_total_count: float,
     noise_scale: float = 0.05,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
-    Derives NMF initialization for nominated metadata-capturing factors from OLS coefficients.
+    Derives NMF W initialization for nominated metadata-capturing factors from OLS coefficients.
 
-    Runs truncated SVD on the range-scaled OLS coefficient matrix (rows scaled by range_M_d)
-    to extract dominant modes of metadata-gene co-variation in min-max scaled space. Applies
-    a sign convention so the primary gene direction is positive, then ReLU-projects to
-    non-negative and L1-normalizes. Beta columns are calibrated so that a cell at the maximum
-    metadata value contributes approximately ``mean_total_count / n_components`` to its
-    H_struct loading: ``sum(Beta_j) ≈ mean_total_count / n_components`` (since M_scaled=1
-    at maximum for each covariate).
-
-    Recommended workflow:
-        1. Run ``StreamingOrdinaryLeastSquares(var_names_g=gene_names, n_targets=n_genes)``
-           with ``x_ng=M_metadata`` and ``y_nk=X_genes`` for one epoch.
-        2. Call ``.solve()`` to get ``ols_coeff_dg`` of shape (D, G).
-        3. Pass ``ols_coeff_dg`` to this function.
+    Runs truncated SVD on the range-scaled OLS coefficient matrix to extract dominant modes
+    of metadata-gene co-variation in min-max scaled space. Applies a sign convention so the
+    primary gene direction is positive, then ReLU-projects to non-negative and L1-normalizes.
 
     Args:
         ols_coeff_dg: OLS coefficient matrix of shape (D, G), in raw metadata units.
         n_metadata_programs: Number of metadata factors to initialize.
         n_replicates: Number of NMF replicates.
-        n_components: Total NMF components k (for loading scale calibration).
-        range_M_d: Global metadata range (max - min) of shape (D,). Used to convert OLS
-            directions to min-max scaled space and to calibrate Beta scale.
-        mean_total_count: Expected total UMI count per cell.
+        range_M_d: Global metadata range (max - min) of shape (D,).
         noise_scale: Relative noise std for replicate diversity (default 0.05).
 
     Returns:
-        W_meta_rkg: shape (R, n_metadata_programs, G) — nominated gene factor vectors.
-        Beta_meta_rdk: shape (R, D, n_metadata_programs) — nominated Beta columns.
+        W_meta_rkg: shape (R, n_metadata_programs, G) — nominated gene factor vectors,
+            L1-normalized by row.
     """
     D, G = ols_coeff_dg.shape
     n_singular = min(n_metadata_programs, D)
 
-    # Scale OLS rows by range_M_d to get scaled-space directions: dX/dM_scaled = range_M * dX/dM
+    # Scale OLS rows by range_M_d to get directions in min-max scaled space
     ols_coeff_dg_scaled = range_M_d.unsqueeze(1) * ols_coeff_dg  # (D, G)
     U, S, Vh = torch.linalg.svd(ols_coeff_dg_scaled, full_matrices=False)
-    # U: (D, min(D,G)), S: (min(D,G),), Vh: (min(D,G), G)
-    U = U[:, :n_singular]  # (D, n_singular)
-    S = S[:n_singular]  # (n_singular,)
-    Vh = Vh[:n_singular]  # (n_singular, G)
+    U = U[:, :n_singular]
+    S = S[:n_singular]
+    Vh = Vh[:n_singular]
 
     # Sign convention: largest absolute value in each V row should be positive
     for j in range(n_singular):
@@ -313,53 +148,26 @@ def compute_metadata_nmf_init(
             Vh[j] = -Vh[j]
             U[:, j] = -U[:, j]
 
-    # Build base W and Beta for each nominated program.
-    # Beta calibration: at full range (M_scaled=1 for all d), contribution = beta_j.sum().
-    # Target: beta_j.sum() ≈ target_loading. Fallback: uniform target_loading / D per entry.
     W_base: list[torch.Tensor] = []
-    Beta_base: list[torch.Tensor] = []
-    target_loading = mean_total_count / max(n_components, 1)
-
     for j in range(n_metadata_programs):
         if j < n_singular:
             w_j = F.relu(Vh[j]) + 1e-8  # (G,)
             w_j = F.normalize(w_j, p=1, dim=0)
-
-            beta_j = F.relu(U[:, j])  # (D,) non-negative, in scaled space
-            full_range_loading = beta_j.sum().item()
-            if full_range_loading > 1e-8:
-                beta_j = beta_j * (target_loading / full_range_loading)
-            else:
-                beta_j = torch.ones(D, device=ols_coeff_dg.device) * (target_loading / max(D, 1))
         else:
             # More programs than SVD modes: random init for extras
             w_j = F.normalize(torch.rand(G, device=ols_coeff_dg.device) + 1e-8, p=1, dim=0)
-            beta_j = torch.ones(D, device=ols_coeff_dg.device) * (target_loading / max(D, 1))
-
         W_base.append(w_j)
-        Beta_base.append(beta_j)
 
     W_meta_rkg = torch.zeros(n_replicates, n_metadata_programs, G, device=ols_coeff_dg.device)
-    Beta_meta_rdk = torch.zeros(n_replicates, D, n_metadata_programs, device=ols_coeff_dg.device)
-
     for r in range(n_replicates):
         for j in range(n_metadata_programs):
             w_j = W_base[j]
-            beta_j = Beta_base[j]
-
             w_mean = w_j.mean().item()
             noise_w = torch.randn(G, device=ols_coeff_dg.device) * noise_scale * max(w_mean, 1e-8)
             w_r = F.relu(w_j + noise_w) + 1e-8
             W_meta_rkg[r, j] = F.normalize(w_r, p=1, dim=0)
 
-            beta_mean = beta_j.mean().item()
-            if beta_mean > 1e-10:
-                noise_b = torch.randn(D, device=ols_coeff_dg.device) * noise_scale * beta_mean
-                Beta_meta_rdk[r, :, j] = F.relu(beta_j + noise_b)
-            else:
-                Beta_meta_rdk[r, :, j] = beta_j
-
-    return W_meta_rkg, Beta_meta_rdk
+    return W_meta_rkg
 
 
 class MetadataAugmentedLoadingsEncoder(BilinearLoadingsEncoder):
@@ -367,14 +175,9 @@ class MetadataAugmentedLoadingsEncoder(BilinearLoadingsEncoder):
     Encoder that augments the cell embedding with a metadata side-channel before computing
     bilinear affinities with gene factors.
 
-    The metadata projection is added to the cell embedding so the encoder can learn to
-    predict the idiosyncratic component H_raw — which should be uncorrelated with metadata M —
-    by seeing M and learning to subtract the structured variance.
-
-    The encoder is trained with a single signal: SmoothL1 matching loss against the FISTA
-    solver's H_raw output. The FISTA solver is itself penalized (via ``lambda_align``) to
-    produce H_raw solutions that are decorrelated from M, so the encoder indirectly learns
-    decorrelated warm-starts by chasing H_solver.
+    The encoder is trained to predict H_total (the FISTA solver output). Seeing the metadata
+    M directly allows the encoder to learn warm-starts that account for both idiosyncratic
+    and metadata-driven variance.
     """
 
     def __init__(self, n_genes: int, latent_dim: int, n_metadata: int):
@@ -389,7 +192,7 @@ class MetadataAugmentedLoadingsEncoder(BilinearLoadingsEncoder):
             m_nd: Metadata matrix of shape (N, D), raw (uncentered). Required.
 
         Returns:
-            h_rnk: Warm-start idiosyncratic loadings of shape (R, N, K), non-negative,
+            h_rnk: Warm-start loadings of shape (R, N, K), non-negative,
                 scaled so each cell's loadings sum approximately to its total count.
         """
         assert m_nd is not None, "m_nd is required for MetadataAugmentedLoadingsEncoder"
@@ -405,82 +208,21 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
     """
     Structure-aware extension of AmortizedOnlineNonNegativeMatrixFactorization.
 
-    Decomposes cell loadings into:
+    Uses a **solve-then-harvest** paradigm:
 
-        H_total = H_raw + H_struct = H_raw + M * Beta
+    - **Training**: FISTA solves directly for ``H_total >= 0`` on the full X.
+      Nominated programs (first ``n_metadata_programs``) are exempt from the alignment
+      penalty — they are the "tax-free haven" for metadata-correlated variance.
+      Non-nominated programs pay a covariance penalty, so FISTA routes metadata variance
+      to the cheaper nominated columns. Beta is never part of the training loop.
 
-    where H_raw is idiosyncratic (penalized to be uncorrelated with metadata M) and
-    H_struct = M * Beta is the metadata-driven structured component. Gene factors W are
-    shared across both components.
-
-    Objective (implicit, enforced by training signals):
-
-        L_recon   = ||X - H_total * W||_F^2
-        L_select  = lambda_select * sum_k ||Beta[:, k]||_2   (Group Lasso on Beta)
-
-    The FISTA solver for H_raw minimizes an augmented objective that includes a covariance
-    decorrelation penalty and an optional L1 sparsity penalty directly in the gradient steps::
-
-        min_{H>=0} (1/2)||X_eff - H W||_F^2
-                   + lambda_align * ||M_c^T (H - mu_H) / sqrt(n_valid)||_F^2
-                   + lambda_L1 * ||H||_1
-
-    where ``X_eff = X - H_struct @ W``, ``M_c`` is batch-centered scaled metadata with NaN
-    rows zeroed, and ``mu_H`` is a bias-corrected EMA of the mean H_raw loading.  Dividing
-    by ``sqrt(n_valid)`` makes ``lambda_align`` batch-size independent (comparable to
-    ``E[m_c^2]`` rather than ``N * E[m_c^2]``).  The encoder then learns decorrelated
-    warm-starts indirectly by chasing the FISTA H_solver via the SmoothL1 matching loss.
-
-    Group Lasso on Beta achieves **factor-level sparsity**: only a few nominated factors
-    become metadata-driven; the rest stay free.
-
-    **Nominated factors and initialization:**
-    The first ``n_metadata_programs`` factors are "nominated" as metadata factors.
-    They are initialized from OLS coefficients (see ``compute_metadata_nmf_init``), and
-    their Beta columns are the only ones ever updated during training. Non-nominated Beta
-    columns (index ``n_metadata_programs:K``) stay exactly at zero throughout. Group Lasso
-    prunes *among* the nominated columns: if ``n_metadata_programs`` is over-specified,
-    unnecessary nominated Beta columns are driven to zero; only genuinely metadata-correlated
-    factors survive. Different replicates receive independent noise, ensuring diversity for
-    the consensus step.
+    - **Inference** (``predict``): Beta is harvested post-hoc via OLS from the nominated
+      H_total columns: ``Beta = (M^T M + eps I)^{-1} M^T H_nominated``, clamped >= 0.
 
     **Metadata convention:**
-    ``m_nd`` should contain **raw non-negative** metadata values (e.g., donor age in years).
-    The model internally applies min-max scaling: ``M_scaled = (M - min) / (max - min)``,
-    clipped to ``[0, 1]``. This guarantees ``H_struct = M_scaled * Beta >= 0`` (since
-    ``Beta >= 0``), keeping ``H_total >= 0``. Provide ``metadata_min_d`` and
-    ``metadata_max_d`` computed from the training set (or representative percentiles for
-    robustness to outliers).
-
-    **Recommended workflow:**
-
-    .. code-block:: python
-
-        # Step 1: pre-training OLS pass (one epoch)
-        ols = StreamingOrdinaryLeastSquares(var_names_g=gene_names, n_targets=n_genes)
-        # train ols with x_ng=M_metadata, y_nk=X_genes for one epoch
-        ols_coeff_dg = ols.solve().numpy()   # (D, G)
-
-        # Step 2: metadata statistics
-        metadata_mean_d = M.mean(axis=0)    # (D,)
-        metadata_min_d  = M.min(axis=0)     # (D,)
-        metadata_max_d  = M.max(axis=0)     # (D,)
-
-        # Step 3: train structured NMF
-        model = AmortizedOnlineStructureAwareNMF(
-            ...,
-            n_metadata=D,
-            metadata_mean_d=metadata_mean_d,
-            metadata_min_d=metadata_min_d,
-            metadata_max_d=metadata_max_d,
-            ols_coeff_dg=ols_coeff_dg,
-            n_metadata_programs=2,          # or 2 * D as a starting point
-        )
-
-        # Step 4: consensus
-        consensus_factors = compute_consensus_factors(model)
-        # Stability of the first 1-2 factor clusters reveals how many metadata
-        # programs were genuinely needed.
+    ``m_nd`` should contain **raw non-negative** metadata values. The model internally
+    applies min-max scaling to ``[0, 1]``. Provide ``metadata_min_d`` and
+    ``metadata_max_d`` computed from the training set.
 
     Args:
         var_names_g: Gene names.
@@ -490,32 +232,19 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         total_n_cells: Total dataset size (for EMA period computation).
         batch_size: Training batch size.
         n_metadata: Number of metadata columns (D).
-        metadata_mean_d: Precomputed global metadata mean, shape (D,). Used for
-            covariance penalty centering in scaled space.
-        metadata_min_d: Precomputed global metadata minimum, shape (D,). Required.
-        metadata_max_d: Precomputed global metadata maximum, shape (D,). Required.
-        n_metadata_programs: Number of nominated metadata factors. Defaults to
-            ``2 * n_metadata``. Must be < min(k_values).
-        ols_coeff_dg: OLS coefficient matrix (D, G) from StreamingOrdinaryLeastSquares.
+        metadata_mean_d: Precomputed global metadata mean, shape (D,).
+        metadata_min_d: Precomputed global metadata minimum, shape (D,).
+        metadata_max_d: Precomputed global metadata maximum, shape (D,).
+        n_metadata_programs: Number of nominated metadata factors (exempt from alignment
+            penalty). Defaults to ``2 * n_metadata``. Must be < min(k_values).
+        ols_coeff_dg: OLS coefficient matrix (D, G) for initializing W factors.
             If None, nominated factors use random initialization.
-        mean_total_count: Expected total UMI count per cell, used for Beta scale
-            calibration. If None, a rough estimate of ``10 * min(k_values)`` is used.
         metadata_noise_scale: Relative noise std for replicate diversity (default 0.05).
-        lambda_align: Strength of the covariance decorrelation penalty applied to H_raw
-            inside the FISTA solver. The penalty is normalized by ``sqrt(n_valid)`` so its
-            effective strength is batch-size independent. A value of 0.1–1.0 is a gentle
-            nudge relative to the reconstruction term.
-        lambda_L1: L1 sparsity penalty on H_raw inside the FISTA solver. Discourages
-            the model from over-explaining variance with H_raw when metadata (via Beta)
-            could account for it instead. Default 0.0 (disabled).
-        lambda_select: Group Lasso strength on Beta columns.
-        beta_lr: Upper bound on the Beta proximal gradient step size. The actual step is
-            ``min(beta_lr, 1/L)`` where L is the per-batch Lipschitz constant of the
-            Beta gradient. Setting ``beta_lr=1.0`` (the default) is equivalent to always
-            using the theoretically optimal step size; smaller values slow Beta down.
-        beta_n_iter: Number of proximal gradient iterations per forward call.
-        solver: Inner solver for H_raw. Only ``"fista"`` is supported (HALS requires
-            replicate-varying residuals which are not yet implemented).
+        lambda_align: Strength of the covariance decorrelation penalty on non-nominated
+            programs in the FISTA solver. Any value > 0 creates a preference for metadata
+            variance to route to nominated columns. Penalty is normalized by sqrt(n_valid)
+            to be batch-size independent.
+        solver: Inner solver for H_total. Only ``"fista"`` is supported.
     """
 
     def __init__(
@@ -532,13 +261,8 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         metadata_max_d: list[float] | np.ndarray,
         n_metadata_programs: int | None = None,
         ols_coeff_dg: np.ndarray | None = None,
-        mean_total_count: float | None = None,
         metadata_noise_scale: float = 0.05,
         lambda_align: float = 0.1,
-        lambda_L1: float = 0.0,
-        lambda_select: float = 0.05,
-        beta_lr: float = 1.0,
-        beta_n_iter: int = 20,
         solver: Literal["fista"] = "fista",
         encoder_improvement_threshold: float = 2e-3,
         reconstruction_improvement_threshold: float = 2e-3,
@@ -582,27 +306,21 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             init=init,
             transformed_data_mean=transformed_data_mean,
         )
-        # super().__init__() has: set self.encoder = BilinearLoadingsEncoder, registered
-        # A/B/D buffers, and called reset_parameters() once (early return because
+        # super().__init__() sets self.encoder = BilinearLoadingsEncoder, registers
+        # A/B/D buffers, and calls reset_parameters() once (early return because
         # subclass attrs not yet set).
 
         g = len(self.var_names_g)
         self.n_metadata = n_metadata
         self.n_metadata_programs = n_metadata_programs
         self.lambda_align = lambda_align
-        self.lambda_L1 = lambda_L1
-        self.lambda_select = lambda_select
-        self.beta_lr = beta_lr
-        self.beta_n_iter = beta_n_iter
 
-        # Store init data for reset_parameters
         self._ols_coeff_dg: torch.Tensor | None = (
             torch.from_numpy(np.array(ols_coeff_dg)).float() if ols_coeff_dg is not None else None
         )
         self._metadata_mean_d_init = torch.from_numpy(np.array(metadata_mean_d)).float()
         self._metadata_min_d_init = torch.from_numpy(np.array(metadata_min_d)).float()
         self._metadata_max_d_init = torch.from_numpy(np.array(metadata_max_d)).float()
-        self._mean_total_count = mean_total_count
         self._metadata_noise_scale = metadata_noise_scale
 
         # Replace encoder with metadata-augmented version
@@ -615,14 +333,13 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         self.register_buffer("range_M_global_d", range_M)
         self.register_buffer("mu_M_scaled_d", mu_M_scaled)
 
-        # Per-k Beta and H_raw EMA buffers
+        # Per-k mu_H EMA buffers (track H_total mean)
         for k in k_values:
-            self.register_buffer(f"beta_{k}_rdk", torch.zeros(r, n_metadata, k))
             self.register_buffer(f"mu_H_ema_{k}_rk", torch.zeros(r, k))
 
         self._n_ema_updates: int = 0
 
-        # Full reset with OLS init and new encoder
+        # Full reset with OLS W init and new encoder
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -640,22 +357,10 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         if not hasattr(self, "n_metadata_programs"):
             return
 
-        # Zero all Beta buffers (non-nominated columns must start exactly at zero)
-        for k in self.k_values:
-            buf_name = f"beta_{k}_rdk"
-            if hasattr(self, buf_name):
-                getattr(self, buf_name).zero_()
-
         if self._ols_coeff_dg is None:
-            # No OLS: nominated Beta columns get small uniform random values
-            for k in self.k_values:
-                buf_name = f"beta_{k}_rdk"
-                if not hasattr(self, buf_name):
-                    continue
-                getattr(self, buf_name)[:, :, : self.n_metadata_programs].uniform_(0.01, 0.1)
             return
 
-        # OLS-based initialization
+        # OLS-based W initialization for nominated programs
         range_M = getattr(
             self,
             "range_M_global_d",
@@ -665,20 +370,16 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         for k in self.k_values:
             D_rkg = getattr(self, f"D_{k}_rkg")
             device = D_rkg.device
-            mean_count = float(self._mean_total_count) if self._mean_total_count is not None else 10.0 * k
 
-            W_meta_rkg, Beta_meta_rdk = compute_metadata_nmf_init(
+            W_meta_rkg = compute_metadata_nmf_init(
                 ols_coeff_dg=self._ols_coeff_dg.to(device),
                 n_metadata_programs=self.n_metadata_programs,
                 n_replicates=self.r,
-                n_components=k,
                 range_M_d=range_M.to(device),
-                mean_total_count=mean_count,
                 noise_scale=self._metadata_noise_scale,
             )
 
             D_rkg[:, : self.n_metadata_programs, :].copy_(W_meta_rkg)
-            getattr(self, f"beta_{k}_rdk")[:, :, : self.n_metadata_programs].copy_(Beta_meta_rdk)
 
     def online_dictionary_update(
         self,
@@ -690,28 +391,26 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         """
         Structure-aware online dictionary update for one k value.
 
-        Solves for H_raw on the effective residual X - H_struct * W, updates Beta
-        via Group Lasso proximal gradient, accumulates A/B using H_total = H_raw + H_struct,
-        and updates W via FISTA. Computes the encoder loss (SmoothL1 warm-start loss) but
-        does NOT call encoder.backward() — that is handled by Lightning.
+        FISTA solves for H_total directly on the full X. Nominated programs (index
+        0:n_metadata_programs) are exempt from the alignment penalty, making them the
+        natural route for metadata variance. No Beta update occurs during training.
 
         Args:
             x_ng: Gene counts (N, G).
             k: The k value to run.
-            n_iterations: Solver iterations for both H_raw and W.
+            n_iterations: Solver iterations.
             m_nd: Metadata matrix (N, D), raw uncentered non-negative values.
 
         Returns:
             dict with keys:
                 ``loss``: encoder loss (SmoothL1 warm-start loss), has gradients.
-                ``solver_loadings_rnk``: H_total detached (R, N, K), for recon error tracking.
-                ``encoder_loadings_rnk``: H_raw_warm detached (R, N, K).
+                ``solver_loadings_rnk``: H_total detached (R, N, K).
+                ``encoder_loadings_rnk``: H_total_warm detached (R, N, K).
         """
         assert m_nd is not None, "m_nd must be provided for AmortizedOnlineStructureAwareNMF"
         n = x_ng.shape[0]
 
         W_rkg = getattr(self, f"D_{k}_rkg")
-        beta_rdk = getattr(self, f"beta_{k}_rdk")
         A_rkk = getattr(self, f"A_{k}_rkk")
         B_rkg = getattr(self, f"B_{k}_rkg")
         mu_H_ema_rk = getattr(self, f"mu_H_ema_{k}_rk")
@@ -719,29 +418,24 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         # --- Step 0: min-max scale metadata to [0, 1] ---
         nan_mask_n = m_nd.isnan().any(dim=1)  # (N,) True where any metadata dim is NaN
         n_valid = int((~nan_mask_n).sum().item())
-        m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)  # (N, D)
-        m_scaled_nd = m_scaled_nd.nan_to_num(0.0)  # NaN cells → 0; H_struct=0, Beta grad=0
+        m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)
+        m_scaled_nd = m_scaled_nd.nan_to_num(0.0)  # NaN cells → 0
 
-        # --- Step 1: encoder warm-start for H_raw (has gradients) ---
-        H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
+        # --- Step 1: encoder warm-start for H_total (has gradients) ---
+        H_total_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
 
-        # --- Step 2: structural component H_struct = M_scaled @ Beta (linear, non-negative) ---
         with torch.no_grad():
-            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk)
-
-            # --- Step 3 & 4: FISTA solver setup (no (R, N, G) materialization) ---
-            # W @ X_eff.T = W @ X.T - (W @ W.T) @ H_struct.T, avoiding explicit X_eff.
+            # --- Precompute FISTA inputs on full X (no H_struct subtraction) ---
             wwT_rkk = torch.einsum("rkg,rhg->rkh", W_rkg, W_rkg)  # (R, K, K)
             WxT_rkn = torch.einsum("rkg,ng->rkn", W_rkg, x_ng)  # (R, K, N)
-            wwT_Hstruct_rkn = torch.einsum("rkh,rnh->rkn", wwT_rkk, H_struct_rnk)  # (R, K, N)
-            wxT_eff_rkn = WxT_rkn - wwT_Hstruct_rkn  # (R, K, N)
 
-            # --- Precompute M_c and mu_H for the structure-aware FISTA solver ---
+            # --- Precompute M_c and mu_H for the covariance penalty ---
             M_c_nd = m_scaled_nd - self.mu_M_scaled_d  # (N, D), centered scaled metadata
-            M_c_nd = M_c_nd.masked_fill(nan_mask_n.unsqueeze(1), 0.0)  # zero out NaN-cell rows
-            # Normalize by sqrt(n_valid) so the penalty scales as an average over valid cells,
-            # making lambda_align batch-size independent (comparable to E[m_c^2] * 2*lambda).
+            M_c_nd = M_c_nd.masked_fill(nan_mask_n.unsqueeze(1), 0.0)  # zero NaN-cell rows
+            # Normalize by sqrt(n_valid): penalty scales as average over valid cells,
+            # making lambda_align batch-size independent.
             M_c_nd = M_c_nd / math.sqrt(max(n_valid, 1))
+
             ema_rho = float(np.exp(-1.0 / self.n_batches_for_forgetting_momentum))
             if self._n_ema_updates > 0:
                 bias_correction = max(1.0 - ema_rho**self._n_ema_updates, 1e-8)
@@ -749,44 +443,27 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             else:
                 mu_H_corrected_rk = torch.zeros_like(mu_H_ema_rk)
 
-        H_raw_solver_kn = solve_structure_aware_nnls_fista(
+        H_total_solver_rkn = solve_structure_aware_nnls_fista(
             AtA=wwT_rkk,
-            AtB=wxT_eff_rkn,
-            initial_x=H_raw_warm_rnk.detach().transpose(-2, -1),  # (R, K, N)
+            AtB=WxT_rkn,
+            initial_x=H_total_warm_rnk.detach().transpose(-2, -1),  # (R, K, N)
             M_c_nd=M_c_nd,
             mu_H_rk=mu_H_corrected_rk,
             lambda_align=self.lambda_align,
-            lambda_L1=self.lambda_L1,
             n_metadata_programs=self.n_metadata_programs,
             max_iter=n_iterations,
         )
-        H_raw_solver_rnk = H_raw_solver_kn.transpose(-2, -1)  # (R, N, K)
+        H_total_solver_rnk = H_total_solver_rkn.transpose(-2, -1)  # (R, N, K)
 
         with torch.no_grad():
-            # --- Step 5: Beta update via Group Lasso proximal gradient ---
-            beta_rdk_updated = update_beta_group_lasso(
-                H_raw_rnk=H_raw_solver_rnk,
-                W_rkg=W_rkg,
-                X_ng=x_ng,
-                M_scaled_nd=m_scaled_nd,
-                beta_rdk=beta_rdk,
-                lambda_select=self.lambda_select,
-                beta_lr=self.beta_lr,
-                n_iter=self.beta_n_iter,
-                n_metadata_programs=self.n_metadata_programs,
-                n_valid=n_valid,
+            # --- Accumulate A, B using H_total ---
+            A_rkk_new = (
+                self.exponential_decay_rho * A_rkk
+                + torch.bmm(H_total_solver_rnk.transpose(1, 2), H_total_solver_rnk) / n
             )
-            setattr(self, f"beta_{k}_rdk", beta_rdk_updated)
+            B_rkg_new = self.exponential_decay_rho * B_rkg + torch.einsum("rnk,ng->rkg", H_total_solver_rnk, x_ng) / n
 
-            # --- Step 6: recompute H_struct and H_total ---
-            H_struct_updated_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk_updated)
-            H_total_rnk = H_raw_solver_rnk + H_struct_updated_rnk
-
-            # --- Step 7: accumulate A, B using H_total (Mairal update with rho decay) ---
-            A_rkk_new = self.exponential_decay_rho * A_rkk + torch.bmm(H_total_rnk.transpose(1, 2), H_total_rnk) / n
-            B_rkg_new = self.exponential_decay_rho * B_rkg + torch.einsum("rnk,ng->rkg", H_total_rnk, x_ng) / n
-
-        # --- Step 8: update W via FISTA factors ---
+        # --- Update W via FISTA ---
         W_rkg_new, _ = nmf_compute_factors_fista(
             w_rkg=W_rkg,
             A_rkk=A_rkk_new,
@@ -799,24 +476,22 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         setattr(self, f"B_{k}_rkg", B_rkg_new)
         setattr(self, f"D_{k}_rkg", W_rkg_new)
 
-        # --- Step 9: update mu_H_ema with solver H_raw over valid cells only ---
+        # --- Update mu_H_ema with H_total over valid cells ---
         with torch.no_grad():
             if n_valid > 0:
-                batch_mean_rk = H_raw_solver_rnk[:, ~nan_mask_n, :].mean(dim=1)  # (R, K)
+                batch_mean_rk = H_total_solver_rnk[:, ~nan_mask_n, :].mean(dim=1)
             else:
-                batch_mean_rk = H_raw_solver_rnk.mean(dim=1)  # fallback: all cells
+                batch_mean_rk = H_total_solver_rnk.mean(dim=1)
             mu_H_ema_new = ema_rho * mu_H_ema_rk + (1.0 - ema_rho) * batch_mean_rk
             setattr(self, f"mu_H_ema_{k}_rk", mu_H_ema_new)
 
-        # --- Step 10: encoder loss ---
-        # The encoder is trained purely as a warm-start predictor; structure is enforced
-        # directly inside the FISTA solver via the covariance penalty on H_solver.
-        encoder_loss = self.encoder_loss_fn(H_raw_warm_rnk.contiguous(), H_raw_solver_rnk.detach().contiguous())
+        # --- Encoder loss: chase H_total_solver ---
+        encoder_loss = self.encoder_loss_fn(H_total_warm_rnk.contiguous(), H_total_solver_rnk.detach().contiguous())
 
         return {
             "loss": encoder_loss,
-            "solver_loadings_rnk": H_total_rnk.detach(),  # H_total for recon error tracking
-            "encoder_loadings_rnk": H_raw_warm_rnk.detach(),
+            "solver_loadings_rnk": H_total_solver_rnk.detach(),
+            "encoder_loadings_rnk": H_total_warm_rnk.detach(),
         }
 
     def forward(
@@ -886,22 +561,19 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         m_nd: torch.Tensor | None = None,
     ) -> None:
         """
-        Validation step computing reconstruction error using H_total = H_raw_encoder + H_struct.
+        Validation step computing reconstruction error using the encoder's H_total prediction.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         if m_nd is None:
             raise ValueError("m_nd must be provided for AmortizedOnlineStructureAwareNMF.validate")
 
-        m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)  # (N, D)
-        m_scaled_nd = m_scaled_nd.nan_to_num(0.0)  # NaN cells → 0; H_struct=0 for missing metadata
+        m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)
+        m_scaled_nd = m_scaled_nd.nan_to_num(0.0)
         nmf_reconstruction_errors = []
         for k in self.k_values:
             W_rkg = getattr(self, f"D_{k}_rkg")
-            beta_rdk = getattr(self, f"beta_{k}_rdk")
-            H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
-            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk.detach())
-            H_total_rnk = H_raw_warm_rnk + H_struct_rnk
+            H_total_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
             squared_error_r = compute_reconstruction_error_compiled(
                 x_ng=x_ng, loadings_rnk=H_total_rnk, factors_rkg=W_rkg
             )
@@ -922,3 +594,85 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
         if self._val_nmf_loss_ema is not None:
             pl_module.log("val_nmf_loss", self._val_nmf_loss_ema, sync_dist=True, on_epoch=True)
+
+    @torch.no_grad()
+    def predict(
+        self,
+        x_ng: torch.Tensor,
+        var_names_g: np.ndarray,
+        m_nd: torch.Tensor,
+        n_iterations: int = 200,
+    ) -> dict[str, dict[int, torch.Tensor]]:
+        """
+        Post-hoc inference: FISTA on full X to get H_total, then OLS to harvest Beta.
+
+        Beta is computed as the non-negative OLS solution mapping scaled metadata to the
+        nominated H_total columns:
+        ``Beta = (M^T M + eps I)^{-1} M^T H_nominated``, clamped >= 0.
+
+        Args:
+            x_ng: Gene counts (N, G).
+            var_names_g: Variable names matching self.var_names_g.
+            m_nd: Metadata matrix (N, D), raw uncentered non-negative values.
+            n_iterations: FISTA iterations for the final solve.
+
+        Returns:
+            dict with keys:
+                ``H_total``: {k: tensor (R, N, K)} — full non-negative loadings.
+                ``Beta``: {k: tensor (R, D, n_metadata_programs)} — harvested Beta >= 0.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+
+        nan_mask_n = m_nd.isnan().any(dim=1)
+        n_valid = int((~nan_mask_n).sum().item())
+        m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)
+        m_scaled_nd = m_scaled_nd.nan_to_num(0.0)
+
+        M_c_nd = m_scaled_nd - self.mu_M_scaled_d
+        M_c_nd = M_c_nd.masked_fill(nan_mask_n.unsqueeze(1), 0.0)
+        M_c_nd = M_c_nd / math.sqrt(max(n_valid, 1))
+
+        H_total_out: dict[int, torch.Tensor] = {}
+        Beta_out: dict[int, torch.Tensor] = {}
+
+        for k in self.k_values:
+            W_rkg = getattr(self, f"D_{k}_rkg")
+            mu_H_ema_rk = getattr(self, f"mu_H_ema_{k}_rk")
+            if self._n_ema_updates > 0:
+                ema_rho = float(np.exp(-1.0 / self.n_batches_for_forgetting_momentum))
+                bias_correction = max(1.0 - ema_rho**self._n_ema_updates, 1e-8)
+                mu_H_corrected_rk = mu_H_ema_rk / bias_correction
+            else:
+                mu_H_corrected_rk = torch.zeros_like(mu_H_ema_rk)
+
+            n = x_ng.shape[0]
+            wwT_rkk = torch.einsum("rkg,rhg->rkh", W_rkg, W_rkg)
+            WxT_rkn = torch.einsum("rkg,ng->rkn", W_rkg, x_ng)
+
+            H_total_solver_rkn = solve_structure_aware_nnls_fista(
+                AtA=wwT_rkk,
+                AtB=WxT_rkn,
+                initial_x=torch.zeros(self.r, k, n, device=x_ng.device, dtype=x_ng.dtype),
+                M_c_nd=M_c_nd,
+                mu_H_rk=mu_H_corrected_rk,
+                lambda_align=self.lambda_align,
+                n_metadata_programs=self.n_metadata_programs,
+                max_iter=n_iterations,
+            )
+            H_total_solver_rnk = H_total_solver_rkn.transpose(-2, -1)  # (R, N, K)
+            H_total_out[k] = H_total_solver_rnk
+
+            # OLS harvest: solve (M^T M + eps I) Beta = M^T H_nominated, clamp >= 0
+            p = self.n_metadata_programs
+            H_nominated_rnp = H_total_solver_rnk[:, :, :p]  # (R, N, p)
+            MtM = m_scaled_nd.T @ m_scaled_nd  # (D, D)
+            eps = 1e-6 * torch.eye(MtM.shape[0], device=MtM.device, dtype=MtM.dtype)
+            MtH_rdp = torch.einsum("nd,rnp->rdp", m_scaled_nd, H_nominated_rnp)  # (R, D, p)
+            beta_rdp = torch.linalg.solve(
+                (MtM + eps).unsqueeze(0).expand(self.r, -1, -1),  # (R, D, D)
+                MtH_rdp,  # (R, D, p)
+            ).clamp(min=0.0)
+            Beta_out[k] = beta_rdp
+
+        return {"H_total": H_total_out, "Beta": Beta_out}

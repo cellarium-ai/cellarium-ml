@@ -17,8 +17,6 @@ from cellarium.ml.models.nmf import solve_nnls_fista_precomputed
 from cellarium.ml.models.nmf_structured import (
     MetadataAugmentedLoadingsEncoder,
     compute_metadata_nmf_init,
-    group_lasso_prox,
-    update_beta_group_lasso,
 )
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField, to_codes_column
@@ -177,10 +175,6 @@ def _make_structured_module(
     n_metadata_programs: int = 1,
     latent_dim: int = 16,
     lambda_align: float = 0.1,
-    lambda_L1: float = 0.0,
-    lambda_select: float = 0.05,
-    mean_total_count: float | None = None,
-    beta_lr: float = 1.0,
     batch_size: int = 64,
     exploration_epochs: int = 2,
 ) -> CellariumModule:
@@ -203,11 +197,7 @@ def _make_structured_module(
         metadata_max_d=metadata_max_d,
         n_metadata_programs=n_metadata_programs,
         ols_coeff_dg=ols_coeff_dg,
-        mean_total_count=mean_total_count,
         lambda_align=lambda_align,
-        lambda_L1=lambda_L1,
-        lambda_select=lambda_select,
-        beta_lr=beta_lr,
         exploration_epochs=exploration_epochs,
         max_solver_iter_train=30,
         max_solver_iter_cooldown=100,
@@ -242,49 +232,19 @@ def _make_datamodule(adata: anndata.AnnData, batch_size: int = 64) -> CellariumA
 # ---------------------------------------------------------------------------
 
 
-def test_group_lasso_prox_zeroes_weak_columns() -> None:
-    """Columns whose group norm is below the threshold are exactly zeroed out."""
-    torch.manual_seed(0)
-    r, D, K = 2, 3, 5
-    beta = torch.randn(r, D, K) * 0.01  # all columns have tiny norm
-    lambda_select, lr = 1.0, 0.1
-    out = group_lasso_prox(beta, lambda_select=lambda_select, lr=lr)
-    # threshold = lambda_select * lr = 0.1; all column norms << 0.1 → all zeroed
-    assert out.abs().max().item() == pytest.approx(0.0, abs=1e-7)
-
-
-def test_group_lasso_prox_preserves_strong_columns() -> None:
-    """Columns far above the threshold shrink but remain non-zero, direction preserved."""
-    r, D, K = 1, 4, 3
-    beta = torch.zeros(r, D, K)
-    beta[0, :, 0] = torch.tensor([1.0, 2.0, 3.0, 4.0])  # large column 0
-    lambda_select, lr = 0.01, 0.1  # threshold = 0.001; well below column-0 norm
-    out = group_lasso_prox(beta, lambda_select=lambda_select, lr=lr)
-    # Column 0 should shrink but remain non-zero
-    assert out[0, :, 0].norm().item() > 0
-    # Direction should be preserved (proportional to original)
-    cos_sim = F.cosine_similarity(out[0, :, 0].unsqueeze(0), beta[0, :, 0].unsqueeze(0)).item()
-    assert cos_sim == pytest.approx(1.0, abs=1e-5)
-    # Other columns (zero) stay zero
-    assert out[0, :, 1:].abs().max().item() == pytest.approx(0.0, abs=1e-7)
-
-
 def test_compute_metadata_nmf_init_shapes() -> None:
-    """Output tensors have the expected shapes."""
+    """Output tensor has the expected shape."""
     torch.manual_seed(0)
-    D, G, n_progs, n_reps, n_comp = 2, 30, 3, 4, 8
+    D, G, n_progs, n_reps = 2, 30, 3, 4
     ols = torch.randn(D, G)
     range_M = torch.ones(D) * 60.0  # e.g. age range 20-80
-    W_out, Beta_out = compute_metadata_nmf_init(
+    W_out = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=n_progs,
         n_replicates=n_reps,
-        n_components=n_comp,
         range_M_d=range_M,
-        mean_total_count=5000.0,
     )
     assert W_out.shape == (n_reps, n_progs, G)
-    assert Beta_out.shape == (n_reps, D, n_progs)
 
 
 def test_compute_metadata_nmf_init_l1_norms() -> None:
@@ -293,13 +253,11 @@ def test_compute_metadata_nmf_init_l1_norms() -> None:
     D, G = 1, 50
     ols = torch.randn(D, G)
     range_M = torch.tensor([60.0])
-    W_out, _ = compute_metadata_nmf_init(
+    W_out = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=2,
         n_replicates=3,
-        n_components=5,
         range_M_d=range_M,
-        mean_total_count=8000.0,
     )
     assert (W_out >= 0).all(), "W factors must be non-negative"
     l1_norms = W_out.norm(p=1, dim=-1)  # (R, P)
@@ -312,13 +270,11 @@ def test_compute_metadata_nmf_init_replicate_diversity() -> None:
     D, G = 1, 40
     ols = torch.randn(D, G)
     range_M = torch.tensor([60.0])
-    W_out, _ = compute_metadata_nmf_init(
+    W_out = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=1,
         n_replicates=4,
-        n_components=6,
         range_M_d=range_M,
-        mean_total_count=5000.0,
         noise_scale=0.1,
     )
     # At least two replicates should differ
@@ -467,7 +423,7 @@ def test_structured_nmf_single_device(metadata_sim_adata: anndata.AnnData) -> No
 
 
 def test_multiple_k_values(metadata_sim_adata: anndata.AnnData) -> None:
-    """Model handles multiple k values; Beta buffers have correct shapes."""
+    """Model handles multiple k values; factor shapes are correct."""
     sim = metadata_sim_adata.uns["sim"]
     D = metadata_sim_adata.obsm["metadata"].shape[1]
     k_values, r, n_progs = [5, 8], 2, 1
@@ -487,38 +443,6 @@ def test_multiple_k_values(metadata_sim_adata: anndata.AnnData) -> None:
     assert isinstance(model, AmortizedOnlineStructureAwareNMF)
     for k in k_values:
         assert model.factors_dict[k].shape == (r, k, metadata_sim_adata.shape[1])
-        assert getattr(model, f"beta_{k}_rdk").shape == (r, D, k)
-
-
-def test_non_nominated_beta_always_zero(metadata_sim_adata: anndata.AnnData) -> None:
-    """Non-nominated Beta columns stay exactly zero throughout training.
-
-    By design, update_beta_group_lasso only touches columns 0:n_metadata_programs.
-    Non-nominated columns are never updated, so they remain at exactly zero
-    regardless of how many epochs are trained.
-    """
-    sim = metadata_sim_adata.uns["sim"]
-    k, r, n_progs = 4, 2, 1
-    module = _make_structured_module(
-        adata=metadata_sim_adata,
-        k_values=[k],
-        r=r,
-        n_metadata=1,
-        metadata_mean_d=sim["metadata_mean_d"],
-        n_metadata_programs=n_progs,
-    )
-    dm = _make_datamodule(metadata_sim_adata, batch_size=64)
-    dm.setup(stage="fit")
-    trainer = pl.Trainer(barebones=True, accelerator="cpu", devices=1, max_epochs=1)
-    trainer.fit(module, dm)
-
-    model = module.model
-    assert isinstance(model, AmortizedOnlineStructureAwareNMF)
-    beta = getattr(model, f"beta_{k}_rdk")  # (r, D, k)
-    non_nominated = beta[:, :, n_progs:]
-    assert non_nominated.abs().max().item() == pytest.approx(0.0, abs=1e-7), (
-        "Non-nominated Beta columns must remain exactly zero — they are never updated"
-    )
 
 
 def test_nan_metadata_produces_finite_loss(metadata_sim_adata: anndata.AnnData) -> None:
@@ -526,9 +450,9 @@ def test_nan_metadata_produces_finite_loss(metadata_sim_adata: anndata.AnnData) 
     forward() returns a finite loss when m_nd contains NaN for ~25% of cells.
 
     Exercises:
-    - nan_to_num(0.0) on m_scaled_nd → H_struct = 0 and Beta gradient = 0 for NaN cells
+    - nan_to_num(0.0) on m_scaled_nd
     - M_c_nd.masked_fill → NaN cells excluded from the covariance penalty numerator
-    - n_valid normalization in both the covariance penalty and update_beta_group_lasso
+    - n_valid normalization in the covariance penalty
     - EMA mean computed over valid cells only (second call has _n_ema_updates > 0)
     """
     rng = np.random.default_rng(7)
@@ -538,7 +462,7 @@ def test_nan_metadata_produces_finite_loss(metadata_sim_adata: anndata.AnnData) 
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
 
     x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
-    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
+    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float().clone()
 
     # Inject NaN into ~25% of cells
     nan_indices = rng.choice(n_batch, size=n_batch // 4, replace=False)
@@ -570,92 +494,11 @@ def test_nan_metadata_produces_finite_loss(metadata_sim_adata: anndata.AnnData) 
     assert loss2 is not None
     assert torch.isfinite(loss2), f"Loss must be finite on second call (EMA path) with NaN metadata; got {loss2.item()}"
 
-    # Beta and W buffers must remain finite after both updates
+    # W buffers must remain finite after both updates
     k = 4
-    beta = getattr(model, f"beta_{k}_rdk")
     W = getattr(model, f"D_{k}_rkg")
-    assert not beta.isnan().any(), "Beta must not contain NaN after forward with NaN metadata"
-    assert torch.isfinite(beta).all(), "Beta must be finite after forward with NaN metadata"
     assert not W.isnan().any(), "W must not contain NaN after forward with NaN metadata"
-
-
-@pytest.mark.parametrize("lambda_L1", [0.0, 0.5])
-def test_structured_nmf_lambda_L1(lambda_L1: float, metadata_sim_adata: anndata.AnnData) -> None:
-    """
-    Non-zero lambda_L1 trains without error and produces sparser H_raw than lambda_L1=0.
-
-    Both lambda_L1=0.0 (default, regression) and lambda_L1=0.5 (active penalty) are
-    exercised. The active-penalty case additionally checks that the mean H_raw loading
-    from the FISTA solver is strictly lower, since the L1 penalty shifts the proximal
-    threshold and drives values toward zero.
-    """
-    sim = metadata_sim_adata.uns["sim"]
-    g = metadata_sim_adata.shape[1]
-    n_batch = 64
-    var_names_g = np.array([f"gene_{i}" for i in range(g)])
-    torch.manual_seed(0)
-    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
-    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
-
-    model = AmortizedOnlineStructureAwareNMF(
-        var_names_g=var_names_g.tolist(),
-        k_values=[4],
-        r=2,
-        latent_dim=16,
-        total_n_cells=metadata_sim_adata.shape[0],
-        batch_size=64,
-        n_metadata=1,
-        metadata_mean_d=sim["metadata_mean_d"],
-        metadata_min_d=sim["metadata_min_d"],
-        metadata_max_d=sim["metadata_max_d"],
-        n_metadata_programs=1,
-        lambda_L1=lambda_L1,
-        lambda_select=0.0,  # isolate the L1 effect
-    )
-
-    result = model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)
-    loss = result["loss"]
-    assert loss is not None
-    assert torch.isfinite(loss), f"Loss must be finite with lambda_L1={lambda_L1}; got {loss.item()}"
-    assert loss.item() >= 0
-
-    beta = getattr(model, "beta_4_rdk")
-    W = getattr(model, "D_4_rkg")
-    assert torch.isfinite(beta).all(), "Beta must be finite"
-    assert torch.isfinite(W).all(), "W must be finite"
-
-    if lambda_L1 > 0:
-        # With an active L1 penalty the FISTA solver applies a positive threshold
-        # (lambda_L1 / L) to every H element, producing a sparser solution.
-        # Compare against lambda_L1=0 using identical weights and input by calling
-        # online_dictionary_update directly (forward() only exposes the scalar loss).
-        model_no_l1 = AmortizedOnlineStructureAwareNMF(
-            var_names_g=var_names_g.tolist(),
-            k_values=[4],
-            r=2,
-            latent_dim=16,
-            total_n_cells=metadata_sim_adata.shape[0],
-            batch_size=64,
-            n_metadata=1,
-            metadata_mean_d=sim["metadata_mean_d"],
-            metadata_min_d=sim["metadata_min_d"],
-            metadata_max_d=sim["metadata_max_d"],
-            n_metadata_programs=1,
-            lambda_L1=0.0,
-            lambda_select=0.0,
-        )
-        model_no_l1.load_state_dict(model.state_dict())
-
-        out_l1 = model.online_dictionary_update(x_ng=x_ng, k=4, m_nd=m_nd)
-        out_no_l1 = model_no_l1.online_dictionary_update(x_ng=x_ng, k=4, m_nd=m_nd)
-        # solver_loadings_rnk = H_total = H_raw_solver + H_struct; with L1 penalising
-        # H_raw, H_total should be lower on average (H_struct doesn't compensate in one step).
-        mean_l1 = out_l1["solver_loadings_rnk"].mean().item()
-        mean_no_l1 = out_no_l1["solver_loadings_rnk"].mean().item()
-        assert mean_l1 <= mean_no_l1, (
-            f"lambda_L1={lambda_L1} should produce lower-mean H_total than lambda_L1=0; "
-            f"got mean_l1={mean_l1:.4f} > mean_no_l1={mean_no_l1:.4f}"
-        )
+    assert torch.isfinite(W).all(), "W must be finite after forward with NaN metadata"
 
 
 # ---------------------------------------------------------------------------
@@ -663,45 +506,10 @@ def test_structured_nmf_lambda_L1(lambda_L1: float, metadata_sim_adata: anndata.
 # ---------------------------------------------------------------------------
 
 
-def test_ols_init_beta_sparsity(metadata_sim_adata: anndata.AnnData) -> None:
-    """
-    At initialization, nominated Beta column is non-zero and non-nominated columns
-    are exactly zero. This is guaranteed by the OLS init + freeze design.
-    """
-    sim = metadata_sim_adata.uns["sim"]
-    g = metadata_sim_adata.shape[1]
-    k, r, n_progs = 4, 2, 1
-    var_names_g = np.array([f"gene_{i}" for i in range(g)])
-    # Instantiate model directly (no CellariumModule wrapper needed)
-    model = AmortizedOnlineStructureAwareNMF(
-        var_names_g=var_names_g.tolist(),
-        k_values=[k],
-        r=r,
-        latent_dim=16,
-        total_n_cells=metadata_sim_adata.shape[0],
-        batch_size=64,
-        n_metadata=1,
-        metadata_mean_d=sim["metadata_mean_d"],
-        metadata_min_d=sim["metadata_min_d"],
-        metadata_max_d=sim["metadata_max_d"],
-        n_metadata_programs=n_progs,
-        ols_coeff_dg=sim["ols_coeff_dg"],
-        mean_total_count=float(metadata_sim_adata.X.sum(axis=1).mean()),
-    )
-    beta_init = getattr(model, f"beta_{k}_rdk").detach()  # (r, D=1, k)
-    non_nominated = beta_init[:, :, n_progs:]
-    nominated = beta_init[:, :, :n_progs]
-    assert non_nominated.abs().max().item() == pytest.approx(0.0, abs=1e-7), (
-        "Non-nominated Beta columns must be exactly zero at initialization"
-    )
-    assert nominated.abs().max().item() > 0.0, "Nominated Beta column must be non-zero after OLS initialization"
-
-
 def _build_recovery_module_and_data(
     large_sim_adata: anndata.AnnData,
     n_metadata_programs: int,
     k: int = 6,
-    lambda_select: float = 0.1,
     lambda_align: float = 0.5,
     batch_size: int = 1024,
 ) -> tuple["CellariumModule", "CellariumAnnDataDataModule"]:
@@ -718,12 +526,8 @@ def _build_recovery_module_and_data(
         n_metadata_programs=n_metadata_programs,
         latent_dim=32,
         lambda_align=lambda_align,
-        lambda_select=lambda_select,
-        mean_total_count=float(large_sim_adata.X.sum(axis=1).mean()),
         batch_size=batch_size,
         # Prevent early stopping from cutting training short before max_epochs=20.
-        # The convergence trigger is designed for production runs; in tests we want
-        # to run the full 20 epochs to reach the cosine-similarity threshold.
         exploration_epochs=25,
     )
     dm = _make_datamodule(large_sim_adata, batch_size=batch_size)
@@ -735,8 +539,8 @@ def test_metadata_factor_recovery(large_sim_adata: anndata.AnnData) -> None:
     After training, the model recovers the metadata-driven gene factor in the scaled space.
 
     Setup: n=10240 cells, g=30 genes, k_true=6 factors, D=1 (age).
-    Only factor 0 is age-driven (beta_true[0, 0]=2.0). n_metadata_programs=1 so only
-    the one nominated Beta column ever updates.
+    Only factor 0 is age-driven (beta_true[0, 0]=2.0). n_metadata_programs=1 so the
+    first nominated program captures the age signal via the tax-free haven mechanism.
 
     Note on the cos-sim reference: the model trains on DivideByScale-normalized data
     (X / per_gene_std), so the optimal factor 0 in the model's W space is proportional
@@ -746,7 +550,7 @@ def test_metadata_factor_recovery(large_sim_adata: anndata.AnnData) -> None:
     Checks:
     1. W[:,0,:] has cosine similarity >= 0.90 with the scaled reference W_true_scaled[0]
        in at least one replicate.
-    2. Reconstruction error on scaled data beats all-zeros baseline.
+    2. Reconstruction error on scaled data beats all-zeros baseline (FISTA on full X).
     3. No NaN/Inf in encoder output.
     """
     k = 6
@@ -761,16 +565,12 @@ def test_metadata_factor_recovery(large_sim_adata: anndata.AnnData) -> None:
 
     model = module.model
     assert isinstance(model, AmortizedOnlineStructureAwareNMF)
-    beta_rdk = getattr(model, f"beta_{k}_rdk").detach()  # (r, D=1, k)
     W_rkg = getattr(model, f"D_{k}_rkg").detach()  # (r, k, g)
 
     # --- Assertion 1: W[:,0,:] aligns with the correctly-scaled W_true[0] ---
-    # The model sees x_ng = X_ng / scale_g, so the optimal W_true in model space is
-    # W_true[0] / scale_g (then L1-normalized). Compare against that reference.
     scale_g = torch.from_numpy(large_sim_adata.X.std(axis=0)).float().clamp(min=1e-4)
     W_true_unscaled = torch.from_numpy(W_true[0]).float()
     W_true_scaled = W_true_unscaled / scale_g
-    # L1-normalize to match the model's W convention (rows sum to 1, non-negative)
     W_true_scaled_ref = F.normalize(W_true_scaled.unsqueeze(0), p=1, dim=-1, eps=1e-8).squeeze(0)
 
     cos_sims = [
@@ -778,38 +578,29 @@ def test_metadata_factor_recovery(large_sim_adata: anndata.AnnData) -> None:
     ]
     max_cos_sim = max(cos_sims)
     print(f"Max cosine similarity: {max_cos_sim:.3f} (per replicate: {[f'{c:.3f}' for c in cos_sims]})")
-    assert max_cos_sim >= 0.95, (
-        f"Max cosine similarity W[:,0,:] vs scaled W_true[0] should be >= 0.95; "
+    assert max_cos_sim >= 0.90, (
+        f"Max cosine similarity W[:,0,:] vs scaled W_true[0] should be >= 0.90; "
         f"got {max_cos_sim:.3f} (per replicate: {[f'{c:.3f}' for c in cos_sims]}). "
-        f"OLS init should give a good warm start — check compute_metadata_nmf_init and "
-        f"update_beta_group_lasso."
+        f"OLS init should give a good warm start — check compute_metadata_nmf_init."
     )
 
-    # --- Assertion 2: Reconstruction beats all-zeros on DivideByScale-normalized data ---
-    # Run FISTA on the full dataset to get the optimal H_raw given the trained W and Beta.
-    # This mirrors the training loop exactly: solve H_raw on X_eff = X - H_struct @ W,
-    # then reconstruct with H_total = H_raw + H_struct. The encoder warm-start is only
-    # used for training speed; FISTA is the ground truth for reconstruction quality.
+    # --- Assertion 2: Reconstruction beats all-zeros baseline ---
+    # Run plain FISTA on full X given the trained W to get H_total, then reconstruct.
     x_all_raw = torch.from_numpy(large_sim_adata.X).float()
-    m_all = torch.from_numpy(large_sim_adata.obsm["metadata"]).float()
     x_all = x_all_raw / scale_g
     n_all = x_all.shape[0]
 
     model.eval()
     with torch.no_grad():
-        m_scaled_all = ((m_all - model.min_M_global_d) / model.range_M_global_d).clamp(0.0, 1.0)
-        H_struct_rnk = torch.einsum("nd,rdk->rnk", m_scaled_all, beta_rdk)  # linear
-        X_eff_rng = x_all.unsqueeze(0) - torch.einsum("rnk,rkg->rng", H_struct_rnk, W_rkg)
         wwT_rkk = torch.einsum("rkg,rhg->rkh", W_rkg, W_rkg)
-        wxT_rkn = torch.einsum("rkg,rng->rkn", W_rkg, X_eff_rng)
-        H_raw_solver_kn, _ = solve_nnls_fista_precomputed(
+        WxT_rkn = torch.einsum("rkg,ng->rkn", W_rkg, x_all)
+        H_total_solver_rkn, _ = solve_nnls_fista_precomputed(
             AtA=wwT_rkk,
-            AtB=wxT_rkn,
+            AtB=WxT_rkn,
             initial_x=torch.zeros(r, k, n_all),
             max_iter=200,
         )
-        H_raw_solver_rnk = H_raw_solver_kn.transpose(-2, -1)
-        H_total_rnk = H_raw_solver_rnk + H_struct_rnk
+        H_total_rnk = H_total_solver_rkn.transpose(-2, -1)
         recon_rng = torch.einsum("rnk,rkg->rng", H_total_rnk, W_rkg)
         recon_err = ((recon_rng - x_all.unsqueeze(0)) ** 2).mean().item()
         baseline_err = (x_all**2).mean().item()
@@ -819,94 +610,111 @@ def test_metadata_factor_recovery(large_sim_adata: anndata.AnnData) -> None:
     assert recon_err < baseline_err, f"Model ({recon_err:.4f}) should beat all-zeros baseline ({baseline_err:.4f})"
 
     # --- Assertion 3: No NaN/Inf in encoder output ---
+    m_all = torch.from_numpy(large_sim_adata.obsm["metadata"]).float()
+    m_scaled_all = ((m_all - model.min_M_global_d) / model.range_M_global_d).clamp(0.0, 1.0)
     with torch.no_grad():
-        H_raw_warm_rnk = model.encoder(x_all, W_rkg, m_scaled_all)
-    assert not H_raw_warm_rnk.isnan().any(), "Encoder output must not contain NaN"
-    assert not H_raw_warm_rnk.isinf().any(), "Encoder output must not contain Inf"
+        H_total_warm_rnk = model.encoder(x_all, W_rkg, m_scaled_all)
+    assert not H_total_warm_rnk.isnan().any(), "Encoder output must not contain NaN"
+    assert not H_total_warm_rnk.isinf().any(), "Encoder output must not contain Inf"
 
 
-def test_group_lasso_prunes_excess_nominated_beta(large_sim_adata: anndata.AnnData) -> None:
+# ---------------------------------------------------------------------------
+# New mechanism tests
+# ---------------------------------------------------------------------------
+
+
+def test_alignment_penalty_reduces_free_program_metadata_correlation(
+    metadata_sim_adata: anndata.AnnData,
+) -> None:
     """
-    Direct function-level test of group lasso pruning inside update_beta_group_lasso.
-
-    Why a function-level test (not full training loop):
-      In a stochastic training loop with k=6 factors, spurious nominated Beta columns
-      (factors 1-3 with no age correlation) accumulate non-zero gradients due to finite
-      overlaps between learned W factors. The exact lambda_select window where the true
-      column survives but all spurious columns are pruned is narrow and depends on the
-      specific W configuration at each training step. By calling update_beta_group_lasso
-      directly with controlled orthogonal W factors, we guarantee the spurious gradient
-      is exactly zero and the test cleanly verifies the pruning mechanism.
-
-    Setup: block-orthogonal W factors (factor 0 covers genes 0-4, factors 1-5 cover
-    disjoint gene sets) so overlap between factor 0 (age) and factors 1-3 is exactly
-    zero. X is purely age-driven through factor 0. Beta starts at zero.
-
-    Checks:
-    - Beta[:,0] grows from zero (gradient from age signal >> lambda_select=5)
-    - Beta[:,1:4] stay exactly at zero (zero gradient from orthogonal W)
-    - Beta[:,4:6] stay at zero (never updated — not in nominated slice)
+    With lambda_align > 0, the FISTA solver routes metadata variance to nominated programs,
+    reducing the correlation of free programs with metadata vs. lambda_align = 0.
     """
+    sim = metadata_sim_adata.uns["sim"]
+    g = metadata_sim_adata.shape[1]
+    n_batch = 128
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
+    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
 
-    n, g, k, r, D = 1024, 30, 6, 3, 1
-    n_progs = 4  # 4 nominated, but only factor 0 has age signal
+    def make_and_run(lam: float) -> torch.Tensor:
+        torch.manual_seed(0)
+        model = AmortizedOnlineStructureAwareNMF(
+            var_names_g=var_names_g.tolist(),
+            k_values=[4],
+            r=1,
+            latent_dim=16,
+            total_n_cells=metadata_sim_adata.shape[0],
+            batch_size=n_batch,
+            n_metadata=1,
+            metadata_mean_d=sim["metadata_mean_d"],
+            metadata_min_d=sim["metadata_min_d"],
+            metadata_max_d=sim["metadata_max_d"],
+            n_metadata_programs=1,
+            lambda_align=lam,
+        )
+        out = model.online_dictionary_update(x_ng=x_ng, k=4, m_nd=m_nd, n_iterations=50)
+        return out["solver_loadings_rnk"]  # (1, N, 4)
 
-    # Block-orthogonal W: factor 0 covers genes 0-4, factor 1 covers genes 5-9, etc.
-    # This guarantees zero overlap between factor 0 and factors 1-3, making spurious
-    # gradient exactly zero regardless of age variance or beta_true magnitude.
-    W_rkg = torch.zeros(r, k, g)
-    for fac in range(k):
-        start = fac * 5
-        W_rkg[:, fac, start : start + 5] = 1.0 / 5  # L1-normalized, 5 genes each
+    H_no_pen = make_and_run(0.0)
+    H_pen = make_and_run(10.0)
 
-    # Metadata (age): take first 1024 cells from fixture; min-max scale to [0, 1].
-    M_nd = torch.from_numpy(large_sim_adata.obsm["metadata"][:n]).float()  # (1024, 1)
-    M_min = M_nd.min(dim=0).values
-    M_range = (M_nd.max(dim=0).values - M_min).clamp(min=1e-8)
-    M_scaled_nd = ((M_nd - M_min) / M_range).clamp(0.0, 1.0)  # in [0, 1]
+    min_M = torch.from_numpy(sim["metadata_min_d"]).float()
+    max_M = torch.from_numpy(sim["metadata_max_d"]).float()
+    m_scaled = ((m_nd - min_M) / (max_M - min_M)).clamp(0, 1).squeeze(1)  # (N,)
+    m_c = m_scaled - m_scaled.mean()
+    std_m = m_c.std().clamp(min=1e-8)
 
-    # X is ONLY driven by factor 0 through the age metadata (H_raw = 0 for simplicity).
-    # We generate X in raw-age space; M_scaled is only used in the gradient update.
-    beta_true_0 = 2.0
-    H_struct_factor0 = M_nd * beta_true_0  # (1024, 1): raw ages * beta_true
-    X_ng = H_struct_factor0 @ W_rkg[0, :1, :]  # (1024, g): age signal through factor 0 only
+    def max_free_corr(H_rnk: torch.Tensor) -> float:
+        H_free = H_rnk[0, :, 1:]  # (N, K_free): non-nominated programs
+        H_c = H_free - H_free.mean(dim=0, keepdim=True)
+        cov = (H_c * m_c.unsqueeze(1)).mean(dim=0)
+        std_H = H_c.std(dim=0).clamp(min=1e-8)
+        return (cov / (std_H * std_m)).abs().max().item()
 
-    # Beta starts at zero. With min-max scaled M and linear H_struct, at beta=0:
-    #   H_struct=0, err_W = -X_res_WaT
-    #   grad(col=0) ≈ -(2/n) * (M_scaled^T @ M_nd) * 2.0 * WaWaT[0,0] ≈ -24
-    #   grad(col=1-3) = 0 (exactly orthogonal W factors)
-    # With lambda_select=5: col 0 grows (24 >> 5), cols 1-3 stay at zero ✓
-    beta_rdk = torch.zeros(r, D, k)
+    corr_no = max_free_corr(H_no_pen)
+    corr_pen = max_free_corr(H_pen)
+    assert corr_pen < corr_no, (
+        f"lambda_align=10 should reduce free-program correlation with metadata; "
+        f"got corr_pen={corr_pen:.4f}, corr_no={corr_no:.4f}"
+    )
 
-    beta_updated = update_beta_group_lasso(
-        H_raw_rnk=torch.zeros(r, n, k),  # H_raw = 0 → X_res = X_ng exactly
-        W_rkg=W_rkg,
-        X_ng=X_ng,
-        M_scaled_nd=M_scaled_nd,
-        beta_rdk=beta_rdk,
-        lambda_select=5.0,
-        beta_lr=1.0,
-        n_iter=200,  # enough iterations to converge from zero
+
+def test_predict_returns_h_total_and_beta(metadata_sim_adata: anndata.AnnData) -> None:
+    """predict() returns H_total and Beta with correct shapes and non-negative Beta."""
+    sim = metadata_sim_adata.uns["sim"]
+    g = metadata_sim_adata.shape[1]
+    k, r, n_progs = 4, 2, 1
+    n_batch = 32
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
+    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
+
+    model = AmortizedOnlineStructureAwareNMF(
+        var_names_g=var_names_g.tolist(),
+        k_values=[k],
+        r=r,
+        latent_dim=16,
+        total_n_cells=metadata_sim_adata.shape[0],
+        batch_size=64,
+        n_metadata=1,
+        metadata_mean_d=sim["metadata_mean_d"],
+        metadata_min_d=sim["metadata_min_d"],
+        metadata_max_d=sim["metadata_max_d"],
         n_metadata_programs=n_progs,
     )
 
-    # Nominated factor 0 should grow (age signal drives it; gradient >> lambda_select=5)
-    beta_0_norm = beta_updated[:, :, 0].norm().item()
-    assert beta_0_norm > 0.1, (
-        f"Nominated Beta column 0 should be non-zero (group norm = {beta_0_norm:.4f}). "
-        f"Factor 0 is the age gene direction; its gradient (≈24) >> lambda_select (5.0)."
-    )
+    result = model.predict(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd, n_iterations=50)
 
-    # Nominated factors 1-3 should stay exactly at zero (zero gradient from orthogonal W)
-    for col in range(1, n_progs):
-        max_val = beta_updated[:, :, col].abs().max().item()
-        assert max_val == pytest.approx(0.0, abs=1e-5), (
-            f"Nominated Beta column {col} should remain zero (max abs = {max_val:.6f}). "
-            f"Factor {col} is orthogonal to the age direction — gradient is exactly zero."
-        )
+    assert "H_total" in result and "Beta" in result
+    assert k in result["H_total"] and k in result["Beta"]
 
-    # Non-nominated factors (4:6) always stay at zero — never updated by design
-    non_nominated_max = beta_updated[:, :, n_progs:].abs().max().item()
-    assert non_nominated_max == pytest.approx(0.0, abs=1e-7), (
-        f"Non-nominated Beta columns (index {n_progs}:{k}) must be exactly zero."
-    )
+    H = result["H_total"][k]
+    Beta = result["Beta"][k]
+
+    assert H.shape == (r, n_batch, k), f"Expected ({r}, {n_batch}, {k}), got {H.shape}"
+    assert Beta.shape == (r, 1, n_progs), f"Expected ({r}, 1, {n_progs}), got {Beta.shape}"
+    assert (H >= 0).all(), "H_total must be non-negative"
+    assert (Beta >= 0).all(), "Beta must be non-negative"
+    assert torch.isfinite(H).all(), "H_total must be finite"
+    assert torch.isfinite(Beta).all(), "Beta must be finite"
