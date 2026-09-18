@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+import warnings
 from collections.abc import Sequence
 from typing import Literal
 
@@ -141,6 +142,8 @@ def update_beta_group_lasso(
     n_iter: int,
     n_metadata_programs: int,
     n_valid: int | None = None,
+    beta_prior_active: torch.Tensor | None = None,
+    lambda_prior: float = 0.0,
 ) -> torch.Tensor:
     """
     Proximal gradient update for Beta under Group Lasso regularization.
@@ -175,6 +178,13 @@ def update_beta_group_lasso(
             Lipschitz constant and gradient are normalized by ``n_valid`` instead
             of the total batch size, so missing-metadata cells do not dilute the
             effective step size. Defaults to the total batch size.
+        beta_prior_active: OLS-derived prior for nominated Beta columns, shape
+            (R, D, n_metadata_programs). When provided with ``lambda_prior > 0``,
+            adds ``lambda_prior * ||Beta_active - beta_prior_active||_F^2`` to the
+            Beta objective, pulling Beta toward the OLS initialization.
+        lambda_prior: Strength of the L2 prior toward ``beta_prior_active``.
+            Default 0 disables the prior. The Lipschitz constant is updated to
+            account for the prior term so step sizes remain valid.
 
     Returns:
         Updated beta_rdk of shape (R, D, K).
@@ -191,7 +201,7 @@ def update_beta_group_lasso(
     WaWaT_rpp = torch.einsum("rpg,rqg->rpq", W_active, W_active)  # (R, P, P)
     # Trace upper-bounds lambda_max for a PSD matrix; avoids eigvalsh and its CPU sync.
     lambda_max_WaWaT = WaWaT_rpp.diagonal(dim1=-2, dim2=-1).sum(dim=-1).max()  # scalar tensor
-    L = (2.0 / n_eff) * lambda_max_MscTMsc * lambda_max_WaWaT
+    L = (2.0 / n_eff) * lambda_max_MscTMsc * lambda_max_WaWaT + 2.0 * lambda_prior
     effective_lr = torch.minimum(
         torch.tensor(beta_lr, device=L.device, dtype=L.dtype),
         1.0 / L.clamp(min=1e-10),
@@ -211,6 +221,8 @@ def update_beta_group_lasso(
         pred_W_rnp = torch.einsum("rnp,rpq->rnq", H_struct_rnp, WaWaT_rpp)  # (R, N, P)
         err_W_rnp = pred_W_rnp - X_res_WaT_rnp  # (R, N, P)
         grad_active = (2.0 / n_eff) * torch.einsum("nd,rnp->rdp", M_scaled_nd, err_W_rnp)  # linear
+        if lambda_prior > 0.0 and beta_prior_active is not None:
+            grad_active = grad_active + 2.0 * lambda_prior * (beta_active - beta_prior_active)
 
         beta_active = beta_active - effective_lr * grad_active
         beta_active = group_lasso_prox(beta_active, lambda_select, effective_lr)
@@ -477,6 +489,10 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             Beta gradient. Setting ``beta_lr=1.0`` (the default) is equivalent to always
             using the theoretically optimal step size; smaller values slow Beta down.
         beta_n_iter: Number of proximal gradient iterations per forward call.
+        lambda_prior: Strength of the L2 prior pulling Beta toward its OLS initialization.
+            Adds ``lambda_prior * ||Beta_active - Beta_prior||_F^2`` to the Beta objective.
+            Requires ``ols_coeff_dg``; without it, beta_prior is zero and the prior acts
+            as an extra L2 regularizer toward zero. Default 0 disables the prior.
         solver: Inner solver for H_raw. Only ``"fista"`` is supported (HALS requires
             replicate-varying residuals which are not yet implemented).
     """
@@ -501,6 +517,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         lambda_select: float = 0.05,
         beta_lr: float = 1.0,
         beta_n_iter: int = 20,
+        lambda_prior: float = 0.0,
         solver: Literal["fista"] = "fista",
         encoder_improvement_threshold: float = 2e-3,
         reconstruction_improvement_threshold: float = 2e-3,
@@ -555,6 +572,16 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         self.lambda_select = lambda_select
         self.beta_lr = beta_lr
         self.beta_n_iter = beta_n_iter
+        self.lambda_prior = lambda_prior
+
+        if lambda_prior > 0.0 and ols_coeff_dg is None:
+            warnings.warn(
+                "lambda_prior > 0 but ols_coeff_dg is None: beta_prior will be all zeros, "
+                "so the prior acts as an extra L2 regularizer toward zero rather than toward "
+                "the OLS estimate. Consider providing ols_coeff_dg or setting lambda_prior=0.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         # Store init data for reset_parameters
         self._ols_coeff_dg: torch.Tensor | None = (
@@ -579,6 +606,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         # Per-k Beta and H_raw EMA buffers
         for k in k_values:
             self.register_buffer(f"beta_{k}_rdk", torch.zeros(r, n_metadata, k))
+            self.register_buffer(f"beta_prior_{k}_rdk", torch.zeros(r, n_metadata, n_metadata_programs))
             self.register_buffer(f"mu_H_ema_{k}_rk", torch.zeros(r, k))
 
         self._n_ema_updates: int = 0
@@ -606,6 +634,9 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             buf_name = f"beta_{k}_rdk"
             if hasattr(self, buf_name):
                 getattr(self, buf_name).zero_()
+            prior_buf_name = f"beta_prior_{k}_rdk"
+            if hasattr(self, prior_buf_name):
+                getattr(self, prior_buf_name).zero_()
 
         if self._ols_coeff_dg is None:
             # No OLS: nominated Beta columns get small uniform random values
@@ -640,6 +671,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
             D_rkg[:, : self.n_metadata_programs, :].copy_(W_meta_rkg)
             getattr(self, f"beta_{k}_rdk")[:, :, : self.n_metadata_programs].copy_(Beta_meta_rdk)
+            getattr(self, f"beta_prior_{k}_rdk").copy_(Beta_meta_rdk)
 
     def online_dictionary_update(
         self,
@@ -723,6 +755,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
         with torch.no_grad():
             # --- Step 5: Beta update via Group Lasso proximal gradient ---
+            beta_prior_rdk = getattr(self, f"beta_prior_{k}_rdk")
             beta_rdk_updated = update_beta_group_lasso(
                 H_raw_rnk=H_raw_solver_rnk,
                 W_rkg=W_rkg,
@@ -734,6 +767,8 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
                 n_iter=self.beta_n_iter,
                 n_metadata_programs=self.n_metadata_programs,
                 n_valid=n_valid,
+                beta_prior_active=beta_prior_rdk,
+                lambda_prior=self.lambda_prior,
             )
             setattr(self, f"beta_{k}_rdk", beta_rdk_updated)
 

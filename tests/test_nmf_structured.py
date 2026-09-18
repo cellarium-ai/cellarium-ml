@@ -323,6 +323,52 @@ def test_compute_metadata_nmf_init_replicate_diversity() -> None:
     assert not W_out[0].allclose(W_out[1]), "Replicates should be diverse with noise_scale > 0"
 
 
+def test_update_beta_group_lasso_prior_pulls_nominated_positive() -> None:
+    """With lambda_prior > 0, the prior gradient pulls nominated Beta toward beta_prior_active.
+
+    Uses X=0 and H_raw=0 so the data gradient at beta=0 is exactly zero; only the prior
+    gradient acts on the first step. After 100 iterations the nominated columns must be
+    positive (pulled from zero toward beta_prior_active=2.0). Non-nominated columns are
+    never touched and must remain exactly zero.
+    """
+    torch.manual_seed(0)
+    r, D, n, k, n_progs = 2, 1, 100, 4, 2
+    g = k * 5
+
+    W_rkg = torch.zeros(r, k, g)
+    for i in range(k):
+        W_rkg[:, i, i * 5 : (i + 1) * 5] = 0.2  # L1-normalized, disjoint blocks
+
+    M_scaled_nd = torch.rand(n, D)
+    X_ng = torch.zeros(n, g)  # zero data → data gradient is zero at beta=0
+    H_raw_rnk = torch.zeros(r, n, k)
+    beta_prior = torch.full((r, D, n_progs), 2.0)
+    beta_rdk = torch.zeros(r, D, k)
+
+    result = update_beta_group_lasso(
+        H_raw_rnk=H_raw_rnk,
+        W_rkg=W_rkg,
+        X_ng=X_ng,
+        M_scaled_nd=M_scaled_nd,
+        beta_rdk=beta_rdk,
+        lambda_select=0.0,
+        beta_lr=1.0,
+        n_iter=100,
+        n_metadata_programs=n_progs,
+        beta_prior_active=beta_prior,
+        lambda_prior=1.0,
+    )
+
+    assert torch.isfinite(result).all(), "Result must be finite with lambda_prior > 0"
+    assert (result >= 0).all(), "Result must remain non-negative"
+    assert result[:, :, :n_progs].min().item() > 0.0, (
+        "Nominated Beta should be pulled positive by the prior (beta_prior=2.0)"
+    )
+    assert result[:, :, n_progs:].abs().max().item() == pytest.approx(0.0, abs=1e-7), (
+        "Non-nominated columns must remain exactly zero"
+    )
+
+
 def test_metadata_encoder_output_shape() -> None:
     """MetadataAugmentedLoadingsEncoder produces (R, N, K) non-negative output."""
     torch.manual_seed(0)
@@ -575,6 +621,55 @@ def test_nan_metadata_produces_finite_loss(metadata_sim_adata: anndata.AnnData) 
     assert not beta.isnan().any(), "Beta must not contain NaN after forward with NaN metadata"
     assert torch.isfinite(beta).all(), "Beta must be finite after forward with NaN metadata"
     assert not W.isnan().any(), "W must not contain NaN after forward with NaN metadata"
+
+
+def test_lambda_prior_finite_and_frozen(metadata_sim_adata: anndata.AnnData) -> None:
+    """Model with lambda_prior > 0 produces finite loss; beta_prior buffer is frozen.
+
+    Checks:
+    - Loss is finite on both forward passes (exercises the _n_ema_updates=0 and >0 paths)
+    - Beta and W remain finite and Beta remains non-negative
+    - beta_prior_{k}_rdk is unchanged after training (it is a fixed prior, not a running stat)
+    """
+    sim = metadata_sim_adata.uns["sim"]
+    g = metadata_sim_adata.shape[1]
+    n_batch = 64
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
+    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
+
+    model = AmortizedOnlineStructureAwareNMF(
+        var_names_g=var_names_g.tolist(),
+        k_values=[4],
+        r=2,
+        latent_dim=16,
+        total_n_cells=metadata_sim_adata.shape[0],
+        batch_size=64,
+        n_metadata=1,
+        metadata_mean_d=sim["metadata_mean_d"],
+        metadata_min_d=sim["metadata_min_d"],
+        metadata_max_d=sim["metadata_max_d"],
+        n_metadata_programs=1,
+        ols_coeff_dg=sim["ols_coeff_dg"],
+        mean_total_count=float(metadata_sim_adata.X.sum(axis=1).mean()),
+        lambda_prior=0.1,
+    )
+    k = 4
+    beta_prior_at_init = getattr(model, f"beta_prior_{k}_rdk").clone()
+
+    for call_idx in range(2):
+        loss = model(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd)["loss"]
+        assert loss is not None
+        assert torch.isfinite(loss), f"Loss must be finite (call {call_idx}); got {loss.item()}"
+
+    beta = getattr(model, f"beta_{k}_rdk")
+    beta_prior = getattr(model, f"beta_prior_{k}_rdk")
+    assert torch.isfinite(beta).all(), "Beta must be finite after forward with lambda_prior > 0"
+    assert (beta >= 0).all(), "Beta must remain non-negative with lambda_prior > 0"
+    assert not beta.isnan().any(), "Beta must not contain NaN"
+    assert beta_prior.equal(beta_prior_at_init), (
+        "beta_prior buffer must be frozen — it is a fixed prior, never updated during training"
+    )
 
 
 # ---------------------------------------------------------------------------
