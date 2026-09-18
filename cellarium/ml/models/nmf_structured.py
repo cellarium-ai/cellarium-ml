@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+import warnings
 from collections.abc import Sequence
 from typing import Literal
 
@@ -108,6 +109,134 @@ def solve_structure_aware_nnls_fista(
         t = t_new
 
     return x
+
+
+@torch.no_grad()
+def group_lasso_prox(beta_rdk: torch.Tensor, lambda_select: float, lr: float | torch.Tensor) -> torch.Tensor:
+    """
+    Block soft-thresholding proximal operator for the Group Lasso penalty.
+
+    For each factor column k, computes the L2 norm across the metadata dimension d
+    and shrinks the entire column toward zero. Columns whose group norm falls below
+    ``lambda_select * lr`` are zeroed out exactly, achieving factor-level sparsity:
+    only a few factors are metadata-driven.
+
+    Args:
+        beta_rdk: Beta tensor of shape (R, D, K).
+        lambda_select: Group Lasso regularization strength.
+        lr: Proximal gradient step size.
+
+    Returns:
+        Updated beta_rdk with group-sparse columns.
+    """
+    group_norms_r1k = beta_rdk.norm(dim=1, keepdim=True)  # (R, 1, K)
+    threshold = lambda_select * lr
+    scale = (1.0 - threshold / group_norms_r1k.clamp(min=1e-10)).clamp(min=0.0)
+    scale = torch.where(group_norms_r1k > threshold, scale, torch.zeros_like(scale))
+    return beta_rdk * scale
+
+
+@torch.no_grad()
+def update_beta_group_lasso(
+    H_raw_rnk: torch.Tensor,
+    W_rkg: torch.Tensor,
+    X_ng: torch.Tensor,
+    M_scaled_nd: torch.Tensor,
+    beta_rdk: torch.Tensor,
+    lambda_select: float,
+    beta_lr: float,
+    n_iter: int,
+    n_metadata_programs: int,
+    n_valid: int | None = None,
+    beta_prior_active: torch.Tensor | None = None,
+    lambda_prior: float = 0.0,
+) -> torch.Tensor:
+    """
+    Proximal gradient update for Beta under Group Lasso regularization.
+
+    Updates only the nominated columns ``0:n_metadata_programs`` of Beta.
+    Non-nominated columns are never touched — they stay at exactly zero by design.
+    This means the Group Lasso prunes *among* nominated columns: if
+    ``n_metadata_programs`` was over-specified, unnecessary nominated columns are
+    driven to zero; only those with genuine metadata-correlation survive.
+
+    The forward is linear: ``H_struct = M_scaled @ Beta``. Since ``M_scaled`` is
+    min-max scaled to ``[0, 1]`` and ``Beta >= 0`` (enforced by clamping), H_struct
+    is guaranteed non-negative. The gradient is the standard linear least-squares
+    gradient with no chain-rule correction needed.
+
+    Args:
+        H_raw_rnk: Idiosyncratic loadings of shape (R, N, K).
+        W_rkg: Gene factors of shape (R, K, G).
+        X_ng: Gene counts of shape (N, G).
+        M_scaled_nd: Min-max scaled metadata of shape (N, D), values in [0, 1].
+            Cells with missing metadata should have their rows pre-filled with 0
+            before this call; their gradient contribution is then exactly zero.
+        beta_rdk: Current Beta of shape (R, D, K).
+        lambda_select: Group Lasso strength.
+        beta_lr: Upper bound on the proximal gradient step size. The actual step is
+            ``min(beta_lr, 1/L)`` where L is the per-batch Lipschitz constant.
+            Setting ``beta_lr=1.0`` uses the Lipschitz-optimal step when L≥1.
+        n_iter: Number of proximal gradient iterations per forward call.
+        n_metadata_programs: Number of nominated metadata columns to update.
+            Non-nominated columns (``n_metadata_programs:K``) are never updated.
+        n_valid: Number of cells with non-missing metadata. When provided, the
+            Lipschitz constant and gradient are normalized by ``n_valid`` instead
+            of the total batch size, so missing-metadata cells do not dilute the
+            effective step size. Defaults to the total batch size.
+        beta_prior_active: OLS-derived prior for nominated Beta columns, shape
+            (R, D, n_metadata_programs). When provided with ``lambda_prior > 0``,
+            adds ``lambda_prior * ||Beta_active - beta_prior_active||_F^2`` to the
+            Beta objective, pulling Beta toward the OLS initialization.
+        lambda_prior: Strength of the L2 prior toward ``beta_prior_active``.
+            Default 0 disables the prior. The Lipschitz constant is updated to
+            account for the prior term so step sizes remain valid.
+
+    Returns:
+        Updated beta_rdk of shape (R, D, K).
+    """
+    n = X_ng.shape[0]
+    n_eff = max(n_valid, 1) if n_valid is not None else n
+    W_active = W_rkg[:, :n_metadata_programs, :]  # (R, P, G), P = n_metadata_programs
+
+    # Lipschitz constant of the linear beta gradient:
+    #   ||grad(beta)||_2 <= (2/n_eff) * ||M_sc^T M_sc||_op * lambda_max(WaWaT) * ||delta_beta||_2
+    MscTMsc = M_scaled_nd.T @ M_scaled_nd  # (D, D): self-product of scaled metadata
+    lambda_max_MscTMsc = torch.linalg.matrix_norm(MscTMsc, ord=2)  # scalar tensor, no CPU sync
+    # WaWaT is precomputed here and reused for both the Lipschitz bound and the loop gradient.
+    WaWaT_rpp = torch.einsum("rpg,rqg->rpq", W_active, W_active)  # (R, P, P)
+    # Trace upper-bounds lambda_max for a PSD matrix; avoids eigvalsh and its CPU sync.
+    lambda_max_WaWaT = WaWaT_rpp.diagonal(dim1=-2, dim2=-1).sum(dim=-1).max()  # scalar tensor
+    L = (2.0 / n_eff) * lambda_max_MscTMsc * lambda_max_WaWaT + 2.0 * lambda_prior
+    effective_lr = torch.minimum(
+        torch.tensor(beta_lr, device=L.device, dtype=L.dtype),
+        1.0 / L.clamp(min=1e-10),
+    )  # 0-d tensor, no CPU sync
+
+    # Precompute G-space projections into the latent space so the hot loop never touches G.
+    # X_res @ Wa.T = (X - H_raw @ W_all) @ Wa.T = X @ Wa.T - H_raw @ (W_all @ Wa.T)
+    X_WaT_rnp = torch.einsum("ng,rpg->rnp", X_ng, W_active)  # (R, N, P)
+    WWaT_rkp = torch.einsum("rkg,rpg->rkp", W_rkg, W_active)  # (R, K, P)
+    X_res_WaT_rnp = X_WaT_rnp - torch.einsum("rnk,rkp->rnp", H_raw_rnk, WWaT_rkp)  # (R, N, P)
+
+    beta_active = beta_rdk[:, :, :n_metadata_programs].clone()
+
+    for _ in range(n_iter):
+        # All operations in (R, N, P) space — G dimension eliminated from the loop.
+        H_struct_rnp = torch.einsum("nd,rdp->rnp", M_scaled_nd, beta_active)  # (R, N, P): linear
+        pred_W_rnp = torch.einsum("rnp,rpq->rnq", H_struct_rnp, WaWaT_rpp)  # (R, N, P)
+        err_W_rnp = pred_W_rnp - X_res_WaT_rnp  # (R, N, P)
+        grad_active = (2.0 / n_eff) * torch.einsum("nd,rnp->rdp", M_scaled_nd, err_W_rnp)  # linear
+        if lambda_prior > 0.0 and beta_prior_active is not None:
+            grad_active = grad_active + 2.0 * lambda_prior * (beta_active - beta_prior_active)
+
+        beta_active = beta_active - effective_lr * grad_active
+        beta_active = group_lasso_prox(beta_active, lambda_select, effective_lr)
+        beta_active = beta_active.clamp(min=0.0)
+
+    result = beta_rdk.clone()
+    result[:, :, :n_metadata_programs] = beta_active
+    return result
 
 
 @torch.no_grad()
@@ -245,11 +374,22 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         ols_coeff_dg: OLS coefficient matrix (D, G) for initializing W factors.
             If None, nominated factors use random initialization.
         metadata_noise_scale: Relative noise std for replicate diversity (default 0.05).
-        lambda_align: Strength of the covariance decorrelation penalty on non-nominated
-            programs in the FISTA solver. Any value > 0 creates a preference for metadata
-            variance to route to nominated columns. Penalty is normalized by sqrt(n_valid)
-            to be batch-size independent.
-        solver: Inner solver for H_total. Only ``"fista"`` is supported.
+        lambda_align: Strength of the covariance decorrelation penalty applied to H_raw
+            inside the FISTA solver. The penalty is normalized by ``sqrt(n_valid)`` so its
+            effective strength is batch-size independent. A value of 0.1–1.0 is a gentle
+            nudge relative to the reconstruction term.
+        lambda_select: Group Lasso strength on Beta columns.
+        beta_lr: Upper bound on the Beta proximal gradient step size. The actual step is
+            ``min(beta_lr, 1/L)`` where L is the per-batch Lipschitz constant of the
+            Beta gradient. Setting ``beta_lr=1.0`` (the default) is equivalent to always
+            using the theoretically optimal step size; smaller values slow Beta down.
+        beta_n_iter: Number of proximal gradient iterations per forward call.
+        lambda_prior: Strength of the L2 prior pulling Beta toward its OLS initialization.
+            Adds ``lambda_prior * ||Beta_active - Beta_prior||_F^2`` to the Beta objective.
+            Requires ``ols_coeff_dg``; without it, beta_prior is zero and the prior acts
+            as an extra L2 regularizer toward zero. Default 0 disables the prior.
+        solver: Inner solver for H_raw. Only ``"fista"`` is supported (HALS requires
+            replicate-varying residuals which are not yet implemented).
     """
 
     def __init__(
@@ -268,6 +408,10 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         ols_coeff_dg: np.ndarray | None = None,
         metadata_noise_scale: float = 0.05,
         lambda_align: float = 0.1,
+        lambda_select: float = 0.05,
+        beta_lr: float = 1.0,
+        beta_n_iter: int = 20,
+        lambda_prior: float = 0.0,
         solver: Literal["fista"] = "fista",
         encoder_improvement_threshold: float = 2e-3,
         reconstruction_improvement_threshold: float = 2e-3,
@@ -319,6 +463,19 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         self.n_metadata = n_metadata
         self.n_metadata_programs = n_metadata_programs
         self.lambda_align = lambda_align
+        self.lambda_select = lambda_select
+        self.beta_lr = beta_lr
+        self.beta_n_iter = beta_n_iter
+        self.lambda_prior = lambda_prior
+
+        if lambda_prior > 0.0 and ols_coeff_dg is None:
+            warnings.warn(
+                "lambda_prior > 0 but ols_coeff_dg is None: beta_prior will be all zeros, "
+                "so the prior acts as an extra L2 regularizer toward zero rather than toward "
+                "the OLS estimate. Consider providing ols_coeff_dg or setting lambda_prior=0.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         self._ols_coeff_dg: torch.Tensor | None = (
             torch.from_numpy(np.array(ols_coeff_dg)).float() if ols_coeff_dg is not None else None
@@ -340,6 +497,8 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
 
         # Per-k mu_H EMA buffers (track H_total mean)
         for k in k_values:
+            self.register_buffer(f"beta_{k}_rdk", torch.zeros(r, n_metadata, k))
+            self.register_buffer(f"beta_prior_{k}_rdk", torch.zeros(r, n_metadata, n_metadata_programs))
             self.register_buffer(f"mu_H_ema_{k}_rk", torch.zeros(r, k))
 
         self._n_ema_updates: int = 0
@@ -361,6 +520,15 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         # Guard: called from super().__init__() before subclass attrs are set
         if not hasattr(self, "n_metadata_programs"):
             return
+
+        # Zero all Beta buffers (non-nominated columns must start exactly at zero)
+        for k in self.k_values:
+            buf_name = f"beta_{k}_rdk"
+            if hasattr(self, buf_name):
+                getattr(self, buf_name).zero_()
+            prior_buf_name = f"beta_prior_{k}_rdk"
+            if hasattr(self, prior_buf_name):
+                getattr(self, prior_buf_name).zero_()
 
         if self._ols_coeff_dg is None:
             return
@@ -385,6 +553,8 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             )
 
             D_rkg[:, : self.n_metadata_programs, :].copy_(W_meta_rkg)
+            getattr(self, f"beta_{k}_rdk")[:, :, : self.n_metadata_programs].copy_(Beta_meta_rdk)
+            getattr(self, f"beta_prior_{k}_rdk").copy_(Beta_meta_rdk)
 
     def online_dictionary_update(
         self,
@@ -461,10 +631,21 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         H_total_solver_rnk = H_total_solver_rkn.transpose(-2, -1)  # (R, N, K)
 
         with torch.no_grad():
-            # --- Accumulate A, B using H_total ---
-            A_rkk_new = (
-                self.exponential_decay_rho * A_rkk
-                + torch.bmm(H_total_solver_rnk.transpose(1, 2), H_total_solver_rnk) / n
+            # --- Step 5: Beta update via Group Lasso proximal gradient ---
+            beta_prior_rdk = getattr(self, f"beta_prior_{k}_rdk")
+            beta_rdk_updated = update_beta_group_lasso(
+                H_raw_rnk=H_raw_solver_rnk,
+                W_rkg=W_rkg,
+                X_ng=x_ng,
+                M_scaled_nd=m_scaled_nd,
+                beta_rdk=beta_rdk,
+                lambda_select=self.lambda_select,
+                beta_lr=self.beta_lr,
+                n_iter=self.beta_n_iter,
+                n_metadata_programs=self.n_metadata_programs,
+                n_valid=n_valid,
+                beta_prior_active=beta_prior_rdk,
+                lambda_prior=self.lambda_prior,
             )
             B_rkg_new = self.exponential_decay_rho * B_rkg + torch.einsum("rnk,ng->rkg", H_total_solver_rnk, x_ng) / n
 
