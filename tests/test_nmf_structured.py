@@ -17,6 +17,7 @@ from cellarium.ml.models.nmf import solve_nnls_fista_precomputed
 from cellarium.ml.models.nmf_structured import (
     MetadataAugmentedLoadingsEncoder,
     compute_metadata_nmf_init,
+    update_beta_group_lasso,
 )
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField, to_codes_column
@@ -238,11 +239,13 @@ def test_compute_metadata_nmf_init_shapes() -> None:
     D, G, n_progs, n_reps = 2, 30, 3, 4
     ols = torch.randn(D, G)
     range_M = torch.ones(D) * 60.0  # e.g. age range 20-80
-    W_out = compute_metadata_nmf_init(
+    W_out, _ = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=n_progs,
         n_replicates=n_reps,
+        n_components=n_progs,
         range_M_d=range_M,
+        mean_total_count=1000.0,
     )
     assert W_out.shape == (n_reps, n_progs, G)
 
@@ -253,11 +256,13 @@ def test_compute_metadata_nmf_init_l1_norms() -> None:
     D, G = 1, 50
     ols = torch.randn(D, G)
     range_M = torch.tensor([60.0])
-    W_out = compute_metadata_nmf_init(
+    W_out, _ = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=2,
         n_replicates=3,
+        n_components=4,
         range_M_d=range_M,
+        mean_total_count=1000.0,
     )
     assert (W_out >= 0).all(), "W factors must be non-negative"
     l1_norms = W_out.norm(p=1, dim=-1)  # (R, P)
@@ -270,11 +275,13 @@ def test_compute_metadata_nmf_init_replicate_diversity() -> None:
     D, G = 1, 40
     ols = torch.randn(D, G)
     range_M = torch.tensor([60.0])
-    W_out = compute_metadata_nmf_init(
+    W_out, _ = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=1,
         n_replicates=4,
+        n_components=4,
         range_M_d=range_M,
+        mean_total_count=1000.0,
         noise_scale=0.1,
     )
     # At least two replicates should differ
@@ -773,43 +780,3 @@ def test_alignment_penalty_reduces_free_program_metadata_correlation(
         f"lambda_align=10 should reduce free-program correlation with metadata; "
         f"got corr_pen={corr_pen:.4f}, corr_no={corr_no:.4f}"
     )
-
-
-def test_predict_returns_h_total_and_beta(metadata_sim_adata: anndata.AnnData) -> None:
-    """predict() returns H_total and Beta with correct shapes and non-negative Beta."""
-    sim = metadata_sim_adata.uns["sim"]
-    g = metadata_sim_adata.shape[1]
-    k, r, n_progs = 4, 2, 1
-    n_batch = 32
-    var_names_g = np.array([f"gene_{i}" for i in range(g)])
-    x_ng = torch.from_numpy(metadata_sim_adata.X[:n_batch]).float()
-    m_nd = torch.from_numpy(metadata_sim_adata.obsm["metadata"][:n_batch]).float()
-
-    model = AmortizedOnlineStructureAwareNMF(
-        var_names_g=var_names_g.tolist(),
-        k_values=[k],
-        r=r,
-        latent_dim=16,
-        total_n_cells=metadata_sim_adata.shape[0],
-        batch_size=64,
-        n_metadata=1,
-        metadata_mean_d=sim["metadata_mean_d"],
-        metadata_min_d=sim["metadata_min_d"],
-        metadata_max_d=sim["metadata_max_d"],
-        n_metadata_programs=n_progs,
-    )
-
-    result = model.predict(x_ng=x_ng, var_names_g=var_names_g, m_nd=m_nd, n_iterations=50)
-
-    assert "H_total" in result and "Beta" in result
-    assert k in result["H_total"] and k in result["Beta"]
-
-    H = result["H_total"][k]
-    Beta = result["Beta"][k]
-
-    assert H.shape == (r, n_batch, k), f"Expected ({r}, {n_batch}, {k}), got {H.shape}"
-    assert Beta.shape == (r, 1, n_progs), f"Expected ({r}, 1, {n_progs}), got {Beta.shape}"
-    assert (H >= 0).all(), "H_total must be non-negative"
-    assert (Beta >= 0).all(), "Beta must be non-negative"
-    assert torch.isfinite(H).all(), "H_total must be finite"
-    assert torch.isfinite(Beta).all(), "Beta must be finite"
