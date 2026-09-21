@@ -272,10 +272,14 @@ def compute_metadata_nmf_init(
 
     Returns:
         W_meta_rkg: shape (R, n_metadata_programs, G) — nominated gene factor vectors.
-        Beta_meta_rdk: shape (R, D, n_metadata_programs) — nominated Beta columns.
+        Beta_meta_rdk: shape (R, 2*D, n_metadata_programs) — nominated Beta columns in the
+            augmented design. The first D rows correspond to M_scaled (positive correlations)
+            and the next D rows correspond to 1-M_scaled (negative correlations).
     """
     D, G = ols_coeff_dg.shape
-    n_singular = min(n_metadata_programs, D)
+    # Each SVD mode spawns two programs: one for the + direction (ReLU(Vh[j])) and one for
+    # the - direction (ReLU(-Vh[j])).  So we only need ceil(n_metadata_programs / 2) modes.
+    n_singular = min((n_metadata_programs + 1) // 2, D)
 
     # Scale OLS rows by range_M_d to get scaled-space directions: dX/dM_scaled = range_M * dX/dM
     ols_coeff_dg_scaled = range_M_d.unsqueeze(1) * ols_coeff_dg  # (D, G)
@@ -293,50 +297,61 @@ def compute_metadata_nmf_init(
             U[:, j] = -U[:, j]
 
     # Build base W and Beta for each nominated program.
-    # Beta calibration: at full range (M_scaled=1 for all d), contribution = beta_j.sum().
-    # Target: beta_j.sum() ≈ target_loading. Fallback: uniform target_loading / D per entry.
+    # Programs are ordered (0,+), (0,-), (1,+), (1,-), ... where (j,+) captures genes that
+    # go UP with SVD mode j and (j,-) captures genes that go DOWN.
+    #
+    # Beta layout: first D rows = M_scaled channel (positive correlation with M),
+    #              next D rows  = (1-M_scaled) channel (negative correlation with M).
+    # Positive program: beta = [ReLU(U[:,j]),  ReLU(-U[:,j])] — high when combo-j is high.
+    # Negative program: beta = [ReLU(-U[:,j]), ReLU(U[:,j])]  — high when combo-j is low.
+    # Both sum to ||U[:,j]||_1 before calibration.
     W_base: list[torch.Tensor] = []
     Beta_base: list[torch.Tensor] = []
     target_loading = mean_total_count / max(n_components, 1)
 
-    for j in range(n_metadata_programs):
+    for p in range(n_metadata_programs):
+        j = p // 2  # SVD mode index
+        positive = p % 2 == 0  # True → + direction, False → − direction
         if j < n_singular:
-            w_j = F.relu(Vh[j]) + 1e-8  # (G,)
+            if positive:
+                w_j = F.relu(Vh[j]) + 1e-8
+                beta_j = torch.cat([F.relu(U[:, j]), F.relu(-U[:, j])])  # [M-chan, (1-M)-chan]
+            else:
+                w_j = F.relu(-Vh[j]) + 1e-8
+                beta_j = torch.cat([F.relu(-U[:, j]), F.relu(U[:, j])])  # swapped channels
             w_j = F.normalize(w_j, p=1, dim=0)
-
-            beta_j = F.relu(U[:, j])  # (D,) non-negative, in scaled space
-            full_range_loading = beta_j.sum().item()
+            full_range_loading = beta_j.sum().item()  # = ||U[:,j]||_1
             if full_range_loading > 1e-8:
                 beta_j = beta_j * (target_loading / full_range_loading)
             else:
-                beta_j = torch.ones(D, device=ols_coeff_dg.device) * (target_loading / max(D, 1))
+                beta_j = torch.ones(2 * D, device=ols_coeff_dg.device) * (target_loading / max(2 * D, 1))
         else:
-            # More programs than SVD modes: random init for extras
+            # More programs than 2 * n_singular SVD-informed slots: random init for extras
             w_j = F.normalize(torch.rand(G, device=ols_coeff_dg.device) + 1e-8, p=1, dim=0)
-            beta_j = torch.ones(D, device=ols_coeff_dg.device) * (target_loading / max(D, 1))
+            beta_j = torch.ones(2 * D, device=ols_coeff_dg.device) * (target_loading / max(2 * D, 1))
 
         W_base.append(w_j)
         Beta_base.append(beta_j)
 
     W_meta_rkg = torch.zeros(n_replicates, n_metadata_programs, G, device=ols_coeff_dg.device)
-    Beta_meta_rdk = torch.zeros(n_replicates, D, n_metadata_programs, device=ols_coeff_dg.device)
+    Beta_meta_rdk = torch.zeros(n_replicates, 2 * D, n_metadata_programs, device=ols_coeff_dg.device)
 
     for r in range(n_replicates):
-        for j in range(n_metadata_programs):
-            w_j = W_base[j]
-            beta_j = Beta_base[j]
+        for p in range(n_metadata_programs):
+            w_j = W_base[p]
+            beta_j = Beta_base[p]
 
             w_mean = w_j.mean().item()
             noise_w = torch.randn(G, device=ols_coeff_dg.device) * noise_scale * max(w_mean, 1e-8)
             w_r = F.relu(w_j + noise_w) + 1e-8
-            W_meta_rkg[r, j] = F.normalize(w_r, p=1, dim=0)
+            W_meta_rkg[r, p] = F.normalize(w_r, p=1, dim=0)
 
             beta_mean = beta_j.mean().item()
             if beta_mean > 1e-10:
-                noise_b = torch.randn(D, device=ols_coeff_dg.device) * noise_scale * beta_mean
-                Beta_meta_rdk[r, :, j] = F.relu(beta_j + noise_b)
+                noise_b = torch.randn(2 * D, device=ols_coeff_dg.device) * noise_scale * beta_mean
+                Beta_meta_rdk[r, :, p] = F.relu(beta_j + noise_b)
             else:
-                Beta_meta_rdk[r, :, j] = beta_j
+                Beta_meta_rdk[r, :, p] = beta_j
 
     return W_meta_rkg, Beta_meta_rdk
 
@@ -603,10 +618,12 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         self.register_buffer("range_M_global_d", range_M)
         self.register_buffer("mu_M_scaled_d", mu_M_scaled)
 
-        # Per-k Beta and H_raw EMA buffers
+        # Per-k Beta and H_raw EMA buffers.
+        # Beta has 2*n_metadata rows: first n_metadata for M_scaled (positive correlations),
+        # next n_metadata for 1-M_scaled (negative correlations).
         for k in k_values:
-            self.register_buffer(f"beta_{k}_rdk", torch.zeros(r, n_metadata, k))
-            self.register_buffer(f"beta_prior_{k}_rdk", torch.zeros(r, n_metadata, n_metadata_programs))
+            self.register_buffer(f"beta_{k}_rdk", torch.zeros(r, 2 * n_metadata, k))
+            self.register_buffer(f"beta_prior_{k}_rdk", torch.zeros(r, 2 * n_metadata, n_metadata_programs))
             self.register_buffer(f"mu_H_ema_{k}_rk", torch.zeros(r, k))
 
         self._n_ema_updates: int = 0
@@ -714,13 +731,18 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         n_valid = int((~nan_mask_n).sum().item())
         m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)  # (N, D)
         m_scaled_nd = m_scaled_nd.nan_to_num(0.0)  # NaN cells → 0; H_struct=0, Beta grad=0
+        # Augmented design matrix: [M_scaled, 1-M_scaled] so Beta can capture both positive
+        # and negative correlations with each metadata variable while remaining non-negative.
+        # NaN cells are zeroed in both channels so they contribute nothing to H_struct or Beta.
+        m_complement_nd = (1.0 - m_scaled_nd).masked_fill(nan_mask_n.unsqueeze(1), 0.0)
+        m_aug_nd = torch.cat([m_scaled_nd, m_complement_nd], dim=1)  # (N, 2D)
 
         # --- Step 1: encoder warm-start for H_raw (has gradients) ---
         H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
 
-        # --- Step 2: structural component H_struct = M_scaled @ Beta (linear, non-negative) ---
+        # --- Step 2: structural component H_struct = M_aug @ Beta (linear, non-negative) ---
         with torch.no_grad():
-            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk)
+            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_aug_nd, beta_rdk)
 
             # --- Step 3 & 4: FISTA solver setup (no (R, N, G) materialization) ---
             # W @ X_eff.T = W @ X.T - (W @ W.T) @ H_struct.T, avoiding explicit X_eff.
@@ -760,7 +782,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
                 H_raw_rnk=H_raw_solver_rnk,
                 W_rkg=W_rkg,
                 X_ng=x_ng,
-                M_scaled_nd=m_scaled_nd,
+                M_scaled_nd=m_aug_nd,
                 beta_rdk=beta_rdk,
                 lambda_select=self.lambda_select,
                 beta_lr=self.beta_lr,
@@ -773,7 +795,7 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
             setattr(self, f"beta_{k}_rdk", beta_rdk_updated)
 
             # --- Step 6: recompute H_struct and H_total ---
-            H_struct_updated_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk_updated)
+            H_struct_updated_rnk = torch.einsum("nd,rdk->rnk", m_aug_nd, beta_rdk_updated)
             H_total_rnk = H_raw_solver_rnk + H_struct_updated_rnk
 
             # --- Step 7: accumulate A, B using H_total (Mairal update with rho decay) ---
@@ -887,14 +909,17 @@ class AmortizedOnlineStructureAwareNMF(AmortizedOnlineNonNegativeMatrixFactoriza
         if m_nd is None:
             raise ValueError("m_nd must be provided for AmortizedOnlineStructureAwareNMF.validate")
 
+        nan_mask_n = m_nd.isnan().any(dim=1)
         m_scaled_nd = ((m_nd - self.min_M_global_d) / self.range_M_global_d).clamp(0.0, 1.0)  # (N, D)
         m_scaled_nd = m_scaled_nd.nan_to_num(0.0)  # NaN cells → 0; H_struct=0 for missing metadata
+        m_complement_nd = (1.0 - m_scaled_nd).masked_fill(nan_mask_n.unsqueeze(1), 0.0)
+        m_aug_nd = torch.cat([m_scaled_nd, m_complement_nd], dim=1)  # (N, 2D)
         nmf_reconstruction_errors = []
         for k in self.k_values:
             W_rkg = getattr(self, f"D_{k}_rkg")
             beta_rdk = getattr(self, f"beta_{k}_rdk")
             H_raw_warm_rnk = self.encoder(x_ng, W_rkg.detach(), m_scaled_nd)
-            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_scaled_nd, beta_rdk.detach())
+            H_struct_rnk = torch.einsum("nd,rdk->rnk", m_aug_nd, beta_rdk.detach())
             H_total_rnk = H_raw_warm_rnk + H_struct_rnk
             squared_error_r = compute_reconstruction_error_compiled(
                 x_ng=x_ng, loadings_rnk=H_total_rnk, factors_rkg=W_rkg

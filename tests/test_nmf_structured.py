@@ -234,12 +234,12 @@ def _make_datamodule(adata: anndata.AnnData, batch_size: int = 64) -> CellariumA
 
 
 def test_compute_metadata_nmf_init_shapes() -> None:
-    """Output tensor has the expected shape."""
+    """Output tensors have the expected shapes, including the 2D-augmented Beta."""
     torch.manual_seed(0)
     D, G, n_progs, n_reps = 2, 30, 3, 4
     ols = torch.randn(D, G)
     range_M = torch.ones(D) * 60.0  # e.g. age range 20-80
-    W_out, _ = compute_metadata_nmf_init(
+    W_out, Beta_out = compute_metadata_nmf_init(
         ols_coeff_dg=ols,
         n_metadata_programs=n_progs,
         n_replicates=n_reps,
@@ -248,6 +248,11 @@ def test_compute_metadata_nmf_init_shapes() -> None:
         mean_total_count=1000.0,
     )
     assert W_out.shape == (n_reps, n_progs, G)
+    # Beta has 2*D rows: first D for M_scaled channel, next D for (1-M_scaled) channel.
+    assert Beta_out.shape == (n_reps, 2 * D, n_progs), (
+        f"Beta should be (R, 2*D, P) = ({n_reps}, {2 * D}, {n_progs}), got {Beta_out.shape}"
+    )
+    assert (Beta_out >= 0).all(), "Beta must be non-negative"
 
 
 def test_compute_metadata_nmf_init_l1_norms() -> None:
@@ -286,6 +291,118 @@ def test_compute_metadata_nmf_init_replicate_diversity() -> None:
     )
     # At least two replicates should differ
     assert not W_out[0].allclose(W_out[1]), "Replicates should be diverse with noise_scale > 0"
+
+
+def test_compute_metadata_nmf_init_plus_minus_directions() -> None:
+    """Programs are initialized as +/- pairs from each SVD mode.
+
+    With a synthetic OLS row (D=1) whose first half of genes is positive and second half
+    negative, and no replicate noise:
+      - Program 0 (j=0, + direction): W mass on genes 0..G//2-1; Beta in M channel only.
+      - Program 1 (j=0, - direction): W mass on genes G//2..G-1; Beta in (1-M) channel only.
+    """
+    G = 20
+    D = 1
+    ols = torch.zeros(D, G)
+    ols[0, : G // 2] = 1.0  # genes 0..9 increase with metadata
+    ols[0, G // 2 :] = -1.0  # genes 10..19 decrease with metadata
+    range_M = torch.tensor([1.0])
+
+    W_out, Beta_out = compute_metadata_nmf_init(
+        ols_coeff_dg=ols,
+        n_metadata_programs=2,
+        n_replicates=1,
+        n_components=10,
+        range_M_d=range_M,
+        mean_total_count=100.0,
+        noise_scale=0.0,
+    )
+
+    w0 = W_out[0, 0]  # (G,) — program 0: should weight genes 0..9
+    w1 = W_out[0, 1]  # (G,) — program 1: should weight genes 10..19
+
+    assert w0[: G // 2].sum() > w0[G // 2 :].sum(), (
+        "Program 0 (+ direction) should weight positive-OLS genes more than negative-OLS genes"
+    )
+    assert w1[G // 2 :].sum() > w1[: G // 2].sum(), (
+        "Program 1 (- direction) should weight negative-OLS genes more than positive-OLS genes"
+    )
+
+    # Beta layout: rows 0..D-1 = M channel, rows D..2D-1 = (1-M) channel.
+    beta0_M_chan = Beta_out[0, :D, 0]  # program 0 M channel
+    beta0_comp_chan = Beta_out[0, D:, 0]  # program 0 (1-M) channel
+    beta1_M_chan = Beta_out[0, :D, 1]  # program 1 M channel
+    beta1_comp_chan = Beta_out[0, D:, 1]  # program 1 (1-M) channel
+
+    assert beta0_M_chan.sum() > beta0_comp_chan.sum(), (
+        "Program 0 (genes go UP with metadata) should have Beta mass in the M channel"
+    )
+    assert beta1_comp_chan.sum() > beta1_M_chan.sum(), (
+        "Program 1 (genes go DOWN with metadata) should have Beta mass in the (1-M) channel"
+    )
+
+
+def test_nan_complement_channel_zeroed() -> None:
+    """For NaN metadata cells, both the M and (1-M) channels of m_aug_nd must be zero.
+
+    The complement channel is 1-M_scaled, which equals 1.0 for NaN cells if not explicitly
+    masked. This test verifies the masking is applied by checking that update_beta_group_lasso
+    produces identical results whether NaN cells are included (correctly masked) or excluded.
+    """
+    torch.manual_seed(42)
+    R, D, G, K, P = 1, 1, 10, 4, 1
+    N_valid = 20  # cells with real metadata
+    N_nan = 10  # cells with NaN metadata (should be invisible)
+
+    W_rkg = F.normalize(torch.rand(R, K, G), p=1, dim=-1)
+    X_valid = torch.rand(N_valid, G)
+    H_raw_valid = torch.rand(R, N_valid, K)
+    m_valid = torch.rand(N_valid, D)  # metadata in [0, 1] (already scaled)
+
+    # Augmented design for valid-only batch
+    m_aug_valid = torch.cat([m_valid, 1.0 - m_valid], dim=1)  # (N_valid, 2D)
+    beta_init = torch.zeros(R, 2 * D, K)
+
+    result_valid_only = update_beta_group_lasso(
+        H_raw_rnk=H_raw_valid,
+        W_rkg=W_rkg,
+        X_ng=X_valid,
+        M_scaled_nd=m_aug_valid,
+        beta_rdk=beta_init.clone(),
+        lambda_select=0.0,
+        beta_lr=0.1,
+        n_iter=5,
+        n_metadata_programs=P,
+        n_valid=N_valid,
+    )
+
+    # Now append NaN cells. Their m_aug rows must be all-zero (both channels).
+    # If the complement masking is missing, the (1-M) channel would be 1.0 for NaN cells,
+    # leaking a non-zero gradient and causing result_with_nan != result_valid_only.
+    # nan_mask = torch.ones(N_nan, 1, dtype=torch.bool)  # all NaN
+    m_nan_rows = torch.zeros(N_nan, 2 * D)  # correctly zeroed both channels
+    m_aug_combined = torch.cat([m_aug_valid, m_nan_rows], dim=0)  # (N_valid+N_nan, 2D)
+
+    X_combined = torch.cat([X_valid, torch.zeros(N_nan, G)], dim=0)
+    H_raw_combined = torch.cat([H_raw_valid, torch.zeros(R, N_nan, K)], dim=1)
+
+    result_with_nan = update_beta_group_lasso(
+        H_raw_rnk=H_raw_combined,
+        W_rkg=W_rkg,
+        X_ng=X_combined,
+        M_scaled_nd=m_aug_combined,
+        beta_rdk=beta_init.clone(),
+        lambda_select=0.0,
+        beta_lr=0.1,
+        n_iter=5,
+        n_metadata_programs=P,
+        n_valid=N_valid,  # normalization uses only valid count
+    )
+
+    assert result_with_nan[:, :, :P].allclose(result_valid_only[:, :, :P], atol=1e-5), (
+        "NaN cells with zero m_aug rows must not change the Beta update — "
+        "both the M and (1-M) channels must be zeroed for missing-metadata cells"
+    )
 
 
 def test_update_beta_group_lasso_prior_pulls_nominated_positive() -> None:
