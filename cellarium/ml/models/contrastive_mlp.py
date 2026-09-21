@@ -85,7 +85,7 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
             x_ng:
                 Gene counts matrix.
         Returns:
-            A dictionary with the embedding matrix.
+            A dictionary with the embedding matrix ``x_ng`` and the corresponding variable names ``var_names_g``.
         """
         with torch.no_grad():
             z_nk = F.normalize(self.layers(x_ng))
