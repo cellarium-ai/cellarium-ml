@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+from typing import Final
 
 import lightning.pytorch as pl
 import numpy as np
@@ -15,6 +16,10 @@ from cellarium.ml.models import SCANVI
 from cellarium.ml.models.scanvi import compute_frontier
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDatasetSCVI
+
+predict_logit_key: Final = "y_logits_nc"
+predict_prob_key: Final = "y_probs_nc"
+predict_cat_key: Final = "category_labels_c"
 
 # ---------------------------------------------------------------------------
 # Dataset
@@ -336,9 +341,9 @@ def test_flat_predict_shapes():
     with torch.no_grad():
         pred = model.predict(x_ng=x_ng, var_names_g=var_names_g, batch_index_n=torch.zeros(n, dtype=torch.long))
     assert pred["x_ng"].shape == (n, n_latent)
-    assert pred["cell_type_probs_nc"].shape == (n, len(categories))
-    assert pred["cell_type_logits_nc"].shape == (n, len(categories))
-    assert torch.allclose(pred["cell_type_probs_nc"].sum(-1), torch.ones(n), atol=1e-5)
+    assert pred[predict_prob_key].shape == (n, len(categories))
+    assert pred[predict_logit_key].shape == (n, len(categories))
+    assert torch.allclose(pred[predict_prob_key].sum(-1), torch.ones(n), atol=1e-5)
 
 
 def test_ontology_predict_shapes():
@@ -351,8 +356,8 @@ def test_ontology_predict_shapes():
         pred = model.predict(x_ng=x_ng, var_names_g=var_names_g, batch_index_n=torch.zeros(n, dtype=torch.long))
     assert pred["x_ng"].shape == (n, n_latent)
     # propagated probabilities over all active nodes
-    assert pred["cell_type_probs_nc"].shape == (n, model.n_active)
-    assert (pred["cell_type_probs_nc"] >= 0).all()
+    assert pred[predict_prob_key].shape == (n, model.n_active)
+    assert (pred[predict_prob_key] >= 0).all()
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +414,7 @@ def test_checkpoint_roundtrip(mode, tmp_path: Path):
         post = loaded.predict(x_ng=x_t, var_names_g=var_names_g, batch_index_n=b_t)
 
     torch.testing.assert_close(pre["x_ng"], post["x_ng"])
-    torch.testing.assert_close(pre["cell_type_probs_nc"], post["cell_type_probs_nc"])
+    torch.testing.assert_close(pre["y_probs_nc"], post["y_probs_nc"])
 
 
 # ---------------------------------------------------------------------------

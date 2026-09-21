@@ -4,7 +4,7 @@
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from collections.abc import Callable
-from typing import Any, Mapping, TypedDict
+from typing import Any, Mapping, Sequence, TypedDict
 
 import lightning.pytorch as pl
 import numpy as np
@@ -78,26 +78,23 @@ GenericPrediction = Mapping[str, Any]
 
 
 class TransformPrediction(TypedDict):
-    """Allow a predict call to act as a data Transform by returning the key `x_ng`."""
+    """Allow a predict call to act as a data :class:`cellarium.ml.transforms.Transform`
+    by returning the keys `x_ng` and `var_names_g`."""
 
     x_ng: torch.Tensor
     var_names_g: np.ndarray
 
 
-class CASClassifierPrediction(TypedDict):
-    """Prediction for CAS classificationmodels, with cell type logits
-    and probabilities using the keys CAS expects."""
+class ClassifierPrediction(TypedDict):
+    """Prediction for a classification model, with output logits and probabilities."""
 
-    cell_type_logits_nc: torch.Tensor
-    cell_type_probs_nc: torch.Tensor
+    y_logits_nc: torch.Tensor
+    y_probs_nc: torch.Tensor
+    category_labels_c: Sequence[str]
 
 
-class CASPrediction(TransformPrediction):
-    """Prediction for CAS models, extending the TransformPrediction with cell type logits
-    and probabilities using the keys CAS expects."""
-
-    cell_type_logits_nc: torch.Tensor
-    cell_type_probs_nc: torch.Tensor
+class TransformClassifierPrediction(TransformPrediction, ClassifierPrediction):
+    """Prediction that combines both Transform and classification outputs."""
 
 
 class PredictMixin(metaclass=ABCMeta):

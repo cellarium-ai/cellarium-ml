@@ -4,6 +4,7 @@
 import math
 import os
 from pathlib import Path
+from typing import Final
 
 import lightning.pytorch as pl
 import numpy as np
@@ -12,7 +13,7 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.model import CASClassifierPrediction
+from cellarium.ml.models.model import ClassifierPrediction
 from cellarium.ml.models.socam import (
     SOCAM,
     _build_nonleaf_info,
@@ -21,6 +22,10 @@ from cellarium.ml.models.socam import (
     compute_class_weights,
 )
 from cellarium.ml.utilities.data import collate_fn
+
+predict_logit_key: Final = "y_logits_nc"
+predict_prob_key: Final = "y_probs_nc"
+predict_cat_key: Final = "category_labels_c"
 
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
@@ -107,20 +112,22 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
 
     # Test prediction from loaded checkpoint
     test_x_ng = torch.randn(2, g)
-    output: CASClassifierPrediction = loaded_model.predict(test_x_ng, var_names_g)
+    output: ClassifierPrediction = loaded_model.predict(test_x_ng, var_names_g)
 
     # Assert prediction output structure
-    assert "cell_type_logits_nc" in output
-    assert "cell_type_probs_nc" in output
-    assert isinstance(output["cell_type_logits_nc"], torch.Tensor)
-    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
-    assert output["cell_type_logits_nc"].shape == (2, c)
-    assert output["cell_type_probs_nc"].shape == (2, c)
+    assert predict_logit_key in output
+    assert predict_prob_key in output
+    assert predict_cat_key in output
+    assert isinstance(output[predict_cat_key], (list, np.ndarray))
+    assert isinstance(output[predict_logit_key], torch.Tensor)
+    assert isinstance(output[predict_prob_key], torch.Tensor)
+    assert output[predict_logit_key].shape == (2, c)
+    assert output[predict_prob_key].shape == (2, c)
 
     # Assert probabilities are valid
-    assert torch.all(output["cell_type_probs_nc"] >= 0)
-    assert torch.all(output["cell_type_probs_nc"] <= 1)
-    prob_sums = output["cell_type_probs_nc"].sum(dim=1)
+    assert torch.all(output[predict_prob_key] >= 0)
+    assert torch.all(output[predict_prob_key] <= 1)
+    prob_sums = output[predict_prob_key].sum(dim=1)
     assert torch.allclose(prob_sums, torch.ones(2), atol=1e-5)
 
 
@@ -152,21 +159,23 @@ def test_socam_predict():
     output = model.predict(x_ng, var_names_g)
 
     # Assert output structure
-    assert "cell_type_logits_nc" in output
-    assert "cell_type_probs_nc" in output
+    assert predict_logit_key in output
+    assert predict_prob_key in output
 
     # Assert output shapes
-    assert output["cell_type_logits_nc"].shape == (n, c)
-    assert output["cell_type_probs_nc"].shape == (n, c)
+    assert output[predict_logit_key].shape == (n, c)
+    assert output[predict_prob_key].shape == (n, c)
+    assert output[predict_cat_key] is not None
+    assert len(output[predict_cat_key]) == c
 
     # Assert probabilities sum to ~1 for each sample
-    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
-    prob_sums = output["cell_type_probs_nc"].sum(dim=1)
+    assert isinstance(output[predict_prob_key], torch.Tensor)
+    prob_sums = output[predict_prob_key].sum(dim=1)
     assert torch.allclose(prob_sums, torch.ones(n), atol=1e-5)
 
     # Assert all probabilities are in [0, 1]
-    assert torch.all(output["cell_type_probs_nc"] >= 0)
-    assert torch.all(output["cell_type_probs_nc"] <= 1)
+    assert torch.all(output[predict_prob_key] >= 0)
+    assert torch.all(output[predict_prob_key] <= 1)
 
 
 def test_socam_probability_propagation():
@@ -201,17 +210,17 @@ def test_socam_probability_propagation():
     output = model.predict(x_ng, var_names_g)
 
     # Assert output structure
-    assert "cell_type_logits_nc" in output
-    assert "cell_type_probs_nc" in output
+    assert predict_logit_key in output
+    assert predict_prob_key in output
 
     # Assert output shapes
-    assert output["cell_type_logits_nc"].shape == (n, c)
-    assert output["cell_type_probs_nc"].shape == (n, c)
+    assert output[predict_logit_key].shape == (n, c)
+    assert output[predict_prob_key].shape == (n, c)
 
     # Assert all probabilities are in [0, 1] and clamped at max 1.0
-    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
-    assert torch.all(output["cell_type_probs_nc"] >= 0)
-    assert torch.all(output["cell_type_probs_nc"] <= 1)
+    assert isinstance(output[predict_prob_key], torch.Tensor)
+    assert torch.all(output[predict_prob_key] >= 0)
+    assert torch.all(output[predict_prob_key] <= 1)
 
     # Test probability propagation logic:
     # Calculate what the probabilities would be WITHOUT propagation
@@ -236,8 +245,8 @@ def test_socam_probability_propagation():
     expected_propagated = torch.clamp(expected_propagated, max=1.0)
 
     # Assert propagated probabilities match expected values
-    assert torch.allclose(output["cell_type_probs_nc"], expected_propagated, atol=1e-5), (
-        f"Probability propagation failed.\nExpected:\n{expected_propagated}\nGot:\n{output['cell_type_probs_nc']}"
+    assert torch.allclose(output[predict_prob_key], expected_propagated, atol=1e-5), (
+        f"Probability propagation failed.\nExpected:\n{expected_propagated}\nGot:\n{output[predict_prob_key]}"
     )
 
 
@@ -351,13 +360,16 @@ def test_predict_with_cl_name_subset():
     model = _make_socam(n=n, g=g, c=5, cl_name_subset=["cell_type_0", "cell_type_2", "cell_type_4"])
     x_ng = torch.randn(n, g)
     output = model.predict(x_ng, var_names_g)
-    assert isinstance(output["cell_type_logits_nc"], torch.Tensor)
-    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
-    assert output["cell_type_logits_nc"].shape == (n, 3)
-    assert output["cell_type_probs_nc"].shape == (n, 3)
-    assert torch.all(output["cell_type_probs_nc"] >= 0)
-    assert torch.all(output["cell_type_probs_nc"] <= 1)
-    assert torch.allclose(output["cell_type_probs_nc"].sum(dim=1), torch.ones(n), atol=1e-5)
+    assert isinstance(output[predict_logit_key], torch.Tensor)
+    assert isinstance(output[predict_prob_key], torch.Tensor)
+    assert output[predict_logit_key].shape == (n, 3)
+    assert output[predict_prob_key].shape == (n, 3)
+    assert predict_cat_key in output
+    assert output[predict_cat_key] is not None
+    assert len(output[predict_cat_key]) == 3
+    assert torch.all(output[predict_prob_key] >= 0)
+    assert torch.all(output[predict_prob_key] <= 1)
+    assert torch.allclose(output[predict_prob_key].sum(dim=1), torch.ones(n), atol=1e-5)
 
 
 def test_predict_no_cl_name_subset():
@@ -366,8 +378,8 @@ def test_predict_no_cl_name_subset():
     model = _make_socam(n=n, g=g, c=c)
     x_ng = torch.randn(n, g)
     output = model.predict(x_ng, var_names_g)
-    assert output["cell_type_logits_nc"].shape == (n, c)
-    assert output["cell_type_probs_nc"].shape == (n, c)
+    assert output[predict_logit_key].shape == (n, c)
+    assert output[predict_prob_key].shape == (n, c)
 
 
 # ---------------------------------------------------------------------------

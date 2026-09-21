@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
-from cellarium.ml.models.model import CASPrediction
+from cellarium.ml.models.model import TransformClassifierPrediction
 from cellarium.ml.models.scvi import (
     SingleCellVariationalInference,
     compute_annealed_kl_weight,
@@ -370,6 +370,7 @@ class SCANVI(SingleCellVariationalInference):
         if self.cell_type_categories is None:
             raise ValueError("classifier_type='flat' requires cell_type_categories to define the class partition.")
         self.class_names: list[str] = list(self.cell_type_categories)
+        self.active_cl_names = self.class_names.copy()
         self.n_partition = len(self.class_names)
         self._classifier_out_dim = self.n_partition
         self._label_to_partition_idx: dict[str, int] = {name: i for i, name in enumerate(self.class_names)}
@@ -1065,7 +1066,7 @@ class SCANVI(SingleCellVariationalInference):
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-    ) -> CASPrediction:
+    ) -> TransformClassifierPrediction:
         """Embed cells and predict cell-type probabilities.
 
         If :attr:`reconstruct_counts_on_predict` is ``True``, falls back to the parent's
@@ -1085,10 +1086,10 @@ class SCANVI(SingleCellVariationalInference):
                 `self.reconstruct_counts_on_predict` is True;
                 otherwise it is the latent embedding matrix ``[N, n_latent]`` (misnomer).)
             - ``var_names_g`` Variable names corresponding to the columns of ``x_ng``.
-            - ``cell_type_probs_nc`` In ontology mode ``cell_type_probs_nc`` is the propagated probability
+            - ``y_probs_nc`` In ontology mode ``y_probs_nc`` is the propagated probability
                 over all active nodes (``[N, n_active]``, columns = :attr:`active_cl_names`); in flat mode
                 it is the softmax over the partition (``[N, n_partition]``).
-            - ``cell_type_logits_nc`` (logits before softmax ``[N, n_partition]``).
+            - ``y_logits_nc`` (logits before softmax ``[N, n_partition]``).
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
@@ -1104,11 +1105,11 @@ class SCANVI(SingleCellVariationalInference):
         )
         qz = inference_outputs["qz"]
         z_nk = self._latent_value_from_latent_distribution(qz)
-        logits = self.cell_type_classifier(qz.mean)
+        logits_nc = self.cell_type_classifier(qz.mean)
         if self.classifier_type == "flat":
-            probs_nc = F.softmax(logits, dim=-1)
+            probs_nc = F.softmax(logits_nc, dim=-1)
         else:
-            probs_nc = self._propagate_probs(F.softmax(logits, dim=-1))
+            probs_nc = self._propagate_probs(F.softmax(logits_nc, dim=-1))
 
         if self.reconstruct_counts_on_predict:
             x_hat_ng = super().predict(
@@ -1121,13 +1122,15 @@ class SCANVI(SingleCellVariationalInference):
             return {
                 "x_ng": x_hat_ng,
                 "var_names_g": var_names_g,
-                "cell_type_probs_nc": probs_nc,
-                "cell_type_logits_nc": logits,
+                "y_probs_nc": probs_nc,
+                "y_logits_nc": logits_nc,
+                "category_labels_c": self.active_cl_names,
             }
         else:
             return {
                 "x_ng": z_nk,
                 "var_names_g": np.array([f"scanvi_{i}" for i in range(z_nk.shape[1])]),
-                "cell_type_probs_nc": probs_nc,
-                "cell_type_logits_nc": logits,
+                "y_probs_nc": probs_nc,
+                "y_logits_nc": logits_nc,
+                "category_labels_c": self.active_cl_names,
             }
