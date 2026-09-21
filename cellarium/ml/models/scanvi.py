@@ -1072,9 +1072,7 @@ class SCANVI(SingleCellVariationalInference):
         count-reconstruction behaviour and omits cell-type probabilities.
 
         Args:
-            x_ng: Gene counts matrix ``[N, self.reconstruction_var_names_g]`` if
-                `self.reconstruct_counts_on_predict` is True;
-                otherwise it is the latent embedding matrix ``[N, n_latent]`` (misnomer).
+            x_ng: Gene counts matrix ``[N, G]``
             var_names_g: Variable names for input validation.
             batch_index_n: Integer batch indices ``[N]``. (Consumed by the encoder; may be a dummy
                 when the encoder is configured batch-agnostic.)
@@ -1082,11 +1080,15 @@ class SCANVI(SingleCellVariationalInference):
             categorical_covariate_index_nd: Integer categorical covariate codes ``[N, D]``.
 
         Returns:
-            A dict with ``x_ng`` (latent embeddings ``[N, n_latent]``) and ``cell_type_probs_nc``
-            and ``cell_type_logits_nc`` (logits before softmax ``[N, n_partition]``).
-            In ontology mode ``cell_type_probs_nc`` is the propagated probability over all active
-            nodes (``[N, n_active]``, columns = :attr:`active_cl_names`); in flat mode it is the
-            softmax over the partition (``[N, n_partition]``).
+            A dict with
+            - ``x_ng`` reconstructed counts ``[N, self.reconstruction_var_names_g]`` if
+                `self.reconstruct_counts_on_predict` is True;
+                otherwise it is the latent embedding matrix ``[N, n_latent]`` (misnomer).)
+            - ``var_names_g`` Variable names corresponding to the columns of ``x_ng``.
+            - ``cell_type_probs_nc`` In ontology mode ``cell_type_probs_nc`` is the propagated probability
+                over all active nodes (``[N, n_active]``, columns = :attr:`active_cl_names`); in flat mode
+                it is the softmax over the partition (``[N, n_partition]``).
+            - ``cell_type_logits_nc`` (logits before softmax ``[N, n_partition]``).
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
@@ -1125,7 +1127,7 @@ class SCANVI(SingleCellVariationalInference):
         else:
             return {
                 "x_ng": z_nk,
-                "var_names_g": np.array([f"scvi_{i}" for i in range(z_nk.shape[1])]),
+                "var_names_g": np.array([f"scanvi_{i}" for i in range(z_nk.shape[1])]),
                 "cell_type_probs_nc": probs_nc,
                 "cell_type_logits_nc": logits,
             }
