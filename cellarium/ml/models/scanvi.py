@@ -1116,4 +1116,5 @@ class SCANVI(SingleCellVariationalInference):
         return {
             "x_ng": z_nk,
             "cell_type_probs_nc": probs_nc,
+            "y_logits_nc": logits,
         }
