@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
+from cellarium.ml.models.model import CASPrediction
 from cellarium.ml.models.scvi import (
     SingleCellVariationalInference,
     compute_annealed_kl_weight,
@@ -1064,14 +1065,16 @@ class SCANVI(SingleCellVariationalInference):
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-    ) -> dict:
+    ) -> CASPrediction:
         """Embed cells and predict cell-type probabilities.
 
         If :attr:`reconstruct_counts_on_predict` is ``True``, falls back to the parent's
         count-reconstruction behaviour and omits cell-type probabilities.
 
         Args:
-            x_ng: Gene counts matrix ``[N, G]``.
+            x_ng: Gene counts matrix ``[N, self.reconstruction_var_names_g]`` if
+                `self.reconstruct_counts_on_predict` is True;
+                otherwise it is the latent embedding matrix ``[N, n_latent]`` (misnomer).
             var_names_g: Variable names for input validation.
             batch_index_n: Integer batch indices ``[N]``. (Consumed by the encoder; may be a dummy
                 when the encoder is configured batch-agnostic.)
@@ -1085,15 +1088,6 @@ class SCANVI(SingleCellVariationalInference):
             nodes (``[N, n_active]``, columns = :attr:`active_cl_names`); in flat mode it is the
             softmax over the partition (``[N, n_partition]``).
         """
-        if self.reconstruct_counts_on_predict:
-            return super().predict(
-                x_ng=x_ng,
-                var_names_g=var_names_g,
-                batch_index_n=batch_index_n,
-                continuous_covariates_nc=continuous_covariates_nc,
-                categorical_covariate_index_nd=categorical_covariate_index_nd,
-            )
-
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
@@ -1114,8 +1108,24 @@ class SCANVI(SingleCellVariationalInference):
         else:
             probs_nc = self._propagate_probs(F.softmax(logits, dim=-1))
 
-        return {
-            "x_ng": z_nk,
-            "cell_type_probs_nc": probs_nc,
-            "cell_type_logits_nc": logits,
-        }
+        if self.reconstruct_counts_on_predict:
+            x_hat_ng = super().predict(
+                x_ng=x_ng,
+                var_names_g=var_names_g,
+                batch_index_n=batch_index_n,
+                continuous_covariates_nc=continuous_covariates_nc,
+                categorical_covariate_index_nd=categorical_covariate_index_nd,
+            )["x_ng"]
+            return {
+                "x_ng": x_hat_ng,
+                "var_names_g": var_names_g,
+                "cell_type_probs_nc": probs_nc,
+                "cell_type_logits_nc": logits,
+            }
+        else:
+            return {
+                "x_ng": z_nk,
+                "var_names_g": np.array([f"scvi_{i}" for i in range(z_nk.shape[1])]),
+                "cell_type_probs_nc": probs_nc,
+                "cell_type_logits_nc": logits,
+            }

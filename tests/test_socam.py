@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumModule
+from cellarium.ml.models.model import CASClassifierPrediction
 from cellarium.ml.models.socam import (
     SOCAM,
     _build_nonleaf_info,
@@ -106,7 +107,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
 
     # Test prediction from loaded checkpoint
     test_x_ng = torch.randn(2, g)
-    output: dict[str, np.ndarray | torch.Tensor] = loaded_model.predict(test_x_ng, var_names_g)
+    output: CASClassifierPrediction = loaded_model.predict(test_x_ng, var_names_g)
 
     # Assert prediction output structure
     assert "cell_type_logits_nc" in output

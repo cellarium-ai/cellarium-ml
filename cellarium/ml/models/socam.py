@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 import torch.nn.functional
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.models.model import CASClassifierPrediction, CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -444,7 +444,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
-    ) -> dict[str, np.ndarray | torch.Tensor]:
+    ) -> CASClassifierPrediction:
         """
         Predict the target logits.
 

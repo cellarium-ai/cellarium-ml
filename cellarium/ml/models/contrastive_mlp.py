@@ -3,12 +3,13 @@
 
 from collections.abc import Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from cellarium.ml.losses.nt_xent import NT_Xent
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 
 
 class ContrastiveMLP(CellariumModel, PredictMixin):
@@ -76,7 +77,7 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
         loss = self.Xent_loss(z1, z2)
         return {"loss": loss}
 
-    def predict(self, x_ng: torch.Tensor):
+    def predict(self, x_ng: torch.Tensor) -> TransformPrediction:
         """
         Sends (transformed) data through the model and returns outputs.
 
@@ -87,5 +88,5 @@ class ContrastiveMLP(CellariumModel, PredictMixin):
             A dictionary with the embedding matrix.
         """
         with torch.no_grad():
-            z = F.normalize(self.layers(x_ng))
-        return {"x_ng": z}
+            z_nk = F.normalize(self.layers(x_ng))
+        return {"x_ng": z_nk, "var_names_g": np.array([f"feature_{i}" for i in range(z_nk.shape[1])])}
