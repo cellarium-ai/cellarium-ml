@@ -337,6 +337,7 @@ def test_flat_predict_shapes():
         pred = model.predict(x_ng=x_ng, var_names_g=var_names_g, batch_index_n=torch.zeros(n, dtype=torch.long))
     assert pred["x_ng"].shape == (n, n_latent)
     assert pred["cell_type_probs_nc"].shape == (n, len(categories))
+    assert pred["cell_type_logits_nc"].shape == (n, len(categories))
     assert torch.allclose(pred["cell_type_probs_nc"].sum(-1), torch.ones(n), atol=1e-5)
 
 

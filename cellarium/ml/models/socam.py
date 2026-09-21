@@ -455,8 +455,9 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 The variable names for the input data.
 
         Returns:
-            A dictionary with the target logits. Output tensors have shape
-            ``(n, n_active_cats)``.
+            A dictionary with the target logits in ``cell_type_logits_nc`` and the
+            predicted probabilities in ``cell_type_probs_nc`` (possibly propagated).
+            Output tensors have shape ``(n, n_active_cats)``.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
@@ -464,7 +465,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
         if self.probability_propagation_flag:
             probs_nc = propagate_probs(probs_nc, self.active_descendant_tensor_cc)
-        return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
+        return {"cell_type_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:

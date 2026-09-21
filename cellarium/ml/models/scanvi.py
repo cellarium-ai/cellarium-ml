@@ -1079,7 +1079,8 @@ class SCANVI(SingleCellVariationalInference):
             categorical_covariate_index_nd: Integer categorical covariate codes ``[N, D]``.
 
         Returns:
-            A dict with ``x_ng`` (latent embeddings ``[N, n_latent]``) and ``cell_type_probs_nc``.
+            A dict with ``x_ng`` (latent embeddings ``[N, n_latent]``) and ``cell_type_probs_nc``
+            and ``cell_type_logits_nc`` (logits before softmax ``[N, n_partition]``).
             In ontology mode ``cell_type_probs_nc`` is the propagated probability over all active
             nodes (``[N, n_active]``, columns = :attr:`active_cl_names`); in flat mode it is the
             softmax over the partition (``[N, n_partition]``).
@@ -1116,5 +1117,5 @@ class SCANVI(SingleCellVariationalInference):
         return {
             "x_ng": z_nk,
             "cell_type_probs_nc": probs_nc,
-            "y_logits_nc": logits,
+            "cell_type_logits_nc": logits,
         }
