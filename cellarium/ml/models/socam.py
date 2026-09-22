@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 import torch.nn.functional
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.models.model import CellariumModel, ClassifierPrediction, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -216,7 +216,11 @@ def compute_class_weights(
 
 class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
     """
-    Logistic regression model for cell type ontology classification.
+    Logistic regression model for cell type ontology classification. [1]
+
+    References:
+        [1] Magre et al., "A supervised ontology-aware cell annotation method for single-cell
+            transcriptomic data", bioRxiv, 2026. https://doi.org/10.64898/2026.01.13.699356
 
     Args:
         n_obs: Number of observations in the dataset (used to scale the cross-entropy loss).
@@ -444,7 +448,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
-    ) -> dict[str, np.ndarray | torch.Tensor]:
+    ) -> ClassifierPrediction:
         """
         Predict the target logits.
 
@@ -455,8 +459,9 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 The variable names for the input data.
 
         Returns:
-            A dictionary with the target logits. Output tensors have shape
-            ``(n, n_active_cats)``.
+            A dictionary with the target logits in ``y_logits_nc`` and the
+            predicted probabilities in ``y_probs_nc`` (possibly propagated).
+            Output tensors have shape ``(n, n_active_cats)``.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
@@ -464,7 +469,11 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
         if self.probability_propagation_flag:
             probs_nc = propagate_probs(probs_nc, self.active_descendant_tensor_cc)
-        return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
+        return {
+            "y_logits_nc": logits_nc,
+            "y_probs_nc": probs_nc,
+            "category_labels_c": self.cl_name_subset if self.cl_name_subset is not None else self.cl_names,
+        }
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:

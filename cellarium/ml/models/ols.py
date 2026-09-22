@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -162,7 +162,7 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
         trainer.should_stop = True
 
     @torch.no_grad()
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> TransformPrediction:
         """
         Apply the solved coefficients to new data.
 
@@ -173,12 +173,12 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
                 The variable names for the input data.
 
         Returns:
-            A dictionary with ``y_hat_nk`` of shape (batch_size, n_targets).
+            A dictionary with ``x_ng`` (misnomer) of shape (batch_size, n_targets).
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
-        return {"y_hat_nk": x_ng @ self.W_gk}
+        return {"x_ng": x_ng @ self.W_gk, "var_names_g": np.array([f"feature_{i}" for i in range(self.W_gk.shape[0])])}
 
     @torch.no_grad()
     def reset_parameters(self) -> None:
