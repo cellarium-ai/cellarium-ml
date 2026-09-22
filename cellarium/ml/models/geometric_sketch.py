@@ -406,7 +406,7 @@ class StreamingPlaidGeometricSketch(CellariumModel):
         max_cells_per_bucket: int = 1,
         min_cells_per_voxel: int = 5,
         min_metadata_diversity: int = 1,
-        store_cell_data: bool = True,
+        store_cell_data: bool = False,
         projector: nn.Module | None = None,
         seed: int = 0,
     ) -> None:
@@ -608,7 +608,7 @@ class StreamingPlaidGeometricSketch(CellariumModel):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def get_reservoir(self, return_cell_data: bool = True) -> dict[str, np.ndarray | torch.Tensor]:
+    def get_reservoir(self, return_cell_data: bool = False) -> dict[str, np.ndarray | torch.Tensor]:
         if return_cell_data and not self.store_cell_data:
             raise ValueError("store_cell_data=False was set at construction.")
 

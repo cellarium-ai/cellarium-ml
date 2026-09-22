@@ -157,6 +157,7 @@ def test_plaid_sketch_fit(tmp_path):
         initial_voxel_size=1.0,
         max_cells_per_bucket=2,
         min_cells_per_voxel=5,
+        store_cell_data=True,
     )
     module = CellariumModule(model=model)
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
@@ -181,7 +182,9 @@ def test_plaid_sketch_fit(tmp_path):
 
 def test_plaid_sketch_reservoir_caps_cells_per_voxel():
     data, var_names, obs_names, _ = _make_plaid_data()
-    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=3)
+    model = StreamingPlaidGeometricSketch(
+        var_names, initial_voxel_size=1.0, max_cells_per_bucket=3, store_cell_data=True
+    )
 
     model.update(torch.from_numpy(data), obs_names)
 
@@ -203,6 +206,7 @@ def test_plaid_sketch_coarsening():
         target_voxels=2,
         initial_voxel_size=1.0,
         max_cells_per_bucket=1,
+        store_cell_data=True,
     )
 
     model.update(data, obs_names)
@@ -226,6 +230,7 @@ def test_plaid_sketch_metadata_diversity_pruning(tmp_path):
         max_cells_per_bucket=2,
         min_cells_per_voxel=1,
         min_metadata_diversity=2,
+        store_cell_data=True,
     )
     module = CellariumModule(model=model)
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
@@ -270,16 +275,20 @@ def test_plaid_sketch_sparse_input_matches_dense():
     data, var_names, obs_names, _ = _make_plaid_data()
     x_dense = torch.from_numpy(data)
 
-    dense_model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=2)
-    sparse_model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=2)
+    dense_model = StreamingPlaidGeometricSketch(
+        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, store_cell_data=True
+    )
+    sparse_model = StreamingPlaidGeometricSketch(
+        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, store_cell_data=True
+    )
     dense_model.update(x_dense, obs_names)
     sparse_model.update(x_dense.to_sparse(), obs_names)
 
     assert dense_model._bucket_total_seen == sparse_model._bucket_total_seen
     assert dense_model._bucket_obs_names == sparse_model._bucket_obs_names
     torch.testing.assert_close(
-        dense_model.get_reservoir()["x_ng"].to_dense(),  # type: ignore[union-attr]
-        sparse_model.get_reservoir()["x_ng"].to_dense(),  # type: ignore[union-attr]
+        dense_model.get_reservoir(return_cell_data=True)["x_ng"].to_dense(),  # type: ignore[union-attr]
+        sparse_model.get_reservoir(return_cell_data=True)["x_ng"].to_dense(),  # type: ignore[union-attr]
     )
 
 
@@ -346,7 +355,9 @@ def test_plaid_sketch_reset_parameters_restores_reproducibility():
 
 def test_plaid_sketch_reset_parameters():
     data, var_names, obs_names, _ = _make_plaid_data()
-    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=2)
+    model = StreamingPlaidGeometricSketch(
+        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, store_cell_data=True
+    )
     model.update(torch.from_numpy(data), obs_names)
     assert model.total_cells > 0
 
@@ -362,7 +373,7 @@ def test_plaid_sketch_reset_parameters():
 
 def test_plaid_sketch_multi_device_raises():
     var_names = np.array(["g0", "g1", "g2"])
-    model = StreamingPlaidGeometricSketch(var_names)
+    model = StreamingPlaidGeometricSketch(var_names, store_cell_data=True)
 
     class _MockTrainer:
         world_size = 2
