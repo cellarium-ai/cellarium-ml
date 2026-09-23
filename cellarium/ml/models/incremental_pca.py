@@ -10,7 +10,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from lightning.pytorch.strategies import DDPStrategy
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -239,7 +239,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         """
         return self.V_kg
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> TransformPrediction:
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 
@@ -252,7 +252,7 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the following keys:
 
-            - ``x_ng``: Embedding of the input data into the principal component space.
+            - ``x_ng``: (misnomer) Embedding of the input data into the principal component space.
             - ``var_names_g``: The list of variable names for the output data.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)

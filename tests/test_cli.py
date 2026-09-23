@@ -1330,10 +1330,10 @@ SINGLE_DEVICE_CONFIGS = [
         "fit": {
             "model": {
                 "model": {
-                    "class_path": "cellarium.ml.models.StreamingGeometricSketch",
+                    "class_path": "cellarium.ml.models.StreamingPlaidGeometricSketch",
                     "init_args": {
-                        "n_bits": "4",
-                        "max_cells_per_bucket": "10",
+                        "target_voxels": "50",
+                        "max_cells_per_bucket": "1",
                     },
                 },
             },

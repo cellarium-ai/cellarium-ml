@@ -20,7 +20,7 @@ from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.distributions import NegativeBinomial
 from cellarium.ml.layers import DressedLayer, FullyConnectedLinear, SwiGLUActivation
-from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction, ValidateMixin
 from cellarium.ml.utilities.data import categories_to_product_codes
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -1136,7 +1136,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-    ):
+    ) -> TransformPrediction:
         """
         Args:
             x_ng:
@@ -1201,7 +1201,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 categorical_covariate_np=categorical_covariate_np,
             )["qz"]
         )
-        return {"x_ng": z_nk}
+        return {"x_ng": z_nk, "var_names_g": np.array([f"scvi_{i}" for i in range(z_nk.shape[1])])}
 
     @torch.no_grad()
     def reconstruct(
@@ -1218,7 +1218,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         n_latent_samples: int = 1000,
         use_importance_sampling: bool = False,
         reconstructed_library_size: float = 10_000,
-    ):
+    ) -> TransformPrediction:
         """
         Reconstruct the data using the VAE, optionally transforming the batch.
 
@@ -1407,7 +1407,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         x_tilde_np = x_tilde_np / len(transformed_batch_index_n_list)
 
-        return {"x_ng": x_tilde_np}
+        return {"x_ng": x_tilde_np, "var_names_g": var_names_g[gene_inds]}
 
     # ------------------------------------------------------------------
     # Validation hooks
