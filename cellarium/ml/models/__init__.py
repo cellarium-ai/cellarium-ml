@@ -5,7 +5,7 @@ from cellarium.ml.models.cellarium_gpt import CellariumGPT
 from cellarium.ml.models.cnmf_transformer import CNMFTransformer
 from cellarium.ml.models.contrastive_mlp import ContrastiveMLP
 from cellarium.ml.models.geneformer import Geneformer
-from cellarium.ml.models.geometric_sketch import StreamingGeometricSketch
+from cellarium.ml.models.geometric_sketch import StreamingHyperplaneGeometricSketch, StreamingPlaidGeometricSketch
 from cellarium.ml.models.hvg_seurat_v3 import HVGSeuratV3
 from cellarium.ml.models.incremental_pca import IncrementalPCA
 from cellarium.ml.models.logistic_regression import LogisticRegression
@@ -42,6 +42,7 @@ __all__ = [
     "ValidateMixin",
     "SingleCellVariationalInference",
     "SOCAM",
-    "StreamingGeometricSketch",
+    "StreamingHyperplaneGeometricSketch",
+    "StreamingPlaidGeometricSketch",
     "StreamingOrdinaryLeastSquares",
 ]

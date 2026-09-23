@@ -257,7 +257,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         setattr(self, f"D_{k}_rkg", D_rkg)
 
         return {
-            "loss": self.encoder_loss_fn(encoder_loadings_rnk, solver_loadings_rnk.detach()),
+            "loss": self.encoder_loss_fn(encoder_loadings_rnk.contiguous(), solver_loadings_rnk.detach().contiguous()),
             "solver_loadings_rnk": solver_loadings_rnk.detach(),
             "encoder_loadings_rnk": encoder_loadings_rnk.detach(),
             "loadings_history": updated_values.get("loadings_history", None),
