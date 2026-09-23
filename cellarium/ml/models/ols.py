@@ -202,7 +202,7 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
         idx = torch.nonzero(informative, as_tuple=False).squeeze(1)
         ratio = mean_g[idx].abs() / sd_g[idx]
         if bool((ratio > OFF_CENTER_WARN_RATIO).any()):
-            worst = idx[int(ratio.argmax())].item()
+            worst = int(idx[int(ratio.argmax())].item())
             warnings.warn(
                 f"fit_intercept=False but feature {self.var_names_g[worst]!r} has mean "
                 f"{mean_g[worst].item():.4g}, which is {ratio.max().item():.1f} standard deviations "
@@ -264,9 +264,7 @@ class StreamingOrdinaryLeastSquares(CellariumModel, PredictMixin):
                 Xsq_g = Xsq_g - n * x_mean_g**2
             W_gk = XtY / (Xsq_g + penalty).unsqueeze(1)
             intercept = (
-                y_mean_k.unsqueeze(0) - W_gk * x_mean_g.unsqueeze(1)
-                if self.fit_intercept
-                else torch.zeros_like(W_gk)
+                y_mean_k.unsqueeze(0) - W_gk * x_mean_g.unsqueeze(1) if self.fit_intercept else torch.zeros_like(W_gk)
             )
         else:
             XtX = self.XtX_gg.to(dtype)

@@ -41,9 +41,7 @@ def _reference_intercept_solve(x: torch.Tensor, y: torch.Tensor) -> tuple[torch.
     return coef[1:], coef[0]  # slopes, intercept
 
 
-def _reference_univariate_intercept_solve(
-    x: torch.Tensor, y: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _reference_univariate_intercept_solve(x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """n_features x n_targets independent simple linear regressions, each with an intercept."""
     g, k = x.shape[1], y.shape[1]
     slopes = torch.empty(g, k, dtype=x.dtype)
@@ -135,6 +133,8 @@ def test_univariate_differs_from_multivariate():
 
     W_mv = mv_model.solve()
     W_uv = uv_model.solve()
+    assert isinstance(W_mv, torch.Tensor)
+    assert isinstance(W_uv, torch.Tensor)
 
     assert not torch.allclose(W_mv, W_uv), "Multivariate and univariate solutions should differ for correlated features"
 
@@ -146,9 +146,7 @@ def test_intercept_matches_reference(batch_size: int):
     x, y, var_names = _make_data(n, g, k, seed=3)
     x = x + 5.0  # strongly off-center: the case a no-intercept fit gets wrong
 
-    model = StreamingOrdinaryLeastSquares(
-        var_names_g=var_names, n_targets=k, ridge_penalty=0.0, fit_intercept=True
-    )
+    model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, ridge_penalty=0.0, fit_intercept=True)
     for start in range(0, n, batch_size):
         model.update(x[start : start + batch_size], y[start : start + batch_size])
 
@@ -218,12 +216,12 @@ def test_no_intercept_on_positive_data_forces_one_sign():
     with pytest.warns(UserWarning, match="fit_intercept=False"):
         W_without = without.solve()
 
-    with_ = StreamingOrdinaryLeastSquares(
-        var_names_g=var_names, n_targets=2, ridge_penalty=0.0, fit_intercept=True
-    )
+    with_ = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=2, ridge_penalty=0.0, fit_intercept=True)
     with_.update(age, y)
     W_with = with_.solve()
 
+    assert isinstance(W_without, torch.Tensor)
+    assert isinstance(W_with, torch.Tensor)
     assert (W_without > 0).all(), "no-intercept fit on positive data should force positive coefficients"
     assert (W_with < 0).all(), "with an intercept the true negative slopes are recovered"
     torch.testing.assert_close(W_with.squeeze(), torch.tensor([-0.5, -0.2]), rtol=1e-3, atol=1e-3)
@@ -277,9 +275,7 @@ def test_ridge_does_not_penalize_intercept():
     y = 100.0 + 0.0 * x  # large offset, zero slope
     var_names = np.array(["feature"])
 
-    model = StreamingOrdinaryLeastSquares(
-        var_names_g=var_names, n_targets=k, ridge_penalty=1e3, fit_intercept=True
-    )
+    model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, ridge_penalty=1e3, fit_intercept=True)
     model.update(x, y)
     W, b = model.solve(return_intercept=True)
 
@@ -293,15 +289,13 @@ def test_predict_includes_intercept():
     x, y, var_names = _make_data(n, g, k, seed=12)
     x = x + 10.0
 
-    model = StreamingOrdinaryLeastSquares(
-        var_names_g=var_names, n_targets=k, ridge_penalty=0.0, fit_intercept=True
-    )
+    model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, ridge_penalty=0.0, fit_intercept=True)
     model.update(x, y)
     W, b = model.solve(return_intercept=True)
     model.W_gk.copy_(W)
     model.intercept_k.copy_(b)
 
-    y_hat = model.predict(x, var_names)["y_hat_nk"]
+    y_hat = model.predict(x, var_names)["x_ng"]
     torch.testing.assert_close(y_hat, x @ W + b, rtol=1e-5, atol=1e-5)
 
 
@@ -310,9 +304,7 @@ def test_predict_rejects_univariate_intercept():
     n, g, k = 50, 3, 2
     x, y, var_names = _make_data(n, g, k, seed=13)
 
-    model = StreamingOrdinaryLeastSquares(
-        var_names_g=var_names, n_targets=k, univariate=True, fit_intercept=True
-    )
+    model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, univariate=True, fit_intercept=True)
     model.update(x, y)
     with pytest.raises(NotImplementedError, match="univariate"):
         model.predict(x, var_names)
@@ -323,9 +315,7 @@ def test_reset_parameters_clears_centering_statistics():
     n, g, k = 60, 4, 2
     x, y, var_names = _make_data(n, g, k, seed=14)
 
-    model = StreamingOrdinaryLeastSquares(
-        var_names_g=var_names, n_targets=k, ridge_penalty=0.0, fit_intercept=True
-    )
+    model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, ridge_penalty=0.0, fit_intercept=True)
     model.update(x + 7.0, y)
     model.reset_parameters()
     assert model.n_obs.item() == 0
@@ -368,6 +358,7 @@ def test_buffers_survive_accelerator_move(univariate: bool, fit_intercept: bool)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             W = model.solve()
+        assert isinstance(W, torch.Tensor)
         assert W.shape == (g, k)
         assert W.device.type == torch.device(device).type
         assert torch.isfinite(W).all(), f"non-finite solution on {device}"
@@ -440,9 +431,7 @@ def test_lightning_integration_with_intercept(tmp_path):
     dataset = _OLSDataset(x, y, var_names)
     loader = torch.utils.data.DataLoader(dataset, batch_size=10, collate_fn=collate_fn)
 
-    model = StreamingOrdinaryLeastSquares(
-        var_names_g=var_names, n_targets=k, ridge_penalty=0.0, fit_intercept=True
-    )
+    model = StreamingOrdinaryLeastSquares(var_names_g=var_names, n_targets=k, ridge_penalty=0.0, fit_intercept=True)
     module = CellariumModule(model=model)
 
     trainer = pl.Trainer(
