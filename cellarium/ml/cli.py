@@ -818,7 +818,7 @@ def geneformer(args: ArgsType = None) -> None:
 @register_model
 def geometric_sketch(args: ArgsType = None) -> None:
     r"""
-    CLI to run the :class:`cellarium.ml.models.StreamingGeometricSketch` model.
+    CLI to run the :class:`cellarium.ml.models.StreamingPlaidGeometricSketch` model.
 
     Streams cells in a single pass and retains a geometrically diverse sketch by
     partitioning gene-expression space with locality-sensitive hashing (LSH).  At most
@@ -851,7 +851,7 @@ def geometric_sketch(args: ArgsType = None) -> None:
         args: Arguments to parse. If ``None`` the arguments are taken from ``sys.argv``.
     """
     cli = lightning_cli_factory(
-        "cellarium.ml.models.StreamingGeometricSketch",
+        "cellarium.ml.models.StreamingPlaidGeometricSketch",
         link_arguments=[
             LinkArguments(
                 ("model.cpu_transforms", "model.transforms", "data"),
