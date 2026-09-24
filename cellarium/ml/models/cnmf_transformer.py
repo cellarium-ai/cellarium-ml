@@ -688,7 +688,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         log_every_n_steps: int = 50,
         use_reservoir: bool = True,
         # reservoir_n_bits: int = 12,
-        reservoir_max_cells_per_bucket: int = 1,
+        reservoir_max_cells: int | None = 512,
         reservoir_seed: int = 0,
     ) -> None:
         if len(k_values) == 0:
@@ -738,6 +738,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self.k_sampling_seed = k_sampling_seed
         self.noise_seed = noise_seed
         self.log_every_n_steps = log_every_n_steps
+        self.reservoir_max_cells = reservoir_max_cells
 
         self.k_max = max(self.k_values)
         self._k_to_index = {k: i for i, k in enumerate(self.k_values)}
@@ -825,9 +826,9 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         if use_reservoir:
             self.reservoir: StreamingPlaidGeometricSketch | None = StreamingPlaidGeometricSketch(
                 var_names_g=np.array(self.var_names_g),
-                target_voxels=500,
-                min_cells_per_voxel=1,
-                max_cells_per_bucket=reservoir_max_cells_per_bucket,
+                target_voxels=1024,
+                min_cells_per_bucket=1,
+                max_cells_per_bucket=2,
                 store_cell_data=True,
                 projector=torch.nn.Linear(len(self.var_names_g), 128),
                 seed=reservoir_seed,
@@ -1215,7 +1216,9 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         # Retrieve strictly historical reservoir (empty on step 0; updated after training below).
         x_reservoir_ng: torch.Tensor | None = None
         if self.use_reservoir and self.reservoir is not None and self.reservoir.total_cells > 0:
-            reservoir_ng = self.reservoir.get_reservoir(return_cell_data=True)["x_ng"]
+            reservoir_ng = self.reservoir.get_reservoir(return_cell_data=True, max_cells=self.reservoir_max_cells)[
+                "x_ng"
+            ]
             assert isinstance(reservoir_ng, torch.Tensor)
             x_reservoir_ng = reservoir_ng.to_dense().to(device=x_ng.device, dtype=x_ng.dtype)
 
@@ -1749,6 +1752,7 @@ def run_measurement_phase(
     transforms: Iterable[torch.nn.Module] = (),
     n_batches: int | None = None,
     k_values: list[int] | None = None,
+    max_reservoir_size: int | None = None,
     n_replicates: int = 100,
     store_replicates_k_values: list[int] | None = None,
     r_store: int = 20,
@@ -1790,6 +1794,7 @@ def run_measurement_phase(
             :class:`~cellarium.ml.core.CellariumPipeline` and receives transformed data).
         n_batches: Number of minibatches.  Defaults to ``model.measurement_n_batches``.
         k_values: Defaults to every ``k`` in ``model.k_values``.
+        max_reservoir_size: Maximum number of cells to fetch from the reservoir.  Defaults to ``None`` (no limit).
         n_replicates: Number of independent noise seeds per ``(batch, k)`` solve.  A
             Kotliar-comparable value (50–100) is usually appropriate.
         store_replicates_k_values: ``k`` values for which raw replicate factors from the first
@@ -1839,7 +1844,7 @@ def run_measurement_phase(
         # no-op and measurement degrades gracefully to the non-reservoir path.
         x_reservoir_ng: torch.Tensor | None = None
         if model.use_reservoir and model.reservoir is not None and model.reservoir.total_cells > 0:
-            reservoir_ng = model.reservoir.get_reservoir(return_cell_data=True)["x_ng"]
+            reservoir_ng = model.reservoir.get_reservoir(return_cell_data=True, max_cells=max_reservoir_size)["x_ng"]
             assert isinstance(reservoir_ng, torch.Tensor)
             x_reservoir_ng = reservoir_ng.to_dense().to(device=device, dtype=dtype)
 
@@ -2013,9 +2018,7 @@ def export_hot_start(
     k_values = list(model.k_values) if k_values is None else sorted(k_values)
     missing = [k for k in k_values if f"consensus_D_{k}_kg" not in model._buffers]
     if missing:
-        raise ValueError(
-            f"k values {missing} have no consensus factors; run run_measurement_phase() first"
-        )
+        raise ValueError(f"k values {missing} have no consensus factors; run run_measurement_phase() first")
 
     out: dict[int, torch.Tensor] = {}
     for k in k_values:
