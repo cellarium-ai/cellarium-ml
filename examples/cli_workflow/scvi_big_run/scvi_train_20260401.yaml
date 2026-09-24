@@ -1,0 +1,99 @@
+# lightning.pytorch==2.5.2
+seed_everything: true
+trainer:
+  logger: null
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: step
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      every_n_epochs: 1
+  max_epochs: 100
+  log_every_n_steps: 100
+  gradient_clip_algorithm: norm
+  gradient_clip_val: 0.5
+  inference_mode: false
+  default_root_dir: gs://cellarium-dev-central/workflows/20260401_human_scvi_our_hvg_copy_czi
+model:
+  cpu_transforms:
+    - class_path: cellarium.ml.transforms.Filter
+      init_args:
+        filter_list:
+          !FileLoader
+          file_path: gs://cellarium-dev-central/workflows/20260331_czi_human_primary_20251108_gte300genes_hvg_seurat_v3/hvg_seurat_v3_output__hvg_only.csv
+          loader_fn: pandas.read_csv
+          attr: "feature_id"
+          convert_fn: pandas.Series.to_list
+  model:
+    class_path: cellarium.ml.models.SingleCellVariationalInference
+    init_args:
+      var_names_g: null
+      n_batch: null
+      batch_embedded: false
+      batch_representation_sampled: false
+      n_cats_per_cov: null
+      kl_warmup_epochs: 20
+      batch_kl_weight_max: 0.0
+      use_batch_norm: both
+      encoder:
+        hidden_layers:
+        - class_path: torch.nn.Linear
+          init_args:
+            out_features: 128
+        # - class_path: torch.nn.Linear
+        #   init_args:
+        #     out_features: 128
+        final_layer:
+          class_path: torch.nn.Linear
+          init_args: {}
+      decoder:
+        hidden_layers:
+        - class_path: cellarium.ml.models.scvi.LinearWithBatch
+          init_args:
+            out_features: 128
+            label_to_bias_hidden_layers: []
+        # - class_path: cellarium.ml.models.scvi.LinearWithBatch
+        #   init_args:
+        #     out_features: 128
+        #     label_to_bias_hidden_layers: []
+        final_layer:
+          # class_path: cellarium.ml.models.scvi.LinearWithBatch
+          # init_args:
+          #   label_to_bias_hidden_layers: []
+          class_path: torch.nn.Linear
+          init_args: {}
+        final_additive_bias: false
+      n_latent: 50
+  optim_fn: torch.optim.AdamW
+  optim_kwargs:
+    lr: 1e-4
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      filenames: gs://cellarium-nexus-file-system-3293a8/pipeline/data-extracts/czi_human_primary_gr300genes/extract_files/extract_{000000..000050}.h5ad
+      shard_size: 10_000
+      last_shard_size: null
+      max_cache_size: 4
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
+    var_names_g:
+      attr: var
+      key: feature_id
+    batch_index_n:
+      attr: obs
+      key: assay_dataset_id_donor_id_suspension_type
+      convert_fn: cellarium.ml.utilities.data.categories_to_codes
+    # categorical_covariate_index_nd:
+    #   attr: obs
+    #   key:
+    #     - suspension_type
+    #     - assay
+    #   convert_fn: cellarium.ml.utilities.data.categories_to_codes
+  batch_size: 1024
+  shuffle: true
+  num_workers: 12
+  persistent_workers: true
