@@ -156,7 +156,7 @@ def test_plaid_sketch_fit(tmp_path):
         var_names,
         initial_voxel_size=1.0,
         max_cells_per_bucket=2,
-        min_cells_per_voxel=5,
+        min_cells_per_bucket=5,
         store_cell_data=True,
     )
     module = CellariumModule(model=model)
@@ -228,7 +228,7 @@ def test_plaid_sketch_metadata_diversity_pruning(tmp_path):
         var_names,
         initial_voxel_size=1.0,
         max_cells_per_bucket=2,
-        min_cells_per_voxel=1,
+        min_cells_per_bucket=1,
         min_metadata_diversity=2,
         store_cell_data=True,
     )
@@ -255,7 +255,7 @@ def test_plaid_sketch_no_cell_data(tmp_path):
         var_names,
         initial_voxel_size=1.0,
         max_cells_per_bucket=2,
-        min_cells_per_voxel=1,
+        min_cells_per_bucket=1,
         store_cell_data=False,
     )
     module = CellariumModule(model=model)
@@ -488,3 +488,75 @@ def test_hyperplane_apply_bucket_filters_diversity():
 
     model.apply_bucket_filters(min_metadata_diversity=2)
     assert model.total_cells == 0
+
+
+# ----------------------------------------------------------------------
+# sketch_obs_names and checkpoint round-trip
+# ----------------------------------------------------------------------
+
+
+def test_sketch_obs_names_populated_after_training(tmp_path):
+    loader, var_names = _make_plaid_loader()
+    model = StreamingPlaidGeometricSketch(
+        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, min_cells_per_bucket=5
+    )
+    module = CellariumModule(model=model)
+    trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
+    trainer.fit(module, train_dataloaders=loader)
+
+    # sketch_obs_names is set at end of training after filtering.
+    assert isinstance(model.sketch_obs_names, np.ndarray)
+    assert len(model.sketch_obs_names) == model.total_cells > 0
+    np.testing.assert_array_equal(model.sketch_obs_names, model.get_reservoir()["obs_names"])
+
+
+def test_checkpoint_contains_sketch_obs_names(tmp_path):
+    loader, var_names = _make_plaid_loader()
+    model = StreamingPlaidGeometricSketch(
+        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, min_cells_per_bucket=5
+    )
+    module = CellariumModule(model=model)
+    trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
+    trainer.fit(module, train_dataloaders=loader)
+
+    ckpt_path = trainer.checkpoint_callback.best_model_path  # type: ignore[union-attr]
+    raw = torch.load(ckpt_path, weights_only=False)
+
+    assert "sketch_state" in raw
+    assert "sketch_obs_names" in raw["sketch_state"]
+    np.testing.assert_array_equal(raw["sketch_state"]["sketch_obs_names"], model.sketch_obs_names)
+
+
+def test_checkpoint_restores_bucket_state_and_sketch_obs_names(tmp_path):
+    loader, var_names = _make_plaid_loader()
+    model = StreamingPlaidGeometricSketch(
+        var_names,
+        initial_voxel_size=1.0,
+        max_cells_per_bucket=2,
+        min_cells_per_bucket=5,
+        store_cell_data=True,
+    )
+    module = CellariumModule(model=model)
+    trainer = pl.Trainer(
+        accelerator="cpu",
+        devices=1,
+        max_epochs=1,
+        default_root_dir=tmp_path,
+        enable_checkpointing=True,
+    )
+    trainer.fit(module, train_dataloaders=loader)
+
+    assert isinstance(model.sketch_obs_names, np.ndarray)
+    obs_names_after_training = model.sketch_obs_names.copy()
+    total_cells_after_training = model.total_cells
+
+    # Load the checkpoint into a fresh model.
+    ckpt_path = trainer.checkpoint_callback.best_model_path  # type: ignore[union-attr]
+    model2 = StreamingPlaidGeometricSketch(
+        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, min_cells_per_bucket=5, store_cell_data=True
+    )
+    module2 = CellariumModule.load_from_checkpoint(ckpt_path, model=model2)
+
+    assert module2.model.total_cells == total_cells_after_training
+    np.testing.assert_array_equal(module2.model.sketch_obs_names, obs_names_after_training)
+    np.testing.assert_array_equal(module2.model.get_reservoir()["obs_names"], obs_names_after_training)

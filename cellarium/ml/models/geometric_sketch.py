@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from abc import abstractmethod
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
@@ -33,6 +34,14 @@ class StreamingGeometricSketch(CellariumModel):
             Gene names for input validation.
         max_cells_per_bucket:
             Maximum cells retained per bucket via uniform reservoir sampling.
+        min_cells_per_bucket:
+            Density threshold for end-of-training pruning via
+            :meth:`apply_bucket_filters`. Buckets that observed fewer cells
+            in total are dropped. Default of ``1`` disables filtering.
+        min_metadata_diversity:
+            Diversity threshold for end-of-training pruning via
+            :meth:`apply_bucket_filters`. Buckets that observed fewer unique
+            metadata categories are dropped. Default of ``1`` disables filtering.
         store_cell_data:
             If ``True``, accumulate sparse cell expression vectors.
             If ``False``, only cell IDs (``obs_names``) are stored; calling
@@ -51,6 +60,8 @@ class StreamingGeometricSketch(CellariumModel):
         self,
         var_names_g: np.ndarray,
         max_cells_per_bucket: int,
+        min_cells_per_bucket: int,
+        min_metadata_diversity: int,
         store_cell_data: bool,
         projector: nn.Module | None,
         seed: int,
@@ -59,6 +70,8 @@ class StreamingGeometricSketch(CellariumModel):
 
         self.var_names_g = var_names_g
         self.max_cells_per_bucket = max_cells_per_bucket
+        self.min_cells_per_bucket = min_cells_per_bucket
+        self.min_metadata_diversity = min_metadata_diversity
         self.store_cell_data = store_cell_data
         self._seed = seed
 
@@ -272,19 +285,47 @@ class StreamingGeometricSketch(CellariumModel):
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         trainer.should_stop = True
+        self.apply_bucket_filters(self.min_cells_per_bucket, self.min_metadata_diversity)
+        self.sketch_obs_names = self.get_reservoir()["obs_names"]
+        assert isinstance(trainer.model, pl.LightningModule)
+        trainer.model.log("final_sketch_size", float(self.total_cells))
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        checkpoint["sketch_state"] = {
+            "bucket_obs_names": self._bucket_obs_names,
+            "bucket_cells": self._bucket_cells,
+            "bucket_total_seen": self._bucket_total_seen,
+            "bucket_metadata": self._bucket_metadata,
+            "batches_seen": self._batches_seen,
+            "prev_total_cells": self._prev_total_cells,
+            "ema_delta": self._ema_delta,
+            "sketch_obs_names": self.sketch_obs_names,
+        }
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        state = checkpoint["sketch_state"]
+        self._bucket_obs_names = state["bucket_obs_names"]
+        self._bucket_cells = state["bucket_cells"]
+        self._bucket_total_seen = state["bucket_total_seen"]
+        self._bucket_metadata = state["bucket_metadata"]
+        self._batches_seen = state["batches_seen"]
+        self._prev_total_cells = state["prev_total_cells"]
+        self._ema_delta = state["ema_delta"]
+        self.sketch_obs_names = state["sketch_obs_names"]
 
     # ------------------------------------------------------------------
     # Parameter reset
     # ------------------------------------------------------------------
 
     def reset_parameters(self) -> None:
-        self._bucket_cells: dict[tuple[int, ...], list[torch.Tensor]] = {}
-        self._bucket_obs_names: dict[tuple[int, ...], list[str]] = {}
-        self._bucket_total_seen: dict[tuple[int, ...], int] = {}
-        self._bucket_metadata: dict[tuple[int, ...], set[int]] = {}
+        self._bucket_cells = {}
+        self._bucket_obs_names = {}
+        self._bucket_total_seen = {}
+        self._bucket_metadata = {}
         self._batches_seen = 0
         self._prev_total_cells = 0
         self._ema_delta = 0.0
+        self.sketch_obs_names = np.empty(0, dtype=object)
         self._generator.manual_seed(self._seed)
         self._dummy_param.data.zero_()
 
@@ -318,6 +359,14 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
             Number of LSH projection bits. Determines up to ``2^n_bits`` buckets.
         max_cells_per_bucket:
             Maximum cells retained per bucket via reservoir sampling.
+        min_cells_per_bucket:
+            Density threshold applied at the end of training. Buckets that
+            observed fewer cells in total are dropped. Default of ``1``
+            disables filtering.
+        min_metadata_diversity:
+            Diversity threshold applied at the end of training. Buckets that
+            observed fewer unique metadata categories are dropped. Default of
+            ``1`` disables filtering.
         store_cell_data:
             If ``True`` (default), accumulate sparse cell expression vectors.
             If ``False``, only cell IDs (obs_names) are stored; calling
@@ -337,6 +386,8 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
         var_names_g: np.ndarray,
         n_bits: int = 12,
         max_cells_per_bucket: int = 100,
+        min_cells_per_bucket: int = 1,
+        min_metadata_diversity: int = 1,
         store_cell_data: bool = True,
         projector: nn.Module | None = None,
         seed: int = 0,
@@ -347,6 +398,8 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
         super().__init__(
             var_names_g=var_names_g,
             max_cells_per_bucket=max_cells_per_bucket,
+            min_cells_per_bucket=min_cells_per_bucket,
+            min_metadata_diversity=min_metadata_diversity,
             store_cell_data=store_cell_data,
             projector=projector,
             seed=seed,
@@ -564,10 +617,10 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
             Starting size ($\epsilon$) of the grid hypercubes.
         max_cells_per_bucket:
             Maximum cells retained per voxel via uniform reservoir sampling.
-        min_cells_per_voxel:
+        min_cells_per_bucket:
             Density threshold applied at the end of training via
             :meth:`apply_bucket_filters`. Voxels that observed fewer cells
-            in total are dropped.
+            in total are dropped. Default of ``5`` prunes sparsely-seen voxels.
         min_metadata_diversity:
             Diversity threshold applied at the end of training via
             :meth:`apply_bucket_filters`. Voxels that observed fewer unique
@@ -588,21 +641,21 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         target_voxels: int = 100_000,
         initial_voxel_size: float = 0.1,
         max_cells_per_bucket: int = 1,
-        min_cells_per_voxel: int = 5,
+        min_cells_per_bucket: int = 5,
         min_metadata_diversity: int = 1,
         store_cell_data: bool = False,
         projector: nn.Module | None = None,
         seed: int = 0,
     ) -> None:
-        # Set before super().__init__() so reset_parameters() and on_train_epoch_end() can reference them.
+        # Set before super().__init__() so reset_parameters() can reference them.
         self.target_voxels = target_voxels
         self.initial_voxel_size = initial_voxel_size
-        self.min_cells_per_voxel = min_cells_per_voxel
-        self.min_metadata_diversity = min_metadata_diversity
 
         super().__init__(
             var_names_g=var_names_g,
             max_cells_per_bucket=max_cells_per_bucket,
+            min_cells_per_bucket=min_cells_per_bucket,
+            min_metadata_diversity=min_metadata_diversity,
             store_cell_data=store_cell_data,
             projector=projector,
             seed=seed,
@@ -783,12 +836,6 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         assert isinstance(trainer.model, pl.LightningModule)
         trainer.model.log("voxel_size", self.voxel_size.item(), prog_bar=True)
         trainer.model.log("active_voxels", float(self.num_filled_buckets), prog_bar=True)
-
-    def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
-        super().on_train_epoch_end(trainer)
-        self.apply_bucket_filters(self.min_cells_per_voxel, self.min_metadata_diversity)
-        assert isinstance(trainer.model, pl.LightningModule)
-        trainer.model.log("final_sketch_size", float(self.total_cells))
 
     # ------------------------------------------------------------------
     # Parameter reset
