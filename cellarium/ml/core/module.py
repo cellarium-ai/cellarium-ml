@@ -551,6 +551,15 @@ class CellariumModule(pl.LightningModule):
                 checkpoint["loops"]["fit_loop"]["epoch_progress"]["current"]["completed"] += 1
                 checkpoint["CellariumAnnDataDataModule"]["epoch"] += 1
 
+        on_save_checkpoint_model = getattr(self.model, "on_save_checkpoint", None)
+        if callable(on_save_checkpoint_model):
+            on_save_checkpoint_model(checkpoint)
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        on_load_checkpoint_model = getattr(self.model, "on_load_checkpoint", None)
+        if callable(on_load_checkpoint_model):
+            on_load_checkpoint_model(checkpoint)
+
     def on_end(self) -> None:
         """
         Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
