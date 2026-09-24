@@ -545,3 +545,23 @@ class CellariumModule(pl.LightningModule):
         on_load_checkpoint_model = getattr(self.model, "on_load_checkpoint", None)
         if callable(on_load_checkpoint_model):
             on_load_checkpoint_model(checkpoint)
+
+    def on_train_end(self) -> None:
+        """
+        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
+        ``on_epoch_end`` must be called at the end of every epoch.
+        """
+        on_end = getattr(self.model, "on_end", None)
+        if callable(on_end):
+            on_end(self.trainer)
+
+    def on_predict_end(self) -> None:
+        """
+        Calls the ``on_epoch_end`` method on the :attr:`model` attribute.
+        If the :attr:`model` attribute has ``on_epoch_end`` method defined, then
+        ``on_epoch_end`` must be called at the end of every epoch.
+        """
+        on_prediction_end = getattr(self.model, "on_prediction_end", None)
+        if callable(on_prediction_end):
+            on_prediction_end(self.trainer)
