@@ -1531,14 +1531,14 @@ def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_
             if plot_only:
                 import matplotlib.pyplot as plt
 
-            plt.figure(figsize=(5, 2))
-            plt.hist(mean_neighbor_distance_m.cpu().numpy(), bins=75)
-            plt.title(f"Local Neighborhood Distances: k = {num_component}")
-            plt.ylabel("Number of NMF factors\n(total is replicates times k)")
-            plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
-            plt.xlim([-0.05, 1.05])
-            # plt.show()
-            return
+                plt.figure(figsize=(5, 2))
+                plt.hist(mean_neighbor_distance_m.cpu().numpy(), bins=75)
+                plt.title(f"Local Neighborhood Distances: k = {num_component}")
+                plt.ylabel("Number of NMF factors\n(total is replicates times k)")
+                plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
+                plt.xlim([-0.05, 1.05])
+                # plt.show()
+                return
 
             logic = mean_neighbor_distance_m < density_threshold
         else:
