@@ -93,7 +93,7 @@ def test_geometric_sketch_sampling_is_reproducible():
     var_names = np.array([f"gene_{i}" for i in range(6)])
     obs_names = np.array([f"cell_{i}" for i in range(40)])
 
-    def run(seed: int) -> dict[int, list[str]]:
+    def run(seed: int) -> dict[tuple[int, ...], list[str]]:
         model = StreamingHyperplaneGeometricSketch(var_names, n_bits=2, max_cells_per_bucket=2, seed=seed)
         model._lazy_init(data)
         # Perturbing the global RNG must not affect a seeded model.
@@ -380,3 +380,111 @@ def test_plaid_sketch_multi_device_raises():
 
     with pytest.raises(RuntimeError, match="single-device"):
         model.on_train_start(_MockTrainer())  # type: ignore[arg-type]
+
+
+# ----------------------------------------------------------------------
+# Shared base-class behaviour: get_reservoir max_cells cap
+# ----------------------------------------------------------------------
+
+
+def test_get_reservoir_max_cells_cap():
+    data, var_names, obs_names, _ = _make_plaid_data()
+    # Use a large-enough bucket cap so all 14 cells are retained.
+    model = StreamingPlaidGeometricSketch(
+        var_names, initial_voxel_size=1.0, max_cells_per_bucket=10, store_cell_data=True
+    )
+    model.update(torch.from_numpy(data), obs_names)
+
+    full = model.get_reservoir(return_cell_data=True)
+    assert len(full["obs_names"]) == model.total_cells
+
+    capped = model.get_reservoir(return_cell_data=True, max_cells=5, seed=42)
+    assert len(capped["obs_names"]) == 5
+    assert capped["x_ng"].shape[0] == 5  # type: ignore[union-attr]
+
+    # Seeded calls are reproducible.
+    capped2 = model.get_reservoir(return_cell_data=True, max_cells=5, seed=42)
+    np.testing.assert_array_equal(capped["obs_names"], capped2["obs_names"])
+
+    # No downsampling when total <= max_cells.
+    nocap = model.get_reservoir(max_cells=1000)
+    assert len(nocap["obs_names"]) == model.total_cells
+
+
+# ----------------------------------------------------------------------
+# Shared base-class behaviour: apply_bucket_filters
+# ----------------------------------------------------------------------
+
+
+def test_apply_bucket_filters_density():
+    data, var_names, obs_names, _ = _make_plaid_data()
+    # voxels: (0, 0) → 6 seen, (2, 2) → 6 seen, (5, 5) → 2 seen
+    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=6)
+    model.update(torch.from_numpy(data), obs_names)
+
+    assert set(model._bucket_obs_names) == {(0, 0), (2, 2), (5, 5)}
+
+    model.apply_bucket_filters(min_cells_per_bucket=5)
+
+    assert set(model._bucket_obs_names) == {(0, 0), (2, 2)}
+    assert (5, 5) not in model._bucket_total_seen
+    assert (5, 5) not in model._bucket_metadata
+
+
+def test_apply_bucket_filters_diversity():
+    data, var_names, obs_names, metadata = _make_plaid_data()
+    # metadata: (0,0) → only category 0; (2,2) → categories 0 and 1; (5,5) → only 0
+    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=6)
+    model.update(torch.from_numpy(data), obs_names, metadata)
+
+    model.apply_bucket_filters(min_metadata_diversity=2)
+
+    assert set(model._bucket_obs_names) == {(2, 2)}
+
+
+def test_apply_bucket_filters_no_metadata_raises():
+    data, var_names, obs_names, _ = _make_plaid_data()
+    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0)
+    model.update(torch.from_numpy(data), obs_names)  # no metadata_n
+
+    with pytest.raises(ValueError, match="no metadata was tracked"):
+        model.apply_bucket_filters(min_metadata_diversity=2)
+
+
+# ----------------------------------------------------------------------
+# Hyperplane: metadata support
+# ----------------------------------------------------------------------
+
+
+def test_hyperplane_metadata_tracked():
+    rng = np.random.default_rng(0)
+    data = torch.from_numpy(rng.standard_normal((20, 6)).astype(np.float32))
+    var_names = np.array([f"gene_{i}" for i in range(6)])
+    obs_names = np.array([f"cell_{i}" for i in range(20)])
+    # Two categories: cells 0-9 → 0, cells 10-19 → 1
+    metadata = np.array([0] * 10 + [1] * 10)
+
+    model = StreamingHyperplaneGeometricSketch(var_names, n_bits=2, max_cells_per_bucket=10)
+    model._lazy_init(data)
+    model.update(data, obs_names, metadata)
+
+    # Every occupied bucket should have a metadata set.
+    assert all(isinstance(v, set) for v in model._bucket_metadata.values())
+    # At least one bucket should have seen both categories (since data spans all buckets with n_bits=2).
+    assert any(len(v) > 0 for v in model._bucket_metadata.values())
+
+
+def test_hyperplane_apply_bucket_filters_diversity():
+    rng = np.random.default_rng(0)
+    data = torch.from_numpy(rng.standard_normal((40, 6)).astype(np.float32))
+    var_names = np.array([f"gene_{i}" for i in range(6)])
+    obs_names = np.array([f"cell_{i}" for i in range(40)])
+    # Only category 0 — diversity filter should prune all buckets.
+    metadata = np.zeros(40, dtype=int)
+
+    model = StreamingHyperplaneGeometricSketch(var_names, n_bits=2, max_cells_per_bucket=10)
+    model._lazy_init(data)
+    model.update(data, obs_names, metadata)
+
+    model.apply_bucket_filters(min_metadata_diversity=2)
+    assert model.total_cells == 0
