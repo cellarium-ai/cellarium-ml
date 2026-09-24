@@ -29,7 +29,7 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from cellarium.ml.models.geometric_sketch import StreamingGeometricSketch
+from cellarium.ml.models.geometric_sketch import StreamingPlaidGeometricSketch
 from cellarium.ml.models.model import PredictMixin, ValidateMixin
 from cellarium.ml.models.nmf import (
     NonNegativeMatrixFactorization,
@@ -687,8 +687,8 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         noise_seed: int = 1,
         log_every_n_steps: int = 50,
         use_reservoir: bool = True,
-        reservoir_n_bits: int = 12,
-        reservoir_max_cells_per_bucket: int = 2,
+        # reservoir_n_bits: int = 12,
+        reservoir_max_cells_per_bucket: int = 1,
         reservoir_seed: int = 0,
     ) -> None:
         if len(k_values) == 0:
@@ -823,11 +823,13 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         self.use_reservoir = use_reservoir
         self._reservoir_cell_counter: int = 0
         if use_reservoir:
-            self.reservoir: StreamingGeometricSketch | None = StreamingGeometricSketch(
+            self.reservoir: StreamingPlaidGeometricSketch | None = StreamingPlaidGeometricSketch(
                 var_names_g=np.array(self.var_names_g),
-                n_bits=reservoir_n_bits,
+                target_voxels=500,
+                min_cells_per_voxel=1,
                 max_cells_per_bucket=reservoir_max_cells_per_bucket,
                 store_cell_data=True,
+                projector=torch.nn.Linear(len(self.var_names_g), 128),
                 seed=reservoir_seed,
             )
             # Disable the dummy DDP-compatibility param; CNMFTransformer's own params handle that.
@@ -1213,7 +1215,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
         # Retrieve strictly historical reservoir (empty on step 0; updated after training below).
         x_reservoir_ng: torch.Tensor | None = None
         if self.use_reservoir and self.reservoir is not None and self.reservoir.total_cells > 0:
-            reservoir_ng = self.reservoir.get_reservoir()["x_ng"]
+            reservoir_ng = self.reservoir.get_reservoir(return_cell_data=True)["x_ng"]
             assert isinstance(reservoir_ng, torch.Tensor)
             x_reservoir_ng = reservoir_ng.to_dense().to(device=x_ng.device, dtype=x_ng.dtype)
 
@@ -1538,7 +1540,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
             pl_module.log("recon_loss", self._last_recon_loss, prog_bar=True)
         if self.use_reservoir and self.reservoir is not None:
             pl_module.log("res_cells", int(self.reservoir.total_cells), prog_bar=True)
-            pl_module.log("res_fill", self.reservoir.bucket_fill_fraction, prog_bar=True)
+            # pl_module.log("res_fill", self.reservoir.bucket_fill_fraction, prog_bar=True)
 
     def validate(
         self,
@@ -1837,7 +1839,7 @@ def run_measurement_phase(
         # no-op and measurement degrades gracefully to the non-reservoir path.
         x_reservoir_ng: torch.Tensor | None = None
         if model.use_reservoir and model.reservoir is not None and model.reservoir.total_cells > 0:
-            reservoir_ng = model.reservoir.get_reservoir()["x_ng"]
+            reservoir_ng = model.reservoir.get_reservoir(return_cell_data=True)["x_ng"]
             assert isinstance(reservoir_ng, torch.Tensor)
             x_reservoir_ng = reservoir_ng.to_dense().to(device=device, dtype=dtype)
 
