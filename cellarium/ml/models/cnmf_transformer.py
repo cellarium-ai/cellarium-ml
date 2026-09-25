@@ -828,7 +828,7 @@ class CNMFTransformer(NonNegativeMatrixFactorization, ValidateMixin, PredictMixi
                 var_names_g=np.array(self.var_names_g),
                 target_voxels=1024,
                 min_cells_per_bucket=1,
-                max_cells_per_bucket=2,
+                max_cells_per_bucket=1,
                 store_cell_data=True,
                 projector=torch.nn.Linear(len(self.var_names_g), 128),
                 seed=reservoir_seed,

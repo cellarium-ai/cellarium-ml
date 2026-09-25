@@ -183,9 +183,9 @@ class StreamingGeometricSketch(CellariumModel):
 
         if return_cell_data:
             if all_cells:
-                result["x_ng"] = torch.stack([c.to_dense() for c in all_cells]).to_sparse_csr()
+                result["x_ng"] = torch.stack([c.to_dense() for c in all_cells]).cpu().to_sparse_csr()
             else:
-                result["x_ng"] = torch.zeros(0, len(self.var_names_g)).to_sparse_csr()
+                result["x_ng"] = torch.zeros(0, len(self.var_names_g)).cpu().to_sparse_csr()
 
         return result
 
