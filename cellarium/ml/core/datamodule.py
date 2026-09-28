@@ -3,6 +3,7 @@
 
 
 import warnings
+from collections.abc import Callable
 from typing import Any, Literal
 
 import lightning.pytorch as pl
@@ -10,7 +11,7 @@ import torch
 from anndata import AnnData
 
 from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
-from cellarium.ml.utilities.core import train_val_split
+from cellarium.ml.utilities.core import FunctionComposer, train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
 
@@ -224,12 +225,37 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 test_mode=self.test_mode,
             )
 
+    def _effective_collate_fn(self) -> Callable:
+        """
+        The ``collate_fn`` to use for a dataloader constructed right now.
+
+        If a :class:`~cellarium.ml.core.CellariumModule` with ``cpu_transforms`` is attached to this
+        datamodule's trainer *and* a trainer stage (fit/validate/test/predict/sanity-check) is actively
+        running, the CPU transforms are composed onto :attr:`collate_fn` for this dataloader only.
+
+        This is computed fresh on every call rather than mutating :attr:`collate_fn` in place, so that:
+
+        * a dataloader requested outside of an active trainer run (e.g. this datamodule reused directly,
+          or after the previous run raised an exception or was interrupted) never picks up CPU transforms
+          it didn't ask for, and
+        * nothing needs to be undone -- there is no persisted state to leave stale.
+        """
+        trainer = getattr(self, "trainer", None)
+        if trainer is not None and trainer.state.stage is not None:
+            module = getattr(trainer, "lightning_module", None)
+            if module is not None:
+                if getattr(module, "pipeline", None) is not None:
+                    cpu_transforms = module.cpu_transforms
+                    if len(cpu_transforms) > 0:
+                        return FunctionComposer(first_applied=self.collate_fn, second_applied=cpu_transforms)
+        return self.collate_fn
+
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         """Training dataloader."""
         return torch.utils.data.DataLoader(
             self.train_dataset,
             num_workers=self.num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=self._effective_collate_fn(),
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
             pin_memory=self.pin_memory,
@@ -240,7 +266,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.val_dataset,
             num_workers=self.num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=self._effective_collate_fn(),
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
             pin_memory=self.pin_memory,
@@ -251,7 +277,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.predict_dataset,
             num_workers=self.num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=self._effective_collate_fn(),
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
             pin_memory=self.pin_memory,
@@ -262,7 +288,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.test_dataset,
             num_workers=self.num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=self._effective_collate_fn(),
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
             pin_memory=self.pin_memory,
