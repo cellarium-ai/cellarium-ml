@@ -359,3 +359,9 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         if "var_names_g" not in self.batch_keys:
             raise ValueError("var_names_g is not available in the batch keys.")
         return self.batch_keys["var_names_g"](self.dadc.adatas[0])
+
+    @property
+    def obs_key_nunique(datamodule, key: str):
+        if key not in datamodule.dadc.adatas[0].obs:
+            raise ValueError(f"Key '{key}' not found in obs columns: {list(datamodule.dadc.adatas[0].obs.columns)}")
+        return datamodule.dadc.adatas[0].obs[key].nunique()
