@@ -17,6 +17,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 import scipy
+import scipy.sparse
 import torch
 from anndata import AnnData
 from torch.utils._pytree import tree_map
@@ -217,6 +218,30 @@ def to_torch_sparse_csr(x: scipy.sparse.spmatrix) -> torch.Tensor:
             dtype=torch.float32,
             device="cpu",
         )
+
+
+def to_scipy_csr(x: torch.Tensor) -> scipy.sparse.csr_matrix:
+    """
+    Convert a CPU :class:`torch.sparse_csr_tensor` to a :class:`scipy.sparse.csr_matrix`.
+
+    The underlying ``crow_indices``, ``col_indices``, and ``values`` buffers are wrapped as
+    numpy arrays without copying, so this is cheap enough to use as a stepping stone for
+    operations (e.g. column indexing) that torch's sparse CSR support does not implement.
+
+    Args:
+        x: A CPU tensor with ``torch.sparse_csr`` layout.
+
+    Returns:
+        A :class:`scipy.sparse.csr_matrix` view of ``x``.
+    """
+    if x.layout != torch.sparse_csr:
+        raise ValueError(f"Expected a tensor with `torch.sparse_csr` layout. Got {x.layout}")
+    if x.device.type != "cpu":
+        raise ValueError(f"`to_scipy_csr` only supports CPU tensors. Got device {x.device}")
+    return scipy.sparse.csr_matrix(
+        (x.values().numpy(), x.col_indices().numpy(), x.crow_indices().numpy()),
+        shape=tuple(x.shape),
+    )
 
 
 def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:

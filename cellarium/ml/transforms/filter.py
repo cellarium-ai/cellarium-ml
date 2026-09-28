@@ -10,7 +10,7 @@ import scipy.sparse
 import torch
 from torch import nn
 
-from cellarium.ml.utilities.data import to_torch_sparse_csr
+from cellarium.ml.utilities.data import to_scipy_csr, to_torch_sparse_csr
 from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
@@ -122,13 +122,17 @@ class Filter(nn.Module):
 
             When ``x_ng`` is a :class:`scipy.sparse.spmatrix` (e.g. when this transform is used as a
             ``cpu_transform`` operating on data from
-            :func:`~cellarium.ml.utilities.data.keep_sparse`), column filtering is performed with
-            scipy and the result is returned as a :class:`torch.sparse_csr_tensor`.  The
-            ``allow_missing=True`` path always returns a dense :class:`torch.Tensor`.
+            :func:`~cellarium.ml.utilities.data.keep_sparse`) or a CPU
+            :class:`torch.sparse_csr_tensor` (e.g. from
+            :func:`~cellarium.ml.utilities.data.to_torch_sparse_csr`), column filtering is
+            performed with scipy (torch has no efficient sparse CSR column indexing) and the
+            result is returned as a :class:`torch.sparse_csr_tensor`.  The ``allow_missing=True``
+            path always returns a dense :class:`torch.Tensor`.
 
         Args:
             x_ng:
-                Gene counts.  Either a dense :class:`torch.Tensor` or a scipy sparse matrix.
+                Gene counts.  A dense :class:`torch.Tensor`, a scipy sparse matrix, or a CPU
+                :class:`torch.sparse_csr_tensor`.
             var_names_g:
                 The list of the variable names in the input data.
 
@@ -142,6 +146,11 @@ class Filter(nn.Module):
         """
         if scipy.sparse.issparse(x_ng):
             return self._forward_sparse(x_ng, var_names_g)
+
+        if isinstance(x_ng, torch.Tensor) and x_ng.layout == torch.sparse_csr:
+            # Torch has no efficient column indexing for sparse CSR tensors; delegate to scipy,
+            # which does, via a zero-copy view of the same underlying buffers.
+            return self._forward_sparse(to_scipy_csr(x_ng), var_names_g)
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
 
