@@ -145,11 +145,11 @@ class OnePassMeanVarStd(CellariumModel):
             )
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
-        if trainer.world_size == 1:
-            return
-        dist.reduce(self.x_sums_bg, dst=0, op=dist.ReduceOp.SUM)
-        dist.reduce(self.x_squared_sums_bg, dst=0, op=dist.ReduceOp.SUM)
-        dist.reduce(self.x_size_b, dst=0, op=dist.ReduceOp.SUM)
+        if trainer.world_size > 1:
+            dist.reduce(self.x_sums_bg, dst=0, op=dist.ReduceOp.SUM)
+            dist.reduce(self.x_squared_sums_bg, dst=0, op=dist.ReduceOp.SUM)
+            dist.reduce(self.x_size_b, dst=0, op=dist.ReduceOp.SUM)
+        trainer.should_stop = True
 
     @property
     def mean_g(self) -> torch.Tensor:
