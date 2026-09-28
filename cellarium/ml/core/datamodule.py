@@ -353,3 +353,9 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 )
 
             self.train_dataset.load_state_dict(state_dict)
+
+    @property
+    def var_names_g(self):
+        if "var_names_g" not in self.batch_keys:
+            raise ValueError("var_names_g is not available in the batch keys.")
+        return self.batch_keys["var_names_g"](self.dadc.adatas[0])
