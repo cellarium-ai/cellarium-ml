@@ -147,6 +147,8 @@ class IncrementalPCA(CellariumModel, PredictMixin):
         The number of levels (hierarchy depth) scales logarithmically with the
         number of processes.
         """
+        trainer.should_stop = True
+
         # no need to merge if only one process
         if trainer.world_size == 1:
             return
