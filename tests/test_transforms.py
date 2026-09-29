@@ -306,6 +306,16 @@ def test_zscore_unknown_gene_raises(zscore_full: ZScore):
         zscore_full(x, bad_names)
 
 
+def test_zscore_clamps_to_max_value():
+    """Extreme inputs are clamped to [-max_value, max_value]."""
+    mean_g = torch.zeros(G_FULL)
+    std_g = torch.ones(G_FULL)
+    transform = ZScore(mean_g, std_g, _full_var_names.copy(), max_value=3.0)
+    x = torch.tensor([[100.0, -100.0, 0.0, 5.0, -2.0]])
+    out = transform(x, _full_var_names)["x_ng"]
+    np.testing.assert_allclose(out.numpy(), [[3.0, -3.0, 0.0, 3.0, -2.0]], atol=1e-5)
+
+
 # ---------------------------------------------------------------------------
 # Densify tests
 # ---------------------------------------------------------------------------
