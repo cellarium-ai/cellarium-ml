@@ -6,17 +6,19 @@ import anndata
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 import torch
 from torch.utils._pytree import tree_map
+from tqdm import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.api.data_analysis import CellariumData
 from cellarium.ml.models import StreamingPlaidGeometricSketch
-from cellarium.ml.transforms import Log1p, NormalizeTotal
-from cellarium.ml.utilities.data import collate_fn
+from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
+from cellarium.ml.utilities.data import AnnDataField, collate_fn, to_scipy_csr
 
 
-def compute_var_names_g(module: CellariumModule, datamodule: CellariumAnnDataDataModule) -> np.ndarray:
+def compute_output_var_names_g(module: CellariumModule, datamodule: CellariumAnnDataDataModule) -> np.ndarray:
     # Run the embedding pipeline's `predict` (rather than `forward`, which is the training
     # step and doesn't update `var_names_g`) so that models like PCA report their actual
     # output var names (e.g. "PC1", "PC2", ...) instead of the input gene names.
@@ -61,16 +63,20 @@ def geometric_sketch(
 
     if embedding_module is None:
         embedding_module = CellariumModule(
+            cpu_transforms=(
+                [] if cdata.hvg is None else [Filter(filter_list=cdata.hvg.index[cdata.hvg], ordering=True)]
+            ),
             transforms=[
+                Densify(),
                 NormalizeTotal(),
                 Log1p(),
                 torch.nn.Linear(in_features=datamodule.dadc.shape[1], out_features=128),
             ],
         )
-    var_names_g = compute_var_names_g(embedding_module, datamodule)
+    var_names_g = compute_output_var_names_g(embedding_module, datamodule)
 
     target_bucket_ncells = 5
-    min_cells_per_bucket_qc_threshold = 2
+    min_cells_per_bucket_qc_threshold = 1
 
     module = CellariumModule(
         transforms=[embedding_module],
@@ -95,32 +101,60 @@ def geometric_sketch(
     reservoir = module.model.get_reservoir(return_cell_data=return_new_adata, max_cells=target_n_cells)
     sketch_obs_names = reservoir["obs_names"]
 
+    sketch_index = pd.Index(sketch_obs_names)
+
     datamodule_shuffle = datamodule.shuffle
     datamodule.shuffle = False
     predict_loader = datamodule.train_dataloader()
     obs_names_list = []
-    embedding_list = []
-    for batch in predict_loader:
+    raw_x_ng_list = []
+    raw_obs_names_list = []
+    for batch in tqdm(predict_loader, desc="Collecting raw data for sketch cells"):
         if "obs_names_n" not in batch:
             raise ValueError("batch_keys in the datamodule needs to contain 'obs_names_n' for geometric_sketch.")
-        obs_names_list.append(batch["obs_names_n"])
+        batch_obs_names = batch["obs_names_n"]
+        obs_names_list.append(batch_obs_names)
         if return_new_adata:
-            embedding_list.append(embedding_module(batch)["x_ng"])
+            mask = sketch_index.get_indexer(batch_obs_names) >= 0
+            if mask.any():
+                raw_x_ng_list.append(to_scipy_csr(batch["x_ng"])[mask])
+                raw_obs_names_list.append(batch_obs_names[mask])
     obs_names = np.concatenate(obs_names_list)
-    if return_new_adata:
-        embedding = torch.cat(embedding_list, dim=0).detach().cpu().numpy()
     datamodule.shuffle = datamodule_shuffle
 
-    ordered_sketch_mask = np.isin(obs_names, sketch_obs_names)
+    ordered_sketch_mask = sketch_index.get_indexer(obs_names) >= 0
     sketch_series = pd.Series(ordered_sketch_mask, index=obs_names)
     datamodule.dadc._obs["in_sketch"] = ordered_sketch_mask
 
     adata = None
     if return_new_adata:
+        # Rows of raw_x_ng/raw_obs_names are kept in the order they were collected (dataset
+        # streaming order), not reservoir order: obs and X just need to agree with each other,
+        # not with `sketch_obs_names`. Only the (small) embedding needs to be reindexed to match.
+        raw_obs_names = np.concatenate(raw_obs_names_list)
+        coverage = pd.Index(raw_obs_names).get_indexer(sketch_obs_names)
+        if (coverage == -1).any():
+            missing = np.asarray(sketch_obs_names)[coverage == -1]
+            raise ValueError(f"Could not find raw data for sketch obs_names, e.g. {missing[:5].tolist()}")
+        raw_x_ng = sp.vstack(raw_x_ng_list, format="csr")
+
+        embedding_pos = sketch_index.get_indexer(raw_obs_names)
+        embedding = reservoir["x_ng"].to_dense().cpu().numpy()[embedding_pos]
+
+        var = datamodule.dadc.adatas[0].var
+        ad_field = datamodule.batch_keys["var_names_g"]
+        assert isinstance(ad_field, AnnDataField)
+        var_col = ad_field.key
+        var = var.set_index(var_col).copy() if var_col is not None else var.copy()
+        if cdata.hvg is None:
+            var["highly_variable"] = False
+        else:
+            var["highly_variable"] = cdata.hvg.reindex(var.index).fillna(False).astype(bool)
+
         adata = anndata.AnnData(
-            X=reservoir["x_ng"],
-            obs=pd.DataFrame(index=reservoir["obs_names"]),
-            var=datamodule.dadc.adatas[0].var.loc[var_names_g],
+            X=raw_x_ng,
+            obs=pd.DataFrame(index=raw_obs_names),
+            var=var,
             obsm={"X_embedding": embedding},
         )
 
