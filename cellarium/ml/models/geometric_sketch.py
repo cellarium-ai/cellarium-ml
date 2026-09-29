@@ -48,8 +48,10 @@ class StreamingGeometricSketch(CellariumModel):
             ``get_reservoir(return_cell_data=True)`` will raise.
         projector:
             Optional frozen encoder mapping ``(N, G) → (N, D)``. When given,
-            its output feeds the bucketing algorithm rather than raw gene
-            expression. The module's gradients are disabled on assignment.
+            its output feeds the bucketing algorithm rather than raw gene expression.
+            The module's gradients are disabled on assignment.
+        limit_input_to_top_pcs:
+            If specified, limit the input to this number of top principal components.
         seed:
             Random seed for reservoir sampling. Sampling draws from a
             generator owned by this model, so results are unaffected by
@@ -64,6 +66,7 @@ class StreamingGeometricSketch(CellariumModel):
         min_metadata_diversity: int,
         store_cell_data: bool,
         projector: nn.Module | None,
+        limit_input_to_top_pcs: int | None,
         seed: int,
     ) -> None:
         super().__init__()
@@ -73,6 +76,7 @@ class StreamingGeometricSketch(CellariumModel):
         self.min_cells_per_bucket = min_cells_per_bucket
         self.min_metadata_diversity = min_metadata_diversity
         self.store_cell_data = store_cell_data
+        self.limit_input_to_top_pcs = limit_input_to_top_pcs
         self._seed = seed
 
         if projector is not None:
@@ -375,6 +379,8 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
             Optional frozen encoder mapping ``(N, G) → (N, D)``. When given, its
             output feeds the LSH linear layer rather than raw gene expression.
             The module's gradients are disabled on assignment.
+        limit_input_to_top_pcs:
+            If specified, limit the input to this number of top principal components.
         seed:
             Random seed for the LSH projection weights and for reservoir sampling.
             Sampling draws from a generator owned by this model, so results are
@@ -390,6 +396,7 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
         min_metadata_diversity: int = 1,
         store_cell_data: bool = True,
         projector: nn.Module | None = None,
+        limit_input_to_top_pcs: int | None = None,
         seed: int = 0,
     ) -> None:
         # Set before super().__init__() so reset_parameters() can reference them.
@@ -402,6 +409,7 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
             min_metadata_diversity=min_metadata_diversity,
             store_cell_data=store_cell_data,
             projector=projector,
+            limit_input_to_top_pcs=limit_input_to_top_pcs,
             seed=seed,
         )
 
@@ -479,6 +487,9 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+
+        if self.limit_input_to_top_pcs is not None:
+            x_ng = x_ng[:, : self.limit_input_to_top_pcs]
 
         self._lazy_init(x_ng)
         self.update(x_ng, obs_names_n, metadata_n)
@@ -635,6 +646,8 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
             If ``True``, accumulate sparse cell expression vectors.
         projector:
             Optional frozen encoder mapping ``(N, G) → (N, D)``.
+        limit_input_to_top_pcs:
+            If specified, limit the input to this number of top principal components.
         seed:
             Random seed for reservoir sampling and reservoir merging. Sampling
             draws from a generator owned by this model, so results are unaffected
@@ -651,6 +664,7 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         min_metadata_diversity: int = 1,
         store_cell_data: bool = False,
         projector: nn.Module | None = None,
+        limit_input_to_top_pcs: int | None = None,
         seed: int = 0,
     ) -> None:
         # Set before super().__init__() so reset_parameters() can reference them.
@@ -664,6 +678,7 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
             min_metadata_diversity=min_metadata_diversity,
             store_cell_data=store_cell_data,
             projector=projector,
+            limit_input_to_top_pcs=limit_input_to_top_pcs,
             seed=seed,
         )
 
@@ -794,6 +809,9 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         if self.min_metadata_diversity > 1 and metadata_n is None:
             raise ValueError("metadata_n must be provided when min_metadata_diversity > 1.")
 
+        if self.limit_input_to_top_pcs is not None:
+            x_ng = x_ng[:, : self.limit_input_to_top_pcs]
+
         self.update(x_ng, obs_names_n, metadata_n)
         return {}
 
@@ -878,3 +896,23 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
             self.voxel_size.fill_(self.initial_voxel_size)
         if hasattr(self, "voxel_offset"):
             delattr(self, "voxel_offset")
+
+    # ------------------------------------------------------------------
+    # Lightning hooks
+    # ------------------------------------------------------------------
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Pre-register ``voxel_offset`` with its checkpointed shape before ``load_state_dict`` runs.
+
+        ``voxel_offset`` is registered lazily by :meth:`_lazy_init` on the first minibatch, so a
+        freshly constructed model that hasn't seen a batch yet won't have it, causing
+        ``load_state_dict`` to reject it as an unexpected key. This hook runs before Lightning's
+        ``load_state_dict`` call (see ``lightning.pytorch.core.saving._load_state``), so it can
+        pre-create a same-shaped placeholder buffer for the key to load into.
+        """
+        super().on_load_checkpoint(checkpoint)
+        if not hasattr(self, "voxel_offset"):
+            for key, tensor in checkpoint["state_dict"].items():
+                if key.rsplit(".", 1)[-1] == "voxel_offset":
+                    self.register_buffer("voxel_offset", torch.empty_like(tensor))
+                    break
