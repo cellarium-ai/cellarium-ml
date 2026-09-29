@@ -150,6 +150,23 @@ def _make_plaid_loader(
     return loader, var_names
 
 
+def _pin_zero_voxel_offset(model: StreamingPlaidGeometricSketch, module: CellariumModule | None = None) -> None:
+    """Fix a `StreamingPlaidGeometricSketch`'s grid origin at zero.
+
+    Tests built on `_make_plaid_data()` assert on its hand-picked, zero-anchored voxel
+    coordinates (e.g. `(0, 0)`, `(2, 2)`). Without this, `StreamingPlaidGeometricSketch`'s
+    data-driven `voxel_offset` (see `_lazy_init`) shifts those coordinates to arbitrary
+    values, breaking the literal assertions without changing the underlying grouping.
+
+    Pass `module` when the model is wrapped in a `CellariumModule` driven by `trainer.fit()`:
+    its `configure_model()` hook calls `model.reset_parameters()` again on the first training
+    step unless `is_initialized` is already set, which would otherwise silently clear this pin.
+    """
+    model.register_buffer("voxel_offset", torch.zeros(len(model.var_names_g)))
+    if module is not None:
+        module.hparams["is_initialized"] = True
+
+
 def test_plaid_sketch_fit(tmp_path):
     loader, var_names = _make_plaid_loader()
     model = StreamingPlaidGeometricSketch(
@@ -160,6 +177,7 @@ def test_plaid_sketch_fit(tmp_path):
         store_cell_data=True,
     )
     module = CellariumModule(model=model)
+    _pin_zero_voxel_offset(model, module)
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
     trainer.fit(module, train_dataloaders=loader)
 
@@ -176,7 +194,7 @@ def test_plaid_sketch_fit(tmp_path):
 
     # Retained cells really do live in the voxel they were assigned to.
     x_dense = res["x_ng"].to_dense()  # type: ignore[union-attr]
-    coords = torch.floor(x_dense / model.voxel_size).long()
+    coords = torch.floor((x_dense - model.voxel_offset) / model.voxel_size).long()
     assert {tuple(c.tolist()) for c in coords} == {(0, 0), (2, 2)}
 
 
@@ -185,6 +203,7 @@ def test_plaid_sketch_reservoir_caps_cells_per_voxel():
     model = StreamingPlaidGeometricSketch(
         var_names, initial_voxel_size=1.0, max_cells_per_bucket=3, store_cell_data=True
     )
+    _pin_zero_voxel_offset(model)
 
     model.update(torch.from_numpy(data), obs_names)
 
@@ -208,6 +227,7 @@ def test_plaid_sketch_coarsening():
         max_cells_per_bucket=1,
         store_cell_data=True,
     )
+    _pin_zero_voxel_offset(model)
 
     model.update(data, obs_names)
 
@@ -233,6 +253,7 @@ def test_plaid_sketch_metadata_diversity_pruning(tmp_path):
         store_cell_data=True,
     )
     module = CellariumModule(model=model)
+    _pin_zero_voxel_offset(model, module)
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
     trainer.fit(module, train_dataloaders=loader)
 
@@ -290,6 +311,34 @@ def test_plaid_sketch_sparse_input_matches_dense():
         dense_model.get_reservoir(return_cell_data=True)["x_ng"].to_dense(),  # type: ignore[union-attr]
         sparse_model.get_reservoir(return_cell_data=True)["x_ng"].to_dense(),  # type: ignore[union-attr]
     )
+
+
+def test_plaid_sketch_coarsening_escapes_zero_centered_degeneracy():
+    """Zero-centered data (e.g. PCA output) must not get stuck at ~1 cell/voxel forever.
+
+    Regression test: a grid floored around a fixed origin of zero has a permanent boundary
+    at zero, which bisects zero-centered, symmetric data down the middle on every axis no
+    matter how large voxel_size grows. The lazily-estimated voxel_offset exists to move that
+    permanent boundary away from the bulk of the data so coarsening can actually converge.
+    """
+    torch.manual_seed(0)
+    n, d = 2000, 20
+    data = torch.randn(n, d) * torch.empty(d).uniform_(1.0, 20.0)
+    var_names = np.array([f"gene_{i}" for i in range(d)])
+    obs_names = np.array([f"cell_{i}" for i in range(n)])
+
+    model = StreamingPlaidGeometricSketch(
+        var_names, target_voxels=10, initial_voxel_size=0.01, max_cells_per_bucket=1_000
+    )
+    # _coarsen() only doubles voxel_size once per update() call, so streaming in many small
+    # batches (as real training does) gives it enough chances to actually reach the data's scale.
+    batch_size = 20
+    for start in range(0, n, batch_size):
+        model.update(data[start : start + batch_size], obs_names[start : start + batch_size])
+
+    # Coarsening must actually reduce occupied buckets well below the cell count, converging
+    # near (or under) target_voxels rather than plateauing at ~1 cell/bucket.
+    assert model.num_filled_buckets < n // 10
 
 
 def test_plaid_sketch_projector_defines_voxel_space():
@@ -420,6 +469,7 @@ def test_apply_bucket_filters_density():
     data, var_names, obs_names, _ = _make_plaid_data()
     # voxels: (0, 0) → 6 seen, (2, 2) → 6 seen, (5, 5) → 2 seen
     model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=6)
+    _pin_zero_voxel_offset(model)
     model.update(torch.from_numpy(data), obs_names)
 
     assert set(model._bucket_obs_names) == {(0, 0), (2, 2), (5, 5)}
@@ -435,6 +485,7 @@ def test_apply_bucket_filters_diversity():
     data, var_names, obs_names, metadata = _make_plaid_data()
     # metadata: (0,0) → only category 0; (2,2) → categories 0 and 1; (5,5) → only 0
     model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=6)
+    _pin_zero_voxel_offset(model)
     model.update(torch.from_numpy(data), obs_names, metadata)
 
     model.apply_bucket_filters(min_metadata_diversity=2)

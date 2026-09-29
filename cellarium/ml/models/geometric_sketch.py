@@ -183,7 +183,7 @@ class StreamingGeometricSketch(CellariumModel):
 
         if return_cell_data:
             if all_cells:
-                result["x_ng"] = torch.stack([c.to_dense() for c in all_cells]).to_sparse_csr()
+                result["x_ng"] = torch.cat([c.unsqueeze(0) for c in all_cells], dim=0).to_sparse_csr()
             else:
                 result["x_ng"] = torch.zeros(0, len(self.var_names_g)).to_sparse_csr()
 
@@ -419,7 +419,7 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
         if self.projector is not None:
             with torch.no_grad():
                 sample = x_ng[:1].float()
-                if sample.is_sparse:
+                if sample.layout != torch.strided:
                     sample = sample.to_dense()
                 out = self.projector(sample)
             D = out.shape[1]
@@ -506,7 +506,7 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
             Number of cells inserted or replaced in this update.
         """
         x_float = x_ng.float()
-        x_dense = x_float.to_dense() if x_float.is_sparse else x_float
+        x_dense = x_float.to_dense() if x_float.layout != torch.strided else x_float
 
         bucket_ids = self._compute_bucket_ids(x_dense)
         inserted_count = 0
@@ -601,6 +601,12 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
     that fail to meet minimum cell count (density) or minimum categorical diversity
     (e.g., number of unique datasets or patients) thresholds.
 
+    The grid's per-axis origin is not fixed at zero: it is estimated once from the first
+    minibatch (a tail-ward offset derived from that batch's mean and std) and then held
+    fixed. This avoids a permanent grid boundary sitting at zero, which would otherwise
+    bisect zero-centered embeddings (e.g. PCA output) down the middle on every axis and
+    prevent coarsening from ever merging cells no matter how large ``voxel_size`` grows.
+
     Only single-device training is supported. A ``RuntimeError`` is raised at the
     start of training if more than one device is detected.
 
@@ -641,7 +647,7 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         target_voxels: int = 100_000,
         initial_voxel_size: float = 0.1,
         max_cells_per_bucket: int = 1,
-        min_cells_per_bucket: int = 5,
+        min_cells_per_bucket: int = 1,
         min_metadata_diversity: int = 1,
         store_cell_data: bool = False,
         projector: nn.Module | None = None,
@@ -664,6 +670,30 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         # Registered after super().__init__() (which calls reset_parameters()); the
         # reset_parameters() override checks hasattr so it safely skips on first call.
         self.register_buffer("voxel_size", torch.tensor(initial_voxel_size, dtype=torch.float32))
+
+    # ------------------------------------------------------------------
+    # Lazy initialization
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _lazy_init(self, z: torch.Tensor) -> None:
+        """Estimate a fixed per-axis grid offset from the first minibatch seen.
+
+        A grid boundary always sits at ``voxel_offset`` itself, for every ``voxel_size``
+        (``floor((offset - offset) / voxel_size) == 0`` regardless of scale). Left at the
+        default of zero, that permanent boundary runs straight through the densest part of
+        zero-centered embeddings (e.g. PCA output), so growing ``voxel_size`` can never merge
+        cells that straddle it: on each axis roughly half the cells are just below zero and
+        half just above, and no amount of coarsening moves that dividing line. Anchoring the
+        boundary near a tail of the first batch's per-axis distribution instead means that once
+        ``voxel_size`` grows to span the data's real spread, cells collapse onto the same side
+        of it rather than being perpetually split down the middle.
+        """
+        if hasattr(self, "voxel_offset"):
+            return
+        # unbiased=False avoids NaN when the first minibatch has a single cell (N=1).
+        offset = z.mean(dim=0) - 10.0 * z.std(dim=0, unbiased=False)
+        self.register_buffer("voxel_offset", offset)
 
     # ------------------------------------------------------------------
     # Core algorithm
@@ -775,14 +805,15 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         metadata_n: np.ndarray | None = None,
     ) -> int:
         x_float = x_ng.float()
-        x_dense = x_float.to_dense() if x_float.is_sparse else x_float
+        x_dense = x_float.to_dense() if x_float.layout != torch.strided else x_float
 
         if self.projector is not None:
             z = self.projector(x_dense)
         else:
             z = x_dense
 
-        coords = torch.floor(z / self.voxel_size).long()
+        self._lazy_init(z)
+        coords = torch.floor((z - self.voxel_offset) / self.voxel_size).long()
         unique_coords, inverse_indices = torch.unique(coords, dim=0, return_inverse=True)
         inserted_count = 0
 
@@ -845,3 +876,5 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         super().reset_parameters()
         if hasattr(self, "voxel_size"):
             self.voxel_size.fill_(self.initial_voxel_size)
+        if hasattr(self, "voxel_offset"):
+            delattr(self, "voxel_offset")
