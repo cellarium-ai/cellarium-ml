@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.api.data_analysis import CellariumData
-from cellarium.ml.models import StreamingPlaidGeometricSketch
+from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
 from cellarium.ml.utilities.data import AnnDataField, collate_fn, to_scipy_csr
 
@@ -35,6 +35,7 @@ def geometric_sketch(
     cdata: CellariumData,
     target_n_cells: int = 1_000_000,
     embedding_module: CellariumModule | None = None,
+    n_pcs: int | None = None,
     return_new_adata: bool = True,
 ) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
     """
@@ -47,6 +48,8 @@ def geometric_sketch(
             approximate.
         embedding_module: A trained :class:`CellariumModule` containing an embedding model such as PCA or scVI.
             If not provided, the embedding will be a random matrix projection, after NormalizeTotal and Log1p.
+        n_pcs: Number of principal components to use for the embedding if the embedding module is PCA.
+            If None, all components are used. Raises ValueError if module is not PCA.
         return_new_adata: Whether to return a new AnnData object with the selected geometric sketch cells.
 
     Returns:
@@ -60,6 +63,9 @@ def geometric_sketch(
     datamodule: CellariumAnnDataDataModule = cdata.datamodule
     if "obs_names_n" not in datamodule.batch_keys:
         raise ValueError("batch_keys in the datamodule needs to contain key 'obs_names_n' for geometric_sketch.")
+
+    if n_pcs is not None and not isinstance(embedding_module.model, IncrementalPCA):
+        raise ValueError("n_pcs can only be specified if the embedding_module's model is IncrementalPCA.")
 
     if embedding_module is None:
         embedding_module = CellariumModule(
@@ -86,6 +92,7 @@ def geometric_sketch(
             min_cells_per_bucket=min_cells_per_bucket_qc_threshold,
             max_cells_per_bucket=target_bucket_ncells,
             projector=None,
+            limit_input_to_top_pcs=n_pcs,
             store_cell_data=return_new_adata,
         ),
     )
