@@ -7,12 +7,26 @@ import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils._pytree import tree_map
 
-from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.api.data_analysis import CellariumData
-from cellarium.ml.cli import compute_var_names_g
 from cellarium.ml.models import StreamingPlaidGeometricSketch
 from cellarium.ml.transforms import Log1p, NormalizeTotal
+from cellarium.ml.utilities.data import collate_fn
+
+
+def compute_var_names_g(module: CellariumModule, datamodule: CellariumAnnDataDataModule) -> np.ndarray:
+    # Run the embedding pipeline's `predict` (rather than `forward`, which is the training
+    # step and doesn't update `var_names_g`) so that models like PCA report their actual
+    # output var names (e.g. "PC1", "PC2", ...) instead of the input gene names.
+    adata = datamodule.dadc[0]
+    batch = tree_map(lambda field: field(adata), datamodule.batch_keys)
+    collated = collate_fn([batch])
+    pipeline = CellariumPipeline(list(module.cpu_transforms or []) + list(module.transforms) + [module.model])
+    var_names_g = pipeline.predict(collated)["var_names_g"]
+    assert isinstance(var_names_g, np.ndarray)
+    return var_names_g
 
 
 def geometric_sketch(
@@ -53,13 +67,7 @@ def geometric_sketch(
                 torch.nn.Linear(in_features=datamodule.dadc.shape[1], out_features=128),
             ],
         )
-
-    var_names_g = compute_var_names_g(
-        cpu_transforms=embedding_module.cpu_transforms,  # type: ignore[arg-type]
-        transforms=embedding_module.transforms + [embedding_module.model],  # type: ignore[arg-type]
-        data=datamodule,
-    )
-    print("Computed variable names for geometric sketching:", var_names_g)
+    var_names_g = compute_var_names_g(embedding_module, datamodule)
 
     target_bucket_ncells = 5
     min_cells_per_bucket_qc_threshold = 2
