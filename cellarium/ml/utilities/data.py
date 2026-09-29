@@ -184,6 +184,10 @@ def keep_sparse(x: scipy.sparse.spmatrix) -> scipy.sparse.spmatrix:
     return x
 
 
+def to_float_tensor(s: pd.Series) -> torch.Tensor:
+    return torch.from_numpy(s.to_numpy()).float()
+
+
 def to_torch_sparse_csr(x: scipy.sparse.spmatrix) -> torch.Tensor:
     """
     Convert a scipy sparse matrix to a :class:`torch.sparse_csr_tensor` (float32, CPU).

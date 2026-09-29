@@ -1,20 +1,19 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .utils import (
+from cellarium.ml.api.data_analysis import CellariumData, get_datamodule
+from cellarium.ml.api.utils import (
     get_h5ad_file_var_names_g,
     get_h5ad_files_limits,
     get_h5ad_files_n_cells,
     h5ad_paths_from_google_bucket,
-    datamodule_var_names_g,
-    datamodule_obs_nunique,
 )
 
 __all__ = [
-    "get_h5ad_files_n_cells",
+    "CellariumData",
+    "get_datamodule",
     "get_h5ad_file_var_names_g",
-    "h5ad_paths_from_google_bucket",
     "get_h5ad_files_limits",
-    "datamodule_var_names_g",
-    "datamodule_obs_nunique",
+    "get_h5ad_files_n_cells",
+    "h5ad_paths_from_google_bucket",
 ]

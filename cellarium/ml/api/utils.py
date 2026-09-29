@@ -2,34 +2,30 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+
 os.environ["GRPC_VERBOSITY"] = "ERROR"
-os.environ["GLOG_minloglevel"] = "2" 
+os.environ["GLOG_minloglevel"] = "2"
 os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
 os.environ["PYTHONWARNINGS"] = "ignore::FutureWarning"
 
-import concurrent.futures
-from typing import Callable
 import multiprocessing as mp
+from typing import Callable
 
-import gcsfs
 import h5py
 import numpy as np
 import requests
 from tqdm import tqdm
 
-from cellarium.ml.data import DistributedAnnDataCollection
-from cellarium.ml.utilities.data import AnnDataField, keep_sparse
-from cellarium.ml import CellariumAnnDataDataModule
-
-
 # Create a global placeholder for the process workers so they only authenticate once.
 _GCS_FS = None
+
 
 def get_gcs_fs():
     """Ensure each worker process only authenticates and opens a session ONCE."""
     global _GCS_FS
     if _GCS_FS is None:
         import gcsfs
+
         _GCS_FS = gcsfs.GCSFileSystem()
     return _GCS_FS
 
@@ -114,36 +110,20 @@ def get_h5ad_file_n_cells(h5ad_path: str) -> int:
     return n_cells
 
 
-# def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
-#     """
-#     Get the number of cells in each h5ad file in a list of paths.
-#     ThreadPoolExecutor is used (preserves order).
-#     """
-#     ctx = mp.get_context('spawn')
-
-#     # return [get_h5ad_file_n_cells(h5ad_path) for h5ad_path in h5ad_paths]
-#     with concurrent.futures.ProcessPoolExecutor(max_workers=None, mp_context=ctx) as executor:
-#         return list(
-#             tqdm(
-#                 executor.map(get_h5ad_file_n_cells, h5ad_paths),
-#                 total=len(h5ad_paths),
-#                 desc="Reading n_obs from h5ad files",
-#                 unit="file",
-#             )
-#         )
-
 def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
     """
     Get the number of cells using a process pool that terminates instantly.
     """
     # opt for a quick for loop if the number of files is small
     if len(h5ad_paths) < 40:
-        return [get_h5ad_file_n_cells(h5ad_path) 
-                for h5ad_path in tqdm(h5ad_paths, desc="Reading n_obs from h5ad files", unit="file")]
+        return [
+            get_h5ad_file_n_cells(h5ad_path)
+            for h5ad_path in tqdm(h5ad_paths, desc="Reading n_obs from h5ad files", unit="file")
+        ]
 
-    ctx = mp.get_context('spawn')
+    ctx = mp.get_context("spawn")
     pool = ctx.Pool(processes=12)
-    
+
     try:
         # pool.imap preserves the order of the results, just like executor.map
         results = list(
@@ -158,7 +138,7 @@ def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
     finally:
         # as soon as we have our list, instantly nuke the worker processes.
         pool.terminate()
-        pool.join() # Wait for the OS to acknowledge they are dead (takes milliseconds)
+        pool.join()  # Wait for the OS to acknowledge they are dead (takes milliseconds)
 
 
 def get_h5ad_files_limits(h5ad_paths: list[str], nexus_extract_uniform_sizes: bool = False) -> np.ndarray:
@@ -226,35 +206,3 @@ def h5ad_paths_from_google_bucket(gs_bucket_path: str) -> list[str]:
     fs = get_gcs_fs()
     paths = fs.ls(gs_bucket_path[5:])
     return [f"gs://{path}" for path in paths if path.endswith(".h5ad")]
-
-
-def get_datamodule(h5ad_paths, obs_columns: dict[str, Callable] = {}, batch_size=4096, shuffle=True, train_size=1.0, stage="fit"):
-    datamodule = CellariumAnnDataDataModule(
-        dadc=DistributedAnnDataCollection(
-            filenames=h5ad_paths,
-            limits=get_h5ad_files_limits(h5ad_paths),
-        ),
-        batch_keys={
-            "x_ng": AnnDataField(
-                attr="X", 
-                convert_fn=keep_sparse,
-            ),
-            "var_names_g": AnnDataField(attr="var_names"),
-            "obs_names_n": AnnDataField(attr="obs_names"),
-            **{col: AnnDataField(attr="obs", key=col, convert_fn=fn) for col, fn in obs_columns.items()},
-        },
-        batch_size=batch_size,
-        shuffle=shuffle,
-        train_size=train_size,
-    )
-
-    datamodule.setup(stage=stage)
-    return datamodule
-
-
-def datamodule_var_names_g(datamodule, column: str | None = 'gene_name'):
-    return datamodule.dadc.adatas[0].var[column]
-
-
-def datamodule_obs_nunique(datamodule, column: str):
-    return datamodule.dadc.adatas[0].obs[column].nunique()
