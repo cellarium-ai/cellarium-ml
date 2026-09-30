@@ -7,6 +7,7 @@ from cellarium.ml.api.utils import (
     get_h5ad_files_limits,
     get_h5ad_files_n_cells,
     h5ad_paths_from_google_bucket,
+    write_obs_parquet,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "get_h5ad_files_limits",
     "get_h5ad_files_n_cells",
     "h5ad_paths_from_google_bucket",
+    "write_obs_parquet",
 ]
