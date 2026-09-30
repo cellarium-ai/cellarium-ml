@@ -64,8 +64,12 @@ def geometric_sketch(
     if "obs_names_n" not in datamodule.batch_keys:
         raise ValueError("batch_keys in the datamodule needs to contain key 'obs_names_n' for geometric_sketch.")
 
-    if n_pcs is not None and not isinstance(embedding_module.model, IncrementalPCA):
-        raise ValueError("n_pcs can only be specified if the embedding_module's model is IncrementalPCA.")
+    if n_pcs is not None:
+        if embedding_module is None:
+            raise ValueError("n_pcs can only be specified if an embedding_module is provided.")
+        else:
+            if not isinstance(embedding_module.model, IncrementalPCA):
+                raise ValueError("n_pcs can only be specified if the embedding_module's model is IncrementalPCA.")
 
     if embedding_module is None:
         embedding_module = CellariumModule(
