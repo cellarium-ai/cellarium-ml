@@ -103,6 +103,7 @@ class LazyObs:
             if self._parquet_path is None:
                 tmpdir = tempfile.mkdtemp(prefix="cellarium_obs_parquet_")
                 parquet_path = os.path.join(tmpdir, "obs.parquet")
+                assert self._h5ad_paths is not None
                 write_obs_parquet(self._h5ad_paths, parquet_path)
                 self._parquet_path = parquet_path
             dataset = ds.dataset(self._parquet_path, format="parquet")
@@ -160,7 +161,9 @@ class LazyObs:
         return self._read(columns=None)
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(parquet_path={self._parquet_path!r}, n_obs={len(self)}, columns={self.columns})"
+        return (
+            f"{self.__class__.__name__}(parquet_path={self._parquet_path!r}, n_obs={len(self)}, columns={self.columns})"
+        )
 
 
 class _LazyObsLoc:

@@ -143,7 +143,7 @@ class TestLazyObsAutoBuild:
 
         result = obs.to_frame()
         assert obs._parquet_path is not None  # built lazily, on the first real query
-        pd.testing.assert_frame_equal(
+        pd.testing.assert_frame_equal(  # type: ignore[unreachable]
             result.sort_index().astype(object), expected.sort_index().astype(object), check_dtype=False
         )
 
