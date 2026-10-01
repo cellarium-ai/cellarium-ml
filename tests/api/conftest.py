@@ -64,4 +64,4 @@ def cdata(make_h5ad_files) -> CellariumData:
     n_files=2 to stay within CellariumData's hardcoded DistributedAnnDataCollection max_cache_size=2.
     """
     h5ad_paths = make_h5ad_files(n_files=2, cells_per_file=20, n_genes=30)
-    return CellariumData(h5ad_paths=h5ad_paths, accelerator="cpu")
+    return CellariumData(h5ad_paths=h5ad_paths)

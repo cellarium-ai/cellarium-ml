@@ -141,13 +141,13 @@ def test_obsm_mapping_length_mismatch_raises(obs_parquet):
 
 
 def test_cellarium_data_obs_is_always_lazy_by_default(h5ad_paths):
-    cdata = CellariumData(h5ad_paths=h5ad_paths, accelerator="cpu")
+    cdata = CellariumData(h5ad_paths=h5ad_paths)
     assert isinstance(cdata.obs, LazyObs)
     assert cdata.obs._dataset is None  # constructing CellariumData shouldn't build/touch obs
 
 
 def test_cellarium_data_repr_does_not_force_obs_build(h5ad_paths):
-    cdata = CellariumData(h5ad_paths=h5ad_paths, accelerator="cpu")
+    cdata = CellariumData(h5ad_paths=h5ad_paths)
     repr(cdata)
     assert cdata.obs._dataset is None
 
@@ -155,7 +155,7 @@ def test_cellarium_data_repr_does_not_force_obs_build(h5ad_paths):
 def test_cellarium_data_default_obs_is_queryable_and_matches_h5ad_files(h5ad_paths):
     expected = pd.concat([ad.read_h5ad(p, backed="r").obs.copy() for p in h5ad_paths], axis=0)
 
-    cdata = CellariumData(h5ad_paths=h5ad_paths, accelerator="cpu")
+    cdata = CellariumData(h5ad_paths=h5ad_paths)
     name = expected.index[0]
     result = cdata.obs.loc[[name]]
     assert list(result.index) == [name]
@@ -168,7 +168,7 @@ def test_cellarium_data_obs_parquet_path_is_lazy_and_queryable(tmp_path, h5ad_pa
     write_obs_parquet(h5ad_paths, output_path, processes=2)
     expected = pd.concat([ad.read_h5ad(p, backed="r").obs.copy() for p in h5ad_paths], axis=0)
 
-    cdata = CellariumData(h5ad_paths=h5ad_paths, obs_parquet_path=output_path, accelerator="cpu")
+    cdata = CellariumData(h5ad_paths=h5ad_paths, obs_parquet_path=output_path)
     assert isinstance(cdata.obs, LazyObs)
     assert cdata.obs._dataset is None  # constructing CellariumData shouldn't touch the parquet file
 
@@ -183,7 +183,7 @@ def test_cellarium_data_obs_parquet_path_is_lazy_and_queryable(tmp_path, h5ad_pa
 
 
 def test_cellarium_data_var_matches_source_h5ad(h5ad_paths):
-    cdata = CellariumData(h5ad_paths=h5ad_paths, accelerator="cpu")
+    cdata = CellariumData(h5ad_paths=h5ad_paths)
     expected_var = ad.read_h5ad(h5ad_paths[0], backed="r").var.copy()
     pd.testing.assert_frame_equal(cdata.var.astype(object), expected_var.astype(object), check_dtype=False)
 
@@ -193,7 +193,7 @@ def test_cellarium_data_var_matches_source_h5ad(h5ad_paths):
 
 @pytest.fixture
 def cdata(h5ad_paths):
-    return CellariumData(h5ad_paths=h5ad_paths, accelerator="cpu")
+    return CellariumData(h5ad_paths=h5ad_paths)
 
 
 def test_cellarium_data_hvg_defaults_to_none(cdata):

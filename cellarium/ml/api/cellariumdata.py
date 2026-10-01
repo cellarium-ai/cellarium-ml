@@ -9,6 +9,7 @@ from typing import Callable, Iterator, Literal, Sequence
 import numpy as np
 import pandas as pd
 import pyarrow.dataset as ds
+import torch
 
 from cellarium.ml import CellariumAnnDataDataModule
 from cellarium.ml.api.utils import get_h5ad_files_limits, write_obs_parquet
@@ -26,7 +27,6 @@ def get_datamodule(
     stage: Literal["fit", "validate", "predict", "test"] = "fit",
     nexus_extract_uniform_sizes: bool | None = None,
     num_workers: int = 0,
-    accelerator: Literal["cpu", "cuda", "mps"] = "cpu",
 ):
     if nexus_extract_uniform_sizes is None:
         nexus_extract_uniform_sizes = all(["extract_files" in path for path in h5ad_paths])  # a guess
@@ -45,7 +45,7 @@ def get_datamodule(
             "x_ng": AnnDataField(
                 attr="X",
                 # mps has no kernel to move a sparse CSR tensor onto device, so use sparse COO there instead
-                convert_fn=to_torch_sparse_coo if accelerator == "mps" else to_torch_sparse_csr,  # type: ignore[arg-type]
+                convert_fn=to_torch_sparse_coo if torch.mps.is_available() else to_torch_sparse_csr,  # type: ignore[arg-type]
             ),
             "var_names_g": AnnDataField(attr="var_names") if var_key is None else AnnDataField(attr="var", key=var_key),
             "obs_names_n": AnnDataField(attr="obs_names"),
@@ -202,7 +202,6 @@ class CellariumData:
         stage: Literal["fit", "validate", "predict", "test"] = "fit",
         nexus_extract_uniform_sizes: bool | None = None,
         datamodule_num_workers: int = 0,
-        accelerator: Literal["cpu", "cuda", "mps"] = "cuda",
         obs_parquet_path: str | None = None,
     ):
         if total_mrna_umis_column is not None:
@@ -217,7 +216,6 @@ class CellariumData:
             stage=stage,
             nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
             num_workers=datamodule_num_workers,
-            accelerator=accelerator,
         )
         # lazy: nothing is read, and no obs parquet database is built, until `.obs` is queried
         self._obs = LazyObs(obs_parquet_path, h5ad_paths=h5ad_paths)
