@@ -8,7 +8,7 @@ from lightning.pytorch.callbacks import EarlyStopping
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._datamodule_context import temporary_batch_keys, temporary_val_split
-from cellarium.ml.api.data_analysis import CellariumData
+from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import SingleCellVariationalInference
 from cellarium.ml.transforms import Densify
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cellarium.ml.api.data_analysis import CellariumData, LazyObs, ObsmMapping
+from cellarium.ml.api.cellariumdata import CellariumData, LazyObs, ObsmMapping
 from cellarium.ml.api.utils import write_obs_parquet
 
 

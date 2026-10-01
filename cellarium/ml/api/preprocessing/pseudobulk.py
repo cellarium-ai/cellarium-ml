@@ -10,7 +10,7 @@ import pandas as pd
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
-from cellarium.ml.api.data_analysis import CellariumData
+from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import OnePassMeanVarStd
 from cellarium.ml.transforms import Densify, Log1p, NormalizeTotal, ZScore
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes

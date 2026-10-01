@@ -8,7 +8,7 @@ import lightning.pytorch as pl
 import pandas as pd
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
-from cellarium.ml.api import CellariumData
+from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
 from cellarium.ml.models import HVGSeuratV3, OnePassMeanVarStd
 from cellarium.ml.preprocessing import kotliar_compute_highly_variable_genes, seurat_compute_highly_variable_genes

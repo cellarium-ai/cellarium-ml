@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from cellarium.ml.api.data_analysis import CellariumData
+from cellarium.ml.api.cellariumdata import CellariumData
 
 
 def _make_h5ad_files(

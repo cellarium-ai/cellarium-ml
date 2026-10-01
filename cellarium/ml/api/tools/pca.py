@@ -6,7 +6,7 @@ from typing import Literal
 import lightning.pytorch as pl
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
-from cellarium.ml.api import CellariumData
+from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import IncrementalPCA, OnePassMeanVarStd
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal, ZScore
 

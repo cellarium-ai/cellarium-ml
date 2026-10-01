@@ -12,7 +12,7 @@ from torch.utils._pytree import tree_map
 from tqdm import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
-from cellarium.ml.api.data_analysis import CellariumData
+from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
