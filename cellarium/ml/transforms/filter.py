@@ -1,7 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import cache
 from typing import Any
 
@@ -10,7 +10,7 @@ import scipy.sparse
 import torch
 from torch import nn
 
-from cellarium.ml.utilities.data import to_scipy_csr, to_torch_sparse_csr
+from cellarium.ml.utilities.data import to_scipy_coo, to_scipy_csr, to_torch_sparse_coo, to_torch_sparse_csr
 from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
@@ -122,17 +122,21 @@ class Filter(nn.Module):
 
             When ``x_ng`` is a :class:`scipy.sparse.spmatrix` (e.g. when this transform is used as a
             ``cpu_transform`` operating on data from
-            :func:`~cellarium.ml.utilities.data.keep_sparse`) or a CPU
+            :func:`~cellarium.ml.utilities.data.keep_sparse`), a CPU
             :class:`torch.sparse_csr_tensor` (e.g. from
-            :func:`~cellarium.ml.utilities.data.to_torch_sparse_csr`), column filtering is
-            performed with scipy (torch has no efficient sparse CSR column indexing) and the
-            result is returned as a :class:`torch.sparse_csr_tensor`.  The ``allow_missing=True``
-            path always returns a dense :class:`torch.Tensor`.
+            :func:`~cellarium.ml.utilities.data.to_torch_sparse_csr`), or a CPU
+            :class:`torch.sparse_coo_tensor` (e.g. from
+            :func:`~cellarium.ml.utilities.data.to_torch_sparse_coo`, used on the ``mps``
+            accelerator since it has no sparse CSR support), column filtering is performed with
+            scipy (torch has no efficient sparse column indexing) and the result is returned in
+            the same torch sparse layout it arrived in (CSR stays CSR, COO stays COO; plain scipy
+            input becomes CSR).  The ``allow_missing=True`` path always returns a dense
+            :class:`torch.Tensor`.
 
         Args:
             x_ng:
                 Gene counts.  A dense :class:`torch.Tensor`, a scipy sparse matrix, or a CPU
-                :class:`torch.sparse_csr_tensor`.
+                :class:`torch.sparse_csr_tensor` or :class:`torch.sparse_coo_tensor`.
             var_names_g:
                 The list of the variable names in the input data.
 
@@ -145,12 +149,18 @@ class Filter(nn.Module):
             - ``var_names_g``: Gene names corresponding to the output columns.
         """
         if scipy.sparse.issparse(x_ng):
-            return self._forward_sparse(x_ng, var_names_g)
+            return self._forward_sparse(x_ng, var_names_g, to_torch_sparse_fn=to_torch_sparse_csr)
 
         if isinstance(x_ng, torch.Tensor) and x_ng.layout == torch.sparse_csr:
             # Torch has no efficient column indexing for sparse CSR tensors; delegate to scipy,
             # which does, via a zero-copy view of the same underlying buffers.
-            return self._forward_sparse(to_scipy_csr(x_ng), var_names_g)
+            return self._forward_sparse(to_scipy_csr(x_ng), var_names_g, to_torch_sparse_fn=to_torch_sparse_csr)
+
+        if isinstance(x_ng, torch.Tensor) and x_ng.layout == torch.sparse_coo:
+            # scipy's coo_matrix doesn't support column indexing at all, so convert to CSR for
+            # the filtering step, then back to COO for output -- the only sparse layout the mps
+            # accelerator (the source of COO x_ng) can hold.
+            return self._forward_sparse(to_scipy_coo(x_ng).tocsr(), var_names_g, to_torch_sparse_fn=to_torch_sparse_coo)
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
 
@@ -179,13 +189,15 @@ class Filter(nn.Module):
         self,
         x_ng: scipy.sparse.spmatrix,
         var_names_g: np.ndarray,
+        to_torch_sparse_fn: Callable[[scipy.sparse.spmatrix], torch.Tensor],
     ) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Sparse-input path for :meth:`forward`.
 
         Filters columns using scipy (no dense allocation for the full gene set), then converts
-        the result to a :class:`torch.sparse_csr_tensor` so that dataloader workers can place
-        it in shared memory for zero-copy transfer to the main process.
+        the result to a torch sparse tensor via ``to_torch_sparse_fn`` (CSR or COO, matching
+        the layout ``x_ng`` arrived in) so that dataloader workers can place it in shared memory
+        for zero-copy transfer to the main process.
 
         The ``allow_missing=True`` path densifies after filtering because zero-fill semantics
         require allocating the full output width.
@@ -209,13 +221,13 @@ class Filter(nn.Module):
         elif self.ordering:
             assert isinstance(result, np.ndarray)
             return {
-                "x_ng": to_torch_sparse_csr(x_ng[:, result]),
+                "x_ng": to_torch_sparse_fn(x_ng[:, result]),
                 "var_names_g": self.filter_list.copy(),
             }
         else:
             assert isinstance(result, np.ndarray)
             return {
-                "x_ng": to_torch_sparse_csr(x_ng[:, result]),
+                "x_ng": to_torch_sparse_fn(x_ng[:, result]),
                 "var_names_g": var_names_g[result],
             }
 

@@ -13,7 +13,7 @@ import pyarrow.dataset as ds
 from cellarium.ml import CellariumAnnDataDataModule
 from cellarium.ml.api.utils import get_h5ad_files_limits, write_obs_parquet
 from cellarium.ml.data import DistributedAnnDataCollection
-from cellarium.ml.utilities.data import AnnDataField, densify, to_float_tensor, to_torch_sparse_csr
+from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
 
 
 def get_datamodule(
@@ -44,7 +44,8 @@ def get_datamodule(
         batch_keys={
             "x_ng": AnnDataField(
                 attr="X",
-                convert_fn=to_torch_sparse_csr if accelerator not in ["mps"] else densify,  # type: ignore[arg-type]
+                # mps has no kernel to move a sparse CSR tensor onto device, so use sparse COO there instead
+                convert_fn=to_torch_sparse_coo if accelerator == "mps" else to_torch_sparse_csr,  # type: ignore[arg-type]
             ),
             "var_names_g": AnnDataField(attr="var_names") if var_key is None else AnnDataField(attr="var", key=var_key),
             "obs_names_n": AnnDataField(attr="obs_names"),

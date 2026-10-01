@@ -224,6 +224,29 @@ def to_torch_sparse_csr(x: scipy.sparse.spmatrix) -> torch.Tensor:
         )
 
 
+def to_torch_sparse_coo(x: scipy.sparse.spmatrix) -> torch.Tensor:
+    """
+    Convert a scipy sparse matrix to a coalesced :class:`torch.sparse_coo_tensor` (float32, CPU).
+
+    Use as ``convert_fn`` for :class:`~cellarium.ml.utilities.data.AnnDataField` on the MPS
+    accelerator, which has no kernel to move a :class:`torch.sparse_csr_tensor` onto an ``mps``
+    device (``to_torch_sparse_csr`` raises ``NotImplementedError`` there). Sparse COO tensors,
+    by contrast, can be moved to ``mps`` and densified on-device, so this keeps the dataloader
+    -> GPU transfer sparse instead of densifying on CPU. Densified by
+    :class:`~cellarium.ml.transforms.Densify`, same as ``to_torch_sparse_csr``.
+
+    Args:
+        x: Sparse matrix.  Converted to COO format if not already.
+
+    Returns:
+        A coalesced :class:`torch.sparse_coo_tensor` on CPU.
+    """
+    coo = x.tocoo()
+    indices = torch.from_numpy(np.vstack([coo.row, coo.col]).astype(np.int64))
+    values = torch.from_numpy(coo.data.astype(np.float32, copy=False))
+    return torch.sparse_coo_tensor(indices, values, size=coo.shape, dtype=torch.float32, device="cpu").coalesce()
+
+
 def to_scipy_csr(x: torch.Tensor) -> scipy.sparse.csr_matrix:
     """
     Convert a CPU :class:`torch.sparse_csr_tensor` to a :class:`scipy.sparse.csr_matrix`.
@@ -244,6 +267,33 @@ def to_scipy_csr(x: torch.Tensor) -> scipy.sparse.csr_matrix:
         raise ValueError(f"`to_scipy_csr` only supports CPU tensors. Got device {x.device}")
     return scipy.sparse.csr_matrix(
         (x.values().numpy(), x.col_indices().numpy(), x.crow_indices().numpy()),
+        shape=tuple(x.shape),
+    )
+
+
+def to_scipy_coo(x: torch.Tensor) -> scipy.sparse.coo_matrix:
+    """
+    Convert a CPU, coalesced :class:`torch.sparse_coo_tensor` to a :class:`scipy.sparse.coo_matrix`.
+
+    The underlying ``indices`` and ``values`` buffers are wrapped as numpy arrays without
+    copying, so this is cheap enough to use as a stepping stone for operations (e.g. column
+    indexing) that torch's sparse COO support does not implement.
+
+    Args:
+        x: A CPU, coalesced tensor with ``torch.sparse_coo`` layout.
+
+    Returns:
+        A :class:`scipy.sparse.coo_matrix` view of ``x``.
+    """
+    if x.layout != torch.sparse_coo:
+        raise ValueError(f"Expected a tensor with `torch.sparse_coo` layout. Got {x.layout}")
+    if x.device.type != "cpu":
+        raise ValueError(f"`to_scipy_coo` only supports CPU tensors. Got device {x.device}")
+    if not x.is_coalesced():
+        x = x.coalesce()
+    indices = x.indices().numpy()
+    return scipy.sparse.coo_matrix(
+        (x.values().numpy(), (indices[0], indices[1])),
         shape=tuple(x.shape),
     )
 
