@@ -29,6 +29,7 @@ dependencies = [
   "jsonargparse[signatures]==4.27.7",
   "lightning>=2.2.0,<=2.5.2",
   "numpy<=1.26.4",
+  "pyarrow",
   "pyro-ppl>=1.9.1",
   "pytest",
   "scikit-misc==0.5.1",
@@ -40,7 +41,6 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
-api = ["pandas", "pyarrow"]
 lint = ["ruff"]
 mypy = ["mypy", "types-PyYAML"]
 ontology = ["networkx", "owlready2"]
@@ -61,7 +61,7 @@ docs = [
   "sphinx_rtd_theme",
   "sphinx-copybutton",
 ]
-dev = ["cellarium-ml[api,docs,lint,mypy,test]"]
+dev = ["cellarium-ml[docs,lint,mypy,test]"]
 
 [project.scripts]
 cellarium-ml = "cellarium.ml.cli:main"
