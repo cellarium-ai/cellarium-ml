@@ -29,6 +29,7 @@ dependencies = [
   "jsonargparse[signatures]==4.27.7",
   "lightning>=2.2.0,<=2.5.2",
   "numpy<=1.26.4",
+  "pyarrow",
   "pyro-ppl>=1.9.1",
   "pytest",
   "scikit-misc==0.5.1",

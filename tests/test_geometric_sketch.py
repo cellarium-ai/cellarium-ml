@@ -150,16 +150,46 @@ def _make_plaid_loader(
     return loader, var_names
 
 
+def _pin_voxel_grid(
+    model: StreamingPlaidGeometricSketch,
+    dim: int,
+    voxel_size: float = 1.0,
+    voxel_offset: float = 0.0,
+    module: CellariumModule | None = None,
+) -> None:
+    """Fix a `StreamingPlaidGeometricSketch`'s grid at a known size and origin.
+
+    Tests built on `_make_plaid_data()` assert on its hand-picked, unit-spaced, zero-anchored
+    voxel coordinates (e.g. `(0, 0)`, `(2, 2)`). Without this, `StreamingPlaidGeometricSketch`'s
+    data-driven `_lazy_init` picks an arbitrary per-axis `voxel_offset`/`voxel_size`/`axis_std`,
+    shifting/rescaling those coordinates without changing the underlying grouping. Registering
+    all three buffers ahead of time makes `_lazy_init`'s `hasattr(self, "voxel_offset")` guard
+    skip recomputing any of them.
+
+    `axis_std` is pinned to `1.0` (irrelevant to bucket assignment; it only matters for
+    coarsening decisions, which most of these tests don't exercise).
+
+    Pass `module` when the model is wrapped in a `CellariumModule` driven by `trainer.fit()`:
+    its `configure_model()` hook calls `model.reset_parameters()` again on the first training
+    step unless `is_initialized` is already set, which would otherwise silently clear this pin.
+    """
+    model.register_buffer("voxel_offset", torch.full((dim,), voxel_offset))
+    model.register_buffer("voxel_size", torch.full((dim,), voxel_size))
+    model.register_buffer("axis_std", torch.ones(dim))
+    if module is not None:
+        module.hparams["is_initialized"] = True
+
+
 def test_plaid_sketch_fit(tmp_path):
     loader, var_names = _make_plaid_loader()
     model = StreamingPlaidGeometricSketch(
         var_names,
-        initial_voxel_size=1.0,
         max_cells_per_bucket=2,
         min_cells_per_bucket=5,
         store_cell_data=True,
     )
     module = CellariumModule(model=model)
+    _pin_voxel_grid(model, dim=len(var_names), module=module)
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
     trainer.fit(module, train_dataloaders=loader)
 
@@ -176,15 +206,14 @@ def test_plaid_sketch_fit(tmp_path):
 
     # Retained cells really do live in the voxel they were assigned to.
     x_dense = res["x_ng"].to_dense()  # type: ignore[union-attr]
-    coords = torch.floor(x_dense / model.voxel_size).long()
+    coords = torch.floor((x_dense - model.voxel_offset) / model.voxel_size).long()
     assert {tuple(c.tolist()) for c in coords} == {(0, 0), (2, 2)}
 
 
 def test_plaid_sketch_reservoir_caps_cells_per_voxel():
     data, var_names, obs_names, _ = _make_plaid_data()
-    model = StreamingPlaidGeometricSketch(
-        var_names, initial_voxel_size=1.0, max_cells_per_bucket=3, store_cell_data=True
-    )
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=3, store_cell_data=True)
+    _pin_voxel_grid(model, dim=len(var_names))
 
     model.update(torch.from_numpy(data), obs_names)
 
@@ -204,10 +233,10 @@ def test_plaid_sketch_coarsening():
     model = StreamingPlaidGeometricSketch(
         var_names,
         target_voxels=2,
-        initial_voxel_size=1.0,
         max_cells_per_bucket=1,
         store_cell_data=True,
     )
+    _pin_voxel_grid(model, dim=1)
 
     model.update(data, obs_names)
 
@@ -222,17 +251,45 @@ def test_plaid_sketch_coarsening():
     assert model._bucket_total_seen[(0,)] == 3
 
 
+def test_plaid_sketch_coarsening_is_axis_selective():
+    """Coarsening only touches the axis (or axes) that are actually over-resolved.
+
+    An isotropic (all-axes-at-once) doubling would blur axis 1 even though it's already
+    at an appropriate resolution relative to its own std; axis-selective coarsening
+    should leave it untouched and only grow axis 0's voxel_size.
+    """
+    var_names = np.array(["gene_0", "gene_1"])
+    model = StreamingPlaidGeometricSketch(var_names, target_voxels=2, max_cells_per_bucket=1)
+    model.register_buffer("voxel_offset", torch.zeros(2))
+    model.register_buffer("axis_std", torch.tensor([4.0, 1.0]))
+    # axis 0 starts far more over-resolved (relative to its own std) than axis 1.
+    model.register_buffer("voxel_size", torch.tensor([0.25, 1.0]))
+
+    # 4 distinct values along axis 0, all sharing the same axis-1 coordinate: 4 occupied
+    # voxels driven purely by axis 0's resolution, exceeding target_voxels=2.
+    data = torch.tensor([[0.5, 0.5], [1.5, 0.5], [2.5, 0.5], [3.5, 0.5]])
+    obs_names = np.array([f"cell_{i}" for i in range(4)])
+
+    model.update(data, obs_names)
+
+    # Axis 1 (already well-resolved) is untouched; only axis 0 was coarsened, and it took
+    # several axis-selective rounds within the single _coarsen() call to converge.
+    assert model.voxel_size[1].item() == pytest.approx(1.0)
+    assert model.voxel_size[0].item() > 0.25
+    assert model.num_filled_buckets <= 2
+
+
 def test_plaid_sketch_metadata_diversity_pruning(tmp_path):
     loader, var_names = _make_plaid_loader(with_metadata=True)
     model = StreamingPlaidGeometricSketch(
         var_names,
-        initial_voxel_size=1.0,
         max_cells_per_bucket=2,
         min_cells_per_bucket=1,
         min_metadata_diversity=2,
         store_cell_data=True,
     )
     module = CellariumModule(model=model)
+    _pin_voxel_grid(model, dim=len(var_names), module=module)
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
     trainer.fit(module, train_dataloaders=loader)
 
@@ -253,7 +310,6 @@ def test_plaid_sketch_no_cell_data(tmp_path):
     loader, var_names = _make_plaid_loader()
     model = StreamingPlaidGeometricSketch(
         var_names,
-        initial_voxel_size=1.0,
         max_cells_per_bucket=2,
         min_cells_per_bucket=1,
         store_cell_data=False,
@@ -275,12 +331,8 @@ def test_plaid_sketch_sparse_input_matches_dense():
     data, var_names, obs_names, _ = _make_plaid_data()
     x_dense = torch.from_numpy(data)
 
-    dense_model = StreamingPlaidGeometricSketch(
-        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, store_cell_data=True
-    )
-    sparse_model = StreamingPlaidGeometricSketch(
-        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, store_cell_data=True
-    )
+    dense_model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=2, store_cell_data=True)
+    sparse_model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=2, store_cell_data=True)
     dense_model.update(x_dense, obs_names)
     sparse_model.update(x_dense.to_sparse(), obs_names)
 
@@ -292,10 +344,42 @@ def test_plaid_sketch_sparse_input_matches_dense():
     )
 
 
+def test_plaid_sketch_coarsening_escapes_zero_centered_degeneracy():
+    """Zero-centered data (e.g. PCA output) must not get stuck at ~1 cell/voxel forever.
+
+    Regression test: a grid floored around a fixed origin of zero has a permanent boundary
+    at zero, which bisects zero-centered, symmetric data down the middle on every axis no
+    matter how large voxel_size grows. The lazily-estimated voxel_offset exists to move that
+    permanent boundary away from the bulk of the data so coarsening can actually converge.
+
+    voxel_size is forced artificially fine right after lazy-init (simulating a badly
+    miscalibrated starting guess) to stress-test that repeated coarsening still converges;
+    voxel_offset and axis_std are left at their natural, data-driven (non-zero) values, since
+    those — not voxel_size — are what this regression test is actually about.
+    """
+    torch.manual_seed(0)
+    n, d = 2000, 20
+    data = torch.randn(n, d) * torch.empty(d).uniform_(1.0, 20.0)
+    var_names = np.array([f"gene_{i}" for i in range(d)])
+    obs_names = np.array([f"cell_{i}" for i in range(n)])
+
+    model = StreamingPlaidGeometricSketch(var_names, target_voxels=10, max_cells_per_bucket=1_000)
+    model._lazy_init(data[:20])
+    model.voxel_size.fill_(0.01)
+
+    batch_size = 20
+    for start in range(0, n, batch_size):
+        model.update(data[start : start + batch_size], obs_names[start : start + batch_size])
+
+    # Coarsening must actually reduce occupied buckets well below the cell count, converging
+    # near (or under) target_voxels rather than plateauing at ~1 cell/bucket.
+    assert model.num_filled_buckets < n // 10
+
+
 def test_plaid_sketch_projector_defines_voxel_space():
     data, var_names, obs_names, _ = _make_plaid_data()
     projector = torch.nn.Linear(len(var_names), 3, bias=False)
-    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, projector=projector)
+    model = StreamingPlaidGeometricSketch(var_names, projector=projector)
 
     model.update(torch.from_numpy(data), obs_names)
 
@@ -309,7 +393,8 @@ def test_plaid_sketch_sampling_is_reproducible():
     x = torch.from_numpy(data)
 
     def run(seed: int) -> dict[tuple[int, ...], list[str]]:
-        model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, seed=seed)
+        model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=2, seed=seed)
+        _pin_voxel_grid(model, dim=len(var_names))
         # Perturbing the global RNG must not affect a seeded model.
         torch.manual_seed(seed + 1000)
         torch.rand(seed + 1)
@@ -326,9 +411,7 @@ def test_plaid_sketch_coarsening_is_reproducible():
     obs_names = np.array([f"cell_{i}" for i in range(len(x))])
 
     def run() -> tuple[dict[tuple[int, ...], list[str]], float]:
-        model = StreamingPlaidGeometricSketch(
-            var_names, target_voxels=2, initial_voxel_size=1.0, max_cells_per_bucket=1, seed=3
-        )
+        model = StreamingPlaidGeometricSketch(var_names, target_voxels=2, max_cells_per_bucket=1, seed=3)
         torch.manual_seed(999)  # must not leak into the merge
         for i in range(len(x)):
             model.update(x[i, None], obs_names[i, None])
@@ -342,7 +425,7 @@ def test_plaid_sketch_coarsening_is_reproducible():
 def test_plaid_sketch_reset_parameters_restores_reproducibility():
     data, var_names, obs_names, _ = _make_plaid_data()
     x = torch.from_numpy(data)
-    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, seed=5)
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=2, seed=5)
 
     model.update(x, obs_names)
     first = {k: list(v) for k, v in model._bucket_obs_names.items()}
@@ -355,11 +438,10 @@ def test_plaid_sketch_reset_parameters_restores_reproducibility():
 
 def test_plaid_sketch_reset_parameters():
     data, var_names, obs_names, _ = _make_plaid_data()
-    model = StreamingPlaidGeometricSketch(
-        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, store_cell_data=True
-    )
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=2, store_cell_data=True)
     model.update(torch.from_numpy(data), obs_names)
     assert model.total_cells > 0
+    assert hasattr(model, "voxel_size")
 
     model.reset_parameters()
 
@@ -368,7 +450,18 @@ def test_plaid_sketch_reset_parameters():
     assert model._bucket_total_seen == {}
     assert model._bucket_metadata == {}
     assert model._batches_seen == 0
+    assert model._coarsen_event_count == 0
     assert len(model.get_reservoir(return_cell_data=True)["obs_names"]) == 0
+
+    # voxel_size, axis_std, and voxel_offset are all data-driven; reset_parameters clears
+    # them entirely rather than restoring a fixed value, deferring to the next _lazy_init.
+    assert not hasattr(model, "voxel_size")
+    assert not hasattr(model, "axis_std")
+    assert not hasattr(model, "voxel_offset")
+
+    # A subsequent update() re-triggers _lazy_init and works normally.
+    model.update(torch.from_numpy(data), obs_names)
+    assert model.total_cells > 0
 
 
 def test_plaid_sketch_multi_device_raises():
@@ -390,9 +483,7 @@ def test_plaid_sketch_multi_device_raises():
 def test_get_reservoir_max_cells_cap():
     data, var_names, obs_names, _ = _make_plaid_data()
     # Use a large-enough bucket cap so all 14 cells are retained.
-    model = StreamingPlaidGeometricSketch(
-        var_names, initial_voxel_size=1.0, max_cells_per_bucket=10, store_cell_data=True
-    )
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=10, store_cell_data=True)
     model.update(torch.from_numpy(data), obs_names)
 
     full = model.get_reservoir(return_cell_data=True)
@@ -419,7 +510,8 @@ def test_get_reservoir_max_cells_cap():
 def test_apply_bucket_filters_density():
     data, var_names, obs_names, _ = _make_plaid_data()
     # voxels: (0, 0) → 6 seen, (2, 2) → 6 seen, (5, 5) → 2 seen
-    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=6)
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=6)
+    _pin_voxel_grid(model, dim=len(var_names))
     model.update(torch.from_numpy(data), obs_names)
 
     assert set(model._bucket_obs_names) == {(0, 0), (2, 2), (5, 5)}
@@ -434,7 +526,8 @@ def test_apply_bucket_filters_density():
 def test_apply_bucket_filters_diversity():
     data, var_names, obs_names, metadata = _make_plaid_data()
     # metadata: (0,0) → only category 0; (2,2) → categories 0 and 1; (5,5) → only 0
-    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0, max_cells_per_bucket=6)
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=6)
+    _pin_voxel_grid(model, dim=len(var_names))
     model.update(torch.from_numpy(data), obs_names, metadata)
 
     model.apply_bucket_filters(min_metadata_diversity=2)
@@ -444,7 +537,7 @@ def test_apply_bucket_filters_diversity():
 
 def test_apply_bucket_filters_no_metadata_raises():
     data, var_names, obs_names, _ = _make_plaid_data()
-    model = StreamingPlaidGeometricSketch(var_names, initial_voxel_size=1.0)
+    model = StreamingPlaidGeometricSketch(var_names)
     model.update(torch.from_numpy(data), obs_names)  # no metadata_n
 
     with pytest.raises(ValueError, match="no metadata was tracked"):
@@ -497,10 +590,9 @@ def test_hyperplane_apply_bucket_filters_diversity():
 
 def test_sketch_obs_names_populated_after_training(tmp_path):
     loader, var_names = _make_plaid_loader()
-    model = StreamingPlaidGeometricSketch(
-        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, min_cells_per_bucket=5
-    )
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=2, min_cells_per_bucket=5)
     module = CellariumModule(model=model)
+    _pin_voxel_grid(model, dim=len(var_names), module=module)
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
     trainer.fit(module, train_dataloaders=loader)
 
@@ -512,9 +604,7 @@ def test_sketch_obs_names_populated_after_training(tmp_path):
 
 def test_checkpoint_contains_sketch_obs_names(tmp_path):
     loader, var_names = _make_plaid_loader()
-    model = StreamingPlaidGeometricSketch(
-        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, min_cells_per_bucket=5
-    )
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=2, min_cells_per_bucket=5)
     module = CellariumModule(model=model)
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_epochs=1, default_root_dir=tmp_path)
     trainer.fit(module, train_dataloaders=loader)
@@ -531,12 +621,12 @@ def test_checkpoint_restores_bucket_state_and_sketch_obs_names(tmp_path):
     loader, var_names = _make_plaid_loader()
     model = StreamingPlaidGeometricSketch(
         var_names,
-        initial_voxel_size=1.0,
         max_cells_per_bucket=2,
         min_cells_per_bucket=5,
         store_cell_data=True,
     )
     module = CellariumModule(model=model)
+    _pin_voxel_grid(model, dim=len(var_names), module=module)
     trainer = pl.Trainer(
         accelerator="cpu",
         devices=1,
@@ -553,9 +643,13 @@ def test_checkpoint_restores_bucket_state_and_sketch_obs_names(tmp_path):
     # Load the checkpoint into a fresh model.
     ckpt_path = trainer.checkpoint_callback.best_model_path  # type: ignore[union-attr]
     model2 = StreamingPlaidGeometricSketch(
-        var_names, initial_voxel_size=1.0, max_cells_per_bucket=2, min_cells_per_bucket=5, store_cell_data=True
+        var_names, max_cells_per_bucket=2, min_cells_per_bucket=5, store_cell_data=True
     )
     module2 = CellariumModule.load_from_checkpoint(ckpt_path, model=model2)
+
+    torch.testing.assert_close(model2.voxel_size, model.voxel_size)
+    torch.testing.assert_close(model2.axis_std, model.axis_std)
+    torch.testing.assert_close(model2.voxel_offset, model.voxel_offset)
 
     assert module2.model.total_cells == total_cells_after_training
     np.testing.assert_array_equal(module2.model.sketch_obs_names, obs_names_after_training)

@@ -48,8 +48,10 @@ class StreamingGeometricSketch(CellariumModel):
             ``get_reservoir(return_cell_data=True)`` will raise.
         projector:
             Optional frozen encoder mapping ``(N, G) → (N, D)``. When given,
-            its output feeds the bucketing algorithm rather than raw gene
-            expression. The module's gradients are disabled on assignment.
+            its output feeds the bucketing algorithm rather than raw gene expression.
+            The module's gradients are disabled on assignment.
+        limit_input_to_top_pcs:
+            If specified, limit the input to this number of top principal components.
         seed:
             Random seed for reservoir sampling. Sampling draws from a
             generator owned by this model, so results are unaffected by
@@ -64,6 +66,7 @@ class StreamingGeometricSketch(CellariumModel):
         min_metadata_diversity: int,
         store_cell_data: bool,
         projector: nn.Module | None,
+        limit_input_to_top_pcs: int | None,
         seed: int,
     ) -> None:
         super().__init__()
@@ -73,6 +76,7 @@ class StreamingGeometricSketch(CellariumModel):
         self.min_cells_per_bucket = min_cells_per_bucket
         self.min_metadata_diversity = min_metadata_diversity
         self.store_cell_data = store_cell_data
+        self.limit_input_to_top_pcs = limit_input_to_top_pcs
         self._seed = seed
 
         if projector is not None:
@@ -183,7 +187,7 @@ class StreamingGeometricSketch(CellariumModel):
 
         if return_cell_data:
             if all_cells:
-                result["x_ng"] = torch.stack([c.to_dense() for c in all_cells]).to_sparse_csr()
+                result["x_ng"] = torch.cat([c.unsqueeze(0) for c in all_cells], dim=0).to_sparse_csr()
             else:
                 result["x_ng"] = torch.zeros(0, len(self.var_names_g)).to_sparse_csr()
 
@@ -270,7 +274,11 @@ class StreamingGeometricSketch(CellariumModel):
         self._batches_seen += 1
 
         total = self.total_cells
-        delta = total - self._prev_total_cells
+        # Clamped at 0: the only source of a negative delta during training is a coarsening
+        # event in StreamingPlaidGeometricSketch, which shrinks total_cells in a single batch.
+        # Letting that spike into the EMA would contaminate proj_total_cells (a display-only
+        # projection) with several batches of spuriously negative values.
+        delta = max(total - self._prev_total_cells, 0)
         self._ema_delta = 0.2 * delta + 0.8 * self._ema_delta
         self._prev_total_cells = total
 
@@ -375,6 +383,8 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
             Optional frozen encoder mapping ``(N, G) → (N, D)``. When given, its
             output feeds the LSH linear layer rather than raw gene expression.
             The module's gradients are disabled on assignment.
+        limit_input_to_top_pcs:
+            If specified, limit the input to this number of top principal components.
         seed:
             Random seed for the LSH projection weights and for reservoir sampling.
             Sampling draws from a generator owned by this model, so results are
@@ -390,6 +400,7 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
         min_metadata_diversity: int = 1,
         store_cell_data: bool = True,
         projector: nn.Module | None = None,
+        limit_input_to_top_pcs: int | None = None,
         seed: int = 0,
     ) -> None:
         # Set before super().__init__() so reset_parameters() can reference them.
@@ -402,6 +413,7 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
             min_metadata_diversity=min_metadata_diversity,
             store_cell_data=store_cell_data,
             projector=projector,
+            limit_input_to_top_pcs=limit_input_to_top_pcs,
             seed=seed,
         )
 
@@ -419,7 +431,7 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
         if self.projector is not None:
             with torch.no_grad():
                 sample = x_ng[:1].float()
-                if sample.is_sparse:
+                if sample.layout != torch.strided:
                     sample = sample.to_dense()
                 out = self.projector(sample)
             D = out.shape[1]
@@ -480,6 +492,9 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
+        if self.limit_input_to_top_pcs is not None:
+            x_ng = x_ng[:, : self.limit_input_to_top_pcs]
+
         self._lazy_init(x_ng)
         self.update(x_ng, obs_names_n, metadata_n)
         return {}
@@ -506,7 +521,7 @@ class StreamingHyperplaneGeometricSketch(StreamingGeometricSketch):
             Number of cells inserted or replaced in this update.
         """
         x_float = x_ng.float()
-        x_dense = x_float.to_dense() if x_float.is_sparse else x_float
+        x_dense = x_float.to_dense() if x_float.layout != torch.strided else x_float
 
         bucket_ids = self._compute_bucket_ids(x_dense)
         inserted_count = 0
@@ -601,6 +616,21 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
     that fail to meet minimum cell count (density) or minimum categorical diversity
     (e.g., number of unique datasets or patients) thresholds.
 
+    The grid's per-axis origin is not fixed at zero: it is estimated once from the first
+    minibatch (a tail-ward offset derived from that batch's mean and std) and then held
+    fixed. This avoids a permanent grid boundary sitting at zero, which would otherwise
+    bisect zero-centered embeddings (e.g. PCA output) down the middle on every axis and
+    prevent coarsening from ever merging cells no matter how large ``voxel_size`` grows.
+
+    ``voxel_size`` is a **per-axis** vector, not a single scalar: an isotropic grid is
+    only meaningful when every axis has comparable scale, which raw (unwhitened) PCA
+    output does not (earlier components carry more variance than later ones). Both the
+    initial per-axis ``voxel_size`` and every subsequent coarsening decision are
+    calibrated from a fixed, one-time estimate of each axis's standard deviation
+    (``axis_std``, estimated from the first minibatch alongside ``voxel_offset``), so
+    that axes are treated fairly relative to their own natural scale rather than in
+    absolute units. See :meth:`_lazy_init` and :meth:`_coarsen` for details.
+
     Only single-device training is supported. A ``RuntimeError`` is raised at the
     start of training if more than one device is detected.
 
@@ -612,9 +642,8 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         var_names_g:
             Gene names for input validation.
         target_voxels:
-            The threshold for spatial grid coarsening.
-        initial_voxel_size:
-            Starting size ($\epsilon$) of the grid hypercubes.
+            The threshold for spatial grid coarsening. Also used to calibrate the initial
+            per-axis grid resolution (see :meth:`_lazy_init`).
         max_cells_per_bucket:
             Maximum cells retained per voxel via uniform reservoir sampling.
         min_cells_per_bucket:
@@ -629,27 +658,39 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
             If ``True``, accumulate sparse cell expression vectors.
         projector:
             Optional frozen encoder mapping ``(N, G) → (N, D)``.
+        limit_input_to_top_pcs:
+            If specified, limit the input to this number of top principal components.
         seed:
             Random seed for reservoir sampling and reservoir merging. Sampling
             draws from a generator owned by this model, so results are unaffected
             by other consumers of the global :mod:`torch` RNG.
     """
 
+    # Assumed per-axis "range" for the initial voxel_size calibration is _RANGE_STD_MULTIPLIER
+    # * axis_std (see _lazy_init). Deliberately generous (matching the 10-std tail anchor
+    # already used for voxel_offset) so the derived starting voxel_size undershoots (finer
+    # grid, not coarser): coarsening is recoverable, starting too coarse is not.
+    _RANGE_STD_MULTIPLIER = 20.0
+
+    # During coarsening, any axis whose current std/voxel_size ratio is within this factor of
+    # the worst (most over-resolved) axis is coarsened together with it, rather than always
+    # picking a single axis (see _coarsen).
+    _COARSEN_MARGIN = 2.0
+
     def __init__(
         self,
         var_names_g: np.ndarray,
         target_voxels: int = 100_000,
-        initial_voxel_size: float = 0.1,
         max_cells_per_bucket: int = 1,
-        min_cells_per_bucket: int = 5,
+        min_cells_per_bucket: int = 1,
         min_metadata_diversity: int = 1,
         store_cell_data: bool = False,
         projector: nn.Module | None = None,
+        limit_input_to_top_pcs: int | None = None,
         seed: int = 0,
     ) -> None:
         # Set before super().__init__() so reset_parameters() can reference them.
         self.target_voxels = target_voxels
-        self.initial_voxel_size = initial_voxel_size
 
         super().__init__(
             var_names_g=var_names_g,
@@ -658,12 +699,59 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
             min_metadata_diversity=min_metadata_diversity,
             store_cell_data=store_cell_data,
             projector=projector,
+            limit_input_to_top_pcs=limit_input_to_top_pcs,
             seed=seed,
         )
 
-        # Registered after super().__init__() (which calls reset_parameters()); the
-        # reset_parameters() override checks hasattr so it safely skips on first call.
-        self.register_buffer("voxel_size", torch.tensor(initial_voxel_size, dtype=torch.float32))
+        # voxel_size (along with voxel_offset and axis_std) is registered lazily in
+        # _lazy_init, once the embedding dimensionality D is known from real data.
+        self._coarsen_event_count = 0
+
+    # ------------------------------------------------------------------
+    # Lazy initialization
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _lazy_init(self, z: torch.Tensor) -> None:
+        """Estimate a fixed per-axis grid offset, scale, and starting voxel_size from the first minibatch seen.
+
+        Offset: a grid boundary always sits at ``voxel_offset`` itself, for every ``voxel_size``
+        (``floor((offset - offset) / voxel_size) == 0`` regardless of scale). Left at the
+        default of zero, that permanent boundary runs straight through the densest part of
+        zero-centered embeddings (e.g. PCA output), so growing ``voxel_size`` can never merge
+        cells that straddle it: on each axis roughly half the cells are just below zero and
+        half just above, and no amount of coarsening moves that dividing line. Anchoring the
+        boundary near a tail of the first batch's per-axis distribution instead means that once
+        ``voxel_size`` grows to span the data's real spread, cells collapse onto the same side
+        of it rather than being perpetually split down the middle.
+
+        Scale: ``axis_std`` is a fixed (never updated again) per-axis standard deviation,
+        estimated once here. It anchors both the initial per-axis ``voxel_size`` below and
+        every later coarsening decision (see :meth:`_coarsen`). It is deliberately *not*
+        refreshed as more data streams in: doing so would make the ratio driving coarsening
+        decisions increase for an axis exactly when a rare, geometrically distant cluster
+        is first observed along it, encouraging coarsening (and the merge-driven cell loss
+        that comes with it) right after discovering the very population most worth keeping.
+
+        Starting voxel_size: sized per axis via a covering-number estimate so that every
+        axis starts with the same ratio of ``axis_std / voxel_size`` (fair, regardless of
+        how different axes' raw scales are), and so that the total number of occupied
+        voxels is expected to be near ``target_voxels`` from the start rather than needing
+        many coarsening rounds to get there.
+        """
+        if hasattr(self, "voxel_offset"):
+            return
+        # unbiased=False avoids NaN when the first minibatch has a single cell (N=1).
+        std = z.std(dim=0, unbiased=False)
+        offset = z.mean(dim=0) - 10.0 * std
+        self.register_buffer("voxel_offset", offset)
+
+        D = z.shape[1]
+        axis_std = std.clamp(min=1e-8)
+        self.register_buffer("axis_std", axis_std)
+        range_ = self._RANGE_STD_MULTIPLIER * axis_std
+        voxel_size = range_ / (self.target_voxels ** (1.0 / D))
+        self.register_buffer("voxel_size", voxel_size)
 
     # ------------------------------------------------------------------
     # Core algorithm
@@ -715,8 +803,10 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         return new_obs, new_cells, total_seen
 
     @torch.no_grad()
-    def _coarsen(self) -> None:
-        self.voxel_size *= 2.0
+    def _coarsen_step(self, axes: torch.Tensor) -> None:
+        """Double ``voxel_size`` along ``axes`` only, remapping and merging colliding buckets."""
+        self.voxel_size[axes] *= 2.0
+        axes_set = set(int(a) for a in axes.tolist())
 
         new_total_seen: dict[tuple[int, ...], int] = {}
         new_obs_names: dict[tuple[int, ...], list[str]] = {}
@@ -724,7 +814,7 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         new_cells: dict[tuple[int, ...], list[torch.Tensor]] = {}
 
         for old_coord, seen in self._bucket_total_seen.items():
-            new_coord = tuple(c // 2 for c in old_coord)
+            new_coord = tuple(c // 2 if i in axes_set else c for i, c in enumerate(old_coord))
             obs = self._bucket_obs_names[old_coord]
             meta = self._bucket_metadata[old_coord]
             cells = self._bucket_cells.get(old_coord, [])
@@ -751,6 +841,33 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         if self.store_cell_data:
             self._bucket_cells = new_cells
 
+    @torch.no_grad()
+    def _coarsen(self) -> None:
+        """Double voxel_size along whichever axis (or axes) are currently most over-resolved.
+
+        Isotropic (all-axes-at-once) coarsening assumes every axis needs the same treatment,
+        which doesn't hold for unwhitened embeddings (e.g. raw PCA, where PC1's natural scale
+        can be far larger than PC20's). Instead, each axis's relative fineness is measured by
+        ``axis_std / voxel_size`` (bins-per-natural-unit-of-spread) and only the axis (or axes
+        within _COARSEN_MARGIN of the worst one) driving that ratio highest gets coarsened.
+        Doubling an axis halves its own ratio, so it becomes progressively less likely to be
+        picked again relative to the others — selection is self-limiting without needing an
+        explicit rule against repeatedly coarsening the same axis.
+
+        Loops (bounded defensively at D+2 rounds) since a single triggering event may require
+        correcting more than one axis before occupied bucket count drops back under
+        target_voxels.
+        """
+        self._coarsen_event_count += 1
+        D = self.voxel_size.shape[0]
+        for _ in range(D + 2):
+            ratio = self.axis_std / self.voxel_size
+            worst = ratio.max()
+            axes = (ratio >= worst / self._COARSEN_MARGIN).nonzero(as_tuple=True)[0]
+            self._coarsen_step(axes)
+            if len(self._bucket_total_seen) <= self.target_voxels:
+                break
+
     def forward(
         self,
         x_ng: torch.Tensor,
@@ -764,6 +881,9 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         if self.min_metadata_diversity > 1 and metadata_n is None:
             raise ValueError("metadata_n must be provided when min_metadata_diversity > 1.")
 
+        if self.limit_input_to_top_pcs is not None:
+            x_ng = x_ng[:, : self.limit_input_to_top_pcs]
+
         self.update(x_ng, obs_names_n, metadata_n)
         return {}
 
@@ -775,14 +895,15 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         metadata_n: np.ndarray | None = None,
     ) -> int:
         x_float = x_ng.float()
-        x_dense = x_float.to_dense() if x_float.is_sparse else x_float
+        x_dense = x_float.to_dense() if x_float.layout != torch.strided else x_float
 
         if self.projector is not None:
             z = self.projector(x_dense)
         else:
             z = x_dense
 
-        coords = torch.floor(z / self.voxel_size).long()
+        self._lazy_init(z)
+        coords = torch.floor((z - self.voxel_offset) / self.voxel_size).long()
         unique_coords, inverse_indices = torch.unique(coords, dim=0, return_inverse=True)
         inserted_count = 0
 
@@ -834,7 +955,9 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         super().on_train_batch_end(trainer)
         assert isinstance(trainer.model, pl.LightningModule)
-        trainer.model.log("voxel_size", self.voxel_size.item(), prog_bar=True)
+        trainer.model.log("voxel_size_mean", self.voxel_size.mean().item(), prog_bar=True)
+        trainer.model.log("voxel_size_max", self.voxel_size.max().item(), prog_bar=True)
+        trainer.model.log("coarsen_events", float(self._coarsen_event_count), prog_bar=True)
         trainer.model.log("active_voxels", float(self.num_filled_buckets), prog_bar=True)
 
     # ------------------------------------------------------------------
@@ -843,5 +966,36 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
 
     def reset_parameters(self) -> None:
         super().reset_parameters()
+        self._coarsen_event_count = 0
+        # voxel_size, axis_std, and voxel_offset are all data-driven (no fixed "initial"
+        # value to restore to), so just clear them and let the next _lazy_init recompute
+        # all three together from the next batch seen.
         if hasattr(self, "voxel_size"):
-            self.voxel_size.fill_(self.initial_voxel_size)
+            delattr(self, "voxel_size")
+        if hasattr(self, "axis_std"):
+            delattr(self, "axis_std")
+        if hasattr(self, "voxel_offset"):
+            delattr(self, "voxel_offset")
+
+    # ------------------------------------------------------------------
+    # Lightning hooks
+    # ------------------------------------------------------------------
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Pre-register lazily-shaped buffers with their checkpointed shape before ``load_state_dict`` runs.
+
+        ``voxel_offset``, ``voxel_size``, and ``axis_std`` are all registered lazily by
+        :meth:`_lazy_init` on the first minibatch, so a freshly constructed model that hasn't
+        seen a batch yet won't have them, causing ``load_state_dict`` to reject them as
+        unexpected keys. This hook runs before Lightning's ``load_state_dict`` call (see
+        ``lightning.pytorch.core.saving._load_state``), so it can pre-create same-shaped
+        placeholder buffers for each key to load into.
+        """
+        super().on_load_checkpoint(checkpoint)
+        for name in ("voxel_offset", "voxel_size", "axis_std"):
+            if hasattr(self, name):
+                continue
+            for key, tensor in checkpoint["state_dict"].items():
+                if key.rsplit(".", 1)[-1] == name:
+                    self.register_buffer(name, torch.empty_like(tensor))
+                    break

@@ -317,6 +317,8 @@ class HVGSeuratV3(CellariumModel):
             self.clip_val_bg[b] = torch.tensor(clip_val)
 
     def _finish_epoch1(self, trainer: pl.Trainer) -> None:
+        trainer.should_stop = True
+
         # 1. Reduce epoch-1 buffers to rank 0
         if trainer.world_size > 1:
             dist.reduce(self.counts_sum_bg, dst=0, op=dist.ReduceOp.SUM)
