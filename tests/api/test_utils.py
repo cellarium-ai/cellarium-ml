@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cellarium.ml.api.utils import write_obs_parquet
+from cellarium.ml.api.utils import get_h5ad_file_var_names_g, get_h5ad_files_limits, write_obs_parquet
 
 
 def _write_h5ad(tmp_path, name: str, obs: pd.DataFrame, n_genes: int = 2) -> str:
@@ -62,3 +62,31 @@ def test_write_obs_parquet_falls_back_when_categories_differ_across_files(tmp_pa
 def test_write_obs_parquet_raises_on_empty_input():
     with pytest.raises(ValueError):
         write_obs_parquet([], "/tmp/should_not_be_created.parquet")
+
+
+def test_get_h5ad_files_limits_variable_sizes(tmp_path):
+    sizes = [3, 5, 2]
+    h5ad_paths = [
+        _write_h5ad(tmp_path, f"data_{i}.h5ad", pd.DataFrame(index=[f"file{i}_cell{j}" for j in range(n)]))
+        for i, n in enumerate(sizes)
+    ]
+    limits = get_h5ad_files_limits(h5ad_paths, nexus_extract_uniform_sizes=False)
+    np.testing.assert_array_equal(limits, np.cumsum(sizes))
+
+
+def test_get_h5ad_files_limits_uniform_sizes_assumes_first_and_last(tmp_path):
+    # the middle file's true size (2) is never read when nexus_extract_uniform_sizes=True;
+    # it's assumed to match the first file's size (4) instead
+    sizes = [4, 2, 4]
+    h5ad_paths = [
+        _write_h5ad(tmp_path, f"data_{i}.h5ad", pd.DataFrame(index=[f"file{i}_cell{j}" for j in range(n)]))
+        for i, n in enumerate(sizes)
+    ]
+    limits = get_h5ad_files_limits(h5ad_paths, nexus_extract_uniform_sizes=True)
+    np.testing.assert_array_equal(limits, np.cumsum([4, 4, 4]))
+
+
+def test_get_h5ad_file_var_names_g(tmp_path):
+    path = _write_h5ad(tmp_path, "data.h5ad", pd.DataFrame(index=["c0", "c1"]), n_genes=3)
+    var_names_g = get_h5ad_file_var_names_g(path)
+    np.testing.assert_array_equal(var_names_g, np.array(["gene0", "gene1", "gene2"]))

@@ -14,8 +14,64 @@ from tqdm import tqdm
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.api.data_analysis import CellariumData
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
+from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
 from cellarium.ml.utilities.data import AnnDataField, collate_fn, to_scipy_csr
+from cellarium.ml.utilities.testing import assert_arrays_equal, assert_columns_and_array_lengths_equal
+
+
+class RandomMatrixProjection(CellariumModel, PredictMixin):
+    """
+    Embeds ``x_ng`` via a fixed, untrained random matrix projection (i.e. a linear layer that is
+    never trained). Used as :func:`geometric_sketch`'s default embedding when no
+    ``embedding_module`` is provided, so that geometric sketching has some (arbitrary) notion of
+    cell-to-cell distance to work with even without a trained embedding model like PCA or scVI.
+
+    Args:
+        var_names_g:
+            The variable names schema for the input data validation.
+        out_features:
+            The dimensionality of the output random projection.
+    """
+
+    def __init__(self, var_names_g: np.ndarray, out_features: int = 128) -> None:
+        super().__init__()
+        self.var_names_g = var_names_g
+        self.n_vars = len(var_names_g)
+        self.out_features = out_features
+        self.linear = torch.nn.Linear(in_features=self.n_vars, out_features=out_features, bias=False)
+        self.linear.requires_grad_(False)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.linear.reset_parameters()
+
+    def forward(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, torch.Tensor | None]:
+        # no-op: this model is never trained, so there is nothing to accumulate across batches
+        return {}
+
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> TransformPrediction:
+        """
+        Randomly project the input data ``x_ng`` into a lower-dimensional space.
+
+        Args:
+            x_ng:
+                Gene counts matrix.
+            var_names_g:
+                The list of the variable names in the input data.
+
+        Returns:
+            A dictionary with the following keys:
+
+            - ``x_ng``: (misnomer) Random projection of the input data.
+            - ``var_names_g``: The list of variable names for the output data.
+        """
+        assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
+        assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
+
+        z_nk = self.linear(x_ng)
+        var_names_k = np.array([f"random_dim{i}" for i in range(self.out_features)])
+        return {"x_ng": z_nk, "var_names_g": var_names_k}
 
 
 def compute_output_var_names_g(module: CellariumModule, datamodule: CellariumAnnDataDataModule) -> np.ndarray:
@@ -72,6 +128,7 @@ def geometric_sketch(
                 raise ValueError("n_pcs can only be specified if the embedding_module's model is IncrementalPCA.")
 
     if embedding_module is None:
+        embedding_var_names_g = datamodule.var_names_g if cdata.hvg is None else np.asarray(cdata.hvg.index[cdata.hvg])
         embedding_module = CellariumModule(
             cpu_transforms=(
                 [] if cdata.hvg is None else [Filter(filter_list=cdata.hvg.index[cdata.hvg], ordering=True)]
@@ -80,9 +137,11 @@ def geometric_sketch(
                 Densify(),
                 NormalizeTotal(),
                 Log1p(),
-                torch.nn.Linear(in_features=datamodule.dadc.shape[1], out_features=128),
             ],
+            model=RandomMatrixProjection(var_names_g=embedding_var_names_g, out_features=128),
         )
+        # this module is used directly below (not via `trainer.fit`), so it must be configured manually
+        embedding_module.configure_model()
     var_names_g = compute_output_var_names_g(embedding_module, datamodule)
 
     target_bucket_ncells = 5

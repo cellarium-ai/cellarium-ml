@@ -3,5 +3,6 @@
 
 from cellarium.ml.api.tools.geometric_sketch import geometric_sketch
 from cellarium.ml.api.tools.pca import pca
+from cellarium.ml.api.tools.scvi import scvi
 
-__all__ = ["geometric_sketch", "pca"]
+__all__ = ["geometric_sketch", "pca", "scvi"]
