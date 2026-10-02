@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+# synthetic / converted datasets produced by the benchmarks
+/benchmarks/data/
