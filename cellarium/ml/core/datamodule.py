@@ -10,7 +10,7 @@ import lightning.pytorch as pl
 import torch
 from anndata import AnnData
 
-from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.data import DistributedCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.utilities.core import FunctionComposer, train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
@@ -48,7 +48,9 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     Args:
         dadc:
-            An instance of :class:`~cellarium.ml.data.DistributedAnnDataCollection` or :class:`AnnData`.
+            An instance of a :class:`~cellarium.ml.data.DistributedCollection` (for example
+            :class:`~cellarium.ml.data.DistributedAnnDataCollection` or
+            :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`) or :class:`AnnData`.
         batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
             in the batch data and how to convert them. Keys must correspond to
@@ -90,6 +92,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             workers are not seeded with the same seed as the previous run.
         test_mode:
             If ``True`` enables tracking of cache and worker informations.
+        prefetch_lookahead:
+            For collections that can prefetch (for example
+            :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`), the number of upcoming shards that each
+            worker announces ahead of time so they are fetched in the background. Ignored by other collections.
         num_workers:
             How many subprocesses to use for data loading. ``0`` means that the data will be loaded in the main process.
         prefetch_factor:
@@ -106,7 +112,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        dadc: DistributedAnnDataCollection | AnnData,
+        dadc: DistributedCollection | AnnData,
         # IterableDistributedAnnDataCollectionDataset args
         batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField] | None = None,
         batch_size: int = 1,
@@ -120,6 +126,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         pred_size: float | int | None = None,
         worker_seed: int | None = None,
         test_mode: bool = False,
+        prefetch_lookahead: int = 2,
         # DataLoader args
         num_workers: int = 0,
         prefetch_factor: int | None = None,
@@ -146,6 +153,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.n_pred = len(dadc)
         self.worker_seed = worker_seed
         self.test_mode = test_mode
+        self.prefetch_lookahead = prefetch_lookahead
         # DataLoader args
         self.num_workers = num_workers
         self.collate_fn = collate_fn
@@ -153,6 +161,15 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
         self.pin_memory = pin_memory
+
+    def prepare_data(self) -> None:
+        """
+        Prepare the data collection for reading the fields in :attr:`batch_keys` (for example, make the needed metadata
+        columns local). Lightning calls this once per node before any worker starts, so that concurrent processes do not
+        all fetch the same data.
+        """
+        if isinstance(self.dadc, DistributedCollection):
+            self.dadc.prepare(self.batch_keys)
 
     def setup(self, stage: str | None = None) -> None:
         """
@@ -175,6 +192,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                prefetch_lookahead=self.prefetch_lookahead,
                 start_idx=0,
                 end_idx=self.n_train,
             )
@@ -191,6 +209,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                prefetch_lookahead=self.prefetch_lookahead,
                 start_idx=self.n_train,
                 end_idx=self.n_train + self.n_val,
             )
@@ -207,6 +226,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                prefetch_lookahead=self.prefetch_lookahead,
                 start_idx=len(self.dadc) - self.n_pred,
                 end_idx=len(self.dadc),
             )
@@ -223,6 +243,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                prefetch_lookahead=self.prefetch_lookahead,
             )
 
     def _effective_collate_fn(self) -> Callable:

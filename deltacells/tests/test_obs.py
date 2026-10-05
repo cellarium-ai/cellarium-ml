@@ -836,3 +836,43 @@ def test_cli_verify_covers_obs(built, tmp_path, capsys):
     Path(p).write_bytes(data)
     assert main(["verify", bad]) == 1
     assert "checksum" in capsys.readouterr().err
+
+
+def test_take_pandas_has_global_categoricals_and_matches_take(built, cache):
+    root, _, obs, *_ = built
+    store = open_dataset(root, cache_dir=cache, obs_columns=["cell_type", "donor", "age", "barcode", "doublet"]).obs
+    idx = np.array([5, 249, 100, 5, 0])
+    df = store.take_pandas(idx, ["cell_type", "donor", "age", "barcode", "doublet"])
+    assert list(df.columns) == ["cell_type", "donor", "age", "barcode", "doublet"] and len(df) == 5
+    assert isinstance(df["cell_type"].dtype, pd.CategoricalDtype)
+    assert list(df["cell_type"].cat.categories) == [
+        "alpha",
+        "beta",
+        "gamma",
+    ]  # the global vocabulary, even if a batch lacks some
+    sub = store.take_pandas([int(np.flatnonzero(obs["cell_type"] == "alpha")[0])], ["cell_type"])
+    assert list(sub["cell_type"].cat.categories) == ["alpha", "beta", "gamma"] and sub["cell_type"].iloc[0] == "alpha"
+    assert (df["cell_type"].astype(object).where(df["cell_type"].notna(), None).tolist()) == [
+        None if pd.isna(v) else v for v in obs["cell_type"].iloc[idx]
+    ]
+    assert np.array_equal(df["donor"].cat.codes.to_numpy(), store.take(idx, ["donor"])["donor"])
+    assert_column_equal(df["age"].to_numpy(), obs["age"].to_numpy()[idx], "age")
+    assert df["barcode"].tolist() == obs["barcode"].iloc[idx].tolist()
+    assert store.take_pandas([], ["cell_type"]).shape == (0, 1)
+    assert store._pandas_dtype("donor") is store._pandas_dtype("donor")  # the dtype is built once per column
+
+
+def test_quiet_metadata_reads_do_not_warn(built, cache):
+    root, *_ = built
+    store = open_dataset(root, cache_dir=cache).obs
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        store.take_pandas([1, 2], ["cell_type"], warn=False)
+        store.take([3], ["age"], warn=False)
+    assert sorted(store.localized_columns()) == ["age", "cell_type"]
+
+
+def test_warmup_is_harmless(built, cache):
+    store = open_dataset(built[0], cache_dir=cache).obs
+    store.warmup()
+    store.warmup()

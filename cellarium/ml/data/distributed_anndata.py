@@ -18,6 +18,7 @@ from anndata.experimental.multi_files._anncollection import (
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
+from cellarium.ml.data.distributed_collection import DistributedCollection
 from cellarium.ml.data.fileio import read_h5ad_file
 from cellarium.ml.data.schema import AnnDataSchema
 
@@ -79,7 +80,7 @@ class DistributedAnnDataCollectionView(AnnCollectionView):
         return obs_names
 
 
-class DistributedAnnDataCollection(AnnCollection):
+class DistributedAnnDataCollection(AnnCollection, DistributedCollection):
     r"""
     Distributed AnnData Collection.
 
@@ -226,6 +227,20 @@ class DistributedAnnDataCollection(AnnCollection):
                 harmonize_dtypes=False,
                 indices_strict=indices_strict,
             )
+
+    @property
+    def var(self) -> pd.DataFrame:
+        """Per-variable annotations, as in the first anndata file."""
+        return self.schema.attr_values["var"]
+
+    def reset_cache(self) -> None:
+        """Forget the cached anndata files."""
+        self.cache.clear()
+
+    @property
+    def cache_miss_count(self) -> int:
+        """Number of anndata files read so far by this process."""
+        return self.cache.miss_count
 
     def __getitem__(self, index: Index) -> AnnData:
         """

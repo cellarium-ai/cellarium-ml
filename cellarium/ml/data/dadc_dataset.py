@@ -3,6 +3,8 @@
 
 import math
 import random
+from collections import Counter
+from collections.abc import Iterable, Iterator
 from itertools import islice
 from typing import Any, Literal
 
@@ -13,7 +15,7 @@ from boltons.iterutils import chunked_iter
 from torch.utils._pytree import tree_map
 from torch.utils.data import IterableDataset
 
-from cellarium.ml.data.distributed_anndata import DistributedAnnDataCollection
+from cellarium.ml.data.distributed_collection import DistributedCollection
 from cellarium.ml.utilities.data import AnnDataField
 from cellarium.ml.utilities.distributed import get_rank_and_num_replicas, get_worker_info
 
@@ -61,7 +63,8 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
 
     Args:
         dadc:
-            DistributedAnnDataCollection or AnnData from which to load the data.
+            :class:`~cellarium.ml.data.DistributedCollection` (for example a
+            :class:`~cellarium.ml.data.DistributedAnnDataCollection`) or :class:`AnnData` from which to load the data.
         batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
             in the batch data and how to convert them. Keys must correspond to
@@ -98,11 +101,15 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             workers are not seeded with the same seed as the previous run.
         test_mode:
             If ``True``, then tracking of cache and worker informations will be enabled.
+        prefetch_lookahead:
+            For collections that can prefetch (``dadc.supports_prefetch``), the number of upcoming shards, beyond those
+            of the current batch, that the dataset announces to ``dadc.prefetch`` while it iterates. It has no effect on
+            the order of the data or on collections that cannot prefetch.
     """
 
     def __init__(
         self,
-        dadc: DistributedAnnDataCollection | AnnData,
+        dadc: DistributedCollection | AnnData,
         batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField],
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
@@ -114,6 +121,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         end_idx: int | None = None,
         worker_seed: int | None = None,
         test_mode: bool = False,
+        prefetch_lookahead: int = 2,
     ) -> None:
         self.dadc = dadc
         if isinstance(dadc, AnnData):
@@ -132,6 +140,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         self.epoch = 0
         self.resume_step: int | None = None
         self.test_mode = test_mode
+        self.prefetch_lookahead = prefetch_lookahead
 
     def __len__(self) -> int:
         """
@@ -185,7 +194,7 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             data["num_replicas"] = np.array([num_replicas])
             data["worker_id"] = np.array([worker_id])
             data["num_workers"] = np.array([num_workers])
-            data["miss_count"] = np.array([self.dadc.cache.miss_count])
+            data["miss_count"] = np.array([getattr(self.dadc, "cache_miss_count", 0)])
             data["epoch"] = np.array([self.epoch])
 
         return data
@@ -433,9 +442,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
         3. If the :attr:`resume_step` is not ``None``, then the worker will skip the batches that have already
            been processed. The workers are shifted based on the global step.
         """
-        if self.test_mode and isinstance(self.dadc, DistributedAnnDataCollection):
+        if self.test_mode and isinstance(self.dadc, DistributedCollection):
             # clear lru cache
-            self.dadc.cache.clear()
+            self.dadc.reset_cache()
 
         # replicas
         rank, num_replicas = get_rank_and_num_replicas()
@@ -513,16 +522,19 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
                     f"Got {len(indices)} != {per_replica} at rank {rank}."
                 )
 
-            # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
-            for worker_batch_idx, batch_indices in enumerate(
-                islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers)
-            ):
-                if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
-                    continue
-                current_batch_idx = worker_batch_idx * num_workers + worker_id
-                if current_batch_idx < num_batches_that_stepped:
-                    continue
-                yield self[batch_indices]
+            def same_order_batches() -> Iterator[list[int]]:
+                # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
+                for worker_batch_idx, batch_indices in enumerate(
+                    islice(chunked_iter(indices, self.batch_size), worker_id, None, num_workers)
+                ):
+                    if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
+                        continue
+                    current_batch_idx = worker_batch_idx * num_workers + worker_id
+                    if current_batch_idx < num_batches_that_stepped:
+                        continue
+                    yield batch_indices
+
+            yield from self._read_batches(same_order_batches())
 
         elif self.iteration_strategy == "cache_efficient":
             # replica indices
@@ -541,18 +553,60 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
             iter_end = min(iter_start + per_worker, per_replica)
             indices = indices[iter_start:iter_end]
 
-            # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
-            for worker_batch_idx, batch_indices in enumerate(chunked_iter(indices, self.batch_size)):
-                if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
-                    continue
-                current_batch_idx = worker_batch_idx * num_workers + worker_id
-                if current_batch_idx < num_batches_that_stepped:
-                    continue
-                yield self[batch_indices]
+            def cache_efficient_batches() -> Iterator[list[int]]:
+                # in python 3.12 `chunked_iter` can be replaced with `itertools.batched`
+                for worker_batch_idx, batch_indices in enumerate(chunked_iter(indices, self.batch_size)):
+                    if self.drop_incomplete_batch and len(batch_indices) < self.batch_size:
+                        continue
+                    current_batch_idx = worker_batch_idx * num_workers + worker_id
+                    if current_batch_idx < num_batches_that_stepped:
+                        continue
+                    yield batch_indices
+
+            yield from self._read_batches(cache_efficient_batches())
 
         # Sets epoch and resume_step for persistent workers
         self.set_epoch(self.epoch + 1)
         self.set_resume_step(None)
+
+    def _read_batches(self, batches: Iterable[list[int]]) -> Iterator[dict[str, dict[str, np.ndarray] | np.ndarray]]:
+        """
+        Read the batches (lists of cell indices) in order. If the collection can prefetch, announce the shards of
+        upcoming batches to ``dadc.prefetch`` ahead of time: whenever fewer than ``prefetch_lookahead`` shards (other than
+        those of the current batch) are announced, the next batch is announced. Each batch is announced once.
+        """
+        if not getattr(self.dadc, "supports_prefetch", False) or self.prefetch_lookahead < 1:
+            for batch_indices in batches:
+                yield self[batch_indices]
+            return
+
+        batch_list = list(batches)
+        limits = np.asarray(self.dadc.limits)
+        touched: dict[int, set[int]] = {}
+
+        def shards_of(k: int) -> set[int]:
+            if k not in touched:
+                touched[k] = set(np.unique(np.searchsorted(limits, np.asarray(batch_list[k]), side="right")).tolist())
+            return touched[k]
+
+        window: Counter[int] = Counter()  # shard -> number of announced batches after the current one that touch it
+        announced = -1  # index of the last announced batch
+        for k, batch_indices in enumerate(batch_list):
+            if announced >= k:  # this batch was announced earlier: it leaves the look-ahead window
+                for shard in shards_of(k):
+                    window[shard] -= 1
+                    if window[shard] == 0:
+                        del window[shard]
+            else:
+                announced = k
+            current = shards_of(k)
+            while announced + 1 < len(batch_list) and len(set(window) - current) < self.prefetch_lookahead:
+                announced += 1
+                for shard in shards_of(announced):
+                    window[shard] += 1
+                self.dadc.prefetch(np.asarray(batch_list[announced]))
+            touched.pop(k, None)
+            yield self[batch_indices]
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         r"""

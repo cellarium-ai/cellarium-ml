@@ -396,6 +396,7 @@ class ObsStore:
 
     def _init_runtime(self) -> None:
         self._schema: ObsSchema | None = None
+        self._dtypes: dict[str, pd.CategoricalDtype] = {}
         self._readers: dict[str, tuple[Any, Any]] = {}  # column -> (memory map, IPC reader)
         self._limits = self.manifest.limits
         self._starts = np.concatenate([[0], self._limits[:-1]]).astype(np.int64)
@@ -570,12 +571,15 @@ class ObsStore:
             return arr.to_numpy(zero_copy_only=True)[local]  # a zero-copy view of the memory map, then a numpy gather
         return arr.take(pa.array(local)).to_numpy(zero_copy_only=False)
 
-    def take(self, indices: Sequence[int] | np.ndarray, columns: Sequence[str] | str) -> dict[str, np.ndarray]:
+    def take(
+        self, indices: Sequence[int] | np.ndarray, columns: Sequence[str] | str, *, warn: bool = True
+    ) -> dict[str, np.ndarray]:
         """Values of ``columns`` for the cells with the given global indices, in that order, as numpy arrays.
 
         Categorical columns come back as integer codes (``-1`` = missing; see :meth:`categories`), strings as object arrays,
         numeric columns with missing values as float64 with NaN. Columns that are not in the local cache yet are fetched first
-        (with a warning: list the columns you need up front with :meth:`localize` to avoid stalling a training run).
+        (with a warning unless ``warn=False``: list the columns you need up front with :meth:`localize` to avoid stalling a
+        training run).
         """
         cols = self._check_columns(columns)
         idx = np.ascontiguousarray(np.asarray(indices, dtype=np.int64)).ravel()
@@ -583,11 +587,12 @@ class ObsStore:
             raise IndexError(f"cell index out of range [0, {self.manifest.n_cells})")
         missing = [c for c in cols if not self._path(c).exists()]
         if missing:
-            warnings.warn(
-                f"obs columns {missing} are not in the local cache ({self.cache_dir}); fetching them now. "
-                "Call dataset.obs.localize([...]) (or pass obs_columns=...) up front to avoid this stall.",
-                stacklevel=2,
-            )
+            if warn:
+                warnings.warn(
+                    f"obs columns {missing} are not in the local cache ({self.cache_dir}); fetching them now. "
+                    "Call dataset.obs.localize([...]) (or pass obs_columns=...) up front to avoid this stall.",
+                    stacklevel=2,
+                )
             self.localize(missing)
         tile_ids = np.searchsorted(self._limits, idx, side="right")
         local = idx - self._starts[tile_ids]
@@ -614,6 +619,32 @@ class ObsStore:
             out[c] = arr
         return out
 
+    def _pandas_dtype(self, column: str) -> pd.CategoricalDtype:
+        """The (cached) pandas dtype of a categorical column; building it validates the vocabulary, which is costly if large."""
+        dt = self._dtypes.get(column)
+        if dt is None:
+            dt = self._dtypes[column] = pd.CategoricalDtype(self.schema[column].categories, ordered=False)
+        return dt
+
+    def take_pandas(
+        self, indices: Sequence[int] | np.ndarray, columns: Sequence[str] | str, *, warn: bool = True
+    ) -> pd.DataFrame:
+        """Like :meth:`take` but as a DataFrame (``RangeIndex``): categorical columns are pandas categoricals carrying the
+        dataset's *global* vocabulary (so ``.cat.categories`` and ``.cat.codes`` are the same in every batch)."""
+        cols = self._check_columns(columns)
+        taken = self.take(indices, cols, warn=warn)
+        data: dict[str, Any] = {}
+        for c in cols:
+            if self.schema[c].kind == "category":
+                data[c] = pd.Categorical.from_codes(taken[c], dtype=self._pandas_dtype(c))
+            else:
+                data[c] = taken[c]
+        return pd.DataFrame(data, columns=cols)
+
+    def warmup(self) -> None:
+        """Pay the one-off cost (about 0.2 s) of Arrow's first compute call now, e.g. when a DataLoader worker starts."""
+        pa.array([0, 1]).take(pa.array([1]))
+
     def to_pandas(self, columns: Sequence[str] | str | None = None, *, categorical: bool = True) -> pd.DataFrame:
         """The whole obs table (or some columns) as a DataFrame with a ``RangeIndex`` over all cells, fetching missing columns.
 
@@ -628,7 +659,7 @@ class ObsStore:
             spec = self.schema[c]
             if spec.kind == "category":
                 codes = chunked.to_numpy()
-                cat = pd.Categorical.from_codes(codes, categories=spec.categories)
+                cat = pd.Categorical.from_codes(codes, dtype=self._pandas_dtype(c))
                 data[c] = cat if categorical else np.asarray(cat.astype(object))
             else:
                 data[c] = chunked.to_pandas()
