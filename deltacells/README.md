@@ -90,25 +90,29 @@ Read it:
 import numpy as np
 from deltacells import open_dataset
 
-ds = open_dataset("/data/my_dataset")             # or "gs://bucket/prefix"
-ds.n_cells, ds.n_genes, ds.limits                 # limits: cumulative cells per tile
-batch = ds.get_batch(np.array([5, 99_000, 12]))   # any global cell indices, any order; returns a CSR SparseBatch
-batch.indptr, batch.indices, batch.values         # int64, int32, float32 numpy arrays
-x = batch.to_torch_csr()                          # torch.sparse_csr tensor sharing memory (needs torch)
+ds = open_dataset("/data/my_dataset")  # or "gs://bucket/prefix"
+ds.n_cells, ds.n_genes, ds.limits  # limits: cumulative cells per tile
+batch = ds.get_batch(np.array([5, 99_000, 12]))  # any global cell indices, any order; returns a CSR SparseBatch
+batch.indptr, batch.indices, batch.values  # int64, int32, float32 numpy arrays
+x = batch.to_torch_csr()  # torch.sparse_csr tensor sharing memory (needs torch)
 batch.to_scipy()
-ds.var_names, ds.gene_order                       # gene names / original column of each stored gene
+ds.var_names, ds.gene_order  # gene names / original column of each stored gene
 ```
 
 Cell metadata (obs) and the gene table (var), if the dataset has them (needs `pyarrow` and `pandas`; see
 [Cell metadata](#cell-metadata-obs)):
 
 ```python
-ds = open_dataset("gs://bucket/prefix", obs_columns=["cell_type", "donor_id"])  # copy just these columns to the local cache, once
-ds.obs.columns                                    # every column and its kind; ds.obs.categories("cell_type") is the vocabulary
-codes = ds.obs.take(batch_cell_indices, ["cell_type", "donor_id"])  # {"cell_type": int codes, ...}: local, ~0.2 ms per 5000 cells
-ds.obs.localize(["age"])                          # add more columns whenever you like (only their bytes are read)
-df = ds.obs.to_pandas(["cell_type", "age"])       # whole-dataset DataFrame, e.g. for plotting
-ds.var                                            # gene table (pandas), in column order
+ds = open_dataset(
+    "gs://bucket/prefix", obs_columns=["cell_type", "donor_id"]
+)  # copy just these columns to the local cache, once
+ds.obs.columns  # every column and its kind; ds.obs.categories("cell_type") is the vocabulary
+codes = ds.obs.take(
+    batch_cell_indices, ["cell_type", "donor_id"]
+)  # {"cell_type": int codes, ...}: local, ~0.2 ms per 5000 cells
+ds.obs.localize(["age"])  # add more columns whenever you like (only their bytes are read)
+df = ds.obs.to_pandas(["cell_type", "age"])  # whole-dataset DataFrame, e.g. for plotting
+ds.var  # gene table (pandas), in column order
 ```
 
 Write your own data:
@@ -117,8 +121,8 @@ Write your own data:
 from deltacells import DatasetWriter
 
 with DatasetWriter("/data/out", n_genes=G, tile_size=10_000, gene_order=order, var_names=names) as w:
-    for block in blocks:                  # scipy CSR / anything scipy can convert; integer counts in [0, 65535]
-        w.add_tile(block)                 # every tile but the last must have exactly tile_size cells
+    for block in blocks:  # scipy CSR / anything scipy can convert; integer counts in [0, 65535]
+        w.add_tile(block)  # every tile but the last must have exactly tile_size cells
 ```
 
 Lower level: `encode_tile(matrix) -> bytes`, `write_tile(path, matrix)`, `Tile(bytes).decode(threads=4)`, `read_tile(path)`.
