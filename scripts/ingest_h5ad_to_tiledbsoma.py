@@ -395,7 +395,9 @@ def main() -> None:
         print(f"obs rows: {exp.obs.count}, X shape: {x.shape}, X nnz: {x.nnz}")
     if "://" not in output:
         x_gb = dir_size_gb(f"{output}/ms/{args.measurement_name}/X/{args.x_layer_name}")
-        print(f"Size on disk: {dir_size_gb(output):.3f} GB (X: {x_gb:.3f} GB, obs: {dir_size_gb(f'{output}/obs'):.3f} GB)")
+        print(
+            f"Size on disk: {dir_size_gb(output):.3f} GB (X: {x_gb:.3f} GB, obs: {dir_size_gb(f'{output}/obs'):.3f} GB)"
+        )
 
 
 if __name__ == "__main__":

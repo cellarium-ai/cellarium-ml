@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -16,7 +15,8 @@ class DistributedCollection(ABC):
 
     A collection is a sequence of ``n_obs`` cells split into consecutive *shards* (for example h5ad files or deltacells
     tiles). Indexing it with global cell indices returns an object that behaves like an :class:`~anndata.AnnData`
-    for the attributes that :class:`~cellarium.ml.utilities.data.AnnDataField` reads (``X``, ``obs``, ``var_names`` ...).
+    for the attributes that :class:`~cellarium.ml.utilities.data.AnnDataField` reads
+    (``X``, ``obs``, ``var_names`` ...).
 
     Subclasses must provide :attr:`n_obs`, :attr:`n_vars`, :attr:`var` and :meth:`__getitem__`, and should set the
     following attributes:
@@ -24,7 +24,8 @@ class DistributedCollection(ABC):
     Attributes:
         limits:
             Cumulative number of cells at the end of each shard, e.g. ``[10000, 20000, 25000]``. Shards are the units
-            that the dataset shuffles and splits between workers, so cells of one shard should be cheap to read together.
+            that the dataset shuffles and splits between workers, so cells of one shard should be cheap to
+            read together.
         var_names:
             Names of the variables (genes), in column order.
 
@@ -33,10 +34,11 @@ class DistributedCollection(ABC):
     training, e.g. making metadata local) and the cache hooks used by the dataset's ``test_mode``.
     """
 
-    #: Whether :meth:`prefetch` does anything. The dataset only computes the look-ahead needed to call it if this is true.
+    #: Whether :meth:`prefetch` does anything. The dataset only computes the look-ahead needed to
+    # call it if this is true.
     supports_prefetch: bool = False
 
-    limits: Sequence[int]
+    limits: list[int]
     var_names: Any
 
     @property

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+from typing import Any
 
 import anndata as ad
 import numpy as np
@@ -19,14 +20,14 @@ def _obs(h5ad_paths: list[str]) -> pd.DataFrame:
 
 
 def _files(root: str) -> set[str]:
-    return {
-        os.path.relpath(os.path.join(r, f), root).replace(os.sep, "/") for r, _, fs in os.walk(root) for f in fs
-    }
+    return {os.path.relpath(os.path.join(r, f), root).replace(os.sep, "/") for r, _, fs in os.walk(root) for f in fs}
 
 
 @pytest.fixture
 def dcdata(deltacells_uri, deltacells_kwargs) -> CellariumData:
-    return CellariumData.from_deltacells(deltacells_uri, batch_size=4, shuffle=False, deltacells_kwargs=deltacells_kwargs)
+    return CellariumData.from_deltacells(
+        deltacells_uri, batch_size=4, shuffle=False, deltacells_kwargs=deltacells_kwargs
+    )
 
 
 # --- create_deltacells_dataset ---------------------------------------------------------------------
@@ -103,7 +104,7 @@ def test_create_uploads_to_gcs_with_the_manifest_last(h5ad_paths, tmp_path):
 def test_upload_refuses_nonempty_prefix_unless_overwrite(h5ad_paths, tmp_path):
     fs = _RecordingFS()
     fs.fs.pipe("bucket/prefix/stale.txt", b"old")
-    kwargs = dict(tile_size=4, level=3, log=None, filesystem=fs, staging_dir=str(tmp_path))
+    kwargs: dict[str, Any] = dict(tile_size=4, level=3, log=None, filesystem=fs, staging_dir=str(tmp_path))
     with pytest.raises(FileExistsError):
         create_deltacells_dataset(h5ad_paths, "gs://bucket/prefix", **kwargs)
     assert not fs.puts

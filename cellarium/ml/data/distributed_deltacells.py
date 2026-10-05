@@ -26,7 +26,8 @@ def _import_deltacells() -> Any:
         raise ImportError("DistributedDeltaCellsCollection requires the `deltacells` package.") from e
     if not hasattr(deltacells, "open_dataset"):  # e.g. an unrelated directory named `deltacells` on sys.path
         raise ImportError(
-            "Found a module named `deltacells` that is not the deltacells package; install it (`pip install -e deltacells`)."
+            "Found a module named `deltacells` that is not the deltacells package; "
+            "install it (`pip install -e deltacells`)."
         )
     return deltacells
 
@@ -40,7 +41,8 @@ def _obs_columns_needed(batch_keys: Any, available: Sequence[str]) -> list[str]:
         attr = field.attr.split(".")[0]
         if attr not in SUPPORTED_ATTRS:
             raise ValueError(
-                f"The deltacells collection cannot provide {field.attr!r}; supported AnnData attributes are {SUPPORTED_ATTRS}."
+                f"The deltacells collection cannot provide {field.attr!r}; "
+                f"supported AnnData attributes are {SUPPORTED_ATTRS}."
             )
         if attr == "obs":
             keys = list(available) if field.key is None else [field.key] if isinstance(field.key, str) else field.key
@@ -52,7 +54,10 @@ def _obs_columns_needed(batch_keys: Any, available: Sequence[str]) -> list[str]:
 
 
 class DeltaCellsObs:
-    """Lazy ``obs`` of a :class:`DeltaCellsBatch`: indexing it with a column name (or a list of names) reads just those columns."""
+    """
+    Lazy ``obs`` of a :class:`DeltaCellsBatch`: indexing it with a column name
+    (or a list of names) reads just those columns.
+    """
 
     def __init__(self, collection: "DistributedDeltaCellsCollection", indices: np.ndarray) -> None:
         self._collection = collection
@@ -141,7 +146,8 @@ class DistributedDeltaCellsCollection(DistributedCollection):
     read and decoded in about a tenth of a second, with the cell metadata (obs) kept beside the tiles and copied to a
     node-local cache, one column at a time, only when a field needs it.
 
-    Indexing returns a :class:`DeltaCellsBatch`, an AnnData-like batch, so :class:`~cellarium.ml.utilities.data.AnnDataField`
+    Indexing returns a :class:`DeltaCellsBatch`, an AnnData-like batch, so
+    :class:`~cellarium.ml.utilities.data.AnnDataField`
     and all of its ``convert_fn`` s work as they do with h5ad files. Differences from h5ad data to be aware of:
 
     * ``X`` holds integer counts (at most 65535) as float32 and the genes are in the dataset's stored order, which
@@ -267,7 +273,10 @@ class DistributedDeltaCellsCollection(DistributedCollection):
         return np.asarray(self._obs_store(key).categories(key))
 
     def obs_key_nunique(self, key: str) -> int:
-        """Number of distinct values of the ``obs`` column ``key``: the number of categories for a categorical column."""
+        """
+        Number of distinct values of the ``obs`` column ``key``:
+        the number of categories for a categorical column.
+        """
         obs = self._obs_store(key)
         if obs.kind(key) == "category":
             return len(obs.categories(key))

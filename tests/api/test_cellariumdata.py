@@ -149,6 +149,7 @@ def test_cellarium_data_obs_is_always_lazy_by_default(h5ad_paths):
 def test_cellarium_data_repr_does_not_force_obs_build(h5ad_paths):
     cdata = CellariumData(h5ad_paths=h5ad_paths)
     repr(cdata)
+    assert isinstance(cdata.obs, LazyObs)
     assert cdata.obs._dataset is None
 
 
@@ -160,6 +161,7 @@ def test_cellarium_data_default_obs_is_queryable_and_matches_h5ad_files(h5ad_pat
     result = cdata.obs.loc[[name]]
     assert list(result.index) == [name]
     pd.testing.assert_frame_equal(result.astype(object), expected.loc[[name]].astype(object), check_dtype=False)
+    assert isinstance(cdata.obs, LazyObs)
     assert cdata.obs._dataset is not None  # opened only once actually queried
 
 

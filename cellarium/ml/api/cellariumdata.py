@@ -229,9 +229,9 @@ class _LazyObsLoc:
 class DeltaCellsLazyObs:
     """
     A queryable view over the ``obs`` of a :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`, with the same
-    interface as :class:`LazyObs`. Only the columns (and cells) a query asks for are read; categorical columns are pandas
-    categoricals with the dataset's global categories. The ``obs_names`` of the dataset are the index of the returned
-    frames, and ``.loc`` selects by them.
+    interface as :class:`LazyObs`. Only the columns (and cells) a query asks for are read; categorical columns are
+    pandas categoricals with the dataset's global categories. The ``obs_names`` of the dataset are the index of the
+    returned frames, and ``.loc`` selects by them.
     """
 
     _NAMES = "obs_names"
@@ -409,7 +409,10 @@ class CellariumData:
 
     @property
     def obs_computed(self) -> ObsmMapping:
-        """Per-cell values computed by api functions (e.g. ``"in_sketch"`` from geometric sketching), one entry of length n_obs each."""
+        """
+        Per-cell values computed by api functions (e.g. ``"in_sketch"`` from geometric sketching), one
+        entry of length n_obs each.
+        """
         return self._obs_computed
 
     @property

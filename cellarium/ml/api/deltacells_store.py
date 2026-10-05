@@ -56,7 +56,6 @@ def _upload_directory(local_dir: str, remote_dir: str, fs: Any, max_workers: int
 def create_deltacells_dataset(
     h5ad_paths: Sequence[str],
     output: str,
-    *,
     tile_size: int = 10_000,
     obs_exclude: Sequence[str] = (),
     sort_genes: bool = True,
@@ -72,8 +71,8 @@ def create_deltacells_dataset(
     for fast training with :meth:`~cellarium.ml.api.CellariumData.from_deltacells`.
 
     The cells are stored in the order of ``h5ad_paths`` (and the order within each file), so
-    ``CellariumData(h5ad_paths)`` and ``CellariumData.from_deltacells(output)`` see the same cells in the same order. All
-    files must have the same ``var_names`` and ``X`` must hold integer counts up to 65535. The genes are stored in a
+    ``CellariumData(h5ad_paths)`` and ``CellariumData.from_deltacells(output)`` see the same cells in the same order.
+    All files must have the same ``var_names`` and ``X`` must hold integer counts up to 65535. The genes are stored in a
     different order (most expressed first, which compresses much better); the ``obs`` columns, ``obs_names`` and ``var``
     are stored too (``CellariumData`` needs the ``obs_names``, so ``obs`` and ``obs_names`` cannot be turned off).
 

@@ -114,7 +114,8 @@ def geometric_sketch(
             "adata": The new AnnData object containing only the selected geometric sketch cells
                 (if `return_new_adata` is True).
             "module": The trained StreamingPlaidGeometricSketch module (if `return_new_adata` is False).
-        Note: stores the same boolean mask (a pandas series indexed by obs_names) in ``cdata.obs_computed['in_sketch']``.
+        Note: stores the same boolean mask (a pandas series indexed by obs_names) in
+        ``cdata.obs_computed['in_sketch']``.
     """
     datamodule: CellariumAnnDataDataModule = cdata.datamodule
     if "obs_names_n" not in datamodule.batch_keys:

@@ -5,7 +5,6 @@ from typing import Literal
 
 import anndata
 import lightning.pytorch as pl
-import numpy as np
 import pandas as pd
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule

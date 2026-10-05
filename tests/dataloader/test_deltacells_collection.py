@@ -23,8 +23,8 @@ if os.environ.get("PYTEST_XDIST_WORKER") is not None:
 pytest.importorskip("deltacells._core")
 pytest.importorskip("pyarrow")
 
-from deltacells import DatasetWriter  # noqa: E402
 from deltacells.obs import ObsSchema  # noqa: E402
+from deltacells.writer import DatasetWriter  # noqa: E402
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule  # noqa: E402
 from cellarium.ml.cli import (  # noqa: E402
@@ -138,7 +138,9 @@ def test_attributes_are_read_lazily(dadc: DistributedDeltaCellsCollection):
     batch = dadc[[1, 5]]
     batch.obs["batch"]
     batch.var_names
-    assert dadc.dataset.stats["tiles_decoded"] == 0 and dadc.dataset.stats["tiles_fetched"] == 0, "no tile is read for metadata"
+    assert dadc.dataset.stats["tiles_decoded"] == 0 and dadc.dataset.stats["tiles_fetched"] == 0, (
+        "no tile is read for metadata"
+    )
     batch.X
     assert dadc.dataset.stats["tiles_decoded"] >= 1
 
@@ -158,7 +160,7 @@ def test_a_dataset_without_obs_raises_a_clear_error(tmp_path: Path):
         dadc[[0]].obs["x"]
 
 
-# ------------------------------------------------------------------------------------------------ fields and the dataset
+# --------------------------------------------------------------------------------------- fields and the dataset
 
 
 def test_iterable_dataset_anndatafields(dadc: DistributedDeltaCellsCollection, obs: pd.DataFrame):
@@ -182,13 +184,18 @@ def test_iterable_dataset_anndatafields(dadc: DistributedDeltaCellsCollection, o
         assert batch["var_names_g"].tolist() == ["gene0"]
         assert batch["batch_n"] == torch.tensor([obs["batch"].cat.codes[i]])
         assert batch["assay_n"] == torch.tensor([obs["assay"].cat.codes[i]])
-        torch.testing.assert_close(torch.cat([batch["batch_n"], batch["assay_n"]]).unsqueeze(0), batch["batch_assay_n2"])
+        torch.testing.assert_close(
+            torch.cat([batch["batch_n"], batch["assay_n"]]).unsqueeze(0), batch["batch_assay_n2"]
+        )
     assert i == dadc.n_obs - 1
 
 
 def test_sparse_x_through_the_worker_and_collate(dadc: DistributedDeltaCellsCollection):
     dataset = IterableDistributedAnnDataCollectionDataset(
-        dadc, batch_keys={"x_ng": AnnDataField("X", convert_fn=to_torch_sparse_csr)}, batch_size=2, shuffle=False
+        dadc,
+        batch_keys={"x_ng": AnnDataField("X", convert_fn=to_torch_sparse_csr)},  # type: ignore[arg-type]
+        batch_size=2,
+        shuffle=False,
     )
     data_loader = torch.utils.data.DataLoader(dataset, num_workers=1, collate_fn=collate_fn)
     values = []
@@ -249,7 +256,9 @@ def test_iterable_dataset(
     tiles = np.searchsorted([0] + dadc.limits, actual_idx, side="right")
     for worker in set(worker_ids):
         miss_count = max(c for c, w in zip(miss_counts, worker_ids) if w == worker)
-        assert miss_count == len(set([o for o, w in zip(tiles, worker_ids) if w == worker])), "each tile is fetched once"
+        assert miss_count == len(set([o for o, w in zip(tiles, worker_ids) if w == worker])), (
+            "each tile is fetched once"
+        )
 
     n_obs = dataset.end_idx - dataset.start_idx
     expected_idx = list(range(dataset.start_idx, dataset.end_idx))
@@ -322,7 +331,9 @@ def test_the_dataset_announces_upcoming_tiles_before_they_are_read(
     assert announced, "prefetch hints were sent while iterating"
     assert read == {0, 1, 2, 3}
     # each batch is announced once, so the number of announcements is at most the number of batches
-    assert sum(1 for kind, _ in dadc.events if kind == "prefetch") <= sum(1 for kind, _ in dadc.events if kind == "read")
+    assert sum(1 for kind, _ in dadc.events if kind == "prefetch") <= sum(
+        1 for kind, _ in dadc.events if kind == "read"
+    )
 
 
 def test_h5ad_style_collections_get_no_prefetch_calls(tmp_path: Path, obs: pd.DataFrame):
@@ -349,7 +360,7 @@ def test_prefetch_lookahead_zero_disables_it(tmp_path: Path, obs: pd.DataFrame):
     assert all(kind == "read" for kind, _ in dadc.events)
 
 
-# ------------------------------------------------------------------------------------------------ prepare and the datamodule
+# -------------------------------------------- prepare and the datamodule
 
 
 def make_datamodule(dadc, **kwargs) -> CellariumAnnDataDataModule:
@@ -390,7 +401,9 @@ def test_prepare_data_with_the_whole_obs_and_extra_columns(tmp_path: Path, obs: 
     assert extra.dataset.obs.localized_columns() == ["assay"]
 
 
-def test_prepare_rejects_unsupported_attributes_and_unknown_columns(dadc: DistributedDeltaCellsCollection, tmp_path: Path):
+def test_prepare_rejects_unsupported_attributes_and_unknown_columns(
+    dadc: DistributedDeltaCellsCollection, tmp_path: Path
+):
     with pytest.raises(ValueError, match="cannot provide 'obsm'"):
         dadc.prepare({"z": AnnDataField("obsm", key="X_pca")})
     with pytest.raises(KeyError, match="not in the dataset"):

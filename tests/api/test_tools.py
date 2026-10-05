@@ -94,7 +94,9 @@ def test_geometric_sketch_with_sparse_coo_batches(make_h5ad_files, monkeypatch):
 
     adata = result["adata"]
     assert isinstance(adata, ad.AnnData)
-    assert adata.n_obs == int(result["obs_names_in_sketch"].sum())
+    sketch_mask = result["obs_names_in_sketch"]
+    assert isinstance(sketch_mask, pd.Series)
+    assert adata.n_obs == int(sketch_mask.sum())
 
 
 def test_geometric_sketch_return_new_adata_false_gives_no_adata(cdata):

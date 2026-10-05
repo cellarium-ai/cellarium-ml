@@ -572,8 +572,9 @@ class IterableDistributedAnnDataCollectionDataset(IterableDataset):
     def _read_batches(self, batches: Iterable[list[int]]) -> Iterator[dict[str, dict[str, np.ndarray] | np.ndarray]]:
         """
         Read the batches (lists of cell indices) in order. If the collection can prefetch, announce the shards of
-        upcoming batches to ``dadc.prefetch`` ahead of time: whenever fewer than ``prefetch_lookahead`` shards (other than
-        those of the current batch) are announced, the next batch is announced. Each batch is announced once.
+        upcoming batches to ``dadc.prefetch`` ahead of time: whenever fewer than ``prefetch_lookahead`` shards
+        (other than those of the current batch) are announced, the next batch is announced. Each batch is
+        announced once.
         """
         if not getattr(self.dadc, "supports_prefetch", False) or self.prefetch_lookahead < 1:
             for batch_indices in batches:
