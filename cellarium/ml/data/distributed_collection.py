@@ -61,6 +61,22 @@ class DistributedCollection(ABC):
     def __len__(self) -> int:
         return self.n_obs
 
+    @property
+    def reference_adata(self) -> Any:
+        """
+        An AnnData-like object to read the attributes that are the same for every cell (``var``, ``var_names``) from,
+        as cheaply as the source allows. Defaults to the first cell.
+        """
+        return self[0]
+
+    def obs_categories(self, key: str) -> np.ndarray:
+        """The categories of the categorical ``obs`` column ``key`` (code ``i`` of a batch means ``categories[i]``)."""
+        raise NotImplementedError(f"{type(self).__name__} does not provide obs_categories.")
+
+    def obs_key_nunique(self, key: str) -> int:
+        """Number of distinct values of the ``obs`` column ``key``."""
+        raise NotImplementedError(f"{type(self).__name__} does not provide obs_key_nunique.")
+
     def prefetch(self, indices: np.ndarray) -> None:
         """
         Hint that cells ``indices`` will be requested soon (in about that order), so that their shards can be fetched

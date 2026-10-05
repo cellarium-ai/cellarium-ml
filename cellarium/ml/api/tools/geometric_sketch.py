@@ -16,7 +16,7 @@ from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
-from cellarium.ml.utilities.data import AnnDataField, collate_fn, to_scipy_csr
+from cellarium.ml.utilities.data import AnnDataField, collate_fn, sparse_tensor_to_scipy_csr
 from cellarium.ml.utilities.testing import assert_arrays_equal, assert_columns_and_array_lengths_equal
 
 
@@ -114,7 +114,7 @@ def geometric_sketch(
             "adata": The new AnnData object containing only the selected geometric sketch cells
                 (if `return_new_adata` is True).
             "module": The trained StreamingPlaidGeometricSketch module (if `return_new_adata` is False).
-        Note: updates cdata.datamodule.obs['in_sketch'] with a boolean mask for selected geometric sketch cells.
+        Note: stores the same boolean mask (a pandas series indexed by obs_names) in ``cdata.obs_computed['in_sketch']``.
     """
     datamodule: CellariumAnnDataDataModule = cdata.datamodule
     if "obs_names_n" not in datamodule.batch_keys:
@@ -187,14 +187,14 @@ def geometric_sketch(
         if return_new_adata:
             mask = sketch_index.get_indexer(batch_obs_names) >= 0
             if mask.any():
-                raw_x_ng_list.append(to_scipy_csr(batch["x_ng"])[mask])
+                raw_x_ng_list.append(sparse_tensor_to_scipy_csr(batch["x_ng"])[mask])
                 raw_obs_names_list.append(batch_obs_names[mask])
     obs_names = np.concatenate(obs_names_list)
     datamodule.shuffle = datamodule_shuffle
 
     ordered_sketch_mask = sketch_index.get_indexer(obs_names) >= 0
     sketch_series = pd.Series(ordered_sketch_mask, index=obs_names)
-    datamodule.dadc._obs["in_sketch"] = ordered_sketch_mask
+    cdata.obs_computed["in_sketch"] = sketch_series
 
     adata = None
     if return_new_adata:
@@ -211,7 +211,7 @@ def geometric_sketch(
         embedding_pos = sketch_index.get_indexer(raw_obs_names)
         embedding = reservoir["x_ng"].to_dense().cpu().numpy()[embedding_pos]
 
-        var = datamodule.dadc.adatas[0].var
+        var = datamodule.dadc.var
         ad_field = datamodule.batch_keys["var_names_g"]
         assert isinstance(ad_field, AnnDataField)
         var_col = ad_field.key

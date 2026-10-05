@@ -4,7 +4,7 @@
 import json
 import os
 import tempfile
-from typing import Callable, Iterator, Literal, Sequence
+from typing import Any, Callable, Iterator, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -13,34 +13,22 @@ import torch
 
 from cellarium.ml import CellariumAnnDataDataModule
 from cellarium.ml.api.utils import get_h5ad_files_limits, write_obs_parquet
-from cellarium.ml.data import DistributedAnnDataCollection
+from cellarium.ml.data import DistributedAnnDataCollection, DistributedCollection, DistributedDeltaCellsCollection
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
 
 
-def get_datamodule(
-    h5ad_paths: list[str],
-    obs_columns: dict[str, tuple[str, Callable]] = {},
-    var_key: str | None = None,
-    batch_size: int = 4096,
-    shuffle: bool = True,
-    train_size: float = 1.0,
-    stage: Literal["fit", "validate", "predict", "test"] = "fit",
-    nexus_extract_uniform_sizes: bool | None = None,
-    num_workers: int = 0,
-):
-    if nexus_extract_uniform_sizes is None:
-        nexus_extract_uniform_sizes = all(["extract_files" in path for path in h5ad_paths])  # a guess
-
+def _build_datamodule(
+    dadc: DistributedCollection,
+    obs_columns: dict[str, tuple[str, Callable]],
+    var_key: str | None,
+    batch_size: int,
+    shuffle: bool,
+    train_size: float,
+    stage: Literal["fit", "validate", "predict", "test"],
+    num_workers: int,
+) -> CellariumAnnDataDataModule:
     datamodule = CellariumAnnDataDataModule(
-        dadc=DistributedAnnDataCollection(
-            filenames=h5ad_paths,
-            limits=get_h5ad_files_limits(
-                h5ad_paths,
-                nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
-            ),
-            obs_columns_to_validate=[c[0] for c in obs_columns.values()],
-            max_cache_size=2,
-        ),
+        dadc=dadc,
         batch_keys={
             "x_ng": AnnDataField(
                 attr="X",
@@ -61,8 +49,57 @@ def get_datamodule(
         prefetch_factor=2 if num_workers > 0 else None,
     )
 
+    # makes metadata local for collections that need it (a no-op for h5ad files); Lightning does this itself when
+    # training, but the api calls `setup` directly
+    datamodule.prepare_data()
     datamodule.setup(stage=stage)
     return datamodule
+
+
+def get_datamodule(
+    h5ad_paths: list[str],
+    obs_columns: dict[str, tuple[str, Callable]] = {},
+    var_key: str | None = None,
+    batch_size: int = 4096,
+    shuffle: bool = True,
+    train_size: float = 1.0,
+    stage: Literal["fit", "validate", "predict", "test"] = "fit",
+    nexus_extract_uniform_sizes: bool | None = None,
+    num_workers: int = 0,
+):
+    if nexus_extract_uniform_sizes is None:
+        nexus_extract_uniform_sizes = all(["extract_files" in path for path in h5ad_paths])  # a guess
+
+    dadc = DistributedAnnDataCollection(
+        filenames=h5ad_paths,
+        limits=get_h5ad_files_limits(
+            h5ad_paths,
+            nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
+        ),
+        obs_columns_to_validate=[c[0] for c in obs_columns.values()],
+        max_cache_size=2,
+    )
+    return _build_datamodule(dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers)
+
+
+def get_deltacells_datamodule(
+    uri: str,
+    obs_columns: dict[str, tuple[str, Callable]] = {},
+    var_key: str | None = None,
+    batch_size: int = 4096,
+    shuffle: bool = True,
+    train_size: float = 1.0,
+    stage: Literal["fit", "validate", "predict", "test"] = "fit",
+    num_workers: int = 0,
+    **collection_kwargs: Any,
+):
+    """
+    Like :func:`get_datamodule` but reading a deltacells dataset (see
+    :func:`~cellarium.ml.api.create_deltacells_dataset`) at ``uri``. ``collection_kwargs`` are passed to
+    :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`.
+    """
+    dadc = DistributedDeltaCellsCollection(uri, **collection_kwargs)
+    return _build_datamodule(dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers)
 
 
 class ObsmMapping(dict):
@@ -189,10 +226,105 @@ class _LazyObsLoc:
         return df.loc[row_labels]
 
 
+class DeltaCellsLazyObs:
+    """
+    A queryable view over the ``obs`` of a :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`, with the same
+    interface as :class:`LazyObs`. Only the columns (and cells) a query asks for are read; categorical columns are pandas
+    categoricals with the dataset's global categories. The ``obs_names`` of the dataset are the index of the returned
+    frames, and ``.loc`` selects by them.
+    """
+
+    _NAMES = "obs_names"
+
+    def __init__(self, dadc: DistributedDeltaCellsCollection):
+        self._dadc = dadc
+
+    @property
+    def _store(self) -> Any:
+        store = self._dadc.dataset.obs
+        if store is None:
+            raise ValueError(f"The deltacells dataset at {self._dadc.uri!r} has no obs.")
+        return store
+
+    def __len__(self) -> int:
+        return self._dadc.n_obs
+
+    @property
+    def columns(self) -> list[str]:
+        return [c for c in self._store.columns if c != self._NAMES]
+
+    def _index(self, indices: np.ndarray | None = None) -> pd.Index:
+        if indices is None:
+            names = self._store.to_pandas(self._NAMES)[self._NAMES]
+        else:
+            names = self._store.take_pandas(indices, [self._NAMES], warn=False)[self._NAMES]
+        return pd.Index(np.asarray(names, dtype=object), name=self._NAMES)
+
+    def _take(self, indices: np.ndarray | None, columns: list[str]) -> pd.DataFrame:
+        if indices is None:
+            df = self._store.to_pandas(columns) if columns else pd.DataFrame(index=pd.RangeIndex(len(self)))
+        else:
+            df = self._store.take_pandas(indices, columns, warn=False)
+        df.index = self._index(indices)
+        return df
+
+    def __getitem__(self, key: str | list[str]) -> pd.DataFrame | pd.Series:
+        columns = [key] if isinstance(key, str) else list(key)
+        df = self._take(None, columns)
+        return df[key] if isinstance(key, str) else df
+
+    @property
+    def loc(self) -> "_DeltaCellsLazyObsLoc":
+        return _DeltaCellsLazyObsLoc(self)
+
+    def iter_batches(self, batch_size: int = 100_000, columns: list[str] | None = None) -> Iterator[pd.DataFrame]:
+        """Stream `obs` in chunks of `pd.DataFrame`, for full-corpus processing without loading it all at once."""
+        columns = self.columns if columns is None else list(columns)
+        for start in range(0, len(self), batch_size):
+            yield self._take(np.arange(start, min(start + batch_size, len(self)), dtype=np.int64), columns)
+
+    def to_frame(self) -> pd.DataFrame:
+        """Materialize the entire `obs` dataframe into memory."""
+        return self._take(None, self.columns)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(uri={self._dadc.uri!r}, n_obs={len(self)}, columns={self.columns})"
+
+
+class _DeltaCellsLazyObsLoc:
+    """Implements `DeltaCellsLazyObs.loc[row_labels]` / `DeltaCellsLazyObs.loc[row_labels, columns]`."""
+
+    def __init__(self, lazy_obs: DeltaCellsLazyObs):
+        self._lazy_obs = lazy_obs
+
+    def __getitem__(self, key) -> pd.DataFrame:
+        lazy_obs = self._lazy_obs
+        row_key, col_key = key if isinstance(key, tuple) else (key, None)
+        row_labels = [row_key] if isinstance(row_key, str) else list(row_key)
+        columns = lazy_obs.columns if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
+
+        names = pd.Index(np.asarray(lazy_obs._store.to_pandas(lazy_obs._NAMES)[lazy_obs._NAMES], dtype=object))
+        missing = pd.Index(row_labels)[~pd.Index(row_labels).isin(names)]
+        if len(missing):
+            raise KeyError(f"Labels not found in obs index: {sorted(missing)[:5]}")
+        positions = names.get_indexer_for(row_labels).astype(np.int64)
+        return lazy_obs._take(positions, columns)
+
+
 class CellariumData:
+    """
+    The data for the api functions: a datamodule over the cells, ``var``, a lazily queried ``obs``, ``obsm``, the
+    highly variable genes and ``obs_computed`` (per-cell values computed by api functions).
+
+    The cells are read from sharded h5ad files (``h5ad_paths``) or from a deltacells dataset (``deltacells_uri``, or
+    :meth:`from_deltacells`; make one with :func:`~cellarium.ml.api.create_deltacells_dataset`). With deltacells the
+    genes come in the dataset's stored order and the categories of categorical ``obs`` columns are global strings; see
+    :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`.
+    """
+
     def __init__(
         self,
-        h5ad_paths: list[str],
+        h5ad_paths: list[str] | None = None,
         total_mrna_umis_column: str | None = None,
         var_key: str | None = None,
         obs_columns: dict[str, tuple[str, Callable]] = {},
@@ -203,29 +335,61 @@ class CellariumData:
         nexus_extract_uniform_sizes: bool | None = None,
         datamodule_num_workers: int = 0,
         obs_parquet_path: str | None = None,
+        *,
+        deltacells_uri: str | None = None,
+        deltacells_kwargs: dict[str, Any] | None = None,
     ):
+        if (h5ad_paths is None) == (deltacells_uri is None):
+            raise ValueError("Provide exactly one of h5ad_paths and deltacells_uri.")
+        obs_columns = dict(obs_columns)
         if total_mrna_umis_column is not None:
             obs_columns["total_mrna_umis_n"] = (total_mrna_umis_column, to_float_tensor)
-        self._datamodule = get_datamodule(
-            h5ad_paths=h5ad_paths,
-            obs_columns=obs_columns,
-            var_key=var_key,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            train_size=train_size,
-            stage=stage,
-            nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
-            num_workers=datamodule_num_workers,
-        )
-        # lazy: nothing is read, and no obs parquet database is built, until `.obs` is queried
-        self._obs = LazyObs(obs_parquet_path, h5ad_paths=h5ad_paths)
+        self._obs: LazyObs | DeltaCellsLazyObs
+        if deltacells_uri is None:
+            assert h5ad_paths is not None
+            self._datamodule = get_datamodule(
+                h5ad_paths=h5ad_paths,
+                obs_columns=obs_columns,
+                var_key=var_key,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                train_size=train_size,
+                stage=stage,
+                nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
+                num_workers=datamodule_num_workers,
+            )
+            # lazy: nothing is read, and no obs parquet database is built, until `.obs` is queried
+            self._obs = LazyObs(obs_parquet_path, h5ad_paths=h5ad_paths)
+        else:
+            self._datamodule = get_deltacells_datamodule(
+                deltacells_uri,
+                obs_columns=obs_columns,
+                var_key=var_key,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                train_size=train_size,
+                stage=stage,
+                num_workers=datamodule_num_workers,
+                **(deltacells_kwargs or {}),
+            )
+            self._obs = DeltaCellsLazyObs(self._datamodule.dadc)
         self._obsm = ObsmMapping(n_obs=self._datamodule.dadc)
-        self._var = self._datamodule.dadc.adatas[0].var.copy()
+        self._obs_computed = ObsmMapping(n_obs=self._datamodule.dadc)
+        self._var = self._datamodule.dadc.var.copy()
         self._hvg: pd.Series | None = None
         if "var_names_g" in self._datamodule.batch_keys:
             anndatafield: AnnDataField = self._datamodule.batch_keys["var_names_g"]
             if anndatafield.key is not None:
                 self._var.set_index(anndatafield.key, inplace=True)
+
+    @classmethod
+    def from_deltacells(cls, uri: str, **kwargs: Any) -> "CellariumData":
+        """
+        Read the cells from the deltacells dataset at ``uri`` (a local path or ``gs://bucket/prefix``). The keyword
+        arguments are those of the constructor, except ``h5ad_paths``, ``nexus_extract_uniform_sizes`` and
+        ``obs_parquet_path``, which only apply to h5ad files.
+        """
+        return cls(deltacells_uri=uri, **kwargs)
 
     @property
     def datamodule(self) -> CellariumAnnDataDataModule:
@@ -236,12 +400,17 @@ class CellariumData:
         return self._var
 
     @property
-    def obs(self) -> LazyObs:
+    def obs(self) -> LazyObs | DeltaCellsLazyObs:
         return self._obs
 
     @property
     def obsm(self) -> ObsmMapping:
         return self._obsm
+
+    @property
+    def obs_computed(self) -> ObsmMapping:
+        """Per-cell values computed by api functions (e.g. ``"in_sketch"`` from geometric sketching), one entry of length n_obs each."""
+        return self._obs_computed
 
     @property
     def hvg(self) -> pd.Series | None:
@@ -276,5 +445,6 @@ class CellariumData:
             f"{self.__class__.__name__}("
             f"shape [{len(self._datamodule.dadc)}, {len(self._var)}], "
             f"obsm keys: {list(self._obsm.keys())}, "
+            f"obs_computed keys: {list(self._obs_computed.keys())}, "
             f"hvg_set={self._hvg is not None})"
         )

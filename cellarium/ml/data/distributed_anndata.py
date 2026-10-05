@@ -233,6 +233,25 @@ class DistributedAnnDataCollection(AnnCollection, DistributedCollection):
         """Per-variable annotations, as in the first anndata file."""
         return self.schema.attr_values["var"]
 
+    @property
+    def reference_adata(self) -> "LazyAnnData":
+        """The first anndata file (read lazily), for attributes that are the same in every file such as ``var``."""
+        return self.adatas[0]
+
+    def _first_obs(self, key: str) -> pd.Series:
+        obs = self.adatas[0].obs
+        if key not in obs:
+            raise ValueError(f"Key '{key}' not found in obs columns: {list(obs.columns)}")
+        return obs[key]
+
+    def obs_categories(self, key: str) -> np.ndarray:
+        """The categories of the categorical ``obs`` column ``key``, as in the first anndata file."""
+        return np.asarray(self._first_obs(key).cat.categories)
+
+    def obs_key_nunique(self, key: str) -> int:
+        """Number of distinct values of the ``obs`` column ``key`` in the first anndata file."""
+        return int(self._first_obs(key).nunique())
+
     def reset_cache(self) -> None:
         """Forget the cached anndata files."""
         self.cache.clear()

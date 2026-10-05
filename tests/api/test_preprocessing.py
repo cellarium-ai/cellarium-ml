@@ -46,7 +46,7 @@ def test_highly_variable_genes_batch_key_unsupported_flavor_raises(cdata, flavor
 def test_highly_variable_genes_seurat_v3_with_batch_key_trains_and_restores_datamodule_state(cdata):
     datamodule = cdata.datamodule
     original_batch_keys = set(datamodule.batch_keys.keys())
-    original_obs_columns_to_validate = datamodule.dadc.obs_columns_to_validate
+    original_obs_columns_to_validate = getattr(datamodule.dadc, "obs_columns_to_validate", None)  # h5ad only
 
     hvg_df, module = highly_variable_genes(
         cdata, n_top_genes=10, flavor="seurat_v3", batch_key="cell_type", accelerator="cpu"
@@ -59,7 +59,7 @@ def test_highly_variable_genes_seurat_v3_with_batch_key_trains_and_restores_data
 
     # side-effect-free: datamodule state restored to what it was before highly_variable_genes() ran
     assert set(datamodule.batch_keys.keys()) == original_batch_keys
-    assert datamodule.dadc.obs_columns_to_validate == original_obs_columns_to_validate
+    assert getattr(datamodule.dadc, "obs_columns_to_validate", None) == original_obs_columns_to_validate
 
 
 # --- pseudobulk() ------------------------------------------------------------------------------
@@ -73,7 +73,7 @@ def test_pseudobulk_raises_without_batch_key(cdata):
 def test_pseudobulk_returns_expected_anndata_and_restores_datamodule_state(cdata):
     datamodule = cdata.datamodule
     original_batch_keys = set(datamodule.batch_keys.keys())
-    original_obs_columns_to_validate = datamodule.dadc.obs_columns_to_validate
+    original_obs_columns_to_validate = getattr(datamodule.dadc, "obs_columns_to_validate", None)  # h5ad only
 
     result = pseudobulk(cdata, batch_key="cell_type", accelerator="cpu")
 
@@ -93,7 +93,7 @@ def test_pseudobulk_returns_expected_anndata_and_restores_datamodule_state(cdata
 
     # side-effect-free: datamodule state restored to what it was before pseudobulk() ran
     assert set(datamodule.batch_keys.keys()) == original_batch_keys
-    assert datamodule.dadc.obs_columns_to_validate == original_obs_columns_to_validate
+    assert getattr(datamodule.dadc, "obs_columns_to_validate", None) == original_obs_columns_to_validate
 
 
 def test_pseudobulk_zscore_smoke(cdata):

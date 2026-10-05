@@ -27,14 +27,20 @@ def natural_sort_key(path: str) -> list[int | str]:
     return [int(tok) if tok.isdigit() else tok for tok in re.split(r"(\d+)", path)]
 
 
-def resolve_files(patterns: Sequence[str]) -> list[str]:
-    """Expand glob patterns / paths into a naturally sorted, de-duplicated list of files."""
-    files: set[str] = set()
+def resolve_files(patterns: Sequence[str] | str, sort: bool = True) -> list[str]:
+    """Expand glob patterns / paths into a de-duplicated list of files.
+
+    With ``sort`` the files are naturally sorted. Without it the order of ``patterns`` is kept (the files matched by one
+    pattern are still sorted), so an explicit list of paths gives the cells in the order of the list. A pattern that
+    matches nothing raises ``FileNotFoundError``.
+    """
+    files: dict[str, None] = {}
     for pattern in [patterns] if isinstance(patterns, str) else patterns:
-        files.update(glob.glob(pattern, recursive=True))
-    if not files:
-        raise FileNotFoundError(f"no files matched {list(patterns)}")
-    return sorted(files, key=natural_sort_key)
+        matched = sorted(glob.glob(pattern, recursive=True), key=natural_sort_key)
+        if not matched:
+            raise FileNotFoundError(f"no files matched {pattern!r}")
+        files.update(dict.fromkeys(matched))
+    return sorted(files, key=natural_sort_key) if sort else list(files)
 
 
 def convert_h5ad(
@@ -43,6 +49,7 @@ def convert_h5ad(
     *,
     tile_size: int = 10_000,
     sort_genes: bool = True,
+    sort_files: bool = True,
     n_chunks: int = DEFAULT_CHUNKS,
     level: int = DEFAULT_LEVEL,
     threads: int | None = None,
@@ -58,7 +65,8 @@ def convert_h5ad(
     """Write ``output`` from h5ad files (glob patterns or paths), preserving cell order.
 
     Files are read one at a time and re-chunked, so they may hold any number of cells; the result depends only on the cell order
-    and ``tile_size``. All files must have the same ``var_names``. ``X`` must hold integer counts up to 65535.
+    and ``tile_size``. All files must have the same ``var_names``. ``X`` must hold integer counts up to 65535. The files are
+    naturally sorted unless ``sort_files=False``, which keeps the order of ``paths``.
 
     With ``sort_genes`` the genes are reordered by decreasing total counts in the first file (a proxy for the whole dataset);
     the original column of each output gene is stored as ``gene_order``.
@@ -73,7 +81,7 @@ def convert_h5ad(
     say = log or (lambda _: None)
     if os.path.exists(output) and os.listdir(output) and not overwrite:
         raise FileExistsError(f"{output} is not empty; pass overwrite=True to replace it")
-    files = resolve_files(paths)
+    files = resolve_files(paths, sort=sort_files)
     say(f"{len(files)} files: {files[0]} ... {files[-1]}")
     if obs or var:
         try:

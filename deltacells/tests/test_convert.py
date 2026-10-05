@@ -49,6 +49,17 @@ def test_natural_sort_and_resolve(tmp_path):
         resolve_files([str(tmp_path / "nothing*")])
 
 
+def test_resolve_keeps_the_given_order_without_sorting(tmp_path):
+    paths = [str(tmp_path / f"s_{n}.h5ad") for n in (10, 2, 1)]
+    for p in paths:
+        open(p, "wb").close()
+    assert resolve_files(paths, sort=False) == paths
+    assert resolve_files([*paths, paths[0]], sort=False) == paths  # duplicates are dropped
+    assert resolve_files(paths) == [paths[2], paths[1], paths[0]]
+    with pytest.raises(FileNotFoundError):  # a missing file is an error, not silently skipped
+        resolve_files([*paths, str(tmp_path / "missing.h5ad")], sort=False)
+
+
 def test_jagged_and_perfect_shards_give_identical_datasets(tmp_path, full):
     write_shards(tmp_path / "perfect", [100, 100, 100, 100, 100, 30], full)
     write_shards(tmp_path / "jagged", [37, 250, 3, 100, 140], full)

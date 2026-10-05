@@ -407,9 +407,11 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             raise ValueError("var_names_g is not available in the batch keys.")
         anndata_field = self.batch_keys["var_names_g"]
         assert isinstance(anndata_field, AnnDataField)
-        return anndata_field(self.dadc.adatas[0])
+        return anndata_field(self.dadc.reference_adata if isinstance(self.dadc, DistributedCollection) else self.dadc)
 
     def obs_key_nunique(self, key: str):
-        if key not in self.dadc.adatas[0].obs:
-            raise ValueError(f"Key '{key}' not found in obs columns: {list(self.dadc.adatas[0].obs.columns)}")
-        return self.dadc.adatas[0].obs[key].nunique()
+        if isinstance(self.dadc, DistributedCollection):
+            return self.dadc.obs_key_nunique(key)
+        if key not in self.dadc.obs:
+            raise ValueError(f"Key '{key}' not found in obs columns: {list(self.dadc.obs.columns)}")
+        return self.dadc.obs[key].nunique()

@@ -58,10 +58,37 @@ def h5ad_paths(make_h5ad_files) -> list[str]:
 
 
 @pytest.fixture
-def cdata(make_h5ad_files) -> CellariumData:
-    """A CellariumData big enough to run HVG/PCA/geometric-sketch tools on.
+def deltacells_uri(h5ad_paths, tmp_path) -> str:
+    """The default synthetic h5ad files converted to a deltacells dataset (tiles of 4 cells, so they straddle files)."""
+    pytest.importorskip("deltacells._core")
+    from cellarium.ml.api import create_deltacells_dataset
+
+    return create_deltacells_dataset(h5ad_paths, str(tmp_path / "deltacells"), tile_size=4, level=3, log=None)
+
+
+@pytest.fixture
+def deltacells_kwargs(tmp_path) -> dict:
+    """Keeps the obs cache of the tests out of the home directory."""
+    return {"cache_dir": str(tmp_path / "deltacells_cache")}
+
+
+@pytest.fixture
+def h5ad_cdata(make_h5ad_files) -> CellariumData:
+    """Like `cdata`, for the tests of what is specific to h5ad files."""
+    return CellariumData(h5ad_paths=make_h5ad_files(n_files=2, cells_per_file=20, n_genes=30))
+
+
+@pytest.fixture(params=["h5ad", "deltacells"])
+def cdata(request, make_h5ad_files, tmp_path, deltacells_kwargs) -> CellariumData:
+    """A CellariumData big enough to run HVG/PCA/geometric-sketch tools on, reading h5ad files and a deltacells dataset.
 
     n_files=2 to stay within CellariumData's hardcoded DistributedAnnDataCollection max_cache_size=2.
     """
     h5ad_paths = make_h5ad_files(n_files=2, cells_per_file=20, n_genes=30)
-    return CellariumData(h5ad_paths=h5ad_paths)
+    if request.param == "h5ad":
+        return CellariumData(h5ad_paths=h5ad_paths)
+    pytest.importorskip("deltacells._core")
+    from cellarium.ml.api import create_deltacells_dataset
+
+    uri = create_deltacells_dataset(h5ad_paths, str(tmp_path / "deltacells"), tile_size=15, level=3, log=None)
+    return CellariumData.from_deltacells(uri, deltacells_kwargs=deltacells_kwargs)

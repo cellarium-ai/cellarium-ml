@@ -254,6 +254,25 @@ class DistributedDeltaCellsCollection(DistributedCollection):
             indices = indices.astype(np.int64, copy=False).ravel()
         return DeltaCellsBatch(self, indices)
 
+    def _obs_store(self, key: str) -> Any:
+        obs = self.dataset.obs
+        if obs is None:
+            raise ValueError(f"The deltacells dataset at {self.uri!r} has no obs.")
+        if key not in obs.columns:
+            raise ValueError(f"Key '{key}' not found in obs columns: {obs.columns}")
+        return obs
+
+    def obs_categories(self, key: str) -> np.ndarray:
+        """The global categories of the categorical ``obs`` column ``key``."""
+        return np.asarray(self._obs_store(key).categories(key))
+
+    def obs_key_nunique(self, key: str) -> int:
+        """Number of distinct values of the ``obs`` column ``key``: the number of categories for a categorical column."""
+        obs = self._obs_store(key)
+        if obs.kind(key) == "category":
+            return len(obs.categories(key))
+        return int(obs.to_pandas(key)[key].nunique())
+
     def take_obs(self, indices: np.ndarray, columns: Sequence[str]) -> pd.DataFrame:
         """Obs columns for the given cells (fetched on first use if they were not made local in :meth:`prepare`)."""
         obs = self.dataset.obs

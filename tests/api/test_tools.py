@@ -4,8 +4,10 @@
 import anndata as ad
 import pandas as pd
 import pytest
+import torch
 
 from cellarium.ml import CellariumModule
+from cellarium.ml.api import CellariumData
 from cellarium.ml.api.preprocessing import highly_variable_genes
 from cellarium.ml.api.tools import geometric_sketch, pca, scvi
 from cellarium.ml.models import IncrementalPCA, SingleCellVariationalInference
@@ -78,12 +80,21 @@ def test_geometric_sketch_default_embedding_returns_expected_keys(cdata):
     assert adata.n_obs == int(sketch_mask.sum())
     assert isinstance(result["module"], CellariumModule)
 
-    # side effect: the sketch mask is also recorded on the underlying obs
-    pd.testing.assert_series_equal(
-        pd.Series(cdata.datamodule.dadc._obs["in_sketch"].values, index=sketch_mask.index),
-        sketch_mask,
-        check_names=False,
-    )
+    # side effect: the sketch mask is also recorded in cdata.obs_computed
+    pd.testing.assert_series_equal(cdata.obs_computed["in_sketch"], sketch_mask)
+
+
+def test_geometric_sketch_with_sparse_coo_batches(make_h5ad_files, monkeypatch):
+    # the mps accelerator gets sparse COO instead of CSR batches; force that layout on any platform
+    monkeypatch.setattr(torch.mps, "is_available", lambda: True)
+    cdata = CellariumData(h5ad_paths=make_h5ad_files(n_files=2, cells_per_file=20, n_genes=30))
+    assert next(iter(cdata.datamodule.train_dataloader()))["x_ng"].layout == torch.sparse_coo
+
+    result = geometric_sketch(cdata, target_n_cells=10, return_new_adata=True)
+
+    adata = result["adata"]
+    assert isinstance(adata, ad.AnnData)
+    assert adata.n_obs == int(result["obs_names_in_sketch"].sum())
 
 
 def test_geometric_sketch_return_new_adata_false_gives_no_adata(cdata):
@@ -104,7 +115,7 @@ def test_scvi_returns_trained_module_and_restores_datamodule_state(cdata):
     datamodule = cdata.datamodule
     original_batch_keys = set(datamodule.batch_keys.keys())
     original_n_train, original_n_val = datamodule.n_train, datamodule.n_val
-    original_obs_columns_to_validate = datamodule.dadc.obs_columns_to_validate
+    original_obs_columns_to_validate = getattr(datamodule.dadc, "obs_columns_to_validate", None)  # h5ad only
 
     module = scvi(
         cdata,
@@ -125,4 +136,4 @@ def test_scvi_returns_trained_module_and_restores_datamodule_state(cdata):
     assert set(datamodule.batch_keys.keys()) == original_batch_keys
     assert datamodule.n_train == original_n_train
     assert datamodule.n_val == original_n_val
-    assert datamodule.dadc.obs_columns_to_validate == original_obs_columns_to_validate
+    assert getattr(datamodule.dadc, "obs_columns_to_validate", None) == original_obs_columns_to_validate
