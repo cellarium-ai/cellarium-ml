@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* \
  && python3 -m venv /opt/venv \
+ && /opt/venv/bin/pip install --upgrade pip \
  && /opt/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu124 \
  && rm -rf ~/.cache/pip
 
