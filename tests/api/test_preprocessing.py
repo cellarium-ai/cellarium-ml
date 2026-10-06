@@ -32,6 +32,25 @@ def test_highly_variable_genes_other_flavors_smoke(cdata, flavor):
     assert isinstance(module, CellariumModule)
 
 
+@pytest.mark.parametrize(
+    "flavor, expected_key", [("seurat", "onepass"), ("kotliar", "onepass"), ("seurat_v3", "hvg_seurat_v3")]
+)
+def test_highly_variable_genes_registers_trained_module(cdata, flavor, expected_key):
+    _, module = highly_variable_genes(cdata, n_top_genes=10, flavor=flavor, accelerator="cpu")
+
+    assert set(cdata.trained_modules) == {expected_key}
+    trained = cdata.trained_modules[expected_key]
+    assert trained.module is module
+    assert trained.complete
+    assert trained.history.empty
+    assert expected_key in repr(cdata)
+
+
+def test_highly_variable_genes_key_added(cdata):
+    highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", key_added="my_onepass", accelerator="cpu")
+    assert set(cdata.trained_modules) == {"my_onepass"}
+
+
 def test_highly_variable_genes_invalid_flavor_raises(cdata):
     with pytest.raises(ValueError):
         highly_variable_genes(cdata, flavor="bogus", accelerator="cpu")  # type: ignore[arg-type]

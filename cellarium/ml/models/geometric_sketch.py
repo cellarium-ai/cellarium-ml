@@ -750,7 +750,7 @@ class StreamingPlaidGeometricSketch(StreamingGeometricSketch):
         axis_std = std.clamp(min=1e-8)
         self.register_buffer("axis_std", axis_std)
         range_ = self._RANGE_STD_MULTIPLIER * axis_std
-        voxel_size = range_ / (self.target_voxels ** (1.0 / D))
+        voxel_size = range_ / (self.target_voxels ** (1.0 / D)) / 100.0
         self.register_buffer("voxel_size", voxel_size)
 
     # ------------------------------------------------------------------

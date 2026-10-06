@@ -11,15 +11,20 @@ os.environ["PYTHONWARNINGS"] = "ignore::FutureWarning"
 import multiprocessing as mp
 import shutil
 import tempfile
-from typing import Callable
+from collections.abc import Mapping
+from typing import Any, Callable
 
 import anndata
 import h5py
+import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
+from lightning.fabric.utilities.rank_zero import rank_zero_only
+from lightning.pytorch.callbacks import TQDMProgressBar
+from lightning.pytorch.loggers import Logger
 from tqdm import tqdm
 
 # Create a global placeholder for the process workers so they only authenticate once.
@@ -334,3 +339,69 @@ def h5ad_paths_from_google_bucket(gs_bucket_path: str) -> list[str]:
     fs = get_gcs_fs()
     paths = fs.ls(gs_bucket_path[5:])
     return [f"gs://{path}" for path in paths if path.endswith(".h5ad")]
+
+
+class PreciseProgressBar(TQDMProgressBar):
+    """
+    A :class:`~lightning.pytorch.callbacks.TQDMProgressBar` that shows float metrics with ``significant_digits``
+    significant digits. tqdm shows numbers with 3 (e.g. ``1.52e+3``), which hides small changes in large values
+    such as a loss in the thousands.
+    """
+
+    def __init__(self, *args: Any, significant_digits: int = 5, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.significant_digits = significant_digits
+
+    def get_metrics(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> dict[str, int | str | float | dict[str, float]]:
+        metrics = super().get_metrics(trainer, pl_module)
+        # tqdm leaves strings as they are
+        return {k: f"{v:.{self.significant_digits}g}" if isinstance(v, float) else v for k, v in metrics.items()}
+
+
+class LossHistory(Logger):
+    """
+    An in-memory Lightning logger that records every metric the module logs, at the cadence it is logged, with no
+    files written. Pass it as ``logger=`` to :class:`lightning.pytorch.Trainer` (and set ``log_every_n_steps``, which
+    controls how often per-step metrics such as ``train_loss`` are recorded; epoch-level metrics such as ``val_loss``
+    are recorded once per epoch). Lightning skips the pre-training validation sanity check, so it is not recorded.
+
+    The record is :attr:`history`, a long-format table with columns ``step``, ``epoch``, ``metric`` and ``value``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._steps: list[int | None] = []
+        self._epochs: list[int | None] = []
+        self._metrics: list[str] = []
+        self._values: list[float] = []
+
+    @property
+    def name(self) -> str:
+        return "loss_history"
+
+    @property
+    def version(self) -> str:
+        return ""
+
+    @rank_zero_only
+    def log_hyperparams(self, params: Any, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    @rank_zero_only
+    def log_metrics(self, metrics: Mapping[str, float], step: int | None = None) -> None:
+        metrics = dict(metrics)
+        epoch = metrics.pop("epoch", None)
+        for metric, value in metrics.items():
+            self._steps.append(step)
+            self._epochs.append(None if epoch is None else int(epoch))
+            self._metrics.append(metric)
+            self._values.append(float(value))
+
+    @property
+    def history(self) -> pd.DataFrame:
+        """The logged metrics as a long-format table with columns ``step``, ``epoch``, ``metric``, ``value``."""
+        return pd.DataFrame(
+            {"step": self._steps, "epoch": self._epochs, "metric": self._metrics, "value": self._values}
+        )

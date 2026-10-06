@@ -24,7 +24,7 @@ class RandomMatrixProjection(CellariumModel, PredictMixin):
     """
     Embeds ``x_ng`` via a fixed, untrained random matrix projection (i.e. a linear layer that is
     never trained). Used as :func:`geometric_sketch`'s default embedding when no
-    ``embedding_module`` is provided, so that geometric sketching has some (arbitrary) notion of
+    ``embedding_module_key`` is provided, so that geometric sketching has some (arbitrary) notion of
     cell-to-cell distance to work with even without a trained embedding model like PCA or scVI.
 
     Args:
@@ -78,11 +78,20 @@ def compute_output_var_names_g(module: CellariumModule, datamodule: CellariumAnn
     # Run the embedding pipeline's `predict` (rather than `forward`, which is the training
     # step and doesn't update `var_names_g`) so that models like PCA report their actual
     # output var names (e.g. "PC1", "PC2", ...) instead of the input gene names.
-    adata = datamodule.dadc[0]
+    # Use a slice of up to one batch, not a single cell (`dadc[0]`), since models with BatchNorm (e.g. scVI)
+    # need more than one cell per batch. Slicing works the same for h5ad and deltacells collections.
+    adata = datamodule.dadc[: min(datamodule.batch_size, datamodule.dadc.n_obs)]
     batch = tree_map(lambda field: field(adata), datamodule.batch_keys)
     collated = collate_fn([batch])
     pipeline = CellariumPipeline(list(module.cpu_transforms or []) + list(module.transforms) + [module.model])
-    var_names_g = pipeline.predict(collated)["var_names_g"]
+    # inference only: eval mode so BatchNorm uses (and doesn't update) its running stats
+    was_training = module.training
+    module.eval()
+    try:
+        with torch.no_grad():
+            var_names_g = pipeline.predict(collated)["var_names_g"]
+    finally:
+        module.train(was_training)
     assert isinstance(var_names_g, np.ndarray)
     return var_names_g
 
@@ -90,7 +99,7 @@ def compute_output_var_names_g(module: CellariumModule, datamodule: CellariumAnn
 def geometric_sketch(
     cdata: CellariumData,
     target_n_cells: int = 1_000_000,
-    embedding_module: CellariumModule | None = None,
+    embedding_module_key: str | None = None,
     n_pcs: int | None = None,
     return_new_adata: bool = True,
 ) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
@@ -102,8 +111,11 @@ def geometric_sketch(
         cdata: :class:`CellariumData` instance containing the data.
         target_n_cells: The target number of cells to select using geometric sketching. This is very
             approximate.
-        embedding_module: A trained :class:`CellariumModule` containing an embedding model such as PCA or scVI.
+        embedding_module_key: The key in ``cdata.trained_modules`` of a trained embedding model such as PCA
+            (``"pca"``) or scVI (``"scvi"``), populated by training it with the api functions. Any data the model
+            needs to run (such as scVI's batch column) is provided for you, see :meth:`CellariumData.using`.
             If not provided, the embedding will be a random matrix projection, after NormalizeTotal and Log1p.
+            Raises ValueError if there is no trained module under this key.
         n_pcs: Number of principal components to use for the embedding if the embedding module is PCA.
             If None, all components are used. Raises ValueError if module is not PCA.
         return_new_adata: Whether to return a new AnnData object with the selected geometric sketch cells.
@@ -117,16 +129,30 @@ def geometric_sketch(
         Note: stores the same boolean mask (a pandas series indexed by obs_names) in
         ``cdata.obs_computed['in_sketch']``.
     """
+    if embedding_module_key is None:
+        return _geometric_sketch(cdata, target_n_cells, None, n_pcs, return_new_adata)
+
+    with cdata.using(embedding_module_key) as trained:
+        return _geometric_sketch(cdata, target_n_cells, trained.module, n_pcs, return_new_adata)
+
+
+def _geometric_sketch(
+    cdata: CellariumData,
+    target_n_cells: int,
+    embedding_module: CellariumModule | None,
+    n_pcs: int | None,
+    return_new_adata: bool,
+) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
     datamodule: CellariumAnnDataDataModule = cdata.datamodule
     if "obs_names_n" not in datamodule.batch_keys:
         raise ValueError("batch_keys in the datamodule needs to contain key 'obs_names_n' for geometric_sketch.")
 
     if n_pcs is not None:
         if embedding_module is None:
-            raise ValueError("n_pcs can only be specified if an embedding_module is provided.")
+            raise ValueError("n_pcs can only be specified if an embedding_module_key is provided.")
         else:
             if not isinstance(embedding_module.model, IncrementalPCA):
-                raise ValueError("n_pcs can only be specified if the embedding_module's model is IncrementalPCA.")
+                raise ValueError("n_pcs can only be specified if the embedding module's model is IncrementalPCA.")
 
     if embedding_module is None:
         embedding_var_names_g = datamodule.var_names_g if cdata.hvg is None else np.asarray(cdata.hvg.index[cdata.hvg])

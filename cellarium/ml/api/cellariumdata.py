@@ -4,15 +4,19 @@
 import json
 import os
 import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Literal, Sequence
 
+import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import pyarrow.dataset as ds
 import torch
 
-from cellarium.ml import CellariumAnnDataDataModule
-from cellarium.ml.api.utils import get_h5ad_files_limits, write_obs_parquet
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml.api._datamodule_context import temporary_batch_keys
+from cellarium.ml.api.utils import LossHistory, get_h5ad_files_limits, write_obs_parquet
 from cellarium.ml.data import DistributedAnnDataCollection, DistributedCollection, DistributedDeltaCellsCollection
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
 
@@ -114,6 +118,90 @@ class ObsmMapping(dict):
         if len(value) != n_obs:
             raise ValueError(f"obsm['{key}'] has length {len(value)}, expected {n_obs} (n_obs)")
         super().__setitem__(key, value)
+
+
+@dataclass(frozen=True)
+class TrainedModule:
+    """
+    A module trained by an api function, with the record of its training.
+
+    Attributes:
+        module: The trained :class:`~cellarium.ml.core.CellariumModule`.
+        history: The metrics logged during training as a long-format table with columns ``step``, ``epoch``,
+            ``metric`` and ``value`` (see :class:`~cellarium.ml.api.utils.LossHistory`). Empty if the api function
+            does not record any.
+        config: The main arguments the api function was called with.
+        n_epochs: The number of epochs completed.
+        complete: ``False`` if training was interrupted.
+        batch_keys: The data fields, beyond those in ``cdata.datamodule.batch_keys``, that the module needs in order
+            to run (e.g. scVI's ``"batch_index_n"``). See :meth:`CellariumData.using`.
+    """
+
+    module: CellariumModule
+    history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    config: dict[str, Any] = field(default_factory=dict)
+    n_epochs: int = 0
+    complete: bool = True
+    batch_keys: dict[str, AnnDataField] = field(default_factory=dict)
+
+    def metric(self, name: str) -> pd.Series:
+        """The values of the logged metric ``name`` (e.g. ``"val_loss"``), indexed by step."""
+        logged = sorted(self.history["metric"].unique()) if "metric" in self.history else []
+        if name not in logged:
+            raise KeyError(f"No metric '{name}' in the history. Logged metrics: {logged}")
+        rows = self.history[self.history["metric"] == name]
+        return rows.set_index("step")["value"].rename(name)
+
+    def __repr__(self) -> str:
+        config = ", ".join(f"{k}={v}" for k, v in self.config.items())
+        status = "" if self.complete else " (interrupted)"
+        return f"{type(self.module.model).__name__}({config}), {self.n_epochs} epochs{status}"
+
+
+class TrainedModulesMapping(dict[str, TrainedModule]):
+    """The latest trained module of each kind (e.g. ``"scvi"``), keyed by name."""
+
+    def __setitem__(self, key: str, value: TrainedModule) -> None:
+        if not isinstance(value, TrainedModule):
+            raise TypeError(f"trained_modules['{key}'] must be a TrainedModule, got {type(value).__name__}")
+        super().__setitem__(key, value)
+
+
+def fit_and_register(
+    cdata: "CellariumData",
+    trainer: pl.Trainer,
+    module: CellariumModule,
+    key: str,
+    config: dict[str, Any] | None = None,
+    loss_history: LossHistory | None = None,
+    batch_keys: dict[str, AnnDataField] | None = None,
+) -> None:
+    """
+    Fit ``module`` on ``cdata.datamodule`` and store it in ``cdata.trained_modules[key]``, along with the metrics
+    recorded by ``loss_history`` (if the trainer's logger is one) and the extra ``batch_keys`` the module needs to
+    run. If training is interrupted, the partially trained module is stored the same way, marked ``complete=False``,
+    before the interruption propagates.
+    """
+
+    def register(complete: bool) -> None:
+        cdata.trained_modules[key] = TrainedModule(
+            module=module,
+            history=pd.DataFrame() if loss_history is None else loss_history.history,
+            config={} if config is None else config,
+            n_epochs=trainer.current_epoch,
+            complete=complete,
+            batch_keys={} if batch_keys is None else dict(batch_keys),
+        )
+
+    try:
+        trainer.fit(module, cdata.datamodule)
+    except (KeyboardInterrupt, SystemExit, NameError):
+        # Lightning turns a KeyboardInterrupt into a SystemExit after shutting down gracefully
+        # and sometimes throws a NameError if something goes wrong during shutdown
+        if trainer.global_step > 0:
+            register(complete=False)
+        raise
+    register(complete=True)
 
 
 class LazyObs:
@@ -314,7 +402,8 @@ class _DeltaCellsLazyObsLoc:
 class CellariumData:
     """
     The data for the api functions: a datamodule over the cells, ``var``, a lazily queried ``obs``, ``obsm``, the
-    highly variable genes and ``obs_computed`` (per-cell values computed by api functions).
+    highly variable genes, ``obs_computed`` (per-cell values computed by api functions) and ``trained_modules`` (the
+    latest module trained by each api function, with its training history).
 
     The cells are read from sharded h5ad files (``h5ad_paths``) or from a deltacells dataset (``deltacells_uri``, or
     :meth:`from_deltacells`; make one with :func:`~cellarium.ml.api.create_deltacells_dataset`). With deltacells the
@@ -376,6 +465,7 @@ class CellariumData:
         self._obsm = ObsmMapping(n_obs=self._datamodule.dadc)
         self._obs_computed = ObsmMapping(n_obs=self._datamodule.dadc)
         self._var = self._datamodule.dadc.var.copy()
+        self._trained_modules = TrainedModulesMapping()
         self._hvg: pd.Series | None = None
         if "var_names_g" in self._datamodule.batch_keys:
             anndatafield: AnnDataField = self._datamodule.batch_keys["var_names_g"]
@@ -416,6 +506,41 @@ class CellariumData:
         return self._obs_computed
 
     @property
+    def trained_modules(self) -> TrainedModulesMapping:
+        """The latest module trained by each api function (e.g. ``"scvi"``), with its training history."""
+        return self._trained_modules
+
+    @contextmanager
+    def using(self, key: str) -> Iterator[TrainedModule]:
+        """
+        Make the data fields that the module ``cdata.trained_modules[key]`` needs in order to run available in
+        ``cdata.datamodule`` for the duration of the ``with`` block (for example, scVI needs the batch column it was
+        trained with), restoring the original state on exit, even if the block raises. Yields the
+        :class:`TrainedModule`.
+
+        Example:
+            >>> with cdata.using("scvi") as trained:
+            ...     ...  # code that runs trained.module over cdata.datamodule
+
+        Raises:
+            ValueError: If there is no trained module under ``key``.
+        """
+        if key not in self._trained_modules:
+            available = list(self._trained_modules)
+            raise ValueError(
+                f"No trained module '{key}' in cdata.trained_modules. "
+                + (f"Available: {available}. " if available else "None have been trained yet. ")
+                + "Train modules with the api functions (e.g. cml.tl.scvi, cml.tl.pca, cml.pp.highly_variable_genes), "
+                "which store them here."
+            )
+        trained = self._trained_modules[key]
+        if not trained.batch_keys:
+            yield trained  # nothing extra needed (e.g. PCA), so leave the datamodule untouched
+            return
+        with temporary_batch_keys(self._datamodule, trained.batch_keys):
+            yield trained
+
+    @property
     def hvg(self) -> pd.Series | None:
         """Boolean HVG mask aligned to var_names_g, or None if not set."""
         return self._hvg
@@ -444,10 +569,14 @@ class CellariumData:
                 self._hvg = pd.Series(np.isin(var_names_g, arr), index=var_names_g)
 
     def __repr__(self) -> str:
-        return (
+        lines = [
             f"{self.__class__.__name__}("
             f"shape [{len(self._datamodule.dadc)}, {len(self._var)}], "
             f"obsm keys: {list(self._obsm.keys())}, "
             f"obs_computed keys: {list(self._obs_computed.keys())}, "
             f"hvg_set={self._hvg is not None})"
-        )
+        ]
+        if self._trained_modules:
+            lines.append("  trained_modules:")
+            lines.extend(f"    {key}: {trained!r}" for key, trained in self._trained_modules.items())
+        return "\n".join(lines)

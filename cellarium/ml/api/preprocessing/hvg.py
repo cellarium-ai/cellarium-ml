@@ -9,7 +9,7 @@ import pandas as pd
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
-from cellarium.ml.api.cellariumdata import CellariumData
+from cellarium.ml.api.cellariumdata import CellariumData, fit_and_register
 from cellarium.ml.models import HVGSeuratV3, OnePassMeanVarStd
 from cellarium.ml.preprocessing import kotliar_compute_highly_variable_genes, seurat_compute_highly_variable_genes
 from cellarium.ml.transforms import Densify, Log1p, NormalizeTotal
@@ -21,6 +21,7 @@ def highly_variable_genes(
     n_top_genes: int = 4000,
     flavor: Literal["seurat_v3", "seurat", "kotliar"] = "seurat",
     batch_key: str | None = None,
+    key_added: str | None = None,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
 ) -> tuple[pd.DataFrame, CellariumModule]:
     """
@@ -34,6 +35,10 @@ def highly_variable_genes(
             ignored. Only supported when ``flavor="seurat_v3"``; raises ``ValueError`` if given together
             with any other flavor. Injected into ``cdata.datamodule.batch_keys`` as ``"batch_index_n"``
             for the duration of training.
+        key_added: The key under which the trained module is stored in ``cdata.trained_modules``, replacing any
+            module already there under that key. Defaults to the kind of model trained: ``"hvg_seurat_v3"`` for
+            ``flavor="seurat_v3"`` and ``"onepass"`` (a :class:`OnePassMeanVarStd`, also used for z-scoring in
+            :func:`pca`) for ``"seurat"`` and ``"kotliar"``.
         accelerator: The accelerator to use for training the module, in ["cpu", "mps", "cuda", "auto"].
 
     NOTE: sets the :attr:`hvg` property of the datamodule with the boolean mask of highly variable genes.
@@ -41,7 +46,10 @@ def highly_variable_genes(
     Returns:
         A tuple containing:
             - A :class:`pandas.DataFrame` with the highly variable genes.
-            - A :class:`CellariumModule` instance used for the computation, containing a trained model.
+            - A :class:`CellariumModule` instance used for the computation, containing a trained model. It is also
+              stored as ``cdata.trained_modules[key_added]`` (with an empty history, since these models log no
+              metrics). If training is interrupted, the partially trained module is stored the same way, marked
+              ``complete=False``.
 
     Note:
         When ``batch_key`` is given, temporarily mutates ``cdata.datamodule`` (injecting a
@@ -101,8 +109,17 @@ def highly_variable_genes(
         if batch_key is not None
         else nullcontext()
     )
+    if key_added is None:
+        key_added = "hvg_seurat_v3" if flavor == "seurat_v3" else "onepass"
+
     with ctx:
-        trainer.fit(module, datamodule)
+        fit_and_register(
+            cdata,
+            trainer,
+            module,
+            key_added,
+            config={"flavor": flavor, "n_top_genes": n_top_genes, "batch_key": batch_key},
+        )
 
     if flavor == "seurat_v3":
         hvg_df = module.model._compute_hvg_df(n_top_genes=n_top_genes)

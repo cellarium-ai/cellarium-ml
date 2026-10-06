@@ -5,8 +5,8 @@ from typing import Literal
 
 import lightning.pytorch as pl
 
-from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
-from cellarium.ml.api.cellariumdata import CellariumData
+from cellarium.ml import CellariumModule
+from cellarium.ml.api.cellariumdata import CellariumData, fit_and_register
 from cellarium.ml.models import IncrementalPCA, OnePassMeanVarStd
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal, ZScore
 
@@ -16,6 +16,7 @@ def pca(
     n_components: int = 50,
     zscore: bool = True,
     onepass_module: CellariumModule | None = None,
+    key_added: str = "pca",
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
 ) -> CellariumModule:
     """
@@ -27,12 +28,15 @@ def pca(
         zscore: Whether to apply z-score normalization using a trained onepass_module.
         onepass_module: A trained :class:`CellariumModule` used for z-score normalization.
             Required if ``zscore`` is True.
+        key_added: The key under which the trained module is stored in ``cdata.trained_modules``,
+            replacing any module already there under that key.
         accelerator: The accelerator to use for training the module, in ["cpu", "mps", "cuda", "auto"].
 
     Returns:
-        A :class:`CellariumModule` instance containing the trained PCA model.
+        A :class:`CellariumModule` instance containing the trained PCA model. It is also stored as
+        ``cdata.trained_modules[key_added]`` (with an empty history, since PCA logs no metrics). If training is
+        interrupted, the partially trained module is stored the same way, marked ``complete=False``.
     """
-    datamodule: CellariumAnnDataDataModule = cdata.datamodule
     if cdata.hvg is None:
         raise ValueError("cdata.hvg must be set before running PCA. Try running highly_variable_genes() first.")
 
@@ -78,6 +82,6 @@ def pca(
         logger=False,
         enable_checkpointing=False,
     )
-    trainer.fit(module, datamodule)
+    fit_and_register(cdata, trainer, module, key_added, config={"n_components": n_components, "zscore": zscore})
 
     return module

@@ -23,9 +23,6 @@ if os.environ.get("PYTEST_XDIST_WORKER") is not None:
 pytest.importorskip("deltacells._core")
 pytest.importorskip("pyarrow")
 
-from deltacells.obs import ObsSchema  # noqa: E402
-from deltacells.writer import DatasetWriter  # noqa: E402
-
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule  # noqa: E402
 from cellarium.ml.cli import (  # noqa: E402
     compute_batch_index_n_categories,
@@ -47,6 +44,8 @@ from cellarium.ml.utilities.data import (  # noqa: E402
     densify,
     to_torch_sparse_csr,
 )
+from deltacells.obs import ObsSchema  # noqa: E402
+from deltacells.writer import DatasetWriter  # noqa: E402
 from tests.common import BoringModel  # noqa: E402
 
 torch.multiprocessing.set_sharing_strategy("file_system")
