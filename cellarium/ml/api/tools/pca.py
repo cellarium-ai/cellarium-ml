@@ -19,7 +19,7 @@ def pca(
     zscore: bool = True,
     key_added: str = "pca",
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
-) -> CellariumModule:
+) -> None:
     """
     Train a PCA model on the data in the datamodule.
 
@@ -37,7 +37,10 @@ def pca(
         accelerator: The accelerator to use for training the module, in ["cpu", "mps", "cuda", "auto"].
 
     Returns:
-        A :class:`CellariumModule` instance containing the trained PCA model. It is also stored as
+        None
+
+    Note:
+        A :class:`CellariumModule` instance containing the trained PCA model is stored as
         ``cdata.trained_modules[key_added]`` (with an empty history, since PCA logs no metrics). If training is
         interrupted, the partially trained module is stored the same way, marked ``complete=False``.
     """
@@ -87,4 +90,4 @@ def pca(
     )
     fit_and_register(cdata, trainer, module, key_added, config=config)
 
-    return module
+    return

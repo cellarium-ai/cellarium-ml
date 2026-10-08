@@ -53,7 +53,7 @@ def scvi(
     log_every_n_steps: int = 10,
     val_check_interval: int = 500,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
-) -> CellariumModule:
+) -> None:
     """
     Train an scVI model on the data in the datamodule, using ``batch_key`` for batch correction.
 
@@ -83,7 +83,10 @@ def scvi(
         accelerator: The accelerator to use for training the module, in ["cpu", "mps", "cuda", "auto"].
 
     Returns:
-        A :class:`CellariumModule` instance containing the trained scVI model. It is also stored, along with the
+        None
+
+    Note:
+        A :class:`CellariumModule` instance containing the trained scVI model is stored, along with the
         training history (``train_loss`` every ``log_every_n_steps`` steps, ``val_loss`` every validation check), as
         ``cdata.trained_modules[key_added]``. If training is interrupted (e.g. ``KeyboardInterrupt``), the partially
         trained module is stored the same way, marked ``complete=False``.
@@ -178,4 +181,4 @@ def scvi(
             batch_keys=batch_keys,
         )
 
-    return module
+    return

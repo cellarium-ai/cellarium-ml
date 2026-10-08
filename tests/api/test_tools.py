@@ -22,9 +22,9 @@ from cellarium.ml.utilities.data import to_torch_sparse_csr
 
 
 @pytest.fixture
-def onepass_module(cdata):
-    _, module = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
-    return module
+def hvg_computed(cdata):
+    """Runs the seurat HVG on `cdata`: sets `cdata.hvg` and registers the onepass module as "onepass"."""
+    highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
 
 
 # --- pca() -----------------------------------------------------------------------------------
@@ -33,20 +33,22 @@ def onepass_module(cdata):
 def test_pca_without_hvg_warns_and_uses_all_genes(cdata):
     assert cdata.hvg is None
     with pytest.warns(UserWarning, match="all genes"):
-        module = pca(cdata, n_components=3, zscore=True, accelerator="cpu")
+        pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
+    module = cdata.trained_modules["pca"].module
     assert module.model.var_names_g.tolist() == cdata.datamodule.var_names_g.tolist()
 
 
-def test_pca_with_hvg_does_not_warn(cdata, onepass_module):
+def test_pca_with_hvg_does_not_warn(cdata, hvg_computed):
     with warnings.catch_warnings():
         warnings.filterwarnings("error", message=".*all genes")
         pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
 
-def test_pca_returns_module_with_expected_shape(cdata, onepass_module):
-    module = pca(cdata, n_components=3, zscore=True, accelerator="cpu")
+def test_pca_trains_module_with_expected_shape(cdata, hvg_computed):
+    pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
+    module = cdata.trained_modules["pca"].module
     assert isinstance(module, CellariumModule)
     assert isinstance(module.model, IncrementalPCA)
     assert module.model.n_components == 3
@@ -54,11 +56,11 @@ def test_pca_returns_module_with_expected_shape(cdata, onepass_module):
     assert sorted(module.model.var_names_g.tolist()) == expected_genes
 
 
-def test_pca_registers_trained_module(cdata, onepass_module):
-    module = pca(cdata, n_components=3, zscore=True, accelerator="cpu")
+def test_pca_registers_trained_module(cdata, hvg_computed):
+    pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
     trained = cdata.trained_modules["pca"]
-    assert trained.module is module
+    assert isinstance(trained.module.model, IncrementalPCA)
     assert trained.complete
     assert trained.history.empty
     assert "n_components=3" in repr(cdata)
@@ -67,7 +69,7 @@ def test_pca_registers_trained_module(cdata, onepass_module):
     assert {"onepass", "pca", "other_pca"} == set(cdata.trained_modules)
 
 
-def test_pca_statistics_do_not_replace_the_hvg_onepass(cdata, onepass_module):
+def test_pca_statistics_do_not_replace_the_hvg_onepass(cdata, hvg_computed):
     onepass = cdata.trained_modules["onepass"]
 
     pca(cdata, n_components=3, zscore=True, accelerator="cpu")
@@ -77,7 +79,7 @@ def test_pca_statistics_do_not_replace_the_hvg_onepass(cdata, onepass_module):
     assert set(cdata.trained_modules) == {"onepass", "pca"}
 
 
-def test_pca_reuses_the_zscore_statistics(cdata, onepass_module, fits):
+def test_pca_reuses_the_zscore_statistics(cdata, hvg_computed, fits):
     n_fits_by_hvg = len(fits)
 
     pca(cdata, n_components=3, accelerator="cpu")
@@ -87,7 +89,7 @@ def test_pca_reuses_the_zscore_statistics(cdata, onepass_module, fits):
     assert fits[-1] == {"target_count": 10_000, "eps": 1e-6, "log1p": True, "batch_key": None}
 
 
-def test_pca_without_zscore_fits_no_statistics(cdata, onepass_module, fits):
+def test_pca_without_zscore_fits_no_statistics(cdata, hvg_computed, fits):
     n_fits_by_hvg = len(fits)
 
     pca(cdata, n_components=3, zscore=False, accelerator="cpu")
@@ -150,9 +152,9 @@ def test_pca_matches_pca_computed_by_hand(counts_and_cdata, zscore, use_hvg):
     torch.manual_seed(0)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*all genes")
-        module = pca(cdata, n_components=n_components, zscore=zscore, accelerator="cpu")
+        pca(cdata, n_components=n_components, zscore=zscore, accelerator="cpu")
 
-    model = module.model
+    model = cdata.trained_modules["pca"].module.model
     assert model.var_names_g.tolist() == var_names_g[keep_g].tolist()
     np.testing.assert_allclose(model.explained_variance_k.numpy(), singular_values_k**2 / len(x_ng), rtol=1e-3)
     # the components are those of the data, up to their signs
@@ -169,7 +171,8 @@ def test_pca_embedding_matches_projection_computed_by_hand(counts_and_cdata):
     x_ng = zscore_with_population_std(preprocess_with_scanpy(counts_ng, var_names_g, keep_g))
 
     torch.manual_seed(0)
-    module = pca(cdata, n_components=len(keep_g), zscore=True, accelerator="cpu")
+    pca(cdata, n_components=len(keep_g), zscore=True, accelerator="cpu")
+    module = cdata.trained_modules["pca"].module
 
     # the embedding of the cells of the first file, through the trained pipeline from the raw counts
     first_file = cdata.datamodule.dadc[:N_CELLS_PER_FILE]
@@ -196,18 +199,18 @@ def test_geometric_sketch_raises_n_pcs_without_embedding_module_key(cdata):
         geometric_sketch(cdata, target_n_cells=10, n_pcs=2)
 
 
-def test_geometric_sketch_raises_n_pcs_with_non_pca_embedding_module(cdata, onepass_module):
-    # the onepass_module fixture trains through the api, so it is registered as "onepass"
+def test_geometric_sketch_raises_n_pcs_with_non_pca_embedding_module(cdata, hvg_computed):
+    # the hvg_computed fixture trains through the api, so the onepass module is registered as "onepass"
     with pytest.raises(ValueError):
         geometric_sketch(cdata, target_n_cells=10, n_pcs=2, embedding_module_key="onepass")
 
 
-def test_geometric_sketch_raises_for_unknown_embedding_module_key_and_lists_available(cdata, onepass_module):
+def test_geometric_sketch_raises_for_unknown_embedding_module_key_and_lists_available(cdata, hvg_computed):
     with pytest.raises(ValueError, match=r"No trained module 'scvi'.*Available: \['onepass'\]"):
         geometric_sketch(cdata, target_n_cells=10, embedding_module_key="scvi")
 
 
-def test_geometric_sketch_with_pca_embedding_module_key(cdata, onepass_module):
+def test_geometric_sketch_with_pca_embedding_module_key(cdata, hvg_computed):
     pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
     result = geometric_sketch(cdata, target_n_cells=10, embedding_module_key="pca", n_pcs=2)
@@ -281,13 +284,13 @@ def test_scvi_raises_without_batch_key(cdata):
         scvi(cdata, batch_key=None, max_epochs=1, accelerator="cpu")  # type: ignore[arg-type]
 
 
-def test_scvi_returns_trained_module_and_restores_datamodule_state(cdata):
+def test_scvi_trains_module_and_restores_datamodule_state(cdata):
     datamodule = cdata.datamodule
     original_batch_keys = set(datamodule.batch_keys.keys())
     original_n_train, original_n_val = datamodule.n_train, datamodule.n_val
     original_obs_columns_to_validate = getattr(datamodule.dadc, "obs_columns_to_validate", None)  # h5ad only
 
-    module = scvi(
+    scvi(
         cdata,
         batch_key="cell_type",
         n_latent=3,
@@ -297,6 +300,7 @@ def test_scvi_returns_trained_module_and_restores_datamodule_state(cdata):
         accelerator="cpu",
     )
 
+    module = cdata.trained_modules["scvi"].module
     assert isinstance(module, CellariumModule)
     assert isinstance(module.model, SingleCellVariationalInference)
     assert module.model.n_latent == 3
@@ -310,7 +314,7 @@ def test_scvi_returns_trained_module_and_restores_datamodule_state(cdata):
 
 
 def test_scvi_registers_trained_module_with_history(cdata):
-    module = scvi(
+    scvi(
         cdata,
         batch_key="cell_type",
         n_latent=3,
@@ -322,7 +326,7 @@ def test_scvi_registers_trained_module_with_history(cdata):
     )
 
     trained = cdata.trained_modules["scvi"]
-    assert trained.module is module
+    assert isinstance(trained.module.model, SingleCellVariationalInference)
     assert trained.complete
     assert trained.n_epochs == 3
     assert list(trained.history.columns) == ["step", "epoch", "metric", "value"]
@@ -335,7 +339,7 @@ def test_scvi_registers_trained_module_with_history(cdata):
     assert set(cdata.trained_modules) == {"scvi", "other"}
 
 
-def test_using_provides_and_restores_the_batch_keys_a_trained_module_needs(cdata, onepass_module):
+def test_using_provides_and_restores_the_batch_keys_a_trained_module_needs(cdata, hvg_computed):
     scvi(cdata, batch_key="cell_type", n_latent=3, max_epochs=1, accelerator="cpu")
     original_batch_keys = set(cdata.datamodule.batch_keys)
 
@@ -400,8 +404,9 @@ def test_scvi_val_check_interval_is_a_global_step_cadence_capped_at_once_per_epo
     ],
 )
 def test_scvi_kl_warmup_defaults_do_not_override_user_values(cdata, scvi_kwargs, expected_steps, expected_epochs):
-    module = scvi(cdata, batch_key="cell_type", n_latent=3, max_epochs=1, scvi_kwargs=scvi_kwargs, accelerator="cpu")
+    scvi(cdata, batch_key="cell_type", n_latent=3, max_epochs=1, scvi_kwargs=scvi_kwargs, accelerator="cpu")
 
+    module = cdata.trained_modules["scvi"].module
     assert module.model.kl_warmup_steps == expected_steps
     assert module.model.kl_warmup_epochs == expected_epochs
 

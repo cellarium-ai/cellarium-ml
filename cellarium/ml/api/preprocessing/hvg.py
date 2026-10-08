@@ -5,7 +5,6 @@ from typing import Literal
 
 import pandas as pd
 
-from cellarium.ml import CellariumModule
 from cellarium.ml.api._data_transforms import OnePassRecipe, SeuratV3Recipe, fit_or_reuse
 from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import HVGSeuratV3, OnePassMeanVarStd
@@ -19,7 +18,7 @@ def highly_variable_genes(
     batch_key: str | None = None,
     key_added: str | None = None,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
-) -> tuple[pd.DataFrame, CellariumModule]:
+) -> pd.DataFrame:
     """
     Compute highly variable genes using the specified flavor.
 
@@ -40,12 +39,7 @@ def highly_variable_genes(
     NOTE: sets the :attr:`hvg` property of the datamodule with the boolean mask of highly variable genes.
 
     Returns:
-        A tuple containing:
-            - A :class:`pandas.DataFrame` with the highly variable genes.
-            - A :class:`CellariumModule` instance used for the computation, containing a trained model. It is also
-              stored as ``cdata.trained_modules[key_added]`` (with an empty history, since these models log no
-              metrics). If training is interrupted, the partially trained module is stored the same way, marked
-              ``complete=False``.
+        A :class:`pandas.DataFrame` with the highly variable genes.
 
     Note:
         The trained models are the statistics of the data, not of the flavor or ``n_top_genes``: a model already
@@ -117,4 +111,4 @@ def highly_variable_genes(
     # set the hvg property of CellariumData instance
     cdata.hvg = hvg_df["highly_variable"]
 
-    return hvg_df, trained.module
+    return hvg_df

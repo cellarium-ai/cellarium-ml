@@ -26,12 +26,12 @@ def _read_counts(cdata: CellariumData) -> ad.AnnData:
 
 
 def test_highly_variable_genes_seurat_sets_hvg_and_returns_df(cdata):
-    hvg_df, module = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
+    hvg_df = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
 
     assert isinstance(hvg_df, pd.DataFrame)
     assert "highly_variable" in hvg_df.columns
     assert list(hvg_df.index) == list(cdata.datamodule.var_names_g)
-    assert isinstance(module, CellariumModule)
+    assert isinstance(cdata.trained_modules["onepass"].module, CellariumModule)
 
     # highly_variable_genes() sets cdata.hvg as a side effect, aligned to the returned mask
     pd.testing.assert_series_equal(cdata.hvg, hvg_df["highly_variable"].astype(bool), check_names=False)
@@ -39,22 +39,23 @@ def test_highly_variable_genes_seurat_sets_hvg_and_returns_df(cdata):
 
 @pytest.mark.parametrize("flavor", ["seurat_v3", "kotliar"])
 def test_highly_variable_genes_other_flavors_smoke(cdata, flavor):
-    hvg_df, module = highly_variable_genes(cdata, n_top_genes=10, flavor=flavor, accelerator="cpu")
+    hvg_df = highly_variable_genes(cdata, n_top_genes=10, flavor=flavor, accelerator="cpu")
 
     assert "highly_variable" in hvg_df.columns
     assert len(hvg_df) == len(cdata.datamodule.var_names_g)
-    assert isinstance(module, CellariumModule)
+    (trained,) = cdata.trained_modules.values()
+    assert isinstance(trained.module, CellariumModule)
 
 
 @pytest.mark.parametrize(
     "flavor, expected_key", [("seurat", "onepass"), ("kotliar", "onepass"), ("seurat_v3", "hvg_seurat_v3")]
 )
 def test_highly_variable_genes_registers_trained_module(cdata, flavor, expected_key):
-    _, module = highly_variable_genes(cdata, n_top_genes=10, flavor=flavor, accelerator="cpu")
+    highly_variable_genes(cdata, n_top_genes=10, flavor=flavor, accelerator="cpu")
 
     assert set(cdata.trained_modules) == {expected_key}
     trained = cdata.trained_modules[expected_key]
-    assert trained.module is module
+    assert isinstance(trained.module, CellariumModule)
     assert trained.complete
     assert trained.history.empty
     assert expected_key in repr(cdata)
@@ -80,10 +81,9 @@ def test_highly_variable_genes_seurat_with_batch_key_trains_and_restores_datamod
     original_batch_keys = set(datamodule.batch_keys.keys())
     original_obs_columns_to_validate = getattr(datamodule.dadc, "obs_columns_to_validate", None)  # h5ad only
 
-    hvg_df, module = highly_variable_genes(
-        cdata, n_top_genes=10, flavor="seurat", batch_key="cell_type", accelerator="cpu"
-    )
+    hvg_df = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", batch_key="cell_type", accelerator="cpu")
 
+    module = cdata.trained_modules["onepass"].module
     assert isinstance(module.model, OnePassMeanVarStd)
     assert module.model.n_batch == 3  # "cell_type" has 3 categories in the synthetic fixture
     assert "highly_variable_nbatches" in hvg_df.columns
@@ -103,7 +103,7 @@ def test_highly_variable_genes_seurat_matches_scanpy(cdata, batch_key):
     sc.pp.log1p(adata)
     sc.pp.highly_variable_genes(adata, flavor="seurat", n_top_genes=n_top_genes, batch_key=batch_key)
 
-    hvg_df, _ = highly_variable_genes(
+    hvg_df = highly_variable_genes(
         cdata, n_top_genes=n_top_genes, flavor="seurat", batch_key=batch_key, accelerator="cpu"
     )
 
@@ -136,26 +136,26 @@ def test_highly_variable_genes_onepass_with_batches_serves_a_call_without_but_no
     highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", batch_key="cell_type", accelerator="cpu")
     assert [config["batch_key"] for config in fits] == [None, "cell_type"]
 
-    unbatched_df, _ = highly_variable_genes(cdata, n_top_genes=10, flavor="kotliar", accelerator="cpu")
+    unbatched_df = highly_variable_genes(cdata, n_top_genes=10, flavor="kotliar", accelerator="cpu")
     assert len(fits) == 2
     assert "highly_variable_nbatches" not in unbatched_df.columns
 
 
 def test_highly_variable_genes_unbatched_after_batched_matches_a_fresh_fit(cdata, fits):
     highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", batch_key="cell_type", accelerator="cpu")
-    reused_df, _ = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
+    reused_df = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
     assert len(fits) == 1
 
     cdata._fit_cache.clear()
-    fresh_df, _ = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
+    fresh_df = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
     assert len(fits) == 2
 
     pd.testing.assert_frame_equal(reused_df, fresh_df, rtol=1e-4)
 
 
 def test_highly_variable_genes_seurat_v3_reused_for_other_n_top_genes_but_exact_on_batch_key(cdata, fits):
-    df_10, _ = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat_v3", accelerator="cpu")
-    df_5, _ = highly_variable_genes(cdata, n_top_genes=5, flavor="seurat_v3", accelerator="cpu")
+    df_10 = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat_v3", accelerator="cpu")
+    df_5 = highly_variable_genes(cdata, n_top_genes=5, flavor="seurat_v3", accelerator="cpu")
     assert len(fits) == 1
     assert df_10["highly_variable"].sum() == 10
     assert df_5["highly_variable"].sum() == 5
@@ -177,10 +177,9 @@ def test_highly_variable_genes_seurat_v3_with_batch_key_trains_and_restores_data
     original_batch_keys = set(datamodule.batch_keys.keys())
     original_obs_columns_to_validate = getattr(datamodule.dadc, "obs_columns_to_validate", None)  # h5ad only
 
-    hvg_df, module = highly_variable_genes(
-        cdata, n_top_genes=10, flavor="seurat_v3", batch_key="cell_type", accelerator="cpu"
-    )
+    hvg_df = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat_v3", batch_key="cell_type", accelerator="cpu")
 
+    module = cdata.trained_modules["hvg_seurat_v3"].module
     assert isinstance(module.model, HVGSeuratV3)
     assert module.model.use_batch_key is True
     assert module.model.n_batch == 3  # "cell_type" has 3 categories in the synthetic fixture
