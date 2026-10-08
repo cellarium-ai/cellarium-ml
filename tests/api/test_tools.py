@@ -1,12 +1,15 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import warnings
 from types import SimpleNamespace
 from typing import Any
 
 import anndata as ad
+import numpy as np
 import pandas as pd
 import pytest
+import scanpy as sc
 import torch
 
 from cellarium.ml import CellariumModule
@@ -15,6 +18,7 @@ from cellarium.ml.api.preprocessing import highly_variable_genes
 from cellarium.ml.api.tools import geometric_sketch, pca, scvi
 from cellarium.ml.api.utils import PreciseProgressBar
 from cellarium.ml.models import IncrementalPCA, SingleCellVariationalInference
+from cellarium.ml.utilities.data import to_torch_sparse_csr
 
 
 @pytest.fixture
@@ -26,19 +30,22 @@ def onepass_module(cdata):
 # --- pca() -----------------------------------------------------------------------------------
 
 
-def test_pca_raises_without_hvg(cdata):
-    with pytest.raises(ValueError):
-        pca(cdata, n_components=3, zscore=False, accelerator="cpu")
+def test_pca_without_hvg_warns_and_uses_all_genes(cdata):
+    assert cdata.hvg is None
+    with pytest.warns(UserWarning, match="all genes"):
+        module = pca(cdata, n_components=3, zscore=True, accelerator="cpu")
+
+    assert module.model.var_names_g.tolist() == cdata.datamodule.var_names_g.tolist()
 
 
-def test_pca_raises_zscore_without_onepass_module(cdata, onepass_module):
-    assert cdata.hvg is not None  # onepass_module fixture sets it as a side effect
-    with pytest.raises(ValueError):
-        pca(cdata, n_components=3, zscore=True, onepass_module=None, accelerator="cpu")
+def test_pca_with_hvg_does_not_warn(cdata, onepass_module):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*all genes")
+        pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
 
 def test_pca_returns_module_with_expected_shape(cdata, onepass_module):
-    module = pca(cdata, n_components=3, zscore=True, onepass_module=onepass_module, accelerator="cpu")
+    module = pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
     assert isinstance(module, CellariumModule)
     assert isinstance(module.model, IncrementalPCA)
@@ -48,7 +55,7 @@ def test_pca_returns_module_with_expected_shape(cdata, onepass_module):
 
 
 def test_pca_registers_trained_module(cdata, onepass_module):
-    module = pca(cdata, n_components=3, zscore=True, onepass_module=onepass_module, accelerator="cpu")
+    module = pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
     trained = cdata.trained_modules["pca"]
     assert trained.module is module
@@ -56,8 +63,121 @@ def test_pca_registers_trained_module(cdata, onepass_module):
     assert trained.history.empty
     assert "n_components=3" in repr(cdata)
 
-    pca(cdata, n_components=3, onepass_module=onepass_module, accelerator="cpu", key_added="other_pca")
+    pca(cdata, n_components=3, accelerator="cpu", key_added="other_pca")
     assert {"onepass", "pca", "other_pca"} == set(cdata.trained_modules)
+
+
+def test_pca_statistics_do_not_replace_the_hvg_onepass(cdata, onepass_module):
+    onepass = cdata.trained_modules["onepass"]
+
+    pca(cdata, n_components=3, zscore=True, accelerator="cpu")
+
+    assert cdata.trained_modules["onepass"] is onepass
+    assert onepass.config["log1p"] is False
+    assert set(cdata.trained_modules) == {"onepass", "pca"}
+
+
+def test_pca_reuses_the_zscore_statistics(cdata, onepass_module, fits):
+    n_fits_by_hvg = len(fits)
+
+    pca(cdata, n_components=3, accelerator="cpu")
+    pca(cdata, n_components=2, accelerator="cpu", key_added="other_pca")  # another n_components: same statistics
+
+    assert len(fits) == n_fits_by_hvg + 1
+    assert fits[-1] == {"target_count": 10_000, "eps": 1e-6, "log1p": True, "batch_key": None}
+
+
+def test_pca_without_zscore_fits_no_statistics(cdata, onepass_module, fits):
+    n_fits_by_hvg = len(fits)
+
+    pca(cdata, n_components=3, zscore=False, accelerator="cpu")
+
+    assert len(fits) == n_fits_by_hvg
+
+
+def test_pca_hvg_onepass_cannot_be_used_for_the_zscore(cdata, fits):
+    """The HVG statistics are of the normalized counts; the z-score needs those of the log1p transformed ones."""
+    highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
+
+    pca(cdata, n_components=3, accelerator="cpu")
+
+    assert [config["log1p"] for config in fits] == [False, True]
+
+
+# --- pca() against the preprocessing and the PCA computed by hand ----------------------------------------
+
+
+N_CELLS_PER_FILE, N_GENES = 100, 24
+
+
+@pytest.fixture
+def counts_and_cdata(make_h5ad_files):
+    """The dense counts of some larger synthetic h5ad files and a CellariumData over them."""
+    h5ad_paths = make_h5ad_files(n_files=2, cells_per_file=N_CELLS_PER_FILE, n_genes=N_GENES, seed=3)
+    adatas = [ad.read_h5ad(path) for path in h5ad_paths]
+    counts_ng = np.vstack([adata.X.toarray() for adata in adatas]).astype(np.float64)
+    assert (counts_ng.std(axis=0) > 0).all()  # no gene is constant, so no singular value is zero
+    return counts_ng, CellariumData(h5ad_paths=h5ad_paths)
+
+
+def preprocess_with_scanpy(counts_ng: np.ndarray, var_names_g: np.ndarray, keep_g: np.ndarray) -> np.ndarray:
+    """Normalize over all genes and log1p transform, then keep the genes in `keep_g`, as scanpy does."""
+    adata = ad.AnnData(X=counts_ng.copy(), var=pd.DataFrame(index=var_names_g))
+    sc.pp.normalize_total(adata, target_sum=10_000)
+    sc.pp.log1p(adata)
+    return adata.X[:, keep_g]
+
+
+def zscore_with_population_std(x_ng: np.ndarray, eps: float = 1e-4) -> np.ndarray:
+    return (x_ng - x_ng.mean(axis=0)) / (x_ng.std(axis=0) + eps)
+
+
+@pytest.mark.parametrize("zscore", [True, False])
+@pytest.mark.parametrize("use_hvg", [True, False])
+def test_pca_matches_pca_computed_by_hand(counts_and_cdata, zscore, use_hvg):
+    counts_ng, cdata = counts_and_cdata
+    var_names_g = cdata.datamodule.var_names_g
+    # the genes with the most counts, so that the preprocessing before the subsetting matters
+    keep_g = np.sort(np.argsort(-counts_ng.sum(axis=0))[:10]) if use_hvg else np.arange(N_GENES)
+    if use_hvg:
+        cdata.hvg = var_names_g[keep_g]
+    n_components = len(keep_g)  # all of them: the randomized svd is then exact
+
+    x_ng = preprocess_with_scanpy(counts_ng, var_names_g, keep_g)
+    x_ng = zscore_with_population_std(x_ng) if zscore else x_ng - x_ng.mean(axis=0)
+    _, singular_values_k, components_kg = np.linalg.svd(x_ng, full_matrices=False)
+
+    torch.manual_seed(0)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*all genes")
+        module = pca(cdata, n_components=n_components, zscore=zscore, accelerator="cpu")
+
+    model = module.model
+    assert model.var_names_g.tolist() == var_names_g[keep_g].tolist()
+    np.testing.assert_allclose(model.explained_variance_k.numpy(), singular_values_k**2 / len(x_ng), rtol=1e-3)
+    # the components are those of the data, up to their signs
+    cosines_k = np.sum(model.components_kg.numpy() * components_kg, axis=1)
+    np.testing.assert_allclose(np.abs(cosines_k), 1.0, atol=1e-3)
+
+
+def test_pca_embedding_matches_projection_computed_by_hand(counts_and_cdata):
+    counts_ng, cdata = counts_and_cdata
+    var_names_g = cdata.datamodule.var_names_g
+    keep_g = np.sort(np.argsort(-counts_ng.sum(axis=0))[:10])
+    cdata.hvg = var_names_g[keep_g]
+
+    x_ng = zscore_with_population_std(preprocess_with_scanpy(counts_ng, var_names_g, keep_g))
+
+    torch.manual_seed(0)
+    module = pca(cdata, n_components=len(keep_g), zscore=True, accelerator="cpu")
+
+    # the embedding of the cells of the first file, through the trained pipeline from the raw counts
+    first_file = cdata.datamodule.dadc[:N_CELLS_PER_FILE]
+    batch = {"x_ng": to_torch_sparse_csr(first_file.X), "var_names_g": np.array(first_file.var_names)}
+    embedding_nk = module.pipeline.predict(batch)["x_ng"].detach().numpy()
+
+    expected_nk = x_ng[:N_CELLS_PER_FILE] @ module.model.components_kg.numpy().T
+    np.testing.assert_allclose(embedding_nk, expected_nk, rtol=1e-3, atol=1e-3)
 
 
 # --- geometric_sketch() -----------------------------------------------------------------------
@@ -86,7 +206,7 @@ def test_geometric_sketch_raises_for_unknown_embedding_module_key_and_lists_avai
 
 
 def test_geometric_sketch_with_pca_embedding_module_key(cdata, onepass_module):
-    pca(cdata, n_components=3, zscore=True, onepass_module=onepass_module, accelerator="cpu")
+    pca(cdata, n_components=3, zscore=True, accelerator="cpu")
 
     result = geometric_sketch(cdata, target_n_cells=10, embedding_module_key="pca", n_pcs=2)
 

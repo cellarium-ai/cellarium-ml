@@ -7,7 +7,22 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
+from cellarium.ml.api import _data_transforms
 from cellarium.ml.api.cellariumdata import CellariumData
+
+
+@pytest.fixture
+def fits(monkeypatch) -> list[dict]:
+    """The configs (the recipes) of the statistics models that `fit_or_reuse` has fit so far, one per fit."""
+    fitted = []
+    fit_and_register = _data_transforms.fit_and_register
+
+    def spy(cdata, trainer, module, key, config=None, **kwargs):
+        fitted.append(config)
+        return fit_and_register(cdata, trainer, module, key, config=config, **kwargs)
+
+    monkeypatch.setattr(_data_transforms, "fit_and_register", spy)
+    return fitted
 
 
 def _make_h5ad_files(

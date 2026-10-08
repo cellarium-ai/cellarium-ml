@@ -6,7 +6,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Literal, Sequence
+from typing import Any, Callable, Hashable, Iterator, Literal, Sequence
 
 import lightning.pytorch as pl
 import numpy as np
@@ -171,20 +171,23 @@ def fit_and_register(
     cdata: "CellariumData",
     trainer: pl.Trainer,
     module: CellariumModule,
-    key: str,
+    key: str | None,
     config: dict[str, Any] | None = None,
     loss_history: LossHistory | None = None,
     batch_keys: dict[str, AnnDataField] | None = None,
-) -> None:
+) -> TrainedModule:
     """
     Fit ``module`` on ``cdata.datamodule`` and store it in ``cdata.trained_modules[key]``, along with the metrics
     recorded by ``loss_history`` (if the trainer's logger is one) and the extra ``batch_keys`` the module needs to
     run. If training is interrupted, the partially trained module is stored the same way, marked ``complete=False``,
-    before the interruption propagates.
+    before the interruption propagates. With ``key=None`` nothing is stored in ``cdata.trained_modules``.
+
+    Returns:
+        The :class:`TrainedModule` of the completed fit.
     """
 
-    def register(complete: bool) -> None:
-        cdata.trained_modules[key] = TrainedModule(
+    def register(complete: bool) -> TrainedModule:
+        trained = TrainedModule(
             module=module,
             history=pd.DataFrame() if loss_history is None else loss_history.history,
             config={} if config is None else config,
@@ -192,6 +195,9 @@ def fit_and_register(
             complete=complete,
             batch_keys={} if batch_keys is None else dict(batch_keys),
         )
+        if key is not None:
+            cdata.trained_modules[key] = trained
+        return trained
 
     try:
         trainer.fit(module, cdata.datamodule)
@@ -201,7 +207,24 @@ def fit_and_register(
         if trainer.global_step > 0:
             register(complete=False)
         raise
-    register(complete=True)
+    return register(complete=True)
+
+
+class FitCache(dict[Hashable, TrainedModule]):
+    """
+    The trained modules whose fitted statistics api functions can reuse, keyed by the recipe that produced each (see
+    :mod:`cellarium.ml.api._data_transforms`). Private to a :class:`CellariumData`, and separate from
+    ``cdata.trained_modules``, which holds the modules for users to look at.
+    """
+
+    def find(self, recipe: Any) -> TrainedModule | None:
+        """The trained module for ``recipe`` (preferring an exact match), or one that ``recipe.is_served_by``."""
+        if recipe in self:
+            return self[recipe]
+        for other, trained in self.items():
+            if recipe.is_served_by(other):
+                return trained
+        return None
 
 
 class LazyObs:
@@ -466,6 +489,7 @@ class CellariumData:
         self._obs_computed = ObsmMapping(n_obs=self._datamodule.dadc)
         self._var = self._datamodule.dadc.var.copy()
         self._trained_modules = TrainedModulesMapping()
+        self._fit_cache = FitCache()
         self._hvg: pd.Series | None = None
         if "var_names_g" in self._datamodule.batch_keys:
             anndatafield: AnnDataField = self._datamodule.batch_keys["var_names_g"]
