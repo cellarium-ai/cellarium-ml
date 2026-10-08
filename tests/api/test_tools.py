@@ -174,7 +174,9 @@ def test_pca_embedding_matches_projection_computed_by_hand(counts_and_cdata):
     # the embedding of the cells of the first file, through the trained pipeline from the raw counts
     first_file = cdata.datamodule.dadc[:N_CELLS_PER_FILE]
     batch = {"x_ng": to_torch_sparse_csr(first_file.X), "var_names_g": np.array(first_file.var_names)}
-    embedding_nk = module.pipeline.predict(batch)["x_ng"].detach().numpy()
+    prediction = module(batch)["x_ng"]
+    assert isinstance(prediction, torch.Tensor)
+    embedding_nk = prediction.detach().numpy()
 
     expected_nk = x_ng[:N_CELLS_PER_FILE] @ module.model.components_kg.numpy().T
     np.testing.assert_allclose(embedding_nk, expected_nk, rtol=1e-3, atol=1e-3)

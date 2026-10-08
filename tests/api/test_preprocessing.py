@@ -165,12 +165,10 @@ def test_highly_variable_genes_seurat_v3_reused_for_other_n_top_genes_but_exact_
     assert [config["batch_key"] for config in fits] == [None, "cell_type"]
 
 
-def test_highly_variable_genes_writes_no_csv(cdata, tmp_path, monkeypatch):
+@pytest.mark.parametrize("flavor", ["seurat", "seurat_v3"])
+def test_highly_variable_genes_writes_no_csv(cdata, tmp_path, monkeypatch, flavor):
     monkeypatch.chdir(tmp_path)
-
-    for flavor in ["seurat", "seurat_v3"]:
-        highly_variable_genes(cdata, n_top_genes=10, flavor=flavor, accelerator="cpu")
-
+    highly_variable_genes(cdata, n_top_genes=10, flavor=flavor, accelerator="cpu")
     assert list(tmp_path.glob("*.csv")) == []
 
 
