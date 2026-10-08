@@ -74,17 +74,93 @@ def test_jagged_and_perfect_shards_give_identical_datasets(tmp_path, full):
     assert same(open_dataset(str(tmp_path / "B"))[:].to_scipy(), full)
 
 
-def test_sort_genes_orders_by_first_shard_totals(tmp_path, full):
+def test_sort_genes_orders_by_the_totals_of_all_files(tmp_path, full):
     write_shards(tmp_path / "in", [200, 200, 130], full)
     out = str(tmp_path / "out")
     convert_h5ad(str(tmp_path / "in" / "*.h5ad"), out, tile_size=150, n_chunks=2, level=3, threads=1, log=None)
     ds = open_dataset(out)
-    first = np.asarray(full[:200].sum(0)).ravel()
+    totals = np.asarray(full.sum(0)).ravel()
     order = ds.gene_order
-    assert sorted(order) == list(range(G)) and (np.diff(first[order]) <= 0).all()
+    assert sorted(order) == list(range(G)) and (np.diff(totals[order]) <= 0).all()
     assert same(ds[:].to_scipy(), full[:, order])
     assert ds.var_names == [f"gene{j}" for j in order]
-    assert ds.manifest.metadata["sort_genes"] is True and ds.manifest.metadata["n_source_files"] == 3
+    meta = ds.manifest.metadata
+    assert meta["sort_genes"] is True and meta["n_source_files"] == 3 and meta["sort_genes_n_files"] == 3
+
+
+def test_sort_genes_max_files_samples_files_evenly(tmp_path, full):
+    write_shards(tmp_path / "in", [100, 100, 100, 100, 100, 30], full)
+    out = str(tmp_path / "out")
+    kw = dict(tile_size=100, n_chunks=2, level=3, threads=1, workers=1, log=None)
+    convert_h5ad(str(tmp_path / "in" / "*.h5ad"), out, sort_genes_max_files=2, **kw)
+    ds = open_dataset(out)
+    sampled = np.asarray(full[:100].sum(0) + full[500:].sum(0)).ravel()  # the first and the last file
+    assert ds.manifest.metadata["sort_genes_n_files"] == 2
+    assert (np.diff(sampled[ds.gene_order]) <= 0).all()
+    assert same(ds[:].to_scipy(), full[:, ds.gene_order])
+    with pytest.raises(ValueError, match="sort_genes_max_files"):
+        convert_h5ad(str(tmp_path / "in" / "*.h5ad"), out, sort_genes_max_files=0, overwrite=True, **kw)
+
+
+def test_workers_give_the_same_dataset_as_one_process(tmp_path, full):
+    write_shards(tmp_path / "in", [37, 250, 3, 100, 140], full)  # tiles that span several files
+    kw = dict(tile_size=64, n_chunks=3, level=3, threads=1, log=None)
+    one = convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "A"), workers=1, **kw)
+    many = convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "B"), workers=3, **kw)
+    assert one.tile_cells == many.tile_cells == [64] * 8 + [18]
+    assert one.tile_bytes == many.tile_bytes and one.tile_nnz == many.tile_nnz
+    for i in range(one.n_tiles):
+        a = Path(tmp_path / "A" / "tiles" / f"tile_{i:06d}.dct").read_bytes()
+        b = Path(tmp_path / "B" / "tiles" / f"tile_{i:06d}.dct").read_bytes()
+        assert a == b, f"tile {i} differs"
+    ds = open_dataset(str(tmp_path / "B"))
+    assert same(ds[:].to_scipy(), full[:, ds.gene_order])
+
+
+def test_dense_x_gives_the_same_dataset_as_csr(tmp_path, full):
+    os.makedirs(tmp_path / "dense")
+    obs = pd.DataFrame(index=[f"cell{j}" for j in range(N)])
+    var = pd.DataFrame(index=[f"gene{j}" for j in range(G)])
+    anndata.AnnData(X=full.toarray().astype(np.float32), obs=obs, var=var).write_h5ad(tmp_path / "dense" / "x.h5ad")
+    write_shards(tmp_path / "csr", [N], full)
+    kw = dict(tile_size=100, n_chunks=2, level=3, threads=1, workers=2, log=None)
+    convert_h5ad(str(tmp_path / "dense" / "*.h5ad"), str(tmp_path / "A"), **kw)
+    convert_h5ad(str(tmp_path / "csr" / "*.h5ad"), str(tmp_path / "B"), **kw)
+    for i in range(6):
+        a = Path(tmp_path / "A" / "tiles" / f"tile_{i:06d}.dct").read_bytes()
+        b = Path(tmp_path / "B" / "tiles" / f"tile_{i:06d}.dct").read_bytes()
+        assert a == b, f"tile {i} differs"
+
+
+def test_obs_follows_the_cells_across_files_and_workers(tmp_path, full):
+    write_shards(tmp_path / "in", [37, 250, 3, 100, 140], full)
+    out = str(tmp_path / "out")
+    convert_h5ad(str(tmp_path / "in" / "*.h5ad"), out, tile_size=64, level=3, threads=1, workers=3, log=None)
+    ds = open_dataset(out)
+    assert list(ds.obs.to_pandas("obs_names")["obs_names"]) == [f"cell{j}" for j in range(N)]
+
+
+def test_default_workers_are_limited_by_memory(monkeypatch):
+    from deltacells import convert
+
+    monkeypatch.setattr(convert, "_cpu_count", lambda: 16)
+    monkeypatch.setattr(convert, "_available_memory", lambda: 10 * 2**30)
+    assert convert._default_workers(100, 1 * 2**30) == 7  # 70% of 10 GiB
+    assert convert._default_workers(100, 100 * 2**30) == 1  # never fewer than one
+    assert convert._default_workers(3, 1) == 3  # not more than the jobs
+    monkeypatch.setattr(convert, "_available_memory", lambda: None)
+    assert convert._default_workers(100, 2**40) == 16
+
+
+def test_tile_pieces_cover_the_cells_in_order():
+    from deltacells.convert import _tile_pieces
+
+    files, offsets = ["a", "empty", "b", "c"], [0, 5, 5, 17, 20]
+    pieces = [p for i in range(3) for p in _tile_pieces(i, 8, offsets, files)]
+    assert _tile_pieces(0, 8, offsets, files) == [("a", 0, 5), ("b", 0, 3)]
+    assert _tile_pieces(1, 8, offsets, files) == [("b", 3, 11)]
+    assert _tile_pieces(2, 8, offsets, files) == [("b", 11, 12), ("c", 0, 3)]
+    assert sum(e - s for _, s, e in pieces) == 20
 
 
 def test_rejects_mismatched_var_names(tmp_path, full):

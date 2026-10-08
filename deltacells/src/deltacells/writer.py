@@ -184,6 +184,29 @@ def write_tile(path: str, matrix: Any, **kwargs: Any) -> int:
     return len(blob)
 
 
+def write_tile_file(
+    root: str,
+    index: int,
+    matrix: Any,
+    *,
+    gene_order: np.ndarray | None = None,
+    n_chunks: int = DEFAULT_CHUNKS,
+    level: int = DEFAULT_LEVEL,
+    threads: int | None = None,
+) -> tuple[int, int, int]:
+    """Reorder the genes of ``matrix`` by ``gene_order`` (if given), encode it and write tile ``index`` of the dataset ``root``.
+
+    Returns ``(n_cells, nnz, n_bytes)``, which :meth:`DatasetWriter.commit_tile` takes. Different tiles can be written from
+    different processes; the ``tiles`` directory must exist (a :class:`DatasetWriter` creates it).
+    """
+    csr = sp.csr_matrix(matrix)
+    if gene_order is not None:
+        csr = permute_columns(_canonical_counts(csr), gene_order)
+    blob = encode_tile(csr, n_chunks=n_chunks, level=level, threads=threads)
+    _atomic_write(os.path.join(root, Manifest.tile_name(index)), blob)
+    return csr.shape[0], parse_tile_info(blob).nnz, len(blob)
+
+
 class DatasetWriter:
     """Write a dataset directory tile by tile (``tiles/tile_000000.dct``, ... and ``manifest.json``).
 
@@ -272,37 +295,65 @@ class DatasetWriter:
         """
         if self._closed:
             raise RuntimeError("writer is closed")
-        if (obs is None) != (self._obs_writer is None):
-            raise ValueError(
-                "obs must be given for every tile if (and only if) the writer was created with an obs_schema"
-            )
         csr = sp.csr_matrix(matrix)
         if csr.shape[1] != self.n_genes:
             raise ValueError(f"matrix has {csr.shape[1]} genes, expected {self.n_genes}")
         n = csr.shape[0]
+        self._check_next_tile(n)
+        obs_table = self._obs_table(obs, n)  # may raise: before anything is written
+        i = len(self._cells)
+        _, nnz, n_bytes = write_tile_file(
+            self.root,
+            i,
+            csr,
+            gene_order=self.gene_order,
+            n_chunks=self.n_chunks,
+            level=self.level,
+            threads=self.threads,
+        )
+        self._record_tile(n, nnz, n_bytes, obs_table)
+        return i
+
+    def commit_tile(
+        self, index: int, n_cells: int, nnz: int, n_bytes: int, obs: pd.DataFrame | Any | None = None
+    ) -> None:
+        """Register tile ``index``, which :func:`write_tile_file` already wrote to ``root`` (for example in another process).
+
+        The tiles must be committed in order. ``n_cells``, ``nnz`` and ``n_bytes`` are what :func:`write_tile_file` returned;
+        ``obs`` is as in :meth:`add_tile`.
+        """
+        if self._closed:
+            raise RuntimeError("writer is closed")
+        if index != len(self._cells):
+            raise ValueError(f"tiles must be committed in order: expected tile {len(self._cells)}, got {index}")
+        self._check_next_tile(n_cells)
+        self._record_tile(n_cells, nnz, n_bytes, self._obs_table(obs, n_cells))
+
+    def _check_next_tile(self, n: int) -> None:
         if not 0 < n <= self.tile_size:
             raise ValueError(f"a tile must hold between 1 and tile_size={self.tile_size} cells, got {n}")
         if self._cells and self._cells[-1] != self.tile_size:
             raise ValueError("only the last tile may hold fewer than tile_size cells")
-        obs_table = None
-        if obs is not None:
-            assert self.obs_schema is not None
-            obs_table = (
-                obs if hasattr(obs, "schema") else self.obs_schema.encode(obs)
-            )  # may raise: before anything is written
-            if obs_table.num_rows != n:
-                raise ValueError(f"obs has {obs_table.num_rows} rows but the tile has {n} cells")
-        if self.gene_order is not None:
-            csr = permute_columns(_canonical_counts(csr), self.gene_order)
-        i = len(self._cells)
-        blob = encode_tile(csr, n_chunks=self.n_chunks, level=self.level, threads=self.threads)
-        _atomic_write(os.path.join(self.root, Manifest.tile_name(i)), blob)
+
+    def _obs_table(self, obs: pd.DataFrame | Any | None, n: int) -> Any:
+        if (obs is None) != (self._obs_writer is None):
+            raise ValueError(
+                "obs must be given for every tile if (and only if) the writer was created with an obs_schema"
+            )
+        if obs is None:
+            return None
+        assert self.obs_schema is not None
+        table = obs if hasattr(obs, "schema") else self.obs_schema.encode(obs)
+        if table.num_rows != n:
+            raise ValueError(f"obs has {table.num_rows} rows but the tile has {n} cells")
+        return table
+
+    def _record_tile(self, n: int, nnz: int, n_bytes: int, obs_table: Any) -> None:
         if obs_table is not None:
             self._obs_writer.add_tile(obs_table)
         self._cells.append(n)
-        self._nnz.append(parse_tile_info(blob).nnz)
-        self._bytes.append(len(blob))
-        return i
+        self._nnz.append(nnz)
+        self._bytes.append(n_bytes)
 
     def close(self) -> Manifest:
         """Write the manifest (and gene order / variable names). Returns it."""

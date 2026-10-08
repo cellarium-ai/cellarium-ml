@@ -204,7 +204,7 @@ strings with missing values come back as object arrays with `None`. `to_pandas` 
 
 `docs/FORMAT.md` is the specification. In short:
 
-1. Genes are sorted by decreasing total counts (first shard as a proxy): frequently detected genes get small, adjacent column
+1. Genes are sorted by decreasing total counts (from up to 10 files spread evenly over the inputs, or all of them with `--sort-genes-max-files 0`): frequently detected genes get small, adjacent column
    indices, so the gaps between a cell's nonzero genes are small and repetitive.
 2. Per cell, the gene indices are delta coded (`g0, g1-g0, g2-g1, ...`); with the counts that gives two uint16 streams.
 3. Each stream is split into byte planes (all low bytes, then all high bytes), compressed with zstd, per chunk of ~1/8 of the
@@ -237,9 +237,11 @@ Sorting the genes saves 21-22% at every level; higher zstd levels are smaller *a
 * **No orchestrator**: no resume-from-checkpoint arithmetic, DDP padding or `drop_last_indices`; the reference loader is a sketch of
   how to call the dataset, not a replacement for cellarium's.
 * **The dataset is not thread-safe for concurrent `get_batch`** calls (they are serialized by a lock).
-* **Gene order depends on the first shard** passed to `convert`; two conversions of the same cells with different first shards (for
-  example differently sized files) sort genes slightly differently. With `--no-sort-genes` the result depends only on cell order
-  and tile size.
+* **Gene order depends on the files sampled for it** (up to `--sort-genes-max-files`, spread evenly over the inputs): the same cells
+  split into a different number of files can sort genes slightly differently when there are more files than that. With
+  `--no-sort-genes` (or when every file is used) the result depends only on cell order and tile size.
+* **The converter does not shuffle**: a tile holds consecutive cells (a tile that spans the end of one file and the start of the next
+  mixes just those two). Shuffle the cells across files first if the input is sorted by donor, tissue, ...
 * Compression at level 19 takes ~7 s per 10k-cell tile with 8 threads (24 s with one chunk); lower levels trade size for speed.
 
 ## Tests and benchmarks

@@ -71,7 +71,8 @@ def _convert(args: argparse.Namespace) -> int:
 
     convert_h5ad(
         args.h5ad_glob, args.output, tile_size=args.tile_size, sort_genes=not args.no_sort_genes, n_chunks=args.chunks,
-        level=args.level, threads=args.threads, overwrite=args.overwrite, obs=not args.no_obs, var=not args.no_var,
+        level=args.level, threads=args.threads, workers=args.workers, sort_genes_max_files=args.sort_genes_max_files or None,
+        overwrite=args.overwrite, obs=not args.no_obs, var=not args.no_var,
         obs_names=not args.no_obs_names, obs_exclude=[c for c in args.obs_exclude.split(",") if c],
         max_categories=args.max_categories, obs_tiles_per_file=args.obs_tiles_per_file,
     )  # fmt: skip
@@ -143,7 +144,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--no-sort-genes", action="store_true", help="Keep the source gene order.")
     p.add_argument("--chunks", type=int, default=8, help="Independently compressed chunks per tile.")
     p.add_argument("--level", type=int, default=19, help="zstd level (higher: smaller, slower to write).")
-    p.add_argument("--threads", type=int, default=None, help="Compression threads (default: up to 8).")
+    p.add_argument(
+        "--threads", type=int, default=None, help="Compression threads per worker (default: cores / workers)."
+    )
+    p.add_argument(
+        "--workers", type=int, default=None,
+        help="Processes that write tiles (default: the cores, limited so that the tiles in flight fit in memory).",
+    )  # fmt: skip
+    p.add_argument(
+        "--sort-genes-max-files", type=int, default=10,
+        help="Files (spread evenly over the inputs) whose counts decide the gene order (default: 10; 0: all of them).",
+    )  # fmt: skip
     p.add_argument("--overwrite", action="store_true", help="Delete the output directory first if it exists.")
     p.add_argument("--no-obs", action="store_true", help="Do not store the cell metadata.")
     p.add_argument("--no-var", action="store_true", help="Do not store the gene table.")
