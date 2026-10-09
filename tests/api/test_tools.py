@@ -243,7 +243,8 @@ def test_geometric_sketch_default_embedding_returns_expected_keys(cdata):
     assert isinstance(sketch_mask, pd.Series)
     assert sketch_mask.dtype == bool
     assert len(sketch_mask) == n_obs
-    assert 0 < sketch_mask.sum() <= n_obs
+    assert n_obs > 10
+    assert sketch_mask.sum() == 10  # exactly the target
 
     adata = result["adata"]
     assert isinstance(adata, ad.AnnData)
@@ -268,6 +269,26 @@ def test_geometric_sketch_with_sparse_coo_batches(make_h5ad_files, monkeypatch):
     sketch_mask = result["obs_names_in_sketch"]
     assert isinstance(sketch_mask, pd.Series)
     assert adata.n_obs == int(sketch_mask.sum())
+
+
+def test_geometric_sketch_returns_exactly_the_target_after_coarsening(make_h5ad_files):
+    cdata = CellariumData(h5ad_paths=make_h5ad_files(n_files=2, cells_per_file=100, n_genes=30))
+
+    # 200 cells and room for only 2 * 25 voxels: the grid coarsens on the way, and the result is still 25 cells
+    result = geometric_sketch(cdata, target_n_cells=25, accelerator="cpu")
+
+    sketch_mask = result["obs_names_in_sketch"]
+    assert isinstance(sketch_mask, pd.Series)
+    assert sketch_mask.sum() == 25
+    adata = result["adata"]
+    assert isinstance(adata, ad.AnnData)
+    assert adata.n_obs == 25 and adata.obsm["X_embedding"].shape[0] == 25
+    assert isinstance(result["module"], CellariumModule)
+    assert len(result["module"].model.sketch_obs_names) == 25  # type: ignore[union-attr]
+
+    # a target beyond the number of cells keeps them all
+    result = geometric_sketch(cdata, target_n_cells=1000, accelerator="cpu")
+    assert result["obs_names_in_sketch"].sum() == 200  # type: ignore[operator]
 
 
 def test_geometric_sketch_return_new_adata_false_gives_no_adata(cdata):
