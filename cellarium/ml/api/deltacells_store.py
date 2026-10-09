@@ -9,12 +9,17 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
 from tqdm import tqdm
 
+from cellarium.ml.api._view_collections import _obs_frame
 from cellarium.ml.api.utils import get_gcs_fs
 from cellarium.ml.data.distributed_deltacells import _import_deltacells
 
 _GCS_PREFIX = "gs://"
+_MAX_COUNT = 65535  # the largest count that deltacells can store
 
 
 def _check_local_h5ad_paths(h5ad_paths: Sequence[str]) -> list[str]:
@@ -116,7 +121,6 @@ def create_deltacells_dataset(
     from deltacells.convert import convert_h5ad
 
     files = _check_local_h5ad_paths(h5ad_paths)
-    remote = output.startswith(_GCS_PREFIX)
     convert = dict(
         obs=True,  # the api reads the obs_names of every batch
         obs_names=True,
@@ -132,9 +136,29 @@ def create_deltacells_dataset(
     # a path is a literal here, not a glob pattern; the order of the list is the order of the cells
     patterns = [glob.escape(f) for f in files]
 
-    if not remote:
-        convert_h5ad(patterns, output, sort_files=False, overwrite=overwrite, **convert)
-        return output
+    def write(directory: str, overwrite: bool) -> None:
+        convert_h5ad(patterns, directory, sort_files=False, overwrite=overwrite, **convert)
+
+    write_dataset(output, write, overwrite=overwrite, staging_dir=staging_dir, filesystem=filesystem)
+    return output
+
+
+def write_dataset(
+    output: str,
+    write: Callable[[str, bool], None],
+    overwrite: bool = False,
+    staging_dir: str | None = None,
+    filesystem: Any = None,
+) -> None:
+    """
+    Create a dataset at ``output``, a local directory or a ``gs://bucket/prefix``, by calling ``write(directory,
+    overwrite)``, which must write the dataset to the local ``directory`` (replacing one that is there if
+    ``overwrite``). For ``gs://`` the dataset is written to a local staging directory first and then uploaded, the
+    manifest last, replacing what is at ``output`` if ``overwrite``.
+    """
+    if not output.startswith(_GCS_PREFIX):
+        write(output, overwrite)
+        return
 
     fs = filesystem if filesystem is not None else get_gcs_fs()
     remote_dir = output[len(_GCS_PREFIX) :].rstrip("/")
@@ -143,10 +167,85 @@ def create_deltacells_dataset(
     staging = tempfile.mkdtemp(prefix="cellarium_deltacells_", dir=staging_dir)
     try:
         local = os.path.join(staging, "dataset")
-        convert_h5ad(patterns, local, sort_files=False, **convert)
+        write(local, False)
         if fs.exists(remote_dir):
             fs.rm(remote_dir, recursive=True)
         _upload_directory(local, remote_dir, fs)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def write_collection_to_deltacells(
+    collection: Any,
+    output: str,
+    tile_size: int = 10_000,
+    sort_genes: bool = True,
+    sort_genes_max_tiles: int = 10,
+    overwrite: bool = False,
+    staging_dir: str | None = None,
+    filesystem: Any = None,
+    **writer_kwargs: Any,
+) -> str:
+    """
+    Write all the cells of ``collection`` (a :class:`~cellarium.ml.data.DistributedCollection`), in order, as a
+    deltacells dataset at ``output`` (see :func:`write_dataset`), in tiles of ``tile_size`` cells with their ``obs``
+    (every column, and the ``obs_names``) and ``var``. This is one pass over the cells, plus one over up to
+    ``sort_genes_max_tiles`` tiles spread over them, to sort the genes by decreasing total counts (better
+    compression). ``X`` must hold integer counts from 0 to 65535. If it does not, or the writing fails otherwise,
+    nothing is left at a local ``output``. ``writer_kwargs`` are passed to :class:`deltacells.DatasetWriter`.
+
+    Returns:
+        ``output``.
+    """
+    _import_deltacells()  # a clear error if deltacells is missing
+    from deltacells.obs import ObsSchema
+    from deltacells.writer import DatasetWriter
+
+    n = len(collection)
+    tile_starts = list(range(0, n, tile_size))
+
+    def read(start: int) -> tuple[sp.csr_matrix, pd.DataFrame]:
+        batch = collection.read(np.arange(start, min(start + tile_size, n)))
+        x = sp.csr_matrix(batch.X)
+        if x.nnz and (x.data.min() < 0 or x.data.max() > _MAX_COUNT or np.any(x.data != np.round(x.data))):
+            raise ValueError(
+                f"The tile of cells {start} to {start + x.shape[0]} does not hold integer counts from 0 to "
+                f"{_MAX_COUNT}, which deltacells requires."
+            )
+        obs = _obs_frame(batch)
+        obs["obs_names"] = np.asarray(obs.index, dtype=str)
+        return x, obs.reset_index(drop=True)
+
+    _, first_obs = read(0)
+    schema = ObsSchema.infer([first_obs])
+    gene_order = None
+    if sort_genes:
+        totals = np.zeros(collection.n_vars)
+        for start in tile_starts[:: max(1, len(tile_starts) // sort_genes_max_tiles)][:sort_genes_max_tiles]:
+            totals += np.asarray(read(start)[0].sum(axis=0)).ravel()
+        gene_order = np.argsort(-totals, kind="stable")
+
+    def write(directory: str, overwrite: bool) -> None:
+        # refuses (FileExistsError) to write into a directory that has something in it unless `overwrite`, before
+        # touching it, so that a failure here leaves what was there alone
+        writer = DatasetWriter(
+            directory,
+            n_genes=collection.n_vars,
+            tile_size=tile_size,
+            gene_order=gene_order,
+            var_names=[str(name) for name in collection.var_names],
+            var=collection.var,
+            obs_schema=schema,
+            overwrite=overwrite,
+            **writer_kwargs,
+        )
+        try:
+            with writer:
+                for start in tqdm(tile_starts, desc="Writing tiles", unit="tile"):
+                    writer.add_tile(*read(start))
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)  # a directory without a manifest is not a dataset
+            raise
+
+    write_dataset(output, write, overwrite=overwrite, staging_dir=staging_dir, filesystem=filesystem)
     return output

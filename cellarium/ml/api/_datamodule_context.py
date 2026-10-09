@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from cellarium.ml import CellariumAnnDataDataModule
+from cellarium.ml.api._view_collections import unwrap_collection
 from cellarium.ml.data import DistributedAnnDataCollection
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField
@@ -33,7 +34,7 @@ def temporary_batch_keys(
             ``datamodule.batch_keys``. Names already present in ``datamodule.batch_keys`` are
             restored to their original field afterward rather than removed.
     """
-    dadc = datamodule.dadc
+    dadc = unwrap_collection(datamodule.dadc)  # the cells of a view are read, and validated, by its source
     # only h5ad collections validate the obs columns of each file they read
     h5ad_dadc = dadc if isinstance(dadc, DistributedAnnDataCollection) else None
 

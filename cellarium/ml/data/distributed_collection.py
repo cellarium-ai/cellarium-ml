@@ -38,6 +38,10 @@ class DistributedCollection(ABC):
     # call it if this is true.
     supports_prefetch: bool = False
 
+    #: The largest number of dataloader workers that can read this collection, or ``None`` for no limit. A collection
+    # that lives in the memory of one process (so that every worker would need a copy) sets it to ``0``.
+    max_num_workers: int | None = None
+
     limits: list[int]
     var_names: Any
 
@@ -59,6 +63,14 @@ class DistributedCollection(ABC):
     @abstractmethod
     def __getitem__(self, index: Any) -> Any:
         """Cells with the given global indices (an int, a slice or a sequence of ints), as an AnnData-like object."""
+
+    def read(self, index: Any) -> Any:
+        """
+        Like indexing, for requests of any size or spread. Collections whose indexing limits how many shards one
+        request may touch (for example :class:`~cellarium.ml.data.DistributedAnnDataCollection`, with a strictly
+        enforced cache size) override this to read in groups. Used for batches of scattered cells.
+        """
+        return self[index]
 
     def __len__(self) -> int:
         return self.n_obs

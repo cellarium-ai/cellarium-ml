@@ -267,13 +267,42 @@ class DistributedAnnDataCollection(AnnCollection, DistributedCollection):
 
         :class:`LazyAnnData` instances corresponding to cells in the index are materialized.
         """
+        return self._gather(index, in_groups=False)
+
+    def read(self, index: Index) -> AnnData:
+        """
+        Like indexing, but cells that lie in more files than the cache holds (for example a batch of scattered cells)
+        are read in groups of at most ``max_cache_size`` files, copying the cells of each group out before the next
+        group is read, so no more than ``max_cache_size`` files are ever in memory (and
+        ``cache_size_strictly_enforced`` is never violated).
+        """
+        return self._gather(index, in_groups=True)
+
+    def _gather(self, index: Index, in_groups: bool) -> AnnData:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         adatas_oidx, oidx, vidx, reverse = self._resolve_idx(oidx, vidx)
-        adatas = self.materialize(adatas_oidx, vidx)
-        adata = concat(adatas, merge="same")
+        used = [i for i, adata_oidx in enumerate(adatas_oidx) if adata_oidx is not None]
+        if not in_groups or len(used) <= self.max_cache_size:
+            adatas = self.materialize(adatas_oidx, vidx)
+            adata = concat(adatas, merge="same")
+        else:
+            groups = []
+            for start in range(0, len(used), self.max_cache_size):
+                group = set(used[start : start + self.max_cache_size])
+                group_oidx = [adata_oidx if i in group else None for i, adata_oidx in enumerate(adatas_oidx)]
+                # `concat` copies the cells, which releases the (views of the) files of the group
+                groups.append(concat(self.materialize(group_oidx, vidx), merge="same"))
+            adata = concat(groups, merge="same")
         adata = adata if reverse is None else adata[reverse]
-        # make sure that categorical dtypes are preserved
-        adata.obs = adata.obs.astype(self.schema.attr_values["obs"].dtypes)
+        # make sure that categorical dtypes are preserved. `astype` leaves a categorical column alone if its categories
+        # are those of the schema in a different order (unordered categorical dtypes compare equal), which would make
+        # the codes of a batch differ from those of other batches, so categories are set explicitly.
+        obs = adata.obs
+        for column, dtype in self.schema.attr_values["obs"].dtypes.items():
+            if isinstance(dtype, pd.CategoricalDtype) and isinstance(obs[column].dtype, pd.CategoricalDtype):
+                obs[column] = obs[column].cat.set_categories(dtype.categories, ordered=dtype.ordered)
+            else:
+                obs[column] = obs[column].astype(dtype)
         return adata
 
     def materialize(self, adatas_oidx: list[np.ndarray | None], vidx: Index1D) -> list[AnnData]:
