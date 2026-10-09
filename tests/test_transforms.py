@@ -387,6 +387,77 @@ def test_zscore_unknown_gene_raises(zscore_full: ZScore):
 
 
 # ---------------------------------------------------------------------------
+# NormalizeTotal sparse tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def x_counts_sparse() -> scipy.sparse.csr_matrix:
+    """Sparse counts with an all-zero row, rows of very different totals, and integer dtype."""
+    rng = np.random.default_rng(7)
+    dense = rng.poisson(rng.uniform(0, 8, size=(1, 12)) * rng.uniform(0.1, 5, size=(9, 1)))
+    dense[3] = 0
+    return scipy.sparse.csr_matrix(dense)
+
+
+_SPARSE_LAYOUTS = {
+    "scipy": lambda x: x,
+    "csr": to_torch_sparse_csr,
+    "coo": to_torch_sparse_coo,
+}
+
+
+@pytest.mark.parametrize("layout", _SPARSE_LAYOUTS)
+@pytest.mark.parametrize("target_count, eps", [(10_000, 1e-6), (500, 0.5)])
+def test_normalize_total_sparse_matches_dense(x_counts_sparse, layout, target_count, eps):
+    x_dense = torch.from_numpy(x_counts_sparse.toarray()).float()
+    expected = NormalizeTotal(target_count=target_count, eps=eps)(x_dense)["x_ng"]
+
+    out = NormalizeTotal(target_count=target_count, eps=eps)(_SPARSE_LAYOUTS[layout](x_counts_sparse))["x_ng"]
+
+    expected_layout = torch.sparse_coo if layout == "coo" else torch.sparse_csr
+    assert out.layout == expected_layout
+    assert out.dtype == torch.float32
+    torch.testing.assert_close(out.to_dense(), expected)
+
+
+@pytest.mark.parametrize("layout", ["csr", "coo"])
+def test_normalize_total_sparse_does_not_modify_input(x_counts_sparse, layout):
+    x = _SPARSE_LAYOUTS[layout](x_counts_sparse)
+    before = x.to_dense().clone()
+
+    NormalizeTotal()(x)
+
+    torch.testing.assert_close(x.to_dense(), before)
+
+
+@pytest.mark.parametrize("layout", ["scipy", "csr", "coo"])
+def test_normalize_total_sparse_total_mrna_umis_n_override(x_counts_sparse, layout):
+    x_dense = torch.from_numpy(x_counts_sparse.toarray()).float()
+    total_mrna_umis_n = torch.arange(1, x_dense.shape[0] + 1).float() * 100
+    expected = NormalizeTotal()(x_dense, total_mrna_umis_n=total_mrna_umis_n)["x_ng"]
+
+    out = NormalizeTotal()(_SPARSE_LAYOUTS[layout](x_counts_sparse), total_mrna_umis_n=total_mrna_umis_n)["x_ng"]
+
+    torch.testing.assert_close(out.to_dense(), expected)
+
+
+def test_normalize_total_sparse_then_filter_then_log1p_matches_scanpy_order(x_counts_sparse):
+    """Normalizing in front of the Filter uses the totals over all genes."""
+    var_names_g = np.array([f"gene_{i}" for i in range(x_counts_sparse.shape[1])])
+    keep = ["gene_5", "gene_1", "gene_9"]
+    x_dense = torch.from_numpy(x_counts_sparse.toarray()).float()
+    normalized = NormalizeTotal()(x_dense)["x_ng"]
+    expected = torch.log1p(normalized[:, [5, 1, 9]])
+
+    pipeline = CellariumPipeline([NormalizeTotal(), Filter(keep, ordering=True), Densify(), Log1p()])
+    out = pipeline({"x_ng": to_torch_sparse_csr(x_counts_sparse), "var_names_g": var_names_g})
+
+    torch.testing.assert_close(out["x_ng"], expected)
+    assert out["var_names_g"].tolist() == keep
+
+
+# ---------------------------------------------------------------------------
 # Densify tests
 # ---------------------------------------------------------------------------
 

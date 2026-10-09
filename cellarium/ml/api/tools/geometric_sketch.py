@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+from typing import Literal
+
 import anndata
 import lightning.pytorch as pl
 import numpy as np
@@ -16,7 +18,7 @@ from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
-from cellarium.ml.utilities.data import AnnDataField, collate_fn, to_scipy_csr
+from cellarium.ml.utilities.data import AnnDataField, collate_fn, sparse_tensor_to_scipy_csr
 from cellarium.ml.utilities.testing import assert_arrays_equal, assert_columns_and_array_lengths_equal
 
 
@@ -24,7 +26,7 @@ class RandomMatrixProjection(CellariumModel, PredictMixin):
     """
     Embeds ``x_ng`` via a fixed, untrained random matrix projection (i.e. a linear layer that is
     never trained). Used as :func:`geometric_sketch`'s default embedding when no
-    ``embedding_module`` is provided, so that geometric sketching has some (arbitrary) notion of
+    ``embedding_module_key`` is provided, so that geometric sketching has some (arbitrary) notion of
     cell-to-cell distance to work with even without a trained embedding model like PCA or scVI.
 
     Args:
@@ -78,11 +80,20 @@ def compute_output_var_names_g(module: CellariumModule, datamodule: CellariumAnn
     # Run the embedding pipeline's `predict` (rather than `forward`, which is the training
     # step and doesn't update `var_names_g`) so that models like PCA report their actual
     # output var names (e.g. "PC1", "PC2", ...) instead of the input gene names.
-    adata = datamodule.dadc[0]
+    # Use a slice of up to one batch, not a single cell (`dadc[0]`), since models with BatchNorm (e.g. scVI)
+    # need more than one cell per batch. Slicing works the same for h5ad and deltacells collections.
+    adata = datamodule.dadc[: min(datamodule.batch_size, datamodule.dadc.n_obs)]
     batch = tree_map(lambda field: field(adata), datamodule.batch_keys)
     collated = collate_fn([batch])
     pipeline = CellariumPipeline(list(module.cpu_transforms or []) + list(module.transforms) + [module.model])
-    var_names_g = pipeline.predict(collated)["var_names_g"]
+    # inference only: eval mode so BatchNorm uses (and doesn't update) its running stats
+    was_training = module.training
+    module.eval()
+    try:
+        with torch.no_grad():
+            var_names_g = pipeline.predict(collated)["var_names_g"]
+    finally:
+        module.train(was_training)
     assert isinstance(var_names_g, np.ndarray)
     return var_names_g
 
@@ -90,9 +101,10 @@ def compute_output_var_names_g(module: CellariumModule, datamodule: CellariumAnn
 def geometric_sketch(
     cdata: CellariumData,
     target_n_cells: int = 1_000_000,
-    embedding_module: CellariumModule | None = None,
+    embedding_module_key: str | None = None,
     n_pcs: int | None = None,
     return_new_adata: bool = True,
+    accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
 ) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
     """
     Train a plaid geometric sketching model on the data in the datamodule,
@@ -100,13 +112,23 @@ def geometric_sketch(
 
     Args:
         cdata: :class:`CellariumData` instance containing the data.
-        target_n_cells: The target number of cells to select using geometric sketching. This is very
-            approximate.
-        embedding_module: A trained :class:`CellariumModule` containing an embedding model such as PCA or scVI.
+        target_n_cells: The number of cells to select using geometric sketching. The sketch is exactly this
+            size, unless the data has fewer cells than this (after pruning), in which case all of them are
+            selected. The sketch is built as a grid over the embedding that is coarsened whenever it exceeds
+            twice this many occupied voxels, keeping two random cells per voxel, and is brought to exactly this
+            size at the end, as in the geometric sketching paper (see
+            :class:`~cellarium.ml.models.StreamingPlaidGeometricSketch`).
+        embedding_module_key: The key in ``cdata.trained_modules`` of a trained embedding model such as PCA
+            (``"pca"``) or scVI (``"scvi"``), populated by training it with the api functions. Any data the model
+            needs to run (such as scVI's batch column) is provided for you, see :meth:`CellariumData.using`.
             If not provided, the embedding will be a random matrix projection, after NormalizeTotal and Log1p.
+            Raises ValueError if there is no trained module under this key.
         n_pcs: Number of principal components to use for the embedding if the embedding module is PCA.
             If None, all components are used. Raises ValueError if module is not PCA.
         return_new_adata: Whether to return a new AnnData object with the selected geometric sketch cells.
+        accelerator: The accelerator to use for the pass over the data, in ["cpu", "mps", "cuda", "auto"]. The
+            sketch itself is kept in tensors on the accelerator (except for "mps", where it is kept on the CPU),
+            which is what makes it fast for millions of cells.
 
     Returns:
         Dict with keys:
@@ -114,18 +136,34 @@ def geometric_sketch(
             "adata": The new AnnData object containing only the selected geometric sketch cells
                 (if `return_new_adata` is True).
             "module": The trained StreamingPlaidGeometricSketch module (if `return_new_adata` is False).
-        Note: updates cdata.datamodule.obs['in_sketch'] with a boolean mask for selected geometric sketch cells.
+        Note: stores the same boolean mask (a pandas series indexed by obs_names) in
+        ``cdata.obs_computed['in_sketch']``.
     """
+    if embedding_module_key is None:
+        return _geometric_sketch(cdata, target_n_cells, None, n_pcs, return_new_adata, accelerator)
+
+    with cdata.using(embedding_module_key) as trained:
+        return _geometric_sketch(cdata, target_n_cells, trained.module, n_pcs, return_new_adata, accelerator)
+
+
+def _geometric_sketch(
+    cdata: CellariumData,
+    target_n_cells: int,
+    embedding_module: CellariumModule | None,
+    n_pcs: int | None,
+    return_new_adata: bool,
+    accelerator: Literal["cpu", "mps", "cuda", "auto"],
+) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
     datamodule: CellariumAnnDataDataModule = cdata.datamodule
     if "obs_names_n" not in datamodule.batch_keys:
         raise ValueError("batch_keys in the datamodule needs to contain key 'obs_names_n' for geometric_sketch.")
 
     if n_pcs is not None:
         if embedding_module is None:
-            raise ValueError("n_pcs can only be specified if an embedding_module is provided.")
+            raise ValueError("n_pcs can only be specified if an embedding_module_key is provided.")
         else:
             if not isinstance(embedding_module.model, IncrementalPCA):
-                raise ValueError("n_pcs can only be specified if the embedding_module's model is IncrementalPCA.")
+                raise ValueError("n_pcs can only be specified if the embedding module's model is IncrementalPCA.")
 
     if embedding_module is None:
         embedding_var_names_g = datamodule.var_names_g if cdata.hvg is None else np.asarray(cdata.hvg.index[cdata.hvg])
@@ -144,16 +182,30 @@ def geometric_sketch(
         embedding_module.configure_model()
     var_names_g = compute_output_var_names_g(embedding_module, datamodule)
 
-    target_bucket_ncells = 5
-    min_cells_per_bucket_qc_threshold = 1
+    # The embedding module's own cpu_transforms (for example the library size normalization of sparse counts
+    # in front of PCA) are made those of the sketch module, so that the dataloader runs them on the CPU, just as
+    # when the embedding module was trained. The rest of the embedding module runs on the accelerator.
+    embedding_module.configure_model()  # idempotent; makes its transforms and model accessible
+    embedding_on_accelerator = CellariumModule(
+        transforms=list(embedding_module.transforms),
+        model=embedding_module.model,
+        is_initialized=True,  # it is trained: do not reset its parameters
+    )
+    embedding_on_accelerator.configure_model()
 
+    # The grid is allowed twice as many occupied voxels as there are cells in the sketch, and each voxel keeps
+    # two cells: a coarsening event leaves between target_voxels / 2 and target_voxels voxels (more than
+    # target_n_cells), and the model brings the sketch to exactly target_n_cells at the end by coarsening
+    # a copy of the grid a little further, as in the geometric sketching paper.
     module = CellariumModule(
-        transforms=[embedding_module],
+        cpu_transforms=list(embedding_module.cpu_transforms),
+        transforms=[embedding_on_accelerator],
         model=StreamingPlaidGeometricSketch(
             var_names_g=var_names_g,
-            target_voxels=target_n_cells // target_bucket_ncells,
-            min_cells_per_bucket=min_cells_per_bucket_qc_threshold,
-            max_cells_per_bucket=target_bucket_ncells,
+            target_voxels=2 * target_n_cells,
+            target_n_cells=target_n_cells,
+            min_cells_per_bucket=1,
+            max_cells_per_bucket=2,
             projector=None,
             limit_input_to_top_pcs=n_pcs,
             store_cell_data=return_new_adata,
@@ -161,7 +213,7 @@ def geometric_sketch(
     )
 
     trainer = pl.Trainer(
-        accelerator="cpu",
+        accelerator=accelerator,
         devices=1,
         logger=False,
         enable_checkpointing=False,
@@ -187,14 +239,14 @@ def geometric_sketch(
         if return_new_adata:
             mask = sketch_index.get_indexer(batch_obs_names) >= 0
             if mask.any():
-                raw_x_ng_list.append(to_scipy_csr(batch["x_ng"])[mask])
+                raw_x_ng_list.append(sparse_tensor_to_scipy_csr(batch["x_ng"])[mask])
                 raw_obs_names_list.append(batch_obs_names[mask])
     obs_names = np.concatenate(obs_names_list)
     datamodule.shuffle = datamodule_shuffle
 
     ordered_sketch_mask = sketch_index.get_indexer(obs_names) >= 0
     sketch_series = pd.Series(ordered_sketch_mask, index=obs_names)
-    datamodule.dadc._obs["in_sketch"] = ordered_sketch_mask
+    cdata.obs_computed["in_sketch"] = sketch_series
 
     adata = None
     if return_new_adata:
@@ -211,7 +263,7 @@ def geometric_sketch(
         embedding_pos = sketch_index.get_indexer(raw_obs_names)
         embedding = reservoir["x_ng"].to_dense().cpu().numpy()[embedding_pos]
 
-        var = datamodule.dadc.adatas[0].var
+        var = datamodule.dadc.var
         ad_field = datamodule.batch_keys["var_names_g"]
         assert isinstance(ad_field, AnnDataField)
         var_col = ad_field.key

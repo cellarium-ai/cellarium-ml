@@ -298,6 +298,29 @@ def to_scipy_coo(x: torch.Tensor) -> scipy.sparse.coo_matrix:
     )
 
 
+def sparse_tensor_to_scipy_csr(x: torch.Tensor) -> scipy.sparse.csr_matrix:
+    """
+    Convert a CPU sparse torch tensor, in either layout a dataloader produces, to a
+    :class:`scipy.sparse.csr_matrix`.
+
+    A :class:`torch.sparse_csr_tensor` (:func:`to_torch_sparse_csr`) is wrapped without copying, see
+    :func:`to_scipy_csr`. A :class:`torch.sparse_coo_tensor` (:func:`to_torch_sparse_coo`, used on the
+    ``mps`` accelerator, which has no sparse CSR support) is converted, which copies the data once.
+    Use this when the code should not care which of the two layouts it receives.
+
+    Args:
+        x: A CPU tensor with ``torch.sparse_csr`` or ``torch.sparse_coo`` layout.
+
+    Returns:
+        A :class:`scipy.sparse.csr_matrix` with the contents of ``x``.
+    """
+    if x.layout == torch.sparse_csr:
+        return to_scipy_csr(x)
+    if x.layout == torch.sparse_coo:
+        return to_scipy_coo(x).tocsr()
+    raise ValueError(f"Expected a tensor with `torch.sparse_csr` or `torch.sparse_coo` layout. Got {x.layout}")
+
+
 def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
     """
     Convert a pandas Series or DataFrame of categorical data to a numpy array of codes.

@@ -1,0 +1,3 @@
+include LICENSE README.md DEVELOPING.md
+recursive-include src *.c *.py py.typed
+recursive-include docs *.md

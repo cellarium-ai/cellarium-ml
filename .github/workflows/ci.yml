@@ -164,6 +164,56 @@ jobs:
     - name: Test dataloader
       run: make test-dataloader
 
+  test-api:
+
+    needs: [lint, mypy, docs]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install -y libzstd-dev
+        python -m pip install --upgrade pip
+        pip install .[test]
+        pip install ./deltacells
+    - name: Check that the deltacells extension was built
+      run: python -c "import deltacells._core"
+    - name: Test API
+      run: make test-api
+
+  test-deltacells:
+
+    needs: [lint, mypy, docs]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install -y libzstd-dev
+        python -m pip install --upgrade pip
+        pip install .[test]
+        pip install ./deltacells
+    - name: Check that the deltacells extension was built
+      run: python -c "import deltacells._core"
+    - name: Test deltacells
+      run: make test-deltacells
+
   test-examples:
 
     needs: [lint, mypy, docs]

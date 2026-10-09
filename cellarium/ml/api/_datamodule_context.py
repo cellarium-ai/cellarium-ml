@@ -11,6 +11,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from cellarium.ml import CellariumAnnDataDataModule
+from cellarium.ml.api._view_collections import unwrap_collection
+from cellarium.ml.data import DistributedAnnDataCollection
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField
 
@@ -32,11 +34,14 @@ def temporary_batch_keys(
             ``datamodule.batch_keys``. Names already present in ``datamodule.batch_keys`` are
             restored to their original field afterward rather than removed.
     """
-    dadc = datamodule.dadc
+    dadc = unwrap_collection(datamodule.dadc)  # the cells of a view are read, and validated, by its source
+    # only h5ad collections validate the obs columns of each file they read
+    h5ad_dadc = dadc if isinstance(dadc, DistributedAnnDataCollection) else None
 
     original_fields = {name: datamodule.batch_keys.get(name) for name in extra_batch_keys}
-    original_obs_columns_to_validate = dadc.obs_columns_to_validate
-    original_schema_obs_columns_to_validate = dadc.schema.obs_columns_to_validate
+    if h5ad_dadc is not None:
+        original_obs_columns_to_validate = h5ad_dadc.obs_columns_to_validate
+        original_schema_obs_columns_to_validate = h5ad_dadc.schema.obs_columns_to_validate
 
     obs_columns_to_validate: list[str] = []
     for field in extra_batch_keys.values():
@@ -49,10 +54,14 @@ def temporary_batch_keys(
 
     try:
         datamodule.batch_keys.update(extra_batch_keys)
-        # mutate the schema object in place: LazyAnnData instances hold a reference to this exact
-        # object, so reassigning `dadc.schema` (a new object) would not affect already-constructed shards
-        dadc.obs_columns_to_validate = obs_columns_to_validate
-        dadc.schema.obs_columns_to_validate = obs_columns_to_validate
+        if h5ad_dadc is not None:
+            # mutate the schema object in place: LazyAnnData instances hold a reference to this exact
+            # object, so reassigning `dadc.schema` (a new object) would not affect already-constructed shards
+            h5ad_dadc.obs_columns_to_validate = obs_columns_to_validate
+            h5ad_dadc.schema.obs_columns_to_validate = obs_columns_to_validate
+        else:
+            # e.g. deltacells: make the new obs columns local before any worker needs them
+            datamodule.prepare_data()
         yield
     finally:
         for name, original_field in original_fields.items():
@@ -60,8 +69,9 @@ def temporary_batch_keys(
                 datamodule.batch_keys.pop(name, None)
             else:
                 datamodule.batch_keys[name] = original_field
-        dadc.obs_columns_to_validate = original_obs_columns_to_validate
-        dadc.schema.obs_columns_to_validate = original_schema_obs_columns_to_validate
+        if h5ad_dadc is not None:
+            h5ad_dadc.obs_columns_to_validate = original_obs_columns_to_validate
+            h5ad_dadc.schema.obs_columns_to_validate = original_schema_obs_columns_to_validate
 
 
 @contextmanager

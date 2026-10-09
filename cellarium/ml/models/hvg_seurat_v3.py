@@ -330,7 +330,7 @@ class HVGSeuratV3(CellariumModel):
             var_df: pd.DataFrame | None = None
             datamodule = getattr(trainer, "datamodule", None)
             if isinstance(datamodule, CellariumAnnDataDataModule):
-                var_df = datamodule.dadc.schema.attr_values["var"]
+                var_df = datamodule.dadc.var
             else:
                 warnings.warn(
                     "HVGSeuratV3: trainer.datamodule is not a CellariumAnnDataDataModule; "

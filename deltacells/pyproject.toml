@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deltacells"
+version = "0.1.0"
+description = "Fast, compact, cloud-friendly tiles of single-cell count matrices: delta-coded gene gaps + zstd, decoded by a small C core."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Cellarium contributors" }]
+dependencies = ["numpy", "scipy"]
+
+[project.optional-dependencies]
+torch = ["torch"]
+h5ad = ["anndata"]
+obs = ["pyarrow", "pandas"]
+gcs = ["google-cloud-storage"]
+test = ["pytest", "anndata", "torch", "pyarrow", "pandas"]
+
+[project.scripts]
+deltacells = "deltacells.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+deltacells = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+# `ruff format` wraps code to 120 columns; long prose lines in docstrings and comments are tolerated.
+ignore = ["E501"]
