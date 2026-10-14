@@ -350,5 +350,5 @@ def test_a_collection_is_written_to_gcs_with_the_manifest_last(cdata, tmp_path):
     )
     assert uri == "gs://bucket/prefix"
     assert fs.puts[-1] == "bucket/prefix/manifest.json"
-    assert not [d for d in os.listdir(tmp_path) if d.startswith("cellarium_deltacells_")]  # staging cleaned up
+    assert not [d for d in os.listdir(tmp_path) if d.startswith("deltacells_stage_")]  # staging cleaned up
     fs.fs.rm("bucket", recursive=True)

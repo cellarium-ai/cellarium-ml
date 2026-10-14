@@ -16,7 +16,7 @@ dependencies = ["numpy", "scipy"]
 torch = ["torch"]
 h5ad = ["anndata"]
 obs = ["pyarrow", "pandas"]
-gcs = ["google-cloud-storage"]
+gcs = ["google-cloud-storage", "fsspec", "gcsfs"]
 test = ["pytest", "anndata", "torch", "pyarrow", "pandas"]
 
 [project.scripts]

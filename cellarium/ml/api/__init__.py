@@ -12,6 +12,7 @@ from cellarium.ml.api.utils import (
     h5ad_paths_from_google_bucket,
     write_obs_parquet,
 )
+from cellarium.ml.data.fileio import read_h5ad_file
 
 __all__ = [
     "CellariumData",
@@ -26,4 +27,5 @@ __all__ = [
     "write_obs_parquet",
     "pp",
     "tl",
+    "read_h5ad_file",
 ]

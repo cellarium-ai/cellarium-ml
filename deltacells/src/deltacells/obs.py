@@ -279,12 +279,25 @@ def obs_fingerprint(schema_json: str, tile_cells: Sequence[int], shard_sha256: S
 
 
 class ObsWriter:
-    """Writes one encoded obs table per tile, in tile order, into parquet shards of ``tiles_per_file`` row groups."""
+    """Writes one encoded obs table per tile, in tile order, into parquet shards of ``tiles_per_file`` row groups.
 
-    def __init__(self, root: str, schema: ObsSchema, *, tiles_per_file: int, compression_level: int = 9) -> None:
+    ``publish(name)``, if given, is called with the name (relative to ``root``) of each file once it is finished, for example
+    to upload it; the file is then no longer touched here.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        schema: ObsSchema,
+        *,
+        tiles_per_file: int,
+        compression_level: int = 9,
+        publish: Callable[[str], None] | None = None,
+    ) -> None:
         if tiles_per_file < 1:
             raise ValueError("obs_tiles_per_file must be at least 1")
         self.root, self.schema, self.tiles_per_file, self.level = root, schema, tiles_per_file, compression_level
+        self._publish = publish or (lambda name: None)
         os.makedirs(os.path.join(root, "obs"), exist_ok=True)
         self._arrow_schema = schema.arrow_schema()
         self._writer: pq.ParquetWriter | None = None
@@ -305,6 +318,7 @@ class ObsWriter:
         self.shard_bytes.append(os.path.getsize(final))
         self.shard_sha256.append(_sha256_file(final))
         self._writer = self._tmp = None
+        self._publish(Manifest.obs_shard_name(len(self.shard_bytes) - 1))
 
     def add_tile(self, table: pa.Table) -> None:
         if not table.schema.equals(self._arrow_schema):
@@ -332,6 +346,7 @@ class ObsWriter:
         with open(path + ".tmp", "w") as f:
             f.write(schema_json)
         os.replace(path + ".tmp", path)
+        self._publish(OBS_SCHEMA_NAME)
         return schema_json, obs_fingerprint(schema_json, tile_cells, self.shard_sha256)
 
 

@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import zlib
+from collections import deque
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -32,8 +34,10 @@ from deltacells.manifest import (
     GENE_ORDER_NAME,
     MANIFEST_NAME,
     VAR_NAMES_NAME,
+    VAR_TABLE_NAME,
     Manifest,
 )
+from deltacells.sink import LocalSink, open_sink
 
 if TYPE_CHECKING:  # pragma: no cover
     import pandas as pd
@@ -211,7 +215,9 @@ class DatasetWriter:
     """Write a dataset directory tile by tile (``tiles/tile_000000.dct``, ... and ``manifest.json``).
 
     Args:
-        root: Output directory.
+        root: Output directory, or a remote prefix such as ``gs://bucket/prefix``. For a remote output everything is written to
+            a local scratch directory (``scratch_dir``) and each file is uploaded as soon as it is finished and then deleted,
+            so the scratch space needed is only a few tiles, not the dataset; the manifest is uploaded last.
         n_genes: Number of genes (columns).
         tile_size: Cells per tile; every tile except the last must have exactly this many.
         gene_order: Optional permutation. Incoming matrices are in the *original* gene order; output column ``j`` is input
@@ -225,10 +231,18 @@ class DatasetWriter:
         obs_compression_level: zstd level of the obs parquet files.
         n_chunks, level, threads: See :func:`encode_tile`.
         metadata: Free-form JSON-serializable dict stored in the manifest.
-        overwrite: Delete ``root`` first if it exists.
+        overwrite: Delete the dataset that is at ``root`` first (right away, before anything is written). Only the files of a
+            deltacells dataset (complete or not) are deleted: if ``root`` holds anything else this raises instead.
+        inputs: Paths of the files the dataset is made from. Raises if one is inside ``root``, which ``overwrite`` would
+            delete.
+        scratch_dir: For a remote ``root``, where to make the local scratch directory (default: the system temp directory).
+        filesystem: An fsspec filesystem to use for a remote ``root`` instead of the default for its protocol (for testing).
+        upload_threads: Files uploaded at the same time to a remote ``root``.
 
-    The manifest is written by :meth:`close` (or on leaving a ``with`` block without an exception); a directory without a
-    manifest is an incomplete dataset.
+    The manifest is written by :meth:`close` (or on leaving a ``with`` block without an exception); a directory or prefix
+    without a manifest is an incomplete dataset. :attr:`root` is the local directory the files are written to (``root``
+    itself for a local output, the scratch directory for a remote one): that is where :func:`write_tile_file` must write
+    the tiles that :meth:`commit_tile` registers. If writing fails, call :meth:`abort` (``with`` does).
     """
 
     def __init__(
@@ -248,18 +262,16 @@ class DatasetWriter:
         threads: int | None = None,
         metadata: dict | None = None,
         overwrite: bool = False,
+        inputs: Sequence[str] = (),
+        scratch_dir: str | None = None,
+        filesystem: Any = None,
+        upload_threads: int = 8,
     ) -> None:
+        # check everything before the destination is touched, so that a mistake does not cost an existing dataset
         if tile_size < 1:
             raise ValueError("tile_size must be positive")
         if not 1 <= n_genes <= MAX_GENES:
             raise ValueError(f"n_genes must be between 1 and {MAX_GENES}")
-        self.root = root
-        if os.path.exists(root):
-            if not overwrite and os.listdir(root):
-                raise FileExistsError(f"{root} is not empty; pass overwrite=True to replace it")
-            if overwrite:
-                shutil.rmtree(root)
-        os.makedirs(os.path.join(root, "tiles"), exist_ok=True)
         self.n_genes, self.tile_size = n_genes, tile_size
         self.gene_order = None if gene_order is None else np.asarray(gene_order, dtype=np.int64)
         if self.gene_order is not None and (
@@ -272,13 +284,35 @@ class DatasetWriter:
         if var is not None and len(var) != n_genes:
             raise ValueError("var must have n_genes rows")
         self.var = var
+        if obs_tiles_per_file < 1:
+            raise ValueError("obs_tiles_per_file must be at least 1")
+
+        self.output = root
+        self._sink = open_sink(root, filesystem)
+        self._sink.prepare(overwrite, list(inputs))
+        self._scratch: str | None = None
+        self._pool: ThreadPoolExecutor | None = None
+        self._uploads: deque[Future] = deque()
+        self._max_uploads = 4 * upload_threads
+        self.n_published = 0  # files uploaded to a remote output so far
+        if self._sink.local:
+            self.root = root
+        else:
+            self._scratch = self.root = tempfile.mkdtemp(prefix="deltacells_stage_", dir=scratch_dir)
+            self._pool = ThreadPoolExecutor(upload_threads)
+        os.makedirs(os.path.join(self.root, "tiles"), exist_ok=True)
+
         self.obs_schema = obs_schema
         self._obs_writer = None
         if obs_schema is not None:
             from deltacells.obs import ObsWriter
 
             self._obs_writer = ObsWriter(
-                root, obs_schema, tiles_per_file=obs_tiles_per_file, compression_level=obs_compression_level
+                self.root,
+                obs_schema,
+                tiles_per_file=obs_tiles_per_file,
+                compression_level=obs_compression_level,
+                publish=self._publish,
             )
         self.obs_tiles_per_file = obs_tiles_per_file
         self.n_chunks, self.level, self.threads, self.metadata = n_chunks, level, threads, dict(metadata or {})
@@ -286,6 +320,48 @@ class DatasetWriter:
         self._nnz: list[int] = []
         self._bytes: list[int] = []
         self._closed = False
+
+    @property
+    def is_remote(self) -> bool:
+        """Whether the dataset is uploaded to a remote prefix (and ``root`` is only a scratch directory)."""
+        return not self._sink.local
+
+    def _publish(self, name: str) -> None:
+        """A file of the dataset is finished in ``root``: upload it (in the background) and delete the local copy. Does
+        nothing for a local output, whose files are already where they belong. Raises the error of an upload that failed."""
+        if self._pool is None:
+            return
+        self._uploads.append(self._pool.submit(self._upload, name))
+        while self._uploads and (self._uploads[0].done() or len(self._uploads) > self._max_uploads):
+            self._uploads.popleft().result()
+
+    def _upload(self, name: str) -> None:
+        path = os.path.join(self.root, name)
+        self._sink.put(path, name)
+        os.remove(path)
+        self.n_published += 1
+
+    def _wait_for_uploads(self) -> None:
+        while self._uploads:
+            self._uploads.popleft().result()
+
+    def _cleanup(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=True, cancel_futures=True)
+            self._pool = None
+        if self._scratch is not None:
+            shutil.rmtree(self._scratch, ignore_errors=True)
+            self._scratch = None
+
+    def abort(self) -> None:
+        """Give up on the dataset. The scratch directory is deleted; so is what was written to a local output (the files of
+        the dataset, and the directory if this created it). Nothing is deleted from a remote output: the files already
+        uploaded stay there, without a manifest, which marks the dataset as incomplete."""
+        self._closed = True
+        self._uploads.clear()
+        self._cleanup()
+        if isinstance(self._sink, LocalSink):
+            self._sink.discard()
 
     def add_tile(self, matrix: Any, obs: pd.DataFrame | Any | None = None) -> int:
         """Write the next tile (and its obs rows, if the writer has an ``obs_schema``); returns its index.
@@ -351,12 +427,14 @@ class DatasetWriter:
     def _record_tile(self, n: int, nnz: int, n_bytes: int, obs_table: Any) -> None:
         if obs_table is not None:
             self._obs_writer.add_tile(obs_table)
+        self._publish(Manifest.tile_name(len(self._cells)))
         self._cells.append(n)
         self._nnz.append(nnz)
         self._bytes.append(n_bytes)
 
     def close(self) -> Manifest:
-        """Write the manifest (and gene order / variable names). Returns it."""
+        """Write the manifest (and gene order / variable names), after everything else has been uploaded if the output is
+        remote. Returns it."""
         if self._closed:
             raise RuntimeError("writer is already closed")
         if not self._cells:
@@ -364,16 +442,19 @@ class DatasetWriter:
         self._closed = True
         if self.gene_order is not None:
             np.save(os.path.join(self.root, GENE_ORDER_NAME), self.gene_order.astype(np.int32))
+            self._publish(GENE_ORDER_NAME)
         if self.var_names is not None:
             names = self.var_names if self.gene_order is None else [self.var_names[j] for j in self.gene_order]
             if any("\n" in v for v in names):
                 raise ValueError("variable names must not contain newlines")
             with open(os.path.join(self.root, VAR_NAMES_NAME), "w") as f:
                 f.write("\n".join(names) + "\n")
+            self._publish(VAR_NAMES_NAME)
         if self.var is not None:
             from deltacells.obs import write_var_table
 
             write_var_table(self.root, self.var if self.gene_order is None else self.var.iloc[self.gene_order])
+            self._publish(VAR_TABLE_NAME)
         obs_fields: dict[str, Any] = {}
         if self._obs_writer is not None:
             _, fingerprint = self._obs_writer.close(self._cells)
@@ -399,12 +480,24 @@ class DatasetWriter:
             has_var_table=self.var is not None,
             **obs_fields,
         )
-        _atomic_write(os.path.join(self.root, MANIFEST_NAME), manifest.to_json().encode())
+        self._wait_for_uploads()  # everything but the manifest is in place
+        manifest_path = os.path.join(self.root, MANIFEST_NAME)
+        _atomic_write(manifest_path, manifest.to_json().encode())
+        if self._scratch is not None:
+            self._sink.put(manifest_path, MANIFEST_NAME)  # last, so that an incomplete dataset has no manifest
+            self.n_published += 1
+        self._cleanup()
         return manifest
 
     def __enter__(self) -> DatasetWriter:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if exc_type is None and not self._closed:
-            self.close()
+        if exc_type is not None:
+            self.abort()
+        elif not self._closed:
+            try:
+                self.close()
+            except BaseException:
+                self.abort()
+                raise

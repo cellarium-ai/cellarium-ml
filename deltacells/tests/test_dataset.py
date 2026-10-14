@@ -248,13 +248,53 @@ def test_invalid_options(built):
 
 
 def test_writer_refuses_nonempty_dir_without_overwrite(tmp_path):
-    (tmp_path / "x").write_text("hi")
+    (tmp_path / "manifest.json").write_text("old")
     with pytest.raises(FileExistsError):
         DatasetWriter(str(tmp_path), n_genes=5, tile_size=10)
+    assert (tmp_path / "manifest.json").exists()
     w = DatasetWriter(str(tmp_path), n_genes=5, tile_size=10, overwrite=True)
-    assert not (tmp_path / "x").exists()
+    assert not (tmp_path / "manifest.json").exists()
     w.add_tile(make_counts(10, 5))
     w.close()
+
+
+def test_writer_never_deletes_what_is_not_a_dataset(tmp_path):
+    (tmp_path / "manifest.json").write_text("old")
+    (tmp_path / "notes.txt").write_text("precious")
+    with pytest.raises(FileExistsError, match="notes.txt"):
+        DatasetWriter(str(tmp_path), n_genes=5, tile_size=10, overwrite=True)
+    assert (tmp_path / "manifest.json").read_text() == "old" and (tmp_path / "notes.txt").read_text() == "precious"
+
+
+def test_writer_refuses_an_output_that_contains_an_input(tmp_path):
+    (tmp_path / "a.h5ad").write_text("data")
+    with pytest.raises(ValueError, match="inside the output"):
+        DatasetWriter(str(tmp_path), n_genes=5, tile_size=10, overwrite=True, inputs=[str(tmp_path / "a.h5ad")])
+    assert (tmp_path / "a.h5ad").exists()
+
+
+def test_writer_checks_its_arguments_before_deleting_anything(tmp_path):
+    (tmp_path / "manifest.json").write_text("old")
+    with pytest.raises(ValueError, match="gene_order"):
+        DatasetWriter(str(tmp_path), n_genes=5, tile_size=10, gene_order=[0, 0, 1, 2, 3], overwrite=True)
+    assert (tmp_path / "manifest.json").exists()
+
+
+def test_aborting_a_local_writer_leaves_nothing_it_created(tmp_path):
+    out = tmp_path / "new"
+    w = DatasetWriter(str(out), n_genes=5, tile_size=10, level=3)
+    w.add_tile(make_counts(10, 5))
+    assert (out / "tiles" / "tile_000000.dct").exists()
+    w.abort()
+    assert not out.exists()
+
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    with pytest.raises(RuntimeError, match="boom"):
+        with DatasetWriter(str(existing), n_genes=5, tile_size=10, level=3) as w2:
+            w2.add_tile(make_counts(10, 5))
+            raise RuntimeError("boom")
+    assert existing.exists() and os.listdir(existing) == []  # a directory that was there is left, emptied
 
 
 def test_writer_tile_rules(tmp_path):

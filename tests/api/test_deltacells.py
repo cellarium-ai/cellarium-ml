@@ -53,8 +53,8 @@ def test_create_rejects_bad_paths(h5ad_paths, tmp_path):
     out = str(tmp_path / "out")
     with pytest.raises(FileNotFoundError):
         create_deltacells_dataset([*h5ad_paths, str(tmp_path / "missing.h5ad")], out, log=None)
-    with pytest.raises(ValueError, match="local"):
-        create_deltacells_dataset(["gs://bucket/a.h5ad"], out, log=None)
+    with pytest.raises(ValueError, match="not supported"):
+        create_deltacells_dataset(["s3://bucket/a.h5ad"], out, log=None)
     with pytest.raises(ValueError):
         create_deltacells_dataset([], out, log=None)
     assert not os.path.exists(out)
@@ -69,50 +69,182 @@ def test_create_refuses_to_overwrite_unless_asked(h5ad_paths, tmp_path):
 
 
 class _RecordingFS:
-    """An in-memory fsspec filesystem that records the order of the uploads."""
+    """An in-memory fsspec filesystem that records the order of the uploads and what is staged when a file is downloaded."""
 
     def __init__(self):
         import fsspec
 
         self.fs = fsspec.filesystem("memory")
         self.puts: list[str] = []
+        self.staged: list[int] = []  # the files in the scratch directory at each download, that one included
 
     def put_file(self, local, remote):
         self.puts.append(remote)
         self.fs.put_file(local, remote)
 
+    def get_file(self, remote, local, **kwargs):
+        self.fs.get_file(remote, local, **kwargs)
+        self.staged.append(len([f for f in os.listdir(os.path.dirname(local)) if not f.endswith(".part")]))
+
     def __getattr__(self, name):
         return getattr(self.fs, name)
 
 
-def test_create_uploads_to_gcs_with_the_manifest_last(h5ad_paths, tmp_path):
+@pytest.fixture
+def fake_gcs():
+    """A fake bucket named ``bucket``, to be used as ``filesystem=`` with ``gs://bucket/...`` paths."""
+    fs = _RecordingFS()
+    yield fs
+    if fs.fs.exists("bucket"):
+        fs.fs.rm("bucket", recursive=True)
+
+
+def _upload_inputs(fs: _RecordingFS, h5ad_paths: list[str]) -> list[str]:
+    for i, path in enumerate(h5ad_paths):
+        fs.fs.put_file(path, f"bucket/in/f{i}.h5ad")
+    return [f"gs://bucket/in/f{i}.h5ad" for i in range(len(h5ad_paths))]
+
+
+def _tiles(root: str) -> list[bytes]:
+    names = sorted(f for f in _files(root) if f.startswith("tiles/"))
+    return [open(os.path.join(root, f), "rb").read() for f in names]
+
+
+def test_create_uploads_to_gcs_with_the_manifest_last(h5ad_paths, tmp_path, fake_gcs):
     local = str(tmp_path / "local")
     create_deltacells_dataset(h5ad_paths, local, tile_size=4, level=3, log=None)
-    fs = _RecordingFS()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
 
     uri = create_deltacells_dataset(
-        h5ad_paths, "gs://bucket/prefix/", tile_size=4, level=3, log=None, filesystem=fs, staging_dir=str(tmp_path)
+        h5ad_paths, "gs://bucket/prefix/", tile_size=4, level=3, log=None, filesystem=fake_gcs, staging_dir=str(scratch)
     )
 
     assert uri == "gs://bucket/prefix/"
-    assert {p.removeprefix("bucket/prefix/") for p in fs.puts} == _files(local)
-    assert fs.puts[-1] == "bucket/prefix/manifest.json"
-    assert not [d for d in os.listdir(tmp_path) if d.startswith("cellarium_deltacells_")]  # staging cleaned up
-    fs.fs.rm("bucket", recursive=True)
+    assert {p.removeprefix("bucket/prefix/") for p in fake_gcs.puts} == _files(local)
+    assert fake_gcs.puts[-1] == "bucket/prefix/manifest.json"
+    assert os.listdir(scratch) == []  # the scratch directory is cleaned up
 
 
-def test_upload_refuses_nonempty_prefix_unless_overwrite(h5ad_paths, tmp_path):
-    fs = _RecordingFS()
-    fs.fs.pipe("bucket/prefix/stale.txt", b"old")
-    kwargs: dict[str, Any] = dict(tile_size=4, level=3, log=None, filesystem=fs, staging_dir=str(tmp_path))
-    with pytest.raises(FileExistsError):
-        create_deltacells_dataset(h5ad_paths, "gs://bucket/prefix", **kwargs)
-    assert not fs.puts
+def test_gcs_files_are_read_and_written_like_local_ones(h5ad_paths, tmp_path, fake_gcs):
+    local = str(tmp_path / "local")
+    create_deltacells_dataset(h5ad_paths, local, tile_size=4, level=3, log=None)
+    urls = _upload_inputs(fake_gcs, h5ad_paths)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    kwargs: dict[str, Any] = dict(tile_size=4, level=3, log=None, filesystem=fake_gcs, staging_dir=str(scratch))
 
-    create_deltacells_dataset(h5ad_paths, "gs://bucket/prefix", overwrite=True, **kwargs)
-    assert not fs.fs.exists("bucket/prefix/stale.txt")
-    assert fs.fs.exists("bucket/prefix/manifest.json")
-    fs.fs.rm("bucket", recursive=True)
+    remote_in = create_deltacells_dataset(urls, str(tmp_path / "remote_in"), **kwargs)
+    create_deltacells_dataset(urls, "gs://bucket/out", **kwargs)
+
+    assert _tiles(remote_in) == _tiles(local)
+    assert {n.removeprefix("/bucket/out/") for n in fake_gcs.fs.find("bucket/out")} == _files(local)
+    assert os.listdir(scratch) == []
+    assert fake_gcs.fs.exists("bucket/in/f0.h5ad")  # the inputs are untouched
+
+
+def test_gcs_files_are_staged_a_few_at_a_time(make_h5ad_files, tmp_path, fake_gcs):
+    paths = make_h5ad_files(n_files=12, cells_per_file=5)
+    urls = _upload_inputs(fake_gcs, paths)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    create_deltacells_dataset(
+        urls, str(tmp_path / "out"), tile_size=4, level=3, log=None, filesystem=fake_gcs, staging_dir=str(scratch),
+        workers=1, sort_genes_max_files=1,
+    )  # fmt: skip
+    assert len(fake_gcs.staged) == 12 + 1  # each file once, and one more for the gene order
+    assert max(fake_gcs.staged) < 12  # never all of them at once
+    assert os.listdir(scratch) == []
+
+
+def test_upload_refuses_nonempty_prefix_unless_overwrite(h5ad_paths, tmp_path, fake_gcs):
+    kwargs: dict[str, Any] = dict(
+        tile_size=4, level=3, log=None, filesystem=fake_gcs, staging_dir=str(tmp_path), workers=1
+    )
+    create_deltacells_dataset(h5ad_paths, "gs://bucket/prefix", **kwargs)
+    with pytest.raises(FileExistsError, match="overwrite"):
+        create_deltacells_dataset(h5ad_paths[:1], "gs://bucket/prefix", **kwargs)
+
+    fake_gcs.fs.pipe("bucket/prefix/tiles/tile_000099.dct", b"stale")  # a leftover of a bigger dataset
+    create_deltacells_dataset(h5ad_paths[:1], "gs://bucket/prefix", overwrite=True, **kwargs)
+    assert not fake_gcs.fs.exists("bucket/prefix/tiles/tile_000099.dct")
+    assert fake_gcs.fs.exists("bucket/prefix/manifest.json")
+
+
+def test_overwrite_never_deletes_what_is_not_a_dataset(h5ad_paths, tmp_path, fake_gcs):
+    fake_gcs.fs.pipe("bucket/prefix/notes.txt", b"precious")
+    fake_gcs.fs.pipe("bucket/prefix/manifest.json", b"{}")
+    kwargs: dict[str, Any] = dict(tile_size=4, level=3, log=None, filesystem=fake_gcs, staging_dir=str(tmp_path))
+    with pytest.raises(FileExistsError, match="notes.txt"):
+        create_deltacells_dataset(h5ad_paths, "gs://bucket/prefix", overwrite=True, **kwargs)
+    assert fake_gcs.fs.cat("bucket/prefix/notes.txt") == b"precious"
+    assert fake_gcs.fs.cat("bucket/prefix/manifest.json") == b"{}"
+    assert not fake_gcs.puts
+
+
+def test_overwrite_never_deletes_the_inputs(h5ad_paths, tmp_path, fake_gcs):
+    out = str(tmp_path / "out")
+    with pytest.raises(ValueError, match="inside the output"):
+        create_deltacells_dataset(h5ad_paths, os.path.dirname(h5ad_paths[0]), overwrite=True, log=None)
+    urls = _upload_inputs(fake_gcs, h5ad_paths)
+    with pytest.raises(ValueError, match="inside the output"):
+        create_deltacells_dataset(urls, "gs://bucket/in", overwrite=True, log=None, filesystem=fake_gcs)
+    assert all(os.path.exists(p) for p in h5ad_paths) and fake_gcs.fs.exists("bucket/in/f0.h5ad")
+    assert not os.path.exists(out)
+
+
+def _paths_with_a_big_count(tmp_path) -> list[str]:
+    import scipy.sparse as sp
+
+    paths = []
+    for i, big in enumerate([False, True]):
+        x = np.array([[1, 0, 3], [0, 70_000 if big else 2, 1]], dtype=np.float32)
+        obs = pd.DataFrame({"n": [0, 1]}, index=[f"f{i}_c{j}" for j in range(2)])
+        adata = ad.AnnData(X=sp.csr_matrix(x), obs=obs, var=pd.DataFrame(index=["a", "MALAT1", "c"]))
+        paths.append(str(tmp_path / f"big{i}.h5ad"))
+        adata.write_h5ad(paths[-1])
+    return paths
+
+
+def test_counts_above_the_limit_are_an_error_unless_clipped(tmp_path):
+    from deltacells import open_dataset
+
+    paths = _paths_with_a_big_count(tmp_path)
+    out = str(tmp_path / "out")
+    with pytest.raises(ValueError, match=r"MALAT1.*clip=True"):
+        create_deltacells_dataset(paths, out, tile_size=2, level=3, log=None, sort_genes=False)
+    assert not os.path.exists(out)  # nothing is left behind
+    with pytest.raises(ValueError, match="MALAT1"):  # also in the pass over the files for the gene order
+        create_deltacells_dataset(paths, out, tile_size=2, level=3, log=None)
+
+    messages: list[str] = []
+    create_deltacells_dataset(paths, out, tile_size=2, level=3, log=messages.append, clip=True)
+    assert any("clipped 1 count" in m and "MALAT1" in m for m in messages)
+    dataset = open_dataset(out)
+    assert dataset.manifest.metadata["clipped_counts"]["genes"] == {"MALAT1": {"n": 1, "largest": 70000.0}}
+    assert dataset[:].to_scipy().max() == 65535
+
+
+def test_a_failed_conversion_leaves_no_manifest_in_the_bucket(tmp_path, fake_gcs):
+    paths = _paths_with_a_big_count(tmp_path)
+    urls = _upload_inputs(fake_gcs, paths)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    with pytest.raises(ValueError, match="clip=True"):
+        create_deltacells_dataset(
+            urls, "gs://bucket/out", tile_size=1, level=3, log=None, sort_genes=False, workers=1,
+            filesystem=fake_gcs, staging_dir=str(scratch),
+        )  # fmt: skip
+    assert fake_gcs.fs.exists("bucket/out/tiles/tile_000000.dct")  # what was uploaded stays ...
+    assert not fake_gcs.fs.exists("bucket/out/manifest.json")  # ... but it is not a dataset
+    assert os.listdir(scratch) == []
+    assert fake_gcs.fs.exists("bucket/in/f1.h5ad")
+
+    create_deltacells_dataset(  # as the error says, running it again with overwrite replaces what is left
+        urls, "gs://bucket/out", tile_size=1, level=3, log=None, sort_genes=False, clip=True, overwrite=True,
+        filesystem=fake_gcs, staging_dir=str(scratch),
+    )  # fmt: skip
+    assert fake_gcs.fs.exists("bucket/out/manifest.json")
 
 
 # --- CellariumData.from_deltacells ---------------------------------------------------------------

@@ -75,6 +75,7 @@ def _convert(args: argparse.Namespace) -> int:
         overwrite=args.overwrite, obs=not args.no_obs, var=not args.no_var,
         obs_names=not args.no_obs_names, obs_exclude=[c for c in args.obs_exclude.split(",") if c],
         max_categories=args.max_categories, obs_tiles_per_file=args.obs_tiles_per_file,
+        clip=args.clip, staging_dir=args.staging_dir,
     )  # fmt: skip
     return 0
 
@@ -138,8 +139,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.set_defaults(func=_verify)
 
     p = sub.add_parser("convert", help="Convert h5ad shards (any sizes) into a dataset of exact-size tiles.")
-    p.add_argument("--h5ad-glob", nargs="+", required=True, help="One or more (quoted) glob patterns or paths.")
-    p.add_argument("--output", required=True)
+    p.add_argument(
+        "--h5ad-glob", nargs="+", required=True,
+        help="One or more (quoted) glob patterns or paths. gs:// files must be listed one by one (not globbed).",
+    )  # fmt: skip
+    p.add_argument("--output", required=True, help="A directory, or gs://bucket/prefix.")
     p.add_argument("--tile-size", type=int, default=10_000)
     p.add_argument("--no-sort-genes", action="store_true", help="Keep the source gene order.")
     p.add_argument("--chunks", type=int, default=8, help="Independently compressed chunks per tile.")
@@ -155,7 +159,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--sort-genes-max-files", type=int, default=10,
         help="Files (spread evenly over the inputs) whose counts decide the gene order (default: 10; 0: all of them).",
     )  # fmt: skip
-    p.add_argument("--overwrite", action="store_true", help="Delete the output directory first if it exists.")
+    p.add_argument(
+        "--overwrite", action="store_true",
+        help="Delete the dataset that is at the output first (this raises if the output has anything else in it).",
+    )  # fmt: skip
+    p.add_argument(
+        "--clip", action="store_true",
+        help="Clip counts above 65535 to 65535 (logged per gene) instead of failing.",
+    )  # fmt: skip
+    p.add_argument(
+        "--staging-dir", default=None,
+        help="Scratch directory for gs:// files (downloaded one at a time and deleted) and tiles waiting to be uploaded "
+        "(default: the system temp directory).",
+    )  # fmt: skip
     p.add_argument("--no-obs", action="store_true", help="Do not store the cell metadata.")
     p.add_argument("--no-var", action="store_true", help="Do not store the gene table.")
     p.add_argument("--no-obs-names", action="store_true", help="Do not store the cell names as the 'obs_names' column.")

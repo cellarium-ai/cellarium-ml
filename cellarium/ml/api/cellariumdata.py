@@ -896,13 +896,14 @@ class CellariumData:
         unrelated to the data it was made from.
 
         Args:
-            uri: A local directory or a ``gs://bucket/prefix`` (staged locally, then uploaded, which needs ``gcsfs``).
-                It must be empty or not exist unless ``overwrite``.
+            uri: A local directory or a ``gs://bucket/prefix`` (each tile is uploaded as it is written, which needs
+                ``gcsfs``). It must be empty or not exist unless ``overwrite``.
             tile_size: Cells per tile (the unit of reading and of shuffling).
             sort_genes: Store the genes by decreasing total counts (better compression).
-            overwrite: Replace an existing dataset at ``uri``.
-            staging_dir: Where to write the dataset before uploading it to ``gs://`` (default: the system temp
-                directory).
+            overwrite: Replace an existing dataset at ``uri``: the files of a deltacells dataset that are there are
+                deleted first; if there is anything else, this raises instead.
+            staging_dir: Scratch directory for the tiles waiting to be uploaded to ``gs://`` (default: the system temp
+                directory). Only a few tiles are ever there, not the dataset.
             deltacells_kwargs: Arguments for opening the new dataset, as for :class:`CellariumData` (by default those
                 this data was opened with, if it was read from a deltacells dataset).
             filesystem: An fsspec filesystem to upload with instead of ``gcsfs`` (for testing).
