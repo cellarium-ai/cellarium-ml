@@ -30,6 +30,8 @@ class ZScore(FilterCompatibilityMixin, nn.Module):
             The variable names schema for the input data validation.
         eps:
             A value added to the denominator for numerical stability.
+        max_value:
+            If not ``None``, the z-scored output is clamped to ``[-max_value, max_value]``.
     """
 
     def __init__(
@@ -38,6 +40,7 @@ class ZScore(FilterCompatibilityMixin, nn.Module):
         std_g: torch.Tensor,
         var_names_g: np.ndarray,
         eps: float = 1e-6,
+        max_value: float | None = 10.0,
     ) -> None:
         super().__init__()
         self.mean_g: torch.Tensor
@@ -47,6 +50,9 @@ class ZScore(FilterCompatibilityMixin, nn.Module):
         self.var_names_g = var_names_g
         assert_nonnegative("eps", eps)
         self.eps = eps
+        if max_value is not None:
+            assert_nonnegative("max_value", max_value)
+        self.max_value = max_value
 
     def forward(
         self,
@@ -82,10 +88,12 @@ class ZScore(FilterCompatibilityMixin, nn.Module):
             std_g = self.std_g[idx]
 
         x_ng = (x_ng - mean_g) / (std_g + self.eps)
+        if self.max_value is not None:
+            x_ng = torch.clamp(x_ng, min=-self.max_value, max=self.max_value)
         return {"x_ng": x_ng}
 
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(mean_g={self.mean_g}, std_g={self.std_g}, "
-            f"var_names_g={self.var_names_g}), eps={self.eps}"
+            f"var_names_g={self.var_names_g}), eps={self.eps}, max_value={self.max_value}"
         )
