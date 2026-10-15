@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import time
 from typing import Any
 
@@ -21,10 +22,19 @@ from deltacells.manifest import GENE_ORDER_NAME, MANIFEST_NAME, OBS_SCHEMA_NAME,
 _DATASET_FILE = re.compile(
     "^("
     + "|".join(re.escape(n) for n in (MANIFEST_NAME, GENE_ORDER_NAME, VAR_NAMES_NAME, VAR_TABLE_NAME, OBS_SCHEMA_NAME))
-    + r"|tiles/tile_\d+\.dct|obs/obs_\d+\.parquet)(\.tmp\d*)?$"
+    + r"|tiles/tile_\d+\.dct|obs/obs_\d+\.parquet|\.deltacells_write_test_\d+)(\.tmp\d*)?$"
 )
 
 _UPLOAD_ATTEMPTS = 4
+_PROBE_NAME = (
+    ".deltacells_write_test_{}"  # the file that :meth:`FsspecSink.probe` makes and deletes (also a "dataset file")
+)
+
+CREDENTIALS_HINT = (
+    "Check the credentials: for gs:// paths deltacells uses the Google Application Default Credentials, not the login of "
+    "gcloud or gsutil. On a Compute Engine VM these are the VM's service account by default, and its access scopes may allow "
+    "reading but not writing. Run `gcloud auth application-default login` to use your own account instead."
+)
 
 
 def is_remote(path: str) -> bool:
@@ -49,14 +59,28 @@ def get_filesystem(url: str, filesystem: Any = None) -> Any:
     return fsspec.filesystem(split_url(url)[0])
 
 
+def _refused(e: Exception) -> bool:
+    """Whether ``e`` is the storage refusing the credentials (not authenticated or not authorized), which trying again does not
+    change. gcsfs raises an ``OSError`` whose message starts with ``Forbidden`` for a 403, and an ``HttpError`` with a ``code``
+    for the other statuses."""
+    if isinstance(e, PermissionError):
+        return True
+    return getattr(e, "code", None) in (401, 403) or (
+        isinstance(e, OSError) and str(e).startswith(("Forbidden", "Unauthorized"))
+    )
+
+
 def retry(fn, what: str, attempts: int = _UPLOAD_ATTEMPTS):
-    """Call ``fn()``, trying again with a growing pause if it fails for a reason that may be temporary."""
+    """Call ``fn()``, trying again with a growing pause if it fails for a reason that may be temporary. A missing file and a
+    refusal of the credentials are not temporary: they are raised at once (the refusal as a ``PermissionError``)."""
     for attempt in range(attempts):
         try:
             return fn()
-        except (FileNotFoundError, PermissionError, NotADirectoryError, IsADirectoryError):
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
             raise  # not temporary
         except Exception as e:
+            if _refused(e):
+                raise PermissionError(f"{what} was refused: {e}\n{CREDENTIALS_HINT}") from e
             if attempt == attempts - 1:
                 raise OSError(f"{what} failed after {attempts} attempts: {e}") from e
             time.sleep(2**attempt)
@@ -102,6 +126,10 @@ class Sink:
                 "not overwritten; delete them yourself or write to another place"
             )
         return names
+
+    def probe(self) -> None:
+        """Check that files can be written here, by writing (and deleting) a tiny one: raises if not. Nothing for a local
+        output, whose files are written where they are by the writer."""
 
     def prepare(self, overwrite: bool, inputs: tuple[str, ...] | list[str] = ()) -> None:
         """:meth:`check`, then delete what is there."""
@@ -205,6 +233,25 @@ class FsspecSink(Sink):
 
     def put(self, local_path: str, name: str) -> None:
         retry(lambda: self.fs.put_file(local_path, f"{self.root}/{name}"), f"uploading {name} to {self.url}")
+
+    def probe(self) -> None:
+        """Upload a tiny file and delete it again, so that a missing permission is found now and not after the (long) scan of
+        the inputs. A refusal is a ``PermissionError`` that says what to check."""
+        name = _PROBE_NAME.format(os.getpid())
+        with tempfile.TemporaryDirectory() as scratch:
+            local = os.path.join(scratch, "probe")
+            with open(local, "wb") as f:
+                f.write(b"deltacells write test\n")
+            self.put(local, name)
+        try:
+            retry(lambda: self.fs.rm(f"{self.root}/{name}"), f"deleting {name} in {self.url}")
+        except FileNotFoundError:
+            pass  # already gone
+        except OSError as e:
+            raise OSError(
+                f"{self.url} can be written to but the test file {name} that was just uploaded could not be deleted ({e}); "
+                "delete it yourself (the files of a dataset could not be replaced either)"
+            ) from e
 
 
 def open_sink(output: str, filesystem: Any = None) -> Sink:

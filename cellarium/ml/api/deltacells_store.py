@@ -65,8 +65,12 @@ def create_deltacells_dataset(
     tissue, ...) shuffle the cells across the files first, for example with a backed shuffling tool such as
     ``annslicer``.
 
-    The h5ad files and ``output`` can be local or in Google Cloud Storage (``gs://...``, with the default credentials;
-    needs ``gcsfs``). The dataset never has to fit on the local disk. Each ``gs://`` h5ad file is downloaded to
+    The h5ad files and ``output`` can be local or in Google Cloud Storage (``gs://...``; needs ``gcsfs``). The
+    credentials are the Google *Application Default Credentials*, not the login of ``gcloud`` / ``gsutil``: on a
+    Compute Engine VM run ``gcloud auth application-default login`` if the VM's service account cannot write to
+    ``output`` (a permission problem is reported before the files are read).
+
+    The dataset never has to fit on the local disk. Each ``gs://`` h5ad file is downloaded to
     ``staging_dir`` just before it is needed and deleted when it is done, and each tile of a ``gs://`` output is
     uploaded as soon as it is written (the manifest last) and then deleted. So ``staging_dir`` needs room for the h5ad
     files that are in use at the same time, roughly ``5 * workers`` of them, plus a few tiles. List the ``gs://`` files
@@ -98,7 +102,10 @@ def create_deltacells_dataset(
         filesystem: An fsspec filesystem to use for ``gs://`` paths instead of ``gcsfs`` (for testing).
         **convert_kwargs: Further arguments of :func:`deltacells.convert.convert_h5ad`, for example ``level`` (the zstd
             level, ``19`` by default: the smallest files, but slow to write; ``12`` is about four times faster and 6%
-            larger), ``max_categories`` or ``var=False``.
+            larger), ``max_categories`` or ``var=False``, ``progress_interval`` (seconds between the progress lines
+            with the speed and the time left, 60 by default) and ``scan_workers`` (the processes that read the
+            metadata of the files first; they are started with ``spawn``, so a script that calls this needs an
+            ``if __name__ == "__main__":`` guard).
 
     Returns:
         ``output``.

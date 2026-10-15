@@ -378,12 +378,14 @@ def _convert_h5ad(
         raise ValueError("sort_genes_max_files must be at least 1 (or None for all the files)")
     files = resolve_files(paths, sort=sort_files)
     say(f"{len(files):,} files: {files[0]} ... {files[-1]}")
-    replaced = open_sink(output, filesystem).check(overwrite, files)  # now, so that a mistake does not cost a slow scan
+    sink = open_sink(output, filesystem)
+    replaced = sink.check(overwrite, files)  # now, so that a mistake does not cost a slow scan
     say(
         f"the output {output} has a dataset of {len(replaced)} files, which will be deleted when the scan is done"
         if replaced
         else f"the output {output} is empty"
     )
+    sink.probe()  # for the same reason: a missing permission to write is found now, not after the scan
     if obs or var:
         try:
             import pandas  # noqa: F401

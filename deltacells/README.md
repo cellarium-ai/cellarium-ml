@@ -170,9 +170,23 @@ deltacells convert --file-list files.txt --output /data/my_dataset      # one pa
 
 ### From and to Google Cloud Storage
 
-Install the extra (`pip install "deltacells[gcs]"`, which adds `gcsfs`) and authenticate with the default credentials (a VM's
-service account, or `gcloud auth application-default login`). To convert a bucket full of h5ad files, list them into a file
-(`gs://` paths are **not** globbed by the converter; the list is what you convert) and point `--output` at a bucket prefix:
+Install the extra (`pip install "deltacells[gcs]"`, which adds `gcsfs`).
+
+**Credentials.** deltacells uses the Google *Application Default Credentials*, which are **not** the login that `gcloud` and
+`gsutil` use: `gsutil ls` can work while deltacells is refused. On a Compute Engine VM with no other credentials, the default is the
+VM's service account, and the VM's access scopes are often read-only (`devstorage.read_only`): reading the inputs works and the
+first upload fails with `Forbidden ... Provided scope(s) are not authorized`. To use your own account, run this once (add
+`--no-launch-browser` on a machine without a browser):
+
+```bash
+gcloud auth application-default login
+```
+
+The account needs read access to the inputs and write access to the output prefix. Before it reads anything, `convert` uploads and
+deletes a tiny test file in the output, so a missing permission is reported in seconds (with this advice) and not after the scan.
+
+To convert a bucket full of h5ad files, list them into a file (`gs://` paths are **not** globbed by the converter; the list is
+what you convert) and point `--output` at a bucket prefix:
 
 ```bash
 gcloud storage ls 'gs://my-bucket/h5ad/*.h5ad' > files.txt          # or: gsutil ls 'gs://my-bucket/h5ad/*.h5ad'
@@ -186,13 +200,20 @@ start with `#` are skipped. Without `--keep-order` the files are naturally sorte
 
 What it does, so that nothing has to fit on the local disk:
 
-* **Scan**: the metadata of every file (`var_names`, obs, number of cells) is read with a few ranged reads each, 16 files at a time.
+* **Scan**: the metadata of every file (`var_names`, obs, number of cells) is read with three ranged reads each (about 21 MB of a
+  63 MB file), in `--scan-workers` processes (about 1.5 per core, up to 24). Processes are needed because h5py serialises the reads it
+  makes through a Python file object, so threads do not overlap them: one thread, or 16, scanned 1.3 files/s from GCS (about 108
+  minutes for 9,447 files), and 24 processes about 17 files/s (480 files in 28 s, process start-up included; ~10 minutes for
+  9,447). Fewer than 32 files, or a `filesystem=` passed in, are scanned in the main process. The processes are started with `spawn`,
+  so a Python **script** that calls `convert_h5ad` or `create_deltacells_dataset` needs the usual `if __name__ == "__main__":`
+  guard (the `deltacells` command does not).
 * **Gene order**: the counts are summed over `--sort-genes-max-files` files (10 by default, spread evenly over the list); those
   files are downloaded one after the other, then deleted.
 * **Tiles**: each file is downloaded whole into `--staging-dir` just before its first tile needs it, and deleted after its last
   tile is written. Each finished tile is uploaded at once and deleted locally, obs shards and the small files too, and
-  **`manifest.json` is uploaded last**, so a prefix without a manifest is not a dataset. All network transfers are done by threads
-  of the main process, which hands local files to the worker processes; the workers never touch the network.
+  **`manifest.json` is uploaded last**, so a prefix without a manifest is not a dataset. The downloads and uploads of this phase are
+  done by threads of the main process, which hands local files to the worker processes that write the tiles; those never touch the
+  network.
 * **Scratch space**: about `5 x workers` input files plus a few tiles (12 workers x 60-100 MB files is a few GB). The run prints its
   estimate. `--staging-dir` defaults to the system temp directory, so point it at a disk with room. With a local `--output` and local
   inputs nothing is staged.
@@ -202,12 +223,33 @@ What it does, so that nothing has to fit on the local disk:
   (an estimate, not a measurement). `--level 12` encodes about 4x faster and is 6% larger (`--level 3`: 7x faster, 11% larger). `--workers` defaults to the
   number of cores, limited by memory (~50 bytes per nonzero of a tile).
 
+What you see while it runs: a line when each phase starts and ends, and, every `--progress-interval` seconds (60 by default, the
+first after 10 s; `0` for none), one about the phase that is running, with how far it is, its speed over the last few minutes, the
+time left, and for the tiles how many input files are staged and how many uploads are pending (which shows whether downloads,
+encoding or uploads limit the speed). The time left is a guess that improves as it runs: the first lines of a phase are the least
+reliable. An example (abridged; the numbers are illustrative, not from a full run):
+
+```
+9,447 files: gs://.../extract_000000.h5ad ... gs://.../extract_009446.h5ad
+the output gs://.../deltacells is empty
+reading the metadata of 9,447 files (24 processes)
+scan: 2,100/9,447 files (22%), 16 files/s, elapsed 0:02:11, ETA 0:07:40
+scan: 9,447 files in 0:09:50
+94,470,000 cells x 61,497 genes in 9,447 files, 590 GB (cells per file: min 10,000, max 10,000)
+gene order: summing the counts of 10 of 9,447 files (100,000 cells)
+writing 9,447 tiles
+tiles: 1,200/9,447 (13%), 0.46 tiles/s, 8.7 MB/s written, elapsed 0:43:10, ETA 4:58:00 | 62 files staged (4.0 GB), 3 uploads pending
+done in 5:41:12: 9,447 tiles, 180,000.0 MB = 1.91 kB per cell
+```
+
 Safety:
 
 * `--overwrite` deletes the existing dataset at `--output` first, but **only files that a deltacells dataset has** (the manifest,
   tiles, obs shards, gene order, ...). If the output holds anything else it stops and deletes nothing; clean it up yourself. It also
   refuses if an input file lies inside the output. Without `--overwrite` a non-empty output is an error.
 * The input h5ad files are only ever read, never changed or deleted.
+* A refusal of the credentials (Forbidden / not authorized) is reported at once with advice and is never retried; other network
+  errors are retried a few times with a growing pause.
 * If a conversion fails (an unreadable file, a tile with too many large counts, a network error after several retries), the tiles
   already uploaded stay in the bucket but there is no manifest, and the error says so. Start again with `--overwrite`; there is no
   resume. The output, the arguments and the metadata of every file are checked before anything is deleted or uploaded.

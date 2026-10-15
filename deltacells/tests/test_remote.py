@@ -159,6 +159,51 @@ def test_sink_refuses_an_output_that_contains_an_input(bucket, tmp_path):
     local.check(True, [str(tmp_path / "outer" / "a.h5ad"), "gs://bucket/out/a.h5ad"])  # not inside
 
 
+class Forbidden(FakeBucket):
+    """A bucket that refuses uploads the way gcsfs reports a 403 (an ``OSError``, not a ``PermissionError``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    def put_file(self, local, remote):
+        self.attempts += 1
+        raise OSError("Forbidden: https://storage.googleapis.com/upload/b/x\nProvided scope(s) are not authorized")
+
+
+def test_a_refused_upload_is_not_retried_and_says_what_to_check(bucket):
+    forbidden = Forbidden()
+    with pytest.raises(PermissionError, match=r"(?s)was refused.*gcloud auth application-default login"):
+        FsspecSink("gs://bucket/p", forbidden).probe()
+    assert forbidden.attempts == 1  # a refusal does not change by trying again
+
+
+def test_the_probe_leaves_nothing_and_a_leftover_one_does_not_block_an_overwrite(bucket):
+    sink = FsspecSink("gs://bucket/p", bucket)
+    sink.probe()
+    assert [kind for kind, _ in bucket.events] == ["put", "rm"] and sink.existing() == []
+
+    class NoDelete(FakeBucket):
+        def rm(self, path, *args, **kwargs):
+            raise PermissionError("no delete")
+
+    stuck = NoDelete()
+    with pytest.raises(OSError, match=r"could not be deleted.*\.deltacells_write_test_"):
+        FsspecSink("gs://bucket/q", stuck).probe()
+    assert (
+        len(sink.check(True)) == 0 and len(FsspecSink("gs://bucket/q", stuck).check(True)) == 1
+    )  # it is a dataset file
+
+
+def test_a_conversion_finds_out_that_it_cannot_write_before_it_scans(bucket, tmp_path):
+    url = put_h5ad(bucket, tmp_path)[2]
+    messages: list[str] = []
+    with pytest.raises(PermissionError, match="application-default login"):
+        convert_h5ad([url], "gs://bucket/out", filesystem=Forbidden(), log=messages.append)
+    assert not [m for m in messages if "metadata" in m]  # it did not start reading the files
+    assert not os.path.exists("bucket/out")
+
+
 def test_sink_retries_an_upload(bucket, tmp_path):
     (tmp_path / "f").write_text("data")
     sink = open_sink("gs://bucket/p", bucket)
@@ -191,8 +236,9 @@ def test_writer_uploads_each_tile_and_the_manifest_last(bucket, tmp_path):
         scratch = w.root
         assert os.path.dirname(scratch) == str(tmp_path) and w.is_remote
         write_tiles(w)
-    puts = [p for kind, p in bucket.events if kind == "put"]
+    puts = [p for kind, p in bucket.events if kind == "put" and ".deltacells_write_test" not in p]  # (not the probe's)
     assert puts[-1] == "bucket/p/manifest.json" and len(puts) == 4
+    assert not [p for p in bucket.fs.find("bucket/p") if "write_test" in p]  # the probe deleted its file
     assert os.listdir(tmp_path) == []  # the scratch directory is gone
     assert bucket.fs.exists("bucket/p/tiles/tile_000002.dct")
 

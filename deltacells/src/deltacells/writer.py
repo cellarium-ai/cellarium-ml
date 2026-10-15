@@ -331,6 +331,8 @@ class DatasetWriter:
 
         self.output = root
         self._sink = open_sink(root, filesystem)
+        self._sink.check(overwrite, list(inputs))
+        self._sink.probe()  # before anything is deleted: if the output cannot be written, what is there stays
         self._sink.prepare(overwrite, list(inputs))
         self._scratch: str | None = None
         self._pool: ThreadPoolExecutor | None = None

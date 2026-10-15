@@ -117,6 +117,76 @@ def test_workers_give_the_same_dataset_as_one_process(tmp_path, full):
     assert same(ds[:].to_scipy(), full[:, ds.gene_order])
 
 
+def test_scanning_the_files_in_processes_gives_the_same_dataset(tmp_path, full):
+    write_shards(tmp_path / "in", [100, 100, 100, 100, 100, 30], full)
+    kw = dict(tile_size=100, level=3, threads=1, workers=1, log=None)
+    threaded = convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "A"), scan_workers=1, **kw)
+    in_processes = convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "B"), scan_workers=3, **kw)
+    assert threaded.to_json() == in_processes.to_json()  # also the obs fingerprint: the schema is the same
+    for name in (
+        "tiles/tile_000000.dct",
+        "tiles/tile_000005.dct",
+        "obs/obs_0000.parquet",
+        "var.parquet",
+        "gene_order.npy",
+    ):
+        assert (tmp_path / "A" / name).read_bytes() == (tmp_path / "B" / name).read_bytes(), name
+
+
+def test_which_files_are_scanned_in_processes():
+    from deltacells.convert import _SCAN_MIN_FILES, _scan_processes
+
+    assert _scan_processes(10_000, None, 1) == 0  # asked for this process
+    assert _scan_processes(_SCAN_MIN_FILES - 1, None, None) == 0  # too few files to be worth starting processes
+    assert 2 <= _scan_processes(10_000, None, None) <= 24
+    assert (
+        _scan_processes(10_000, object(), None) == 0
+    )  # a filesystem that is passed in cannot be shared with processes
+    assert _scan_processes(5, None, 8) == 5  # never more processes than files
+    with pytest.raises(ValueError, match="filesystem"):
+        _scan_processes(100, object(), 4)
+    with pytest.raises(ValueError, match="at least 1"):
+        _scan_processes(100, None, 0)
+
+
+def test_a_scan_process_reports_an_unreadable_file(tmp_path, full):
+    write_shards(tmp_path / "in", [300, 230], full)
+    (tmp_path / "in" / "s_002.h5ad").write_bytes(b"this is not an hdf5 file")
+    with pytest.raises(OSError):
+        convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "out"), scan_workers=2, log=None)
+    assert not os.path.exists(tmp_path / "out")
+
+
+def test_progress_lines_name_the_phases_and_nothing_keeps_running_afterwards(tmp_path, full):
+    import threading
+
+    write_shards(tmp_path / "in", [300, 230], full)
+    messages: list[str] = []
+    kw = dict(tile_size=100, level=3, threads=1, workers=1, log=messages.append)
+    convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "out"), progress_interval=0.05, **kw)
+    phases = [
+        "reading the metadata of 2 files",
+        "scan: 2 files in",
+        "gene order: 2 files in",
+        "tiles: 6 tiles in",
+        "finishing: done in",
+        "done in",
+    ]
+    positions = [next(i for i, m in enumerate(messages) if m.startswith(p)) for p in phases]
+    assert positions == sorted(positions)  # in this order
+
+    messages.clear()  # no periodic lines with an interval of 0: only the start and the end of each phase
+    convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "out"), overwrite=True, progress_interval=0, **kw)
+    assert not [m for m in messages if "ETA" in m]
+
+    write_shards(tmp_path / "bad", [10], full[:10], var_names=[f"other{j}" for j in range(G)], prefix="z")
+    with pytest.raises(ValueError, match="var_names"):  # a failure stops the thread too
+        convert_h5ad(
+            [str(tmp_path / "in" / "s_000.h5ad"), str(tmp_path / "bad" / "z_000.h5ad")], str(tmp_path / "x"), **kw
+        )
+    assert not [t for t in threading.enumerate() if t.name == "deltacells-progress"]
+
+
 def test_dense_x_gives_the_same_dataset_as_csr(tmp_path, full):
     os.makedirs(tmp_path / "dense")
     obs = pd.DataFrame(index=[f"cell{j}" for j in range(N)])
@@ -259,6 +329,9 @@ def test_cli_passes_gs_paths_through_untouched(tmp_path, monkeypatch):
     assert seen["paths"] == ["gs://bucket/in/a.h5ad", "gs://bucket/in/b[1].h5ad", "/data/c[[]2].h5ad"]  # local: literal
     assert seen["output"] == "gs://bucket/out" and seen["sort_files"] is False and seen["staging_dir"] == "/scratch"
     assert main(argv) == 0 and seen["sort_files"] is True
+    assert seen["scan_workers"] is None and seen["progress_interval"] == 60.0  # the defaults
+    assert main([*argv, "--scan-workers", "4", "--progress-interval", "5"]) == 0
+    assert seen["scan_workers"] == 4 and seen["progress_interval"] == 5.0
 
 
 def test_cli_convert_info_verify(tmp_path, full, capsys):
