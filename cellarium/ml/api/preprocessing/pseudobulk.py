@@ -128,11 +128,7 @@ def pseudobulk(
     std_bg = model.batch_var_bg.sqrt().detach().cpu().numpy()
     n_cells_b = model.x_size_b.detach().cpu().numpy().astype(int)
 
-    var = dadc.var
-    ad_field = datamodule.batch_keys["var_names_g"]
-    assert isinstance(ad_field, AnnDataField)
-    var_col = ad_field.key
-    var = var.set_index(var_col).copy() if var_col is not None else var.copy()
+    var = cdata.var.copy()
 
     obs = pd.DataFrame({"n_cells": n_cells_b}, index=pd.Index(group_labels.astype(str), name=batch_key))
 

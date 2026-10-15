@@ -18,7 +18,7 @@ from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
-from cellarium.ml.utilities.data import AnnDataField, collate_fn, sparse_tensor_to_scipy_csr
+from cellarium.ml.utilities.data import collate_fn, sparse_tensor_to_scipy_csr
 from cellarium.ml.utilities.testing import assert_arrays_equal, assert_columns_and_array_lengths_equal
 
 
@@ -291,11 +291,7 @@ def _geometric_sketch(
         embedding_pos = sketch_index.get_indexer(raw_obs_names)
         embedding = reservoir["x_ng"].to_dense().cpu().numpy()[embedding_pos]
 
-        var = datamodule.dadc.var
-        ad_field = datamodule.batch_keys["var_names_g"]
-        assert isinstance(ad_field, AnnDataField)
-        var_col = ad_field.key
-        var = var.set_index(var_col).copy() if var_col is not None else var.copy()
+        var = cdata.var.copy()
         if cdata.hvg is None:
             var["highly_variable"] = False
         else:

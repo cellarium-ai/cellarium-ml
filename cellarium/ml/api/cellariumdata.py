@@ -33,6 +33,14 @@ from cellarium.ml.data import DistributedAnnDataCollection, DistributedCollectio
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
 
 
+def _make_names_unique(names: Any) -> np.ndarray:
+    """
+    The gene ``names`` with the later copies of a repeated name suffixed (``"TBCE"``, ``"TBCE-1"``, ``"TBCE-2"``), as
+    :func:`anndata.utils.make_index_unique` does. A module-level function so that data workers can pickle it.
+    """
+    return np.asarray(anndata.utils.make_index_unique(pd.Index(np.asarray(names).astype(str))), dtype=object)
+
+
 def _build_datamodule(
     dadc: DistributedCollection,
     obs_columns: dict[str, tuple[str, Callable]],
@@ -42,7 +50,9 @@ def _build_datamodule(
     train_size: float,
     stage: Literal["fit", "validate", "predict", "test"],
     num_workers: int,
+    var_names_make_unique: bool = False,
 ) -> CellariumAnnDataDataModule:
+    convert_fn = _make_names_unique if var_names_make_unique else None
     datamodule = CellariumAnnDataDataModule(
         dadc=dadc,
         batch_keys={
@@ -51,7 +61,9 @@ def _build_datamodule(
                 # mps has no kernel to move a sparse CSR tensor onto device, so use sparse COO there instead
                 convert_fn=to_torch_sparse_coo if torch.mps.is_available() else to_torch_sparse_csr,  # type: ignore[arg-type]
             ),
-            "var_names_g": AnnDataField(attr="var_names") if var_key is None else AnnDataField(attr="var", key=var_key),
+            "var_names_g": AnnDataField(attr="var_names", convert_fn=convert_fn)
+            if var_key is None
+            else AnnDataField(attr="var", key=var_key, convert_fn=convert_fn),
             "obs_names_n": AnnDataField(attr="obs_names"),
             **{
                 batch_key: AnnDataField(attr="obs", key=col, convert_fn=fn)
@@ -82,6 +94,7 @@ def get_datamodule(
     stage: Literal["fit", "validate", "predict", "test"] = "fit",
     nexus_extract_uniform_sizes: bool | None = None,
     num_workers: int = 0,
+    var_names_make_unique: bool = False,
 ):
     if nexus_extract_uniform_sizes is None:
         nexus_extract_uniform_sizes = all(["extract_files" in path for path in h5ad_paths])  # a guess
@@ -95,7 +108,9 @@ def get_datamodule(
         obs_columns_to_validate=[c[0] for c in obs_columns.values()],
         max_cache_size=2,
     )
-    return _build_datamodule(dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers)
+    return _build_datamodule(
+        dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers, var_names_make_unique
+    )
 
 
 def get_deltacells_datamodule(
@@ -107,6 +122,7 @@ def get_deltacells_datamodule(
     train_size: float = 1.0,
     stage: Literal["fit", "validate", "predict", "test"] = "fit",
     num_workers: int = 0,
+    var_names_make_unique: bool = False,
     **collection_kwargs: Any,
 ):
     """
@@ -115,7 +131,40 @@ def get_deltacells_datamodule(
     :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`.
     """
     dadc = DistributedDeltaCellsCollection(uri, **collection_kwargs)
-    return _build_datamodule(dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers)
+    return _build_datamodule(
+        dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers, var_names_make_unique
+    )
+
+
+def _check_var_names_unique(var: pd.DataFrame, names: pd.Index, var_key: str | None) -> None:
+    """
+    Raise a ``ValueError`` if the gene ``names`` (``var[var_key]``, or the ``var_names`` if ``var_key`` is ``None``)
+    are not unique, listing the ``var_key`` values that would give unique names.
+    """
+    if names.is_unique:
+        return
+    where = "var_names" if var_key is None else f"var_key={var_key!r}"
+    repeated = names[names.duplicated()].unique()
+
+    def is_name_like(column: pd.Series) -> bool:
+        dtype = column.cat.categories.dtype if isinstance(column.dtype, pd.CategoricalDtype) else column.dtype
+        return bool(pd.api.types.is_string_dtype(dtype)) and column.is_unique and not column.isna().any()
+
+    options: list[str | None] = [column for column in var.columns if column != var_key and is_name_like(var[column])]
+    if var_key is not None and var.index.is_unique:
+        options.append(None)
+    suggestion = (
+        f"Pass a var_key with unique names, one of {options[:10]}"
+        f"{' (and more)' if len(options) > 10 else ''} (None is the var_names)."
+        if options
+        else "None of the var columns has unique names."
+    )
+    raise ValueError(
+        f"The gene names ({where}) must be unique, but {len(repeated)} of them are repeated, "
+        f"for example {repeated[:5].tolist()}. {suggestion} "
+        "Or pass var_names_make_unique=True to keep these names and suffix the repeated ones "
+        "('name', 'name-1', ...); the original names are kept in var."
+    )
 
 
 class ObsmMapping(dict):
@@ -726,6 +775,12 @@ class CellariumData:
     :meth:`from_deltacells`; make one with :func:`~cellarium.ml.api.create_deltacells_dataset`). With deltacells the
     genes come in the dataset's stored order and the categories of categorical ``obs`` columns are global strings; see
     :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`.
+
+    The genes are identified by their names, so these must be unique: the names are the ``var_names`` of the data, or
+    the ``var`` column ``var_key`` if it is given. If they are not, construction raises a ``ValueError`` that lists
+    the ``var`` columns that are unique. With ``var_names_make_unique=True`` the later copies of a repeated name are
+    instead suffixed (``"TBCE"``, ``"TBCE-1"``, ...), as in :func:`anndata.utils.make_index_unique`, and the names as
+    they were stay in ``var`` as the column ``"<var_key>_original"`` (``"var_names_original"`` without a ``var_key``).
     """
 
     def __init__(
@@ -744,6 +799,7 @@ class CellariumData:
         *,
         deltacells_uri: str | None = None,
         deltacells_kwargs: dict[str, Any] | None = None,
+        var_names_make_unique: bool = False,
     ):
         if (h5ad_paths is None) == (deltacells_uri is None):
             raise ValueError("Provide exactly one of h5ad_paths and deltacells_uri.")
@@ -763,6 +819,7 @@ class CellariumData:
                 stage=stage,
                 nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
                 num_workers=datamodule_num_workers,
+                var_names_make_unique=var_names_make_unique,
             )
             # lazy: nothing is read, and no obs parquet database is built, until `.obs` is queried
             self._obs = LazyObs(obs_parquet_path, h5ad_paths=h5ad_paths)
@@ -776,6 +833,7 @@ class CellariumData:
                 train_size=train_size,
                 stage=stage,
                 num_workers=datamodule_num_workers,
+                var_names_make_unique=var_names_make_unique,
                 **(deltacells_kwargs or {}),
             )
             self._obs = DeltaCellsLazyObs(self._datamodule.dadc)
@@ -787,6 +845,13 @@ class CellariumData:
             anndatafield: AnnDataField = self._datamodule.batch_keys["var_names_g"]
             if anndatafield.key is not None:
                 self._var.set_index(anndatafield.key, inplace=True)
+            if var_names_make_unique:
+                # the original names stay available, in a column named after where they came from
+                original_names = self._var.index.to_numpy()
+                self._var.index = pd.Index(self._datamodule.var_names_g, name=self._var.index.name)
+                self._var[f"{anndatafield.key or 'var_names'}_original"] = original_names
+            else:
+                _check_var_names_unique(self._datamodule.dadc.var, self._var.index, anndatafield.key)
         self._init_state()
         # lineage: a root is the data that views are taken from (see `CellariumDataView`)
         self._parent: CellariumData | None = None
