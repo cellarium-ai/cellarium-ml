@@ -15,7 +15,7 @@ from cellarium.ml.api._view_collections import _obs_frame
 from cellarium.ml.data.distributed_deltacells import _import_deltacells
 
 _GCS_PREFIX = "gs://"
-_MAX_COUNT = 65535  # the largest count that deltacells can store
+_MAX_COUNT = 2**31 - 1  # the largest count that deltacells can store
 
 
 def _check_h5ad_paths(h5ad_paths: Sequence[str]) -> list[str]:
@@ -45,7 +45,6 @@ def create_deltacells_dataset(
     staging_dir: str | None = None,
     log: Callable[[str], None] | None = print,
     filesystem: Any = None,
-    clip: bool = False,
     **convert_kwargs: Any,
 ) -> str:
     """
@@ -54,8 +53,9 @@ def create_deltacells_dataset(
 
     The cells are stored in the order of ``h5ad_paths`` (and the order within each file), so
     ``CellariumData(h5ad_paths)`` and ``CellariumData.from_deltacells(output)`` see the same cells in the same order.
-    All files must have the same ``var_names`` and ``X`` must hold integer counts up to 65535 (larger counts are an
-    error unless ``clip``). The genes are stored in a
+    All files must have the same ``var_names`` and ``X`` must hold non-negative integer counts (up to 2**31 - 1; counts
+    above 65535 are stored exactly, but a tile in which more than about 0.5% of the nonzeros are that large is an error:
+    it is not raw counts). The genes are stored in a
     different order (most expressed first, which compresses much better); the ``obs`` columns, ``obs_names`` and ``var``
     are stored too (``CellariumData`` needs the ``obs_names``, so ``obs`` and ``obs_names`` cannot be turned off).
 
@@ -67,15 +67,15 @@ def create_deltacells_dataset(
 
     The h5ad files and ``output`` can be local or in Google Cloud Storage (``gs://...``, with the default credentials;
     needs ``gcsfs``). The dataset never has to fit on the local disk. Each ``gs://`` h5ad file is downloaded to
-    ``staging_dir`` just before it is needed and deleted when it is done, and each tile of a ``gs://`` output is uploaded
-    as soon as it is written (the manifest last) and then deleted. So ``staging_dir`` needs room for the h5ad files that
-    are in use at the same time, roughly ``5 * workers`` of them, plus a few tiles. List the ``gs://`` files one by one
-    (they are not expanded). The files in GCS are only ever read, never changed or deleted.
+    ``staging_dir`` just before it is needed and deleted when it is done, and each tile of a ``gs://`` output is
+    uploaded as soon as it is written (the manifest last) and then deleted. So ``staging_dir`` needs room for the h5ad
+    files that are in use at the same time, roughly ``5 * workers`` of them, plus a few tiles. List the ``gs://`` files
+    one by one (they are not expanded). The files in GCS are only ever read, never changed or deleted.
 
-    ``overwrite`` deletes the dataset at ``output`` first (also an incomplete one left by a failed run); if ``output`` has
-    anything else in it, or an input file is inside it, this raises instead and nothing is deleted. If the conversion fails
-    part way, what was uploaded stays in a ``gs://`` ``output`` (without a manifest, so it is not a usable dataset): run
-    again with ``overwrite=True``, or delete it yourself.
+    ``overwrite`` deletes the dataset at ``output`` first (also an incomplete one left by a failed run); if ``output``
+    has anything else in it, or an input file is inside it, this raises instead and nothing is deleted. If the
+    conversion fails part way, what was uploaded stays in a ``gs://`` ``output`` (without a manifest, so it is not a
+    usable dataset): run again with ``overwrite=True``, or delete it yourself.
 
     Args:
         h5ad_paths: h5ad files (local paths or ``gs://`` paths), in cell order.
@@ -96,11 +96,9 @@ def create_deltacells_dataset(
             (default: the system temp directory). It is not used if everything is local.
         log: Called with progress messages (``None`` to be silent).
         filesystem: An fsspec filesystem to use for ``gs://`` paths instead of ``gcsfs`` (for testing).
-        clip: Clip counts above 65535 to 65535 instead of raising an error. The number clipped and their genes are logged
-            and stored in the manifest metadata.
         **convert_kwargs: Further arguments of :func:`deltacells.convert.convert_h5ad`, for example ``level`` (the zstd
-            level, ``19`` by default: the smallest files, but slow to write; ``9`` is about ten times faster and 7% larger),
-            ``max_categories`` or ``var=False``.
+            level, ``19`` by default: the smallest files, but slow to write; ``9`` is about ten times faster and 7%
+            larger), ``max_categories`` or ``var=False``.
 
     Returns:
         ``output``.
@@ -119,7 +117,6 @@ def create_deltacells_dataset(
         workers=workers,
         sort_genes_max_files=sort_genes_max_files,
         overwrite=overwrite,
-        clip=clip,
         staging_dir=staging_dir,
         filesystem=filesystem,
         log=log,
@@ -146,13 +143,13 @@ def write_collection_to_deltacells(
     """
     Write all the cells of ``collection`` (a :class:`~cellarium.ml.data.DistributedCollection`), in order, as a
     deltacells dataset at ``output`` (a local directory or ``gs://bucket/prefix``), in tiles of ``tile_size`` cells with
-    their ``obs`` (every column, and the ``obs_names``) and ``var``. This is one pass over the cells, plus one over up to
-    ``sort_genes_max_tiles`` tiles spread over them, to sort the genes by decreasing total counts (better
-    compression). ``X`` must hold integer counts from 0 to 65535. If it does not, or the writing fails otherwise,
+    their ``obs`` (every column, and the ``obs_names``) and ``var``. This is one pass over the cells, plus one over up
+    to ``sort_genes_max_tiles`` tiles spread over them, to sort the genes by decreasing total counts (better
+    compression). ``X`` must hold integer counts from 0 to 2**31 - 1. If it does not, or the writing fails otherwise,
     nothing is left at a local ``output``, and a ``gs://`` ``output`` has no manifest. A ``gs://`` ``output`` is
     uploaded tile by tile as it is written (the manifest last), through a small scratch directory in ``staging_dir``;
-    ``overwrite`` deletes only the files of a deltacells dataset that are at ``output`` (and raises if there is anything
-    else). ``writer_kwargs`` are passed to :class:`deltacells.DatasetWriter`.
+    ``overwrite`` deletes only the files of a deltacells dataset that are at ``output`` (and raises if there is
+    anything else). ``writer_kwargs`` are passed to :class:`deltacells.DatasetWriter`.
 
     Returns:
         ``output``.
@@ -185,8 +182,8 @@ def write_collection_to_deltacells(
             totals += np.asarray(read(start)[0].sum(axis=0)).ravel()
         gene_order = np.argsort(-totals, kind="stable")
 
-    # refuses (FileExistsError) to write into an output that has something in it unless `overwrite`, and deletes only the
-    # files of a deltacells dataset, so that a failure before this leaves what was there alone
+    # refuses (FileExistsError) to write into an output that has something in it unless `overwrite`, and deletes only
+    # the files of a deltacells dataset, so that a failure before this leaves what was there alone
     with DatasetWriter(
         output,
         n_genes=collection.n_vars,

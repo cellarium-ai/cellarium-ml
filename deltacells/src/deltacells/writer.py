@@ -23,8 +23,10 @@ from deltacells.format import (
     HEADER_SIZE,
     MAX_GENES,
     MAX_VALUE,
+    STREAM_MAX,
     ChunkInfo,
     align8,
+    exception_limit,
     pack_chunk,
     pack_header,
     parse_tile_info,
@@ -63,7 +65,7 @@ def permute_columns(matrix: sp.csr_matrix, gene_order: np.ndarray) -> sp.csr_mat
 
 
 def _canonical_counts(matrix: Any) -> sp.csr_matrix:
-    """Validate that ``matrix`` holds small non-negative integer counts and return it as a canonical CSR matrix."""
+    """Validate that ``matrix`` holds non-negative integer counts (at most ``MAX_VALUE``) and return it as a canonical CSR matrix."""
     csr = sp.csr_matrix(matrix)
     if not csr.has_canonical_format:
         csr = csr.copy()
@@ -79,9 +81,7 @@ def _canonical_counts(matrix: Any) -> sp.csr_matrix:
         elif not np.issubdtype(data.dtype, np.integer) and data.dtype != np.bool_:
             raise ValueError(f"unsupported value dtype {data.dtype}")
         if data.min() < 0 or data.max() > MAX_VALUE:
-            raise ValueError(
-                f"values must lie in [0, {MAX_VALUE}] (got min {data.min()}, max {data.max()}); this format stores counts as uint16"
-            )
+            raise ValueError(f"values must lie in [0, {MAX_VALUE}] (got min {data.min()}, max {data.max()})")
         if np.any(data == 0):
             csr = csr.copy()
             csr.eliminate_zeros()
@@ -105,14 +105,26 @@ def _compress(array: np.ndarray, level: int) -> np.ndarray:
     return out[:size]
 
 
+def _exception_frame(index: np.ndarray, payload: np.ndarray, lo: int, hi: int, level: int) -> np.ndarray | None:
+    """The exception frame of the nonzeros ``lo:hi``: ``index`` lists the (sorted) nonzeros that are exceptions, ``payload`` their
+    payloads. ``None`` if there are none."""
+    i0, i1 = np.searchsorted(index, [lo, hi])
+    if i0 == i1:
+        return None
+    raw = np.concatenate([(index[i0:i1] - lo).astype(np.uint32), payload[i0:i1].astype(np.uint32)])
+    return np.frombuffer(_core.compress_bytes(raw, level), dtype=np.uint8)
+
+
 def encode_tile(
     matrix: Any, *, n_chunks: int = DEFAULT_CHUNKS, level: int = DEFAULT_LEVEL, threads: int | None = None
 ) -> bytes:
     """Encode a block of cells (rows of a count matrix) as one tile blob.
 
     Args:
-        matrix: Anything ``scipy.sparse`` can turn into CSR (cells x genes) holding integer counts in ``[0, 65535]``, with at most
-            65536 genes. Duplicates are summed and explicit zeros dropped.
+        matrix: Anything ``scipy.sparse`` can turn into CSR (cells x genes) holding integer counts in ``[0, 2**31 - 1]``, with at
+            most ``2**31`` genes. Duplicates are summed and explicit zeros dropped. Counts above 65535, and gaps between a cell's
+            consecutive nonzero genes above 65535, are stored exactly as *exceptions*; they must be rare (at most ``max(1024, nnz /
+            200)`` of each kind per tile), otherwise a ``ValueError`` is raised.
         n_chunks: Number of independently compressed chunks (parallel decode granularity). More chunks cost ~1% size for 8.
         level: zstd level. Higher is smaller and (here) also decodes slightly faster; it only costs compression time.
         threads: Threads used for compression (default: up to 8).
@@ -131,10 +143,27 @@ def encode_tile(
         gaps[1:] = idx[1:] - idx[:-1]
         starts = indptr[:-1][indptr[:-1] < nnz]
         gaps[starts] = idx[starts]  # the first gap of a cell is its first gene index
-    gaps16 = gaps.astype(np.uint16)
-    vals16 = csr.data.astype(np.uint16)
+    vals = csr.data.astype(np.int64)
+
+    big_vals = np.flatnonzero(vals > STREAM_MAX)
+    big_gaps = np.flatnonzero(gaps > STREAM_MAX)
+    limit = exception_limit(nnz)
+    if len(big_vals) > limit:
+        raise ValueError(
+            f"{len(big_vals)} of the {nnz} nonzeros are counts above {STREAM_MAX} (the most a tile accepts is {limit}); "
+            "this does not look like raw counts, which is what the deltacells format is for"
+        )
+    if len(big_gaps) > limit:
+        raise ValueError(
+            f"{len(big_gaps)} of the {nnz} nonzeros follow a gap of more than {STREAM_MAX} genes (the most a tile accepts is "
+            f"{limit}); the cells are too sparse for {n_genes} genes, which the deltacells format does not support"
+        )
+    gaps16 = np.minimum(gaps, STREAM_MAX).astype(np.uint16)
+    vals16 = np.minimum(vals, STREAM_MAX).astype(np.uint16)
 
     bounds = _chunk_bounds(indptr, n_chunks)
+    if any(indptr[b] - indptr[a] >= 2**32 for a, b in bounds):
+        raise ValueError("a chunk has 2**32 or more nonzeros; use more chunks (n_chunks)")
     n_threads = threads if threads is not None else min(8, os.cpu_count() or 1)
     jobs = [(a, b, name, arr[indptr[a] : indptr[b]]) for a, b in bounds for name, arr in (("g", gaps16), ("v", vals16))]
     if n_threads > 1 and len(jobs) > 1:
@@ -147,18 +176,31 @@ def encode_tile(
     indptr_off = align8(table_end)
     pos = indptr_off + 8 * (n_cells + 1)
     chunks = []
+    placed: list[tuple[int, np.ndarray]] = []  # (offset, bytes) of every stream and exception frame
     for i, (a, b) in enumerate(bounds):
-        g, v = streams[2 * i], streams[2 * i + 1]
-        g_off = align8(pos)
-        v_off = align8(g_off + len(g))
-        pos = v_off + len(v)
-        chunks.append(ChunkInfo(a, b, int(indptr[a]), int(indptr[b]), g_off, len(g), v_off, len(v)))
+        lo, hi = int(indptr[a]), int(indptr[b])
+        frames = [
+            streams[2 * i],
+            streams[2 * i + 1],
+            _exception_frame(big_vals, vals[big_vals], lo, hi, level),
+            _exception_frame(big_gaps, gaps[big_gaps] - STREAM_MAX, lo, hi, level),
+        ]
+        entries = []
+        for frame in frames:
+            if frame is None:
+                entries += [0, 0]
+                continue
+            off = align8(pos)
+            placed.append((off, frame))
+            pos = off + len(frame)
+            entries += [off, len(frame)]
+        chunks.append(ChunkInfo(a, b, lo, hi, *entries))
     total = pos
     buf = bytearray(total)
     for i, c in enumerate(chunks):
         buf[HEADER_SIZE + i * CHUNK_ENTRY_SIZE : HEADER_SIZE + (i + 1) * CHUNK_ENTRY_SIZE] = pack_chunk(c)
-        buf[c.gaps_off : c.gaps_off + c.gaps_len] = memoryview(streams[2 * i])
-        buf[c.vals_off : c.vals_off + c.vals_len] = memoryview(streams[2 * i + 1])
+    for off, frame in placed:
+        buf[off : off + len(frame)] = frame.data
     buf[indptr_off : indptr_off + 8 * (n_cells + 1)] = indptr.tobytes()
     crc = zlib.crc32(memoryview(buf)[HEADER_SIZE:]) & 0xFFFFFFFF
     buf[:HEADER_SIZE] = pack_header(

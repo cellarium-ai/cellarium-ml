@@ -887,8 +887,8 @@ class CellariumData:
         It is one pass over the shards that hold the cells (for a view of cells scattered over the data, a pass over all
         of it), plus a look at a few tiles to sort the genes by total counts. The cells are written in their order in
         the data (which is shuffled, if the data is) with all of their ``obs`` and the ``var``; the cells of the
-        original data are the same ones, so ``obs`` names are unchanged. ``X`` must hold integer counts from 0 to 65535
-        (as deltacells requires), and if it does not nothing is written.
+        original data are the same ones, so ``obs`` names are unchanged. ``X`` must hold integer counts from 0 to
+        2**31 - 1 (as deltacells requires), and if it does not nothing is written.
 
         The returned view has the same cells (and root indices) as these, so ``update_from`` works between them, and
         starts with copies of this data's ``obsm`` and ``obs_computed`` but with no trained modules, as any view does.

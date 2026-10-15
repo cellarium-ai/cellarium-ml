@@ -69,7 +69,7 @@ def test_create_refuses_to_overwrite_unless_asked(h5ad_paths, tmp_path):
 
 
 class _RecordingFS:
-    """An in-memory fsspec filesystem that records the order of the uploads and what is staged when a file is downloaded."""
+    """An in-memory fsspec filesystem that records the order of the uploads and what is staged at each download."""
 
     def __init__(self):
         import fsspec
@@ -193,46 +193,48 @@ def test_overwrite_never_deletes_the_inputs(h5ad_paths, tmp_path, fake_gcs):
     assert not os.path.exists(out)
 
 
-def _paths_with_a_big_count(tmp_path) -> list[str]:
+def _paths_with_big_counts(tmp_path, n_cells: int, big_in_second_file: bool, tag: str = "big") -> list[str]:
+    """Two files of ``n_cells`` cells; in the second, every cell has a count of 70000 in MALAT1 (otherwise 2)."""
     import scipy.sparse as sp
 
     paths = []
-    for i, big in enumerate([False, True]):
-        x = np.array([[1, 0, 3], [0, 70_000 if big else 2, 1]], dtype=np.float32)
-        obs = pd.DataFrame({"n": [0, 1]}, index=[f"f{i}_c{j}" for j in range(2)])
+    for i, big in enumerate([False, big_in_second_file]):
+        x = np.tile(np.array([[1, 70_000 if (big and i == 1) else 2, 3]], dtype=np.float32), (n_cells, 1))
+        obs = pd.DataFrame({"n": np.arange(n_cells)}, index=[f"f{i}_c{j}" for j in range(n_cells)])
         adata = ad.AnnData(X=sp.csr_matrix(x), obs=obs, var=pd.DataFrame(index=["a", "MALAT1", "c"]))
-        paths.append(str(tmp_path / f"big{i}.h5ad"))
+        paths.append(str(tmp_path / f"{tag}{i}.h5ad"))
         adata.write_h5ad(paths[-1])
     return paths
 
 
-def test_counts_above_the_limit_are_an_error_unless_clipped(tmp_path):
+def test_counts_above_65535_are_stored_exactly(tmp_path):
     from deltacells import open_dataset
 
-    paths = _paths_with_a_big_count(tmp_path)
+    paths = _paths_with_big_counts(tmp_path, n_cells=3, big_in_second_file=True)
     out = str(tmp_path / "out")
-    with pytest.raises(ValueError, match=r"MALAT1.*clip=True"):
-        create_deltacells_dataset(paths, out, tile_size=2, level=3, log=None, sort_genes=False)
-    assert not os.path.exists(out)  # nothing is left behind
-    with pytest.raises(ValueError, match="MALAT1"):  # also in the pass over the files for the gene order
-        create_deltacells_dataset(paths, out, tile_size=2, level=3, log=None)
-
-    messages: list[str] = []
-    create_deltacells_dataset(paths, out, tile_size=2, level=3, log=messages.append, clip=True)
-    assert any("clipped 1 count" in m and "MALAT1" in m for m in messages)
+    create_deltacells_dataset(paths, out, tile_size=2, level=3, log=None)
     dataset = open_dataset(out)
-    assert dataset.manifest.metadata["clipped_counts"]["genes"] == {"MALAT1": {"n": 1, "largest": 70000.0}}
-    assert dataset[:].to_scipy().max() == 65535
+    expected = np.vstack([ad.read_h5ad(p).X.toarray() for p in paths])
+    assert np.array_equal(dataset[:].to_scipy().toarray()[:, np.argsort(dataset.gene_order)], expected)
+    assert dataset[:].to_scipy().max() == 70_000
+
+
+def test_too_many_counts_above_65535_are_refused(tmp_path):
+    paths = _paths_with_big_counts(tmp_path, n_cells=1100, big_in_second_file=True)
+    out = str(tmp_path / "out")
+    with pytest.raises(ValueError, match="does not look like raw counts"):
+        create_deltacells_dataset(paths, out, tile_size=1100, level=3, log=None, sort_genes=False)
+    assert not os.path.exists(out)  # nothing is left behind
 
 
 def test_a_failed_conversion_leaves_no_manifest_in_the_bucket(tmp_path, fake_gcs):
-    paths = _paths_with_a_big_count(tmp_path)
-    urls = _upload_inputs(fake_gcs, paths)
+    bad = _paths_with_big_counts(tmp_path, n_cells=1100, big_in_second_file=True)  # the second tile fails
+    urls = _upload_inputs(fake_gcs, bad)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    with pytest.raises(ValueError, match="clip=True"):
+    with pytest.raises(ValueError, match="does not look like raw counts"):
         create_deltacells_dataset(
-            urls, "gs://bucket/out", tile_size=1, level=3, log=None, sort_genes=False, workers=1,
+            urls, "gs://bucket/out", tile_size=1100, level=3, log=None, sort_genes=False, workers=1,
             filesystem=fake_gcs, staging_dir=str(scratch),
         )  # fmt: skip
     assert fake_gcs.fs.exists("bucket/out/tiles/tile_000000.dct")  # what was uploaded stays ...
@@ -240,8 +242,10 @@ def test_a_failed_conversion_leaves_no_manifest_in_the_bucket(tmp_path, fake_gcs
     assert os.listdir(scratch) == []
     assert fake_gcs.fs.exists("bucket/in/f1.h5ad")
 
-    create_deltacells_dataset(  # as the error says, running it again with overwrite replaces what is left
-        urls, "gs://bucket/out", tile_size=1, level=3, log=None, sort_genes=False, clip=True, overwrite=True,
+    good = _paths_with_big_counts(tmp_path, n_cells=1100, big_in_second_file=False, tag="good")
+    urls = _upload_inputs(fake_gcs, good)  # the inputs are fixed ...
+    create_deltacells_dataset(  # ... and, as the error says, running it again with overwrite replaces what is left
+        urls, "gs://bucket/out", tile_size=1100, level=3, log=None, sort_genes=False, overwrite=True,
         filesystem=fake_gcs, staging_dir=str(scratch),
     )  # fmt: skip
     assert fake_gcs.fs.exists("bucket/out/manifest.json")

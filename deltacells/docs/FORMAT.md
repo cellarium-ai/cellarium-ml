@@ -1,4 +1,4 @@
-# deltacells format, version 1
+# deltacells format, version 2
 
 A *dataset* is a directory (or bucket prefix) of *tiles* plus a small manifest. A *tile* is one self-contained object holding
 a block of consecutive cells (rows) of a count matrix in CSR form. All integers are **little-endian**; readers on big-endian
@@ -31,7 +31,7 @@ JSON object with at least:
 | key | meaning |
 |---|---|
 | `format` | `"deltacells-dataset"` |
-| `version` | `1` |
+| `version` | `2` |
 | `n_cells`, `n_genes`, `tile_size` | integers |
 | `tile_cells`, `tile_nnz`, `tile_bytes` | per-tile lists (cells, stored nonzeros, file size in bytes) |
 | `n_chunks`, `zstd_level` | encoder settings (informational) |
@@ -48,7 +48,7 @@ Readers must reject manifests whose `format`/`version` they do not understand or
 
 ```
 offset 0                 header                64 bytes
-offset 64                chunk table           n_chunks * 64 bytes
+offset 64                chunk table           n_chunks * 96 bytes
 offset indptr_off        indptr                (n_cells + 1) * int64, 8-byte aligned
 ...                      streams               each compressed stream starts on an 8-byte boundary
 ```
@@ -58,20 +58,22 @@ offset indptr_off        indptr                (n_cells + 1) * int64, 8-byte ali
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 8 | magic | `DELTACEL` |
-| 8 | 4 | version | `1` |
+| 8 | 4 | version | `2` |
 | 12 | 4 | flags | must be `0` (readers reject unknown flags) |
 | 16 | 8 | n_cells | |
 | 24 | 8 | nnz | stored nonzeros in the tile |
-| 32 | 4 | n_genes | `1 .. 65536` |
+| 32 | 4 | n_genes | `1 .. 2^31` |
 | 36 | 4 | n_chunks | |
 | 40 | 8 | indptr_off | multiple of 8, at or after the end of the chunk table |
 | 48 | 8 | total_size | size of the whole blob; must equal the object size |
 | 56 | 4 | crc32 | CRC-32 (zlib / IEEE) of bytes `[64, total_size)` |
 | 60 | 4 | reserved | `0` |
 
-### Chunk table entry (64 bytes, `n_chunks` of them, starting at offset 64)
+### Chunk table entry (96 bytes, `n_chunks` of them, starting at offset 64)
 
-`cell_lo, cell_hi, nnz_lo, nnz_hi, gaps_off, gaps_len, vals_off, vals_len`, each a `uint64`.
+`cell_lo, cell_hi, nnz_lo, nnz_hi, gaps_off, gaps_len, vals_off, vals_len, vexc_off, vexc_len, gexc_off, gexc_len`, each a
+`uint64`. The last four locate the chunk's *exception frames* (see "Exceptions"); a length of `0` means the chunk has none (the
+offset is then ignored; writers store `0`).
 
 Chunks cover the tile contiguously: the first has `cell_lo = nnz_lo = 0`, every chunk starts where the previous one ended, and
 the last ends at `n_cells` / `nnz`. Chunk boundaries are chosen so that chunks hold roughly equal numbers of nonzeros, which
@@ -90,16 +92,38 @@ For each chunk with `n = nnz_hi - nnz_lo` nonzeros there are two streams, `gaps`
 planes, i.e. all `n` low bytes followed by all `n` high bytes.
 
 * **gaps**: for each cell, the genes with nonzero counts in increasing order `g_0 < g_1 < ...`; the stored gaps are
-  `g_0, g_1 - g_0, g_2 - g_1, ...` (the first gap of a cell is its first gene index, so cells decode independently). Every gene
-  index is `< n_genes <= 65536`, so every gap fits in a uint16.
-* **vals**: the counts, in the same order. Counts are integers in `[1, 65535]`; zeros are never stored.
+  `g_0, g_1 - g_0, g_2 - g_1, ...` (the first gap of a cell is its first gene index, so cells decode independently). A gap above
+  65535 is stored as `65535` and is an *exception*.
+* **vals**: the counts, in the same order. Counts are integers in `[1, 2^31 - 1]`; zeros are never stored. A count above 65535
+  is stored as `65535` and is an *exception*.
 
 A chunk with `n = 0` still has two (tiny) valid frames.
 
 Decoding a chunk: decompress both streams; for every cell in `[cell_lo, cell_hi)` take its slice
 `[indptr[cell] - nnz_lo, indptr[cell + 1] - nnz_lo)` and prefix-sum the gaps to get the gene indices; recombine the byte planes of
-the values. A decoder must verify that each frame decompresses to exactly `2 * n` bytes and that every gene index it produces is
-`< n_genes`.
+the values; then apply the exception frames, if any. A decoder must verify that each frame decompresses to exactly `2 * n` bytes and
+that every gene index it produces is `< n_genes`.
+
+### Exceptions
+
+The streams hold uint16 values, but real data has a few counts above 65535 (for example MALAT1 in some cells), and a dataset with
+more than 65536 genes has an occasional gap that large (a cell whose next expressed gene is far away in the gene order). They are
+rare, so instead of widening the streams for everyone they are listed beside them: a chunk that has any has an *exception frame*
+for its values (`vexc`) and/or one for its gaps (`gexc`). Each is a single zstd frame (including its content size) that
+decompresses to `8 * k` bytes: `k` little-endian `uint32` positions followed by `k` `uint32` payloads. A position is the index of
+a nonzero within the chunk (`0 .. n - 1`); positions are strictly increasing, and `k <= n`.
+
+* **vexc**: the payload is the true count (`65536 .. 2^31 - 1`); it replaces the stored `65535`.
+* **gexc**: the payload is the true gap minus 65535 (`1 .. n_genes - 1`); it is added to the gene index that the prefix sum gave
+  for that nonzero *and for every later nonzero of the same cell*. The position tells which cell it is (the cell whose
+  `indptr` range holds it). Several exceptions in one cell add up.
+
+A decoder applies the exceptions after decoding the chunk, so chunks without any (nearly all of them) decode exactly as without
+this mechanism. It must check the frame size, the positions and payload ranges, and that no gene index reaches `n_genes`.
+
+The reference writer refuses a tile with more than `max(1024, nnz / 200)` exceptions of either kind. That is a policy, not a
+format rule: exceptions are applied one by one (about 35 ns each), so a tile where they are not rare would decode slower, and
+data with so many counts above 65535 is not raw counts, which is what this format is for.
 
 ## Obs (optional per-cell metadata)
 
@@ -147,9 +171,11 @@ manifest is deleted and fetched again.
   squeezes the result (higher levels are smaller and, here, decode faster -- they only cost compression time).
 * *Independent chunks* let one tile be decoded by several threads at ~1% size cost for 8 chunks.
 
-## Limits (version 1)
+## Limits (version 2)
 
-* at most 65,536 genes; counts in `[0, 65535]` (the writer refuses anything else rather than clipping);
+* at most 2^31 genes and counts in `[0, 2^31 - 1]` (decoded indices and counts are int32); counts above 65535 and gaps above
+  65535 are exceptions and must be rare (see "Exceptions"); float32 values are exact only up to 2^24;
+* a chunk has fewer than 2^32 nonzeros (exception positions are `uint32`; use more chunks otherwise);
 * a tile's `nnz` is bounded only by memory (offsets are 64-bit);
 * no per-cell metadata in the tile itself (see "Obs" above for the sidecar);
 * obs columns are limited to categorical, numeric, boolean and string; other pandas dtypes (e.g. datetimes) must be excluded or converted.

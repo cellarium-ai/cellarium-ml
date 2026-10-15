@@ -258,6 +258,13 @@ class Tile:
                     self._mv, c.gaps_off, c.gaps_len, c.vals_off, c.vals_len, c.cell_lo, c.cell_hi, c.nnz_lo, c.nnz_hi,
                     info.n_genes, self.indptr, buf, out_indices, out_values, to_float,
                 )  # fmt: skip
+                # values and gaps that did not fit in a uint16 (rare): patched in after the fast path
+                for kind, off, length in ((0, c.vexc_off, c.vexc_len), (1, c.gexc_off, c.gexc_len)):
+                    if length:
+                        _core.apply_exceptions(
+                            self._mv, off, length, kind, c.cell_lo, c.cell_hi, c.nnz_lo, c.nnz_hi,
+                            info.n_genes, self.indptr, out_indices, out_values, to_float,
+                        )  # fmt: skip
 
         if n_threads == 1:
             run(0)

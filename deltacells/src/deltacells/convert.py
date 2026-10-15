@@ -19,7 +19,6 @@ from itertools import accumulate
 import numpy as np
 import scipy.sparse as sp
 
-from deltacells.format import MAX_VALUE
 from deltacells.manifest import DEFAULT_OBS_TILES_PER_FILE, Manifest
 from deltacells.sink import is_remote, open_sink
 from deltacells.staging import BYTES_PER_NNZ, Stager, ordered_map, read_h5ad_meta
@@ -146,67 +145,18 @@ def _tile_pieces(i: int, tile_size: int, offsets: Sequence[int], files: Sequence
     return pieces
 
 
-# --- counts that are too large for deltacells ---------------------------------------------------------------------------
-
-_SYMBOL_COLUMNS = ("feature_name", "gene_name", "gene_symbol", "gene_symbols", "symbol")
-
-
-def _gene_labels(var_names: np.ndarray, var) -> np.ndarray:
-    """How to name the genes in messages: the ``var_names``, with the gene symbol after them if ``var`` has such a column
-    (the ``var_names`` of some files are only ids)."""
-    if var is not None:
-        for column in _SYMBOL_COLUMNS:
-            if column in var.columns:
-                symbols = var[column].astype(str).to_numpy()
-                return np.asarray([n if s == n else f"{n} ({s})" for n, s in zip(var_names, symbols)], dtype=object)
-    return var_names
-
-
-def _overflow(x: sp.csr_matrix) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """The genes with counts above what deltacells can store in ``x``, as ``(genes, number of counts, largest count)``, or
-    ``None`` if there are none."""
-    if x.nnz == 0 or x.data.max() <= MAX_VALUE:
-        return None
-    over = x.data > MAX_VALUE
-    genes, inverse = np.unique(x.indices[over], return_inverse=True)
-    largest = np.zeros(len(genes))
-    np.maximum.at(largest, inverse, x.data[over])
-    return genes, np.bincount(inverse), largest
-
-
-def _overflow_error(where: str, over: tuple[np.ndarray, np.ndarray, np.ndarray], var_names: np.ndarray) -> ValueError:
-    genes, counts, largest = over
-    top = np.argsort(-counts, kind="stable")[:5]
-    listed = ", ".join(f"{var_names[genes[j]]} ({counts[j]} count(s), largest {largest[j]:.0f})" for j in top)
-    more = f" and {len(genes) - len(top)} more gene(s)" if len(genes) > len(top) else ""
-    return ValueError(
-        f"{where} has {int(counts.sum())} count(s) above {MAX_VALUE}, the largest that deltacells can store, in "
-        f"{len(genes)} gene(s): {listed}{more}. Pass clip=True to clip them to {MAX_VALUE} instead (how many are "
-        "clipped, and in which genes, is logged and stored in the manifest)."
-    )
-
-
 # --- the gene order ------------------------------------------------------------------------------------------------------
 
 
-def _column_sums_job(job: tuple[str, int, int, int]):
+def _column_sums_job(job: tuple[str, int, int, int]) -> np.ndarray:
     path, start, end, n_genes = job
     x = _read_rows(path, start, end)
-    return np.bincount(x.indices, weights=x.data, minlength=n_genes), _overflow(x)
+    return np.bincount(x.indices, weights=x.data, minlength=n_genes)
 
 
-def _gene_totals(
-    stager: Stager,
-    n_obs: Sequence[int],
-    n_genes: int,
-    step: int,
-    workers: int,
-    var_names: np.ndarray,
-    clip: bool,
-) -> np.ndarray:
+def _gene_totals(stager: Stager, n_obs: Sequence[int], n_genes: int, step: int, workers: int) -> np.ndarray:
     """Total counts of every gene over the files of ``stager`` (each released after its use), reading ``step`` rows at a time
-    (in ``workers`` processes). Counts that are too large for deltacells are an error unless ``clip``: this is the first
-    pass over ``X``, so the error comes early."""
+    (in ``workers`` processes)."""
     totals = np.zeros(n_genes, dtype=np.float64)
     in_flight = max(2, workers)  # files that are being read at the same time
     pool = None if workers == 1 else ProcessPoolExecutor(workers, mp_context=_mp_context())
@@ -220,10 +170,7 @@ def _gene_totals(
 
     def collect(k: int, futures: list[Future]) -> None:
         for future in futures:
-            part, over = future.result()
-            if over is not None and not clip:
-                raise _overflow_error(stager.files[k], over, var_names)
-            np.add(totals, part, out=totals)
+            np.add(totals, future.result(), out=totals)
         stager.release(k)
 
     pending: deque = deque()
@@ -247,52 +194,31 @@ def _gene_totals(
 _TILE_JOB: dict = {}  # the settings of a tile-writing worker, set by ``_init_tile_worker``
 
 
-def _init_tile_worker(
-    root: str,
-    gene_order: np.ndarray | None,
-    n_chunks: int,
-    level: int,
-    threads: int,
-    var_names: np.ndarray | None = None,
-    clip: bool = False,
-) -> None:
-    _TILE_JOB.update(
-        root=root,
-        gene_order=gene_order,
-        n_chunks=n_chunks,
-        level=level,
-        threads=threads,
-        var_names=var_names,
-        clip=clip,
-    )
+def _init_tile_worker(root: str, gene_order: np.ndarray | None, n_chunks: int, level: int, threads: int) -> None:
+    _TILE_JOB.update(root=root, gene_order=gene_order, n_chunks=n_chunks, level=level, threads=threads)
 
 
-def _write_tile_job(job: tuple[int, list[tuple[str, int, int]], list[str]]):
-    """Read the pieces of one tile (of local files), encode it and write its file.
+def _write_tile_job(job: tuple[int, list[tuple[str, int, int]], list[str]]) -> tuple[int, int, int]:
+    """Read the pieces of one tile (of local files), encode it and write its file. Returns ``(n_cells, nnz, n_bytes)``.
 
-    Returns ``(n_cells, nnz, n_bytes, clipped)``; ``clipped`` is ``None`` or, if counts above what deltacells can store were
-    clipped, ``(genes, number of counts, largest count)`` (see :func:`_overflow`). ``job`` is ``(index, pieces, sources)``
-    where ``sources`` names the original files, for messages.
+    ``job`` is ``(index, pieces, sources)`` where ``sources`` names the original files, for messages.
     """
     index, pieces, sources = job
     parts = [_read_rows(*piece) for piece in pieces]
     x = parts[0] if len(parts) == 1 else sp.vstack(parts, format="csr")
     del parts
-    clipped = _overflow(x)
-    if clipped is not None:
-        if not _TILE_JOB["clip"]:
-            raise _overflow_error(f"tile {index} (from {', '.join(sources)})", clipped, _TILE_JOB["var_names"])
-        x.data = np.minimum(x.data, np.asarray(MAX_VALUE, dtype=x.data.dtype))
-    n, nnz, n_bytes = write_tile_file(
-        _TILE_JOB["root"],
-        index,
-        x,
-        gene_order=_TILE_JOB["gene_order"],
-        n_chunks=_TILE_JOB["n_chunks"],
-        level=_TILE_JOB["level"],
-        threads=_TILE_JOB["threads"],
-    )
-    return n, nnz, n_bytes, clipped
+    try:
+        return write_tile_file(
+            _TILE_JOB["root"],
+            index,
+            x,
+            gene_order=_TILE_JOB["gene_order"],
+            n_chunks=_TILE_JOB["n_chunks"],
+            level=_TILE_JOB["level"],
+            threads=_TILE_JOB["threads"],
+        )
+    except ValueError as e:
+        raise ValueError(f"tile {index} (from {', '.join(sources)}): {e}") from e
 
 
 def convert_h5ad(
@@ -314,7 +240,6 @@ def convert_h5ad(
     max_categories: int = DEFAULT_MAX_CATEGORIES,
     obs_tiles_per_file: int = DEFAULT_OBS_TILES_PER_FILE,
     var: bool = True,
-    clip: bool = False,
     staging_dir: str | None = None,
     filesystem=None,
     log: Callable[[str], None] | None = print,
@@ -324,9 +249,9 @@ def convert_h5ad(
     The files may hold any number of cells (a single file can be much larger than memory): ``X`` is read from disk a tile at a
     time, in ``workers`` processes that each read, encode and write whole tiles, so the result depends only on the cell order
     and ``tile_size``. ``X`` can be CSR (the efficient case) or dense. All files must have the same ``var_names`` and ``X`` must
-    hold integer counts up to 65535 (larger counts are an error, or are clipped to 65535 with ``clip``; the clipped counts are
-    logged per gene and stored in the manifest metadata). The files are naturally sorted unless ``sort_files=False``, which
-    keeps the order of ``paths``. The cells are not shuffled: each tile holds consecutive cells, so files that are sorted by
+    hold non-negative integer counts (up to 2**31 - 1; counts above 65535 are stored exactly, as rare "exceptions", and a tile
+    with more than about 0.5% of them is an error: it is not raw counts). The files are naturally sorted unless
+    ``sort_files=False``, which keeps the order of ``paths``. The cells are not shuffled: each tile holds consecutive cells, so files that are sorted by
     something (donor, tissue, ...) give tiles that are as homogeneous; shuffle the cells across the files first if that matters.
 
     The h5ad files, and ``output``, can be in Google Cloud Storage (``gs://bucket/...``, with the default credentials; needs
@@ -407,7 +332,6 @@ def convert_h5ad(
     n_obs = state["n_obs"]
     var_names = state["var_names"]
     n_genes = len(var_names)
-    gene_labels = _gene_labels(var_names, state["var"])  # to name genes in messages
     say(f"{sum(n_obs)} cells x {n_genes} genes (cells per file: min {min(n_obs)}, max {max(n_obs)})")
 
     n_cells = sum(n_obs)
@@ -434,7 +358,7 @@ def convert_h5ad(
             sizes=[state["sizes"][k] for k in used],
             filesystem=filesystem,
         ) as sampled:
-            totals = _gene_totals(sampled, [n_obs[k] for k in used], n_genes, tile_size, workers, gene_labels, clip)
+            totals = _gene_totals(sampled, [n_obs[k] for k in used], n_genes, tile_size, workers)
         gene_order = np.argsort(-totals, kind="stable")
     else:
         used, gene_order = [], None
@@ -500,25 +424,16 @@ def convert_h5ad(
             yield buf
 
     obs_iter = obs_tiles() if schema is not None else None
-    clipped_genes: dict[str, list[float]] = {}  # gene -> [number of counts clipped, largest]
 
     def commit(i: int, get_result: Callable[[], tuple]) -> None:
         obs_table = None if obs_iter is None else next(obs_iter)  # while the workers are busy with the tiles
-        n, nnz, n_bytes, clipped = get_result()
+        n, nnz, n_bytes = get_result()
         writer.commit_tile(i, n, nnz, n_bytes, obs=obs_table)
         for k in tile_files[i]:
             stager.release(k)
-        note = ""
-        if clipped is not None:
-            genes, counts, largest = clipped
-            for g, c, m in zip(genes, counts, largest):
-                entry = clipped_genes.setdefault(str(gene_labels[g]), [0, 0.0])
-                entry[0] += int(c)
-                entry[1] = max(entry[1], float(m))
-            note = f", clipped {int(counts.sum())} count(s) above {MAX_VALUE} in {len(genes)} gene(s)"
-        say(f"[tile {i + 1}/{n_tiles}] {n} cells, {n_bytes / 1e6:.1f} MB{note}")
+        say(f"[tile {i + 1}/{n_tiles}] {n} cells, {n_bytes / 1e6:.1f} MB")
 
-    init_args = (writer.root, gene_order, n_chunks, level, threads, gene_labels, clip)
+    init_args = (writer.root, gene_order, n_chunks, level, threads)
     try:
         if workers == 1:
             _init_tile_worker(*init_args)
@@ -545,19 +460,6 @@ def convert_h5ad(
                 ) from e
             finally:
                 pool.shutdown(wait=True, cancel_futures=True)
-        if clipped_genes:
-            total = int(sum(c for c, _ in clipped_genes.values()))
-            worst = sorted(clipped_genes.items(), key=lambda kv: -kv[1][0])
-            listed = ", ".join(f"{name} ({int(c)}, largest {m:.0f})" for name, (c, m) in worst[:20])
-            say(
-                f"clipped {total} count(s) above {MAX_VALUE} to {MAX_VALUE}, in {len(clipped_genes)} gene(s) "
-                f"(clipped counts, largest value): {listed}{' ...' if len(worst) > 20 else ''}"
-            )
-            writer.metadata["clipped_counts"] = {
-                "limit": MAX_VALUE,
-                "n_counts": total,
-                "genes": {name: {"n": int(c), "largest": m} for name, (c, m) in worst},
-            }
         manifest = writer.close()
     except BaseException as e:
         writer.abort()

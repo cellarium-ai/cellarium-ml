@@ -150,7 +150,7 @@ class DistributedDeltaCellsCollection(DistributedCollection):
     :class:`~cellarium.ml.utilities.data.AnnDataField`
     and all of its ``convert_fn`` s work as they do with h5ad files. Differences from h5ad data to be aware of:
 
-    * ``X`` holds integer counts (at most 65535) as float32 and the genes are in the dataset's stored order, which
+    * ``X`` holds integer counts as float32 (exact up to 2**24) and the genes are in the dataset's stored order, which
       differs from the original order; models identify genes by ``var_names_g``.
     * The categories of categorical obs columns are global (the same in every batch and every shard) and are strings.
     * Only the attributes ``X``, ``obs``, ``obs_names``, ``var`` and ``var_names`` exist.

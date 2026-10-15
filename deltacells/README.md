@@ -4,7 +4,7 @@ Fast, compact, cloud-friendly **tiles of single-cell count matrices**, built for
 
 A dataset is a directory (or bucket prefix) of *tiles*, each one self-contained object holding ~10k cells x all genes. Within a
 tile the counts are stored as per-cell **gene gaps** (delta coding of the sorted gene indices) and **counts**, as byte-planar
-uint16 streams compressed with **zstd**; a small C core decompresses a tile into CSR arrays in ~0.1 s per core (0.025 s on 8 cores)
+uint16 streams compressed with **zstd** (the rare values that do not fit in a uint16 are stored beside them); a small C core decompresses a tile into CSR arrays in ~0.1 s per core (0.025 s on 8 cores)
 without any intermediate AnnData / Arrow objects. Genes are sorted by decreasing total counts, which is what makes the
 compression work.
 
@@ -121,7 +121,7 @@ Write your own data:
 from deltacells import DatasetWriter
 
 with DatasetWriter("/data/out", n_genes=G, tile_size=10_000, gene_order=order, var_names=names) as w:
-    for block in blocks:  # scipy CSR / anything scipy can convert; integer counts in [0, 65535]
+    for block in blocks:  # scipy CSR / anything scipy can convert; integer counts in [0, 2**31 - 1]
         w.add_tile(block)  # every tile but the last must have exactly tile_size cells
 ```
 
@@ -206,7 +206,9 @@ strings with missing values come back as object arrays with `None`. `to_pandas` 
 
 1. Genes are sorted by decreasing total counts (from up to 10 files spread evenly over the inputs, or all of them with `--sort-genes-max-files 0`): frequently detected genes get small, adjacent column
    indices, so the gaps between a cell's nonzero genes are small and repetitive.
-2. Per cell, the gene indices are delta coded (`g0, g1-g0, g2-g1, ...`); with the counts that gives two uint16 streams.
+2. Per cell, the gene indices are delta coded (`g0, g1-g0, g2-g1, ...`); with the counts that gives two uint16 streams. A count
+   or a gap above 65535 (a few counts of very highly expressed genes; a gap only with more than 65,536 genes) is stored as
+   65535 plus an entry in a small per-chunk *exception frame*, so the common decoding path is not slower for them.
 3. Each stream is split into byte planes (all low bytes, then all high bytes), compressed with zstd, per chunk of ~1/8 of the
    tile's nonzeros. Chunks are independent, so a tile decodes in parallel, at ~0.5% size cost.
 4. A tile is a header, a chunk table, `indptr`, and the compressed streams: one object, decodable on its own, CRC-protected.
@@ -225,8 +227,10 @@ Sorting the genes saves 21-22% at every level; higher zstd levels are smaller *a
 
 ## Limitations
 
-* **Counts are uint16**: integers in [0, 65535] and at most 65,536 genes. The writer raises rather than clipping. No normalized or
-  float data.
+* **Integer counts only**: integers in [0, 2^31 - 1] (float32 batches are exact up to 2^24). Counts above 65535, and gaps above
+  65535 between a cell's consecutive expressed genes (possible with more than 65,536 genes), are stored as exceptions and must be
+  rare: the writer refuses a tile with more than `max(1024, nnz / 200)` of either kind, which is not what raw counts look like (a
+  sparse-feature space such as ATAC peaks is out of scope). No normalized or float data.
 * **GCS is untested against a real bucket**; the backend is a thin wrapper over `google-cloud-storage` and the pipeline logic is
   tested with a fake client and the throttled backend. Reads fetch whole tiles with `download_as_bytes` (one extra copy).
 * **Platforms**: tested on macOS arm64 only (Linux x86-64 should work but has not been run); little-endian hosts only.

@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-The deltacells tile format (version 1). See ``docs/FORMAT.md`` for the full specification.
+The deltacells tile format (version 2). See ``docs/FORMAT.md`` for the full specification.
 
 A tile is one self-contained blob holding a block of cells (rows) of a count matrix in CSR form::
 
-    header (64 bytes) | chunk table (n_chunks * 64 bytes) | indptr (int64 * (n_cells + 1)) | compressed streams
+    header (64 bytes) | chunk table (n_chunks * 96 bytes) | indptr (int64 * (n_cells + 1)) | compressed streams
 
 Within each chunk of consecutive cells, the nonzeros are stored as two zstd-compressed streams of uint16 values
 (byte-planar: all low bytes, then all high bytes): the per-cell *gaps* between consecutive gene indices (the first
-gap of a cell is its first gene index) and the counts. All integers are little-endian.
+gap of a cell is its first gene index) and the counts. The rare values and gaps that do not fit in a uint16 are stored as
+65535 in the stream and listed, exactly, in a small per-chunk *exception frame*. All integers are little-endian.
 """
 
 import struct
@@ -19,17 +20,28 @@ import zlib
 from dataclasses import dataclass
 
 MAGIC = b"DELTACEL"
-VERSION = 1
+VERSION = 2
 HEADER_SIZE = 64
-CHUNK_ENTRY_SIZE = 64
-MAX_GENES = 65536  # gaps and gene indices are stored as uint16
-MAX_VALUE = 65535  # counts are stored as uint16
+CHUNK_ENTRY_SIZE = 96
+MAX_GENES = 2**31  # gene indices are int32 once decoded
+MAX_VALUE = 2**31 - 1  # counts are int32 once decoded
+STREAM_MAX = 65535  # the largest value or gap a uint16 stream holds; larger ones become exceptions
 
 # magic, version, flags, n_cells, nnz, n_genes, n_chunks, indptr_off, total_size, crc32, reserved
 _HEADER = struct.Struct("<8sIIQQIIQQII")
-# cell_lo, cell_hi, nnz_lo, nnz_hi, gaps_off, gaps_len, vals_off, vals_len
-_CHUNK = struct.Struct("<8Q")
+# cell_lo, cell_hi, nnz_lo, nnz_hi, gaps_off, gaps_len, vals_off, vals_len, vexc_off, vexc_len, gexc_off, gexc_len
+_CHUNK = struct.Struct("<12Q")
 assert _HEADER.size == HEADER_SIZE and _CHUNK.size == CHUNK_ENTRY_SIZE
+
+
+def exception_limit(nnz: int) -> int:
+    """The most value exceptions (and, separately, gap exceptions) the writer accepts in a tile of ``nnz`` nonzeros.
+
+    Exceptions are meant to be rare: each costs ~35 ns to decode, so beyond about 0.5% of the nonzeros they would slow decoding
+    noticeably, and data with that many counts above 65535 (or cells with that many gaps above 65535) is not what this format is for.
+    """
+    return max(1024, nnz // 200)
+
 
 if sys.byteorder != "little":  # pragma: no cover
     raise ImportError("deltacells requires a little-endian host")
@@ -49,6 +61,10 @@ class ChunkInfo:
     gaps_len: int
     vals_off: int
     vals_len: int
+    vexc_off: int = 0  # exception frame of the values (0 bytes long: the chunk has none)
+    vexc_len: int = 0
+    gexc_off: int = 0  # exception frame of the gaps
+    gexc_len: int = 0
 
     @property
     def nnz(self) -> int:
@@ -101,6 +117,10 @@ def pack_chunk(chunk: ChunkInfo) -> bytes:
         chunk.gaps_len,
         chunk.vals_off,
         chunk.vals_len,
+        chunk.vexc_off,
+        chunk.vexc_len,
+        chunk.gexc_off,
+        chunk.gexc_len,
     )
 
 
@@ -135,7 +155,9 @@ def parse_tile_info(buf) -> TileInfo:
         c = ChunkInfo(*_CHUNK.unpack_from(mv, HEADER_SIZE + i * CHUNK_ENTRY_SIZE))
         if c.cell_lo != cell or c.cell_hi < c.cell_lo or c.nnz_lo != pos or c.nnz_hi < c.nnz_lo:
             raise FormatError(f"chunk {i} is not contiguous with the previous chunk")
-        for off, length in ((c.gaps_off, c.gaps_len), (c.vals_off, c.vals_len)):
+        streams = [(c.gaps_off, c.gaps_len), (c.vals_off, c.vals_len)]
+        streams += [(off, length) for off, length in ((c.vexc_off, c.vexc_len), (c.gexc_off, c.gexc_len)) if length]
+        for off, length in streams:
             if off % 8 != 0 or off < indptr_end or off > size or length > size - off:
                 raise FormatError(f"chunk {i} stream lies outside the blob")
         cell, pos = c.cell_hi, c.nnz_hi

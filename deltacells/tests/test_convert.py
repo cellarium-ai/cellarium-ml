@@ -170,6 +170,36 @@ def test_rejects_mismatched_var_names(tmp_path, full):
         convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "out"), tile_size=100, log=None)
 
 
+@pytest.mark.parametrize("sort_genes", [False, True])
+@pytest.mark.parametrize("workers", [1, 2])
+def test_large_counts_and_more_than_65536_genes_survive_the_conversion(tmp_path, sort_genes, workers):
+    g = 70_000
+    rows = [[0, 66_500, 69_999], [69_000], [5, 6, 7, 120], [], [0, 33_000, 69_999], [1, 2]] * 5
+    entries = [
+        (r, c, v) for r, genes in enumerate(rows) for c, v in zip(genes, [3, 70_000, 5, 3_000_000][: len(genes)])
+    ]
+    r, c, v = zip(*entries)
+    full = sp.csr_matrix((v, (r, c)), shape=(len(rows), g), dtype=np.int64)
+    write_shards(tmp_path / "in", [12, 18], full)  # the float32 in the h5ad files holds these values exactly
+    out = str(tmp_path / "out")
+    kw = dict(tile_size=9, n_chunks=2, level=3, threads=1, log=None, sort_genes=sort_genes, workers=workers)
+    manifest = convert_h5ad(str(tmp_path / "in" / "*.h5ad"), out, **kw)
+    ds = open_dataset(out)
+    order = ds.gene_order if sort_genes else np.arange(g)
+    assert manifest.n_genes == g and same(ds[:].to_scipy(), full[:, order])
+
+
+def test_a_tile_of_raw_counts_gone_wrong_is_refused_with_its_tile_and_files(tmp_path):
+    n = 1100  # every nonzero of the tile is above 65535: not counts
+    x = sp.csr_matrix(np.full((n, 2), 100_000, dtype=np.float32))
+    os.makedirs(tmp_path / "in")
+    obs = pd.DataFrame(index=[f"c{i}" for i in range(n)])
+    anndata.AnnData(X=x, obs=obs, var=pd.DataFrame(index=["g0", "g1"])).write_h5ad(tmp_path / "in" / "x.h5ad")
+    with pytest.raises(ValueError, match=r"tile 0 \(from .*x\.h5ad\).*does not look like raw counts"):
+        convert_h5ad(str(tmp_path / "in" / "*.h5ad"), str(tmp_path / "out"), tile_size=n, log=None)
+    assert not os.path.exists(tmp_path / "out")
+
+
 def test_rejects_non_integer_counts(tmp_path):
     os.makedirs(tmp_path / "in")
     x = sp.csr_matrix(np.array([[0.5, 0.0], [1.0, 2.0]], dtype=np.float32))

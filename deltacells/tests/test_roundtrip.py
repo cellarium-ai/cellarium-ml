@@ -37,9 +37,9 @@ def test_higher_levels_not_larger():
 
 
 def test_extreme_values_and_genes():
-    n_genes = MAX_GENES
+    n_genes = 70_000  # more than a uint16 gap holds, and the largest value an int32 holds
     rows, cols, vals = [0, 0, 0, 1, 2], [0, 1, n_genes - 1, n_genes - 1, 12345], [1, MAX_VALUE, MAX_VALUE, 1, 777]
-    m = sp.csr_matrix((vals, (rows, cols)), shape=(3, n_genes), dtype=np.float32)
+    m = sp.csr_matrix((vals, (rows, cols)), shape=(3, n_genes), dtype=np.int64)
     d = Tile(encode_tile(m, level=3)).decode(values=np.int32)
     assert same(d.to_scipy(), m)
     assert d.values.max() == MAX_VALUE and d.indices.max() == n_genes - 1
@@ -95,7 +95,7 @@ def test_duplicates_summed_unsorted_and_explicit_zeros_dropped():
     "data,msg",
     [
         ([-1.0], "values must lie"),
-        ([65536.0], "values must lie"),
+        ([2.0**31], "values must lie"),
         ([1.5], "integer"),
         ([np.nan], "integer"),
         ([np.inf], "integer"),

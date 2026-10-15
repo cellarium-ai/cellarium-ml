@@ -301,32 +301,20 @@ def test_mismatched_var_names_in_remote_files_are_found_by_the_scan(bucket, tmp_
     assert not os.path.exists(tmp_path / "o")
 
 
-def test_genes_are_named_by_their_symbol_when_the_var_names_are_ids(tmp_path):
-    import scipy.sparse as sp
-
-    x = sp.csr_matrix(np.array([[1.0, 70000.0], [2.0, 3.0]], dtype=np.float32))
-    var = pd.DataFrame({"feature_name": ["ACTB", "MALAT1"]}, index=["101", "102"])
-    path = str(tmp_path / "ids.h5ad")
-    anndata.AnnData(x, obs=pd.DataFrame(index=["a", "b"]), var=var).write_h5ad(path)
-    with pytest.raises(ValueError, match=r"102 \(MALAT1\)"):
-        convert_h5ad([path], str(tmp_path / "o"), tile_size=2, level=3, log=None, sort_genes=False)
-    messages: list[str] = []
-    manifest = convert_h5ad([path], str(tmp_path / "o"), tile_size=2, level=3, log=messages.append, clip=True)
-    assert list(manifest.metadata["clipped_counts"]["genes"]) == ["102 (MALAT1)"]
-    assert any("102 (MALAT1)" in m for m in messages)
-
-
 def test_a_failure_is_explained_and_leaves_the_inputs_alone(bucket, tmp_path):
     import scipy.sparse as sp
 
-    x = sp.csr_matrix(np.array([[1.0, 2.0], [2.0, 70000.0]], dtype=np.float32))  # the second tile fails
+    n = 2000  # the second tile has more counts above 65535 than a tile accepts (1024), so it fails
+    data = np.full((2 * n, 2), 2.0, dtype=np.float32)
+    data[n:, 1] = 70000
     local = str(tmp_path / "big.h5ad")
-    anndata.AnnData(x, obs=pd.DataFrame(index=["a", "b"]), var=pd.DataFrame(index=["g0", "g1"])).write_h5ad(local)
+    obs = pd.DataFrame(index=[f"c{i}" for i in range(2 * n)])
+    anndata.AnnData(sp.csr_matrix(data), obs=obs, var=pd.DataFrame(index=["g0", "g1"])).write_h5ad(local)
     bucket.fs.put_file(local, "bucket/in/big.h5ad")
     messages: list[str] = []
-    with pytest.raises(ValueError, match="g1") as info:
+    with pytest.raises(ValueError, match="tile 1 .*does not look like raw counts") as info:
         convert_h5ad(
-            ["gs://bucket/in/big.h5ad"], "gs://bucket/out", tile_size=1, level=3, sort_genes=False, workers=1,
+            ["gs://bucket/in/big.h5ad"], "gs://bucket/out", tile_size=n, level=3, sort_genes=False, workers=1,
             filesystem=bucket, staging_dir=str(tmp_path), log=messages.append,
         )  # fmt: skip
     # the way to the incomplete dataset that was left is in the error (Python 3.11+ notes) or in the log (before that)

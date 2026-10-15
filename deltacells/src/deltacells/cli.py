@@ -75,7 +75,7 @@ def _convert(args: argparse.Namespace) -> int:
         overwrite=args.overwrite, obs=not args.no_obs, var=not args.no_var,
         obs_names=not args.no_obs_names, obs_exclude=[c for c in args.obs_exclude.split(",") if c],
         max_categories=args.max_categories, obs_tiles_per_file=args.obs_tiles_per_file,
-        clip=args.clip, staging_dir=args.staging_dir,
+        staging_dir=args.staging_dir,
     )  # fmt: skip
     return 0
 
@@ -162,10 +162,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument(
         "--overwrite", action="store_true",
         help="Delete the dataset that is at the output first (this raises if the output has anything else in it).",
-    )  # fmt: skip
-    p.add_argument(
-        "--clip", action="store_true",
-        help="Clip counts above 65535 to 65535 (logged per gene) instead of failing.",
     )  # fmt: skip
     p.add_argument(
         "--staging-dir", default=None,

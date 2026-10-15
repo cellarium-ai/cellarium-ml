@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 FORMAT_NAME = "deltacells-dataset"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 MANIFEST_NAME = "manifest.json"
 GENE_ORDER_NAME = "gene_order.npy"
 VAR_NAMES_NAME = "var_names.txt"
