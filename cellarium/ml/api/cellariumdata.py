@@ -479,6 +479,8 @@ class LazyObs:
         return self._read(columns=None)
 
     def __repr__(self) -> str:
+        # build the database first if need be, so that `parquet_path` is set by the time it is formatted
+        self._get_dataset()
         return (
             f"{self.__class__.__name__}(parquet_path={self._parquet_path!r}, n_obs={len(self)}, columns={self.columns})"
         )

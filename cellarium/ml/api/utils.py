@@ -134,16 +134,23 @@ def get_h5ad_file_obs(h5ad_path: str) -> pd.DataFrame:
     return obs
 
 
+def _h5ad_source(h5ad_paths: list[str]) -> str:
+    """Where the h5ad files live, for progress bar labels: GCS, URLs, local files or mixed locations."""
+    sources = {
+        "GCS" if path.startswith("gs://") else "URLs" if path.startswith(("http://", "https://")) else "local files"
+        for path in h5ad_paths
+    }
+    return sources.pop() if len(sources) == 1 else "mixed locations"
+
+
 def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
     """
     Get the number of cells using a process pool that terminates instantly.
     """
+    desc = f"Reading n_obs from {_h5ad_source(h5ad_paths)}"
     # opt for a quick for loop if the number of files is small
     if len(h5ad_paths) < 40:
-        return [
-            get_h5ad_file_n_cells(h5ad_path)
-            for h5ad_path in tqdm(h5ad_paths, desc="Reading n_obs from h5ad files", unit="file")
-        ]
+        return [get_h5ad_file_n_cells(h5ad_path) for h5ad_path in tqdm(h5ad_paths, desc=desc, unit="file")]
 
     ctx = mp.get_context("spawn")
     pool = ctx.Pool(processes=12)
@@ -154,7 +161,7 @@ def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
             tqdm(
                 pool.imap(get_h5ad_file_n_cells, h5ad_paths),
                 total=len(h5ad_paths),
-                desc="Reading n_obs from GCS",
+                desc=desc,
                 unit="file",
             )
         )
@@ -254,6 +261,7 @@ def write_obs_parquet(h5ad_paths: list[str], output_path: str, processes: int = 
     if not h5ad_paths:
         raise ValueError("h5ad_paths must be a non-empty list")
 
+    desc = f"Reading obs from {_h5ad_source(h5ad_paths)}"
     tmpdir = tempfile.mkdtemp(prefix="cellarium_obs_parquet_")
     try:
         shard_paths = [os.path.join(tmpdir, f"{i:08d}.parquet") for i in range(len(h5ad_paths))]
@@ -261,7 +269,7 @@ def write_obs_parquet(h5ad_paths: list[str], output_path: str, processes: int = 
 
         # opt for a quick for loop if the number of files is small
         if len(h5ad_paths) < 40:
-            for a in tqdm(args, desc="Reading obs from h5ad files", unit="file"):
+            for a in tqdm(args, desc=desc, unit="file"):
                 _write_obs_shard(a)
         else:
             ctx = mp.get_context("spawn")
@@ -273,7 +281,7 @@ def write_obs_parquet(h5ad_paths: list[str], output_path: str, processes: int = 
                     tqdm(
                         pool.imap_unordered(_write_obs_shard, args),
                         total=len(args),
-                        desc="Reading obs from GCS",
+                        desc=desc,
                         unit="file",
                     )
                 )

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData, concat
 from anndata._core.index import _normalize_indices
+from anndata._core.views import DataFrameView
 from anndata.compat import Index, Index1D
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
@@ -304,8 +305,19 @@ class DistributedAnnDataCollection(AnnCollection, DistributedCollection):
             else:
                 obs[column] = obs[column].astype(dtype)
 
-        adata = adata if reverse is None else adata[reverse]
-        return adata
+        if reverse is None:
+            return adata
+
+        # `adata[reverse]` restores the order of the requested cells. It is a lazy view of `adata` (the rows of `X` are
+        # only gathered, and copied, when `X` is read), but creating it drops the categories that no cell of the view
+        # uses from its `obs`, which makes the codes of a batch differ from those of other batches. Setting the
+        # categories on the view would turn it into a copy of everything, `X` included, so instead the `obs` of the view
+        # is replaced by the reordered `obs` of `adata`, which still has the categories of the schema. This is what
+        # anndata itself does to set the `obs` of a view, but through private attributes: if a new version of anndata
+        # breaks this, `test_h5ad_batches_have_the_categories_of_the_schema_in_the_schema_order` will fail.
+        view = adata[reverse]
+        view._obs = DataFrameView(adata.obs.iloc[reverse], view_args=(view, "obs"))
+        return view
 
     def materialize(self, adatas_oidx: list[np.ndarray | None], vidx: Index1D) -> list[AnnData]:
         """
