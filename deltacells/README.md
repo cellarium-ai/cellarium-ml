@@ -218,9 +218,12 @@ What it does, so that nothing has to fit on the local disk:
   estimate. `--staging-dir` defaults to the system temp directory, so point it at a disk with room. With a local `--output` and local
   inputs nothing is staged.
 * **Speed**: compression is the bottleneck, not the network. At the default `--level 19` a 10k-cell tile of ~2,300 nonzeros per cell
-  takes about 25 core-seconds to encode (4.9 s with 8 threads), so 16 cores write ~0.6 tiles per second, consuming roughly 50 MB/s of
-  h5ad; in a quick test one process downloaded from GCS at about 340 MB/s. That extrapolates to ~4-5 hours for 100M cells on 16 cores
-  (an estimate, not a measurement). `--level 12` encodes about 4x faster and is 6% larger (`--level 3`: 7x faster, 11% larger). `--workers` defaults to the
+  takes about 25 core-seconds to encode on an idle core (4.9 s with 8 threads). In a real run (9,447 files, 12 workers on a 16-vCPU
+  VM, which is 8 physical cores with 2 hyperthreads each) it took about 55 s per tile per worker, 0.22 tiles/s, which is about 11
+  hours for 94M cells: busy hyperthreads are much slower than the idle core of the benchmark, so do not count vCPUs as cores. All
+  12 workers were at 100% CPU, with downloads and uploads keeping up (one process downloaded from GCS at about 340 MB/s in a quick
+  test), so more workers than cores cannot help much. `--level 12` encodes about 4x faster and is 6% larger (`--level 3`: 7x faster,
+  11% larger); for a dataset this size that is the setting to choose unless the last 6% of size matters. `--workers` defaults to the
   number of cores, limited by memory (~50 bytes per nonzero of a tile).
 
 What you see while it runs: a line when each phase starts and ends, and, every `--progress-interval` seconds (60 by default, the
