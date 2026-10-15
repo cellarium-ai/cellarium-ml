@@ -215,6 +215,7 @@ def test_counts_above_65535_are_stored_exactly(tmp_path):
     create_deltacells_dataset(paths, out, tile_size=2, level=3, log=None)
     dataset = open_dataset(out)
     expected = np.vstack([ad.read_h5ad(p).X.toarray() for p in paths])
+    assert isinstance(dataset.gene_order, np.ndarray)
     assert np.array_equal(dataset[:].to_scipy().toarray()[:, np.argsort(dataset.gene_order)], expected)
     assert dataset[:].to_scipy().max() == 70_000
 

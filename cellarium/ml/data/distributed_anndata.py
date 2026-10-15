@@ -293,7 +293,7 @@ class DistributedAnnDataCollection(AnnCollection, DistributedCollection):
                 # `concat` copies the cells, which releases the (views of the) files of the group
                 groups.append(concat(self.materialize(group_oidx, vidx), merge="same"))
             adata = concat(groups, merge="same")
-        
+
         # make sure that categorical dtypes are preserved. `astype` leaves a categorical column alone if its categories
         # are those of the schema in a different order (unordered categorical dtypes compare equal), which would make
         # the codes of a batch differ from those of other batches, so categories are set explicitly.
@@ -303,7 +303,7 @@ class DistributedAnnDataCollection(AnnCollection, DistributedCollection):
                 obs[column] = obs[column].cat.set_categories(dtype.categories, ordered=dtype.ordered)
             else:
                 obs[column] = obs[column].astype(dtype)
-                
+
         adata = adata if reverse is None else adata[reverse]
         return adata
 
