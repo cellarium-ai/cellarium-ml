@@ -188,11 +188,11 @@ class FsspecSink(Sink):
         if not self.fs.exists(self.root):
             return []
         names = []
-        for path in self.fs.find(self.root):
-            path = self._norm(path)
-            name = path[len(self.root) + 1 :] if path.startswith(self.root + "/") else path
-            if name and not name.endswith("/"):  # not a "folder" placeholder
-                names.append(name)
+        for raw in self.fs.find(self.root):
+            if raw.endswith("/"):  # a "folder" placeholder (the empty object that the cloud console makes), not a file
+                continue
+            path = self._norm(raw)
+            names.append(path[len(self.root) + 1 :] if path.startswith(self.root + "/") else path)
         return sorted(names)
 
     def delete(self, names: list[str]) -> None:

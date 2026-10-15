@@ -89,6 +89,57 @@ def test_sink_recognises_the_files_of_a_dataset(bucket):
         sink.check(overwrite=False)
 
 
+class FolderMarkers(FakeBucket):
+    """Like gcsfs on a real bucket: ``find`` also returns the empty "folder" placeholder objects (names ending in ``/``) that the
+    cloud console makes with "create folder", here for the output prefix itself and for a ``tiles/`` folder in it."""
+
+    def __init__(self, root: str):
+        super().__init__()
+        self.root = root
+
+    def exists(self, path, **kwargs):
+        return path.strip("/") == self.root or self.fs.exists(path, **kwargs)
+
+    def find(self, path, **kwargs):
+        return [f"{self.root}/", f"{self.root}/tiles/", *self.fs.find(path, **kwargs)]
+
+
+def test_folder_placeholders_are_not_files_that_block_an_overwrite(monkeypatch, tmp_path):
+    monkeypatch.setattr("deltacells.sink.time.sleep", lambda s: None)
+    b = FolderMarkers("bucket/p")
+    try:
+        sink = FsspecSink("gs://bucket/p", b)
+        assert sink.existing() == [] and sink.check(overwrite=False) == [] and sink.check(overwrite=True) == []
+
+        for name in ("manifest.json", "tiles/tile_000000.dct"):  # a dataset in it: only its files are listed
+            b.fs.pipe(f"bucket/p/{name}", b"x")
+        assert sink.existing() == ["manifest.json", "tiles/tile_000000.dct"]
+        assert sink.check(overwrite=True) == ["manifest.json", "tiles/tile_000000.dct"]
+
+        b.fs.pipe("bucket/p/notes.txt", b"precious")  # something else is still reported, and only that
+        with pytest.raises(FileExistsError, match=r"\['notes.txt'\]"):
+            sink.check(overwrite=True)
+        b.fs.rm("bucket/p/notes.txt")
+
+        # end to end: a whole conversion into the prefix that the console made, with --overwrite
+        url = put_h5ad(b, tmp_path, n_obs=10, name="in/a.h5ad")[2]
+        manifest = convert_h5ad(
+            [url],
+            "gs://bucket/p",
+            tile_size=4,
+            level=3,
+            log=None,
+            filesystem=b,
+            staging_dir=str(tmp_path),
+            overwrite=True,
+        )
+        assert manifest.n_cells == 10 and b.fs.exists("bucket/p/manifest.json")
+        assert not b.fs.exists("bucket/p/tiles/tile_000099.dct")
+    finally:
+        if b.fs.exists("bucket"):
+            b.fs.rm("bucket", recursive=True)
+
+
 def test_sink_deletes_the_manifest_first(bucket):
     for name in ("tiles/tile_000000.dct", "manifest.json", "var.parquet"):
         bucket.fs.pipe(f"bucket/p/{name}", b"x")
