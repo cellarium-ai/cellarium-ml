@@ -18,7 +18,7 @@ from cellarium.ml.transforms import (
     PFlogPF,
     ZScore,
 )
-from cellarium.ml.utilities.data import to_torch_sparse_csr
+from cellarium.ml.utilities.data import to_torch_sparse_coo, to_torch_sparse_csr
 
 n, g, target_count = 100, 3, 10_000
 
@@ -249,6 +249,86 @@ def test_filter_sparse_column_mismatch_raises(x_ng_sparse: scipy.sparse.csr_matr
 
 
 # ---------------------------------------------------------------------------
+# Filter — sparse (torch COO) input path, used on the mps accelerator
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def x_ng_coo() -> torch.Tensor:
+    return to_torch_sparse_coo(scipy.sparse.csr_matrix(_SPARSE_DENSE))
+
+
+def test_filter_coo_ordering_true_reorders_columns(x_ng_coo: torch.Tensor):
+    """ordering=True on a COO input: output columns follow filter_list order, and stay COO."""
+    filter_list = ["gene_2", "gene_0"]
+    transform = Filter(filter_list, ordering=True)
+    result = transform(x_ng_coo, _SPARSE_VAR_NAMES)
+
+    assert result["x_ng"].layout == torch.sparse_coo
+    assert list(result["var_names_g"]) == filter_list
+
+    dense_out = result["x_ng"].to_dense().numpy()
+    np.testing.assert_array_equal(dense_out[:, 0], _SPARSE_DENSE[:, 2])
+    np.testing.assert_array_equal(dense_out[:, 1], _SPARSE_DENSE[:, 0])
+
+
+def test_filter_coo_ordering_false_preserves_input_order(x_ng_coo: torch.Tensor):
+    """ordering=False on a COO input: output columns follow input order, and stay COO."""
+    filter_list = ["gene_2", "gene_0"]
+    transform = Filter(filter_list, ordering=False)
+    result = transform(x_ng_coo, _SPARSE_VAR_NAMES)
+
+    assert result["x_ng"].layout == torch.sparse_coo
+    assert list(result["var_names_g"]) == ["gene_0", "gene_2"]
+
+    dense_out = result["x_ng"].to_dense().numpy()
+    np.testing.assert_array_equal(dense_out[:, 0], _SPARSE_DENSE[:, 0])
+    np.testing.assert_array_equal(dense_out[:, 1], _SPARSE_DENSE[:, 2])
+
+
+def test_filter_coo_allow_missing_fills_zeros(x_ng_coo: torch.Tensor):
+    """allow_missing=True on a COO input: absent genes produce zero-filled columns, dense output."""
+    filter_list = ["gene_1", "gene_X", "gene_0"]  # gene_X not in input
+    transform = Filter(filter_list, ordering=True, allow_missing=True)
+    result = transform(x_ng_coo, _SPARSE_VAR_NAMES)
+
+    assert not result["x_ng"].is_sparse
+    assert result["x_ng"].shape == (5, 3)
+    assert list(result["var_names_g"]) == filter_list
+
+    out = result["x_ng"].numpy()
+    np.testing.assert_array_equal(out[:, 0], _SPARSE_DENSE[:, 1])  # gene_1
+    np.testing.assert_array_equal(out[:, 1], np.zeros(5))  # gene_X (missing)
+    np.testing.assert_array_equal(out[:, 2], _SPARSE_DENSE[:, 0])  # gene_0
+
+
+def test_filter_coo_column_mismatch_raises(x_ng_coo: torch.Tensor):
+    """x_ng columns != len(var_names_g) raises ValueError for COO input too."""
+    bad_var_names = np.array(["gene_0", "gene_1"])  # 2 names but x_ng has 3 columns
+    transform = Filter(["gene_0"], ordering=True)
+    with pytest.raises(ValueError, match="must match"):
+        transform(x_ng_coo, bad_var_names)
+
+
+def test_filter_coo_then_densify_on_mps():
+    """Filter on a COO input, followed by Densify, reproduces the mps accelerator pipeline."""
+    if not torch.backends.mps.is_available():
+        pytest.skip("mps not available")
+
+    x_ng_coo = to_torch_sparse_coo(scipy.sparse.csr_matrix(_SPARSE_DENSE))
+    filter_list = ["gene_2", "gene_0"]
+    filtered = Filter(filter_list, ordering=True)(x_ng_coo, _SPARSE_VAR_NAMES)["x_ng"]
+
+    x_mps = filtered.to(torch.device("mps"))
+    densified = Densify()(x_mps)["x_ng"]
+
+    assert densified.device.type == "mps"
+    assert not densified.is_sparse
+    np.testing.assert_array_equal(densified.cpu().numpy()[:, 0], _SPARSE_DENSE[:, 2])
+    np.testing.assert_array_equal(densified.cpu().numpy()[:, 1], _SPARSE_DENSE[:, 0])
+
+
+# ---------------------------------------------------------------------------
 # ZScore flexible gene-subset tests
 # ---------------------------------------------------------------------------
 
@@ -324,6 +404,16 @@ def test_densify_sparse_csr_to_dense():
     dense = torch.tensor([[0.0, 2.0, 0.0], [1.0, 0.0, 3.0]], dtype=torch.float32)
     x_sparse = to_torch_sparse_csr(scipy.sparse.csr_matrix(dense.numpy()))
     assert x_sparse.is_sparse_csr
+    out = Densify()(x_sparse)["x_ng"]
+    assert not out.is_sparse
+    torch.testing.assert_close(out, dense)
+
+
+def test_densify_sparse_coo_to_dense():
+    """torch.sparse_coo_tensor (the mps-accelerator sparse layout) is densified correctly."""
+    dense = torch.tensor([[0.0, 2.0, 0.0], [1.0, 0.0, 3.0]], dtype=torch.float32)
+    x_sparse = to_torch_sparse_coo(scipy.sparse.csr_matrix(dense.numpy()))
+    assert x_sparse.layout == torch.sparse_coo
     out = Densify()(x_sparse)["x_ng"]
     assert not out.is_sparse
     torch.testing.assert_close(out, dense)
