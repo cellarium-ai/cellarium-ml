@@ -681,11 +681,11 @@ def _build_datamodule_and_train(
     r: int,
     tmp_path_for_ckpt: str,
     seed: int = 0,
-) -> tuple[torch.Tensor, ...]:
+) -> tuple[str, dict[int, torch.Tensor], CellariumAnnDataDataModule]:
     """
     Train an OnlineNMF model for 1 epoch, save a checkpoint, and return
     the D_{k}_rkg tensors (cloned, detached) keyed by k.
-    Returns a tuple of (ckpt_path, dict[int, torch.Tensor]).
+    Returns a tuple of (ckpt_path, dict[int, torch.Tensor], datamodule).
     """
     import os
 

@@ -944,14 +944,17 @@ def online_dictionary_update_fista(
         return_history=return_history,
     )
 
-    return {
+    result = {
         "factors_rkg": factors_rkg,
         "A_rkk": A_rkk,
         "B_rkg": B_rkg,
         "loadings_rnk": loadings_rnk,
-        "loadings_history": loadings_history,
-        "factors_history": factors_history,
     }
+    if loadings_history is not None:
+        result["loadings_history"] = loadings_history
+    if factors_history is not None:
+        result["factors_history"] = factors_history
+    return result
 
 
 def online_dictionary_update_mairal(
@@ -1739,31 +1742,38 @@ class NMFOutput:
         Returns:
             A single NMF module with the same model architecture but with factors from all input modules.
         """
+        import cellarium.ml
+
         if len(nmf_modules) == 0:
             raise ValueError("nmf_modules list cannot be empty")
 
-        base_module = nmf_modules[0]
-        for module in nmf_modules[1:]:
-            if not isinstance(module.model, NonNegativeMatrixFactorization):
-                raise ValueError("All modules must have a NonNegativeMatrixFactorization model")
-            if module.datamodule != base_module.datamodule:
-                raise ValueError("All modules must have the same datamodule")
+        models: list[OnlineNonNegativeMatrixFactorization] = []
+        for module in nmf_modules:
+            if not isinstance(module.model, OnlineNonNegativeMatrixFactorization):
+                raise ValueError("All modules must have an OnlineNonNegativeMatrixFactorization model")
+            models.append(module.model)
 
-        combined_model = NonNegativeMatrixFactorization(
-            var_names_g=base_module.model.var_names_g,
-            k_values=[k for module in nmf_modules for k in module.model.k_values],
-            r=nmf_modules[0].model.r,
-            algorithm=nmf_modules[0].model.algorithm,
-            init=nmf_modules[0].model.init,
-            transformed_data_mean=nmf_modules[0].model.transformed_data_mean,
+        base_module = nmf_modules[0]
+        base_model = models[0]
+        combined_model = OnlineNonNegativeMatrixFactorization(
+            var_names_g=list(base_model.var_names_g),
+            k_values=[k for model in models for k in model.k_values],
+            r=base_model.r,
+            algorithm=base_model.algorithm,
+            init=base_model.init,
+            transformed_data_mean=base_model.transformed_data_mean,
         )
 
         # copy factors from each module into combined model
-        for module in nmf_modules:
-            for k in module.model.k_values:
-                setattr(combined_model, f"D_{k}_rkg", getattr(module.model, f"D_{k}_rkg").clone())
+        for model in models:
+            for k in model.k_values:
+                setattr(combined_model, f"D_{k}_rkg", getattr(model, f"D_{k}_rkg").clone())
 
-        combined_module = cellarium.ml.CellariumModule(model=combined_model, datamodule=base_module.datamodule)
+        combined_module = cellarium.ml.CellariumModule(
+            transforms=list(base_module.cpu_transforms) + list(base_module.transforms),
+            model=combined_model,
+            is_initialized=True,
+        )
         return combined_module
 
     @classmethod
@@ -2083,6 +2093,8 @@ class NMFOutput:
         if k not in self.consensus:
             raise KeyError(f"Missing consensus_factors key k={k}. Choose from {list(self.consensus.keys())}")
         assert self.datamodule is not None, "datamodule must be present to refit consensus factors"
+        if mean_g is None or std_g is None or var_names_g is None:
+            raise ValueError("mean_g, std_g, and var_names_g must all be provided for Z-scoring")
         self.datamodule.setup(stage="predict")
 
         # set up transforms
@@ -2128,6 +2140,7 @@ class NMFOutput:
             ols_solver.update(x_ng=loadings_nk, y_nk=full_batch["x_ng"])
 
         # finalize OLS fit
+        assert ols_solver is not None, "datamodule predict dataloader yielded no batches"
         factors_kg = ols_solver.solve()
         return {"factors_kg": factors_kg, "var_names_g": full_batch["var_names_g"]}
 
@@ -2292,9 +2305,9 @@ class NMFOutput:
 
 
 def kotliar_compute_hvgs(
-    mean_g: np.array,
-    var_g: np.array,
-    var_names_g: np.array,
+    mean_g: np.ndarray,
+    var_g: np.ndarray,
+    var_names_g: np.ndarray,
     num_genes: int | None = 2000,
     expected_fano_threshold: float | None = None,
     minimal_mean: float = 0.5,
