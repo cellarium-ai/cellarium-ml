@@ -851,6 +851,7 @@ class CellariumData:
                 self._var.index = pd.Index(self._datamodule.var_names_g, name=self._var.index.name)
                 self._var[f"{anndatafield.key or 'var_names'}_original"] = original_names
             else:
+                assert isinstance(anndatafield.key, str)
                 _check_var_names_unique(self._datamodule.dadc.var, self._var.index, anndatafield.key)
         self._init_state()
         # lineage: a root is the data that views are taken from (see `CellariumDataView`)
