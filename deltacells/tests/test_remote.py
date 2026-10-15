@@ -3,6 +3,8 @@
 
 """Remote (``gs://``) inputs and outputs, tested with an in-memory fsspec filesystem standing in for the bucket."""
 
+import glob
+import json
 import os
 
 import numpy as np
@@ -287,8 +289,78 @@ def test_conversion_of_remote_files_to_a_bucket_equals_the_local_conversion(buck
         puts = [p for kind, p in bucket.events if kind == "put" and p.startswith(f"bucket/out{workers}/")]
         assert puts[-1] == f"bucket/out{workers}/manifest.json"
         assert os.listdir(scratch) == []
+        # exactly the files of the local dataset, and the same manifest (but for where the files came from)
+        uploaded = {p.removeprefix(f"/bucket/out{workers}/") for p in bucket.fs.find(f"bucket/out{workers}")}
+        assert uploaded == {
+            os.path.relpath(p, tmp_path / "local")
+            for p in glob.glob(f"{tmp_path}/local/**", recursive=True)
+            if os.path.isfile(p)
+        }
+        remote_manifest = json.loads(bucket.fs.cat(f"bucket/out{workers}/manifest.json"))
+        local_manifest = json.loads((tmp_path / "local" / "manifest.json").read_text())
+        assert {k: v for k, v in remote_manifest.items() if k != "metadata"} == {
+            k: v for k, v in local_manifest.items() if k != "metadata"
+        }
     ds = open_dataset(str(tmp_path / "local"))
     assert same(ds[:].to_scipy(), np.vstack([x.toarray() for x, _, _ in inputs])[:, ds.gene_order])
+
+
+def test_remote_inputs_are_staged_a_few_at_a_time(tmp_path):
+    class Recording(FakeBucket):
+        def __init__(self):
+            super().__init__()
+            self.staged: list[int] = []  # the files in the scratch directory at each download, that one included
+
+        def get_file(self, remote, local, **kwargs):
+            self.fs.get_file(remote, local, **kwargs)
+            self.staged.append(
+                len(os.listdir(os.path.dirname(local)))
+            )  # the finished files and this one (a .part file)
+
+    rec = Recording()
+    try:
+        urls = [put_h5ad(rec, tmp_path, n_obs=5, seed=i, name=f"in/f{i}.h5ad")[2] for i in range(12)]
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        convert_h5ad(
+            urls, str(tmp_path / "out"), tile_size=4, level=3, log=None, filesystem=rec, staging_dir=str(scratch),
+            workers=1, sort_genes_max_files=1, sort_files=False,
+        )  # fmt: skip
+        assert len(rec.staged) == 12 + 1  # each file once for its tiles, and one more for the gene order
+        # the window is 4 * workers + max(2, workers) + 2 = 8 files (see convert_h5ad), never all 12 at once
+        assert max(rec.staged) <= 8
+        assert os.listdir(scratch) == []
+    finally:
+        rec.fs.rm("bucket", recursive=True)
+
+
+def test_a_remote_output_is_replaced_only_if_it_is_a_dataset(bucket, tmp_path):
+    urls = [put_h5ad(bucket, tmp_path, n_obs=10, seed=i, name=f"in/f{i}.h5ad")[2] for i in range(2)]
+    kw = dict(tile_size=4, level=3, log=None, filesystem=bucket, staging_dir=str(tmp_path), workers=1, sort_files=False)
+    convert_h5ad(urls, "gs://bucket/prefix", **kw)
+    with pytest.raises(FileExistsError, match="overwrite"):  # a dataset is there
+        convert_h5ad(urls[:1], "gs://bucket/prefix", **kw)
+
+    bucket.fs.pipe("bucket/prefix/tiles/tile_000099.dct", b"stale")  # a leftover of a bigger dataset is replaced
+    manifest = convert_h5ad(urls[:1], "gs://bucket/prefix", overwrite=True, **kw)
+    assert manifest.n_cells == 10 and not bucket.fs.exists("bucket/prefix/tiles/tile_000099.dct")
+
+    bucket.fs.pipe("bucket/prefix/notes.txt", b"precious")  # anything else is never deleted: nothing happens at all
+    before = len(bucket.events)
+    with pytest.raises(FileExistsError, match="notes.txt"):
+        convert_h5ad(urls, "gs://bucket/prefix", overwrite=True, **kw)
+    assert bucket.fs.cat("bucket/prefix/notes.txt") == b"precious" and len(bucket.events) == before
+    assert json.loads(bucket.fs.cat("bucket/prefix/manifest.json"))["n_cells"] == 10
+
+
+def test_a_conversion_never_deletes_its_inputs(bucket, tmp_path):
+    x, local, url = put_h5ad(bucket, tmp_path, name="in/a.h5ad")
+    with pytest.raises(ValueError, match="inside the output"):  # a local input in the output directory
+        convert_h5ad([local], os.path.dirname(local), overwrite=True, log=None)
+    with pytest.raises(ValueError, match="inside the output"):  # a remote input under the output prefix
+        convert_h5ad([url], "gs://bucket/in", overwrite=True, log=None, filesystem=bucket)
+    assert os.path.exists(local) and bucket.fs.exists("bucket/in/a.h5ad")
+    assert not [e for e in bucket.events if e[0] == "rm"]
 
 
 def test_mismatched_var_names_in_remote_files_are_found_by_the_scan(bucket, tmp_path):
@@ -322,3 +394,14 @@ def test_a_failure_is_explained_and_leaves_the_inputs_alone(bucket, tmp_path):
     assert "overwrite=True" in hint and "gs://bucket/out" in hint
     assert bucket.fs.exists("bucket/out/tiles/tile_000000.dct") and not bucket.fs.exists("bucket/out/manifest.json")
     assert bucket.fs.exists("bucket/in/big.h5ad")
+    assert os.listdir(tmp_path) == [os.path.basename(local)]  # nothing is left in the scratch directory
+
+    # as the hint says: with the input fixed, running it again with overwrite=True replaces what was left
+    data[n:, 1] = 2
+    anndata.AnnData(sp.csr_matrix(data), obs=obs, var=pd.DataFrame(index=["g0", "g1"])).write_h5ad(local)
+    bucket.fs.put_file(local, "bucket/in/big.h5ad")
+    kw = dict(tile_size=n, level=3, sort_genes=False, workers=1, filesystem=bucket, staging_dir=str(tmp_path), log=None)
+    with pytest.raises(FileExistsError, match="overwrite"):
+        convert_h5ad(["gs://bucket/in/big.h5ad"], "gs://bucket/out", **kw)
+    manifest = convert_h5ad(["gs://bucket/in/big.h5ad"], "gs://bucket/out", overwrite=True, **kw)
+    assert manifest.n_cells == 2 * n and bucket.fs.exists("bucket/out/manifest.json")

@@ -335,20 +335,16 @@ def test_data_that_are_not_counts_are_refused_and_nothing_is_left_behind(tmp_pat
     assert not os.path.exists(out)
 
 
-def test_a_collection_is_written_to_gcs_with_the_manifest_last(cdata, tmp_path):
+def test_a_collection_is_written_to_gcs_with_the_manifest_last(cdata, tmp_path, fake_gcs):
     pytest.importorskip("deltacells._core")
-    from tests.api.test_deltacells import _RecordingFS
-
-    fs = _RecordingFS()
     uri = write_collection_to_deltacells(
         cdata[POSITIONS].datamodule.dadc,
         "gs://bucket/prefix",
         tile_size=4,
         level=3,
-        filesystem=fs,
+        filesystem=fake_gcs,
         staging_dir=str(tmp_path),
     )
     assert uri == "gs://bucket/prefix"
-    assert fs.puts[-1] == "bucket/prefix/manifest.json"
+    assert fake_gcs.puts[-1] == "bucket/prefix/manifest.json"
     assert not [d for d in os.listdir(tmp_path) if d.startswith("deltacells_stage_")]  # staging cleaned up
-    fs.fs.rm("bucket", recursive=True)

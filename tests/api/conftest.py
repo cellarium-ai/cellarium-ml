@@ -11,6 +11,32 @@ from cellarium.ml.api import _data_transforms
 from cellarium.ml.api.cellariumdata import CellariumData
 
 
+class RecordingFS:
+    """An in-memory fsspec filesystem (the bucket ``bucket``) that records the order of the uploads."""
+
+    def __init__(self):
+        import fsspec
+
+        self.fs = fsspec.filesystem("memory")
+        self.puts: list[str] = []
+
+    def put_file(self, local, remote):
+        self.puts.append(remote)
+        self.fs.put_file(local, remote)
+
+    def __getattr__(self, name):
+        return getattr(self.fs, name)
+
+
+@pytest.fixture
+def fake_gcs():
+    """A fake bucket named ``bucket``, to be used as ``filesystem=`` with ``gs://bucket/...`` paths."""
+    fs = RecordingFS()
+    yield fs
+    if fs.fs.exists("bucket"):
+        fs.fs.rm("bucket", recursive=True)
+
+
 @pytest.fixture
 def fits(monkeypatch) -> list[dict]:
     """The configs (the recipes) of the statistics models that `fit_or_reuse` has fit so far, one per fit."""
