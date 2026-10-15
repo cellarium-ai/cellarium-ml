@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Hashable, Iterator, Literal, Sequence
 
+import anndata
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
@@ -926,6 +927,70 @@ class CellariumData:
         view._deltacells_uri = uri
         view._deltacells_kwargs = {**self._deltacells_kwargs, **(deltacells_kwargs or {})}
         return view
+
+    def to_anndata(
+        self,
+        downsample_method: Literal["random", "geometric_sketch"] | None = None,
+        target_n_cells: int | None = None,
+        *,
+        geometric_sketch_kwargs: dict[str, Any] | None = None,
+        collect_embeddings: bool | str | Sequence[str] = True,
+        seed: int = 0,
+        max_gb: float | None = None,
+    ) -> anndata.AnnData:
+        """
+        Read these cells into memory as an :class:`~anndata.AnnData`, to continue the analysis with scanpy. This is
+        **memory-heavy** (see :meth:`to_ram`), so it is meant for a view of a few cells; to take a manageable number of
+        cells from many, downsample them first, at random or with a geometric sketch.
+
+        The AnnData has the raw counts as ``X`` (a float32 CSR matrix), the cells in the order of the data, and
+
+        * ``obs``: all the ``obs`` columns, and the entries of ``obs_computed`` as columns ``computed_<key>``,
+        * ``var``: the ``var`` and a boolean ``highly_variable`` column (``False`` if ``hvg`` has not been set),
+        * ``obsm``: the entries of ``obsm``, and the embeddings by trained modules (see ``collect_embeddings``) as
+          ``X_<key>``, where ``key`` is the key of the module in ``trained_modules`` (for example ``X_pca``).
+
+        The embeddings are computed from the cells in memory once they have been selected, so they do not need another
+        pass over the data.
+
+        Example:
+            >>> is_t_cell = (cdata.obs["cell_type"] == "T cell").to_numpy()
+            >>> adata = cdata[is_t_cell].to_anndata(downsample_method="geometric_sketch", target_n_cells=10_000)
+
+        Args:
+            downsample_method: How to choose the cells that are kept, if not all of them: ``"random"`` (uniformly,
+                without replacement), ``"geometric_sketch"`` (see :func:`~cellarium.ml.api.tools.geometric_sketch`,
+                which makes a pass over the data) or ``None`` (all the cells). Random sampling reads cells that are
+                scattered over the data, which for a large dataset means reading nearly all of its files.
+            target_n_cells: The number of cells to keep. It is required with a ``downsample_method`` and an error
+                without one. If the data has no more cells than this, all of them are kept (and nothing is sampled).
+            geometric_sketch_kwargs: Further arguments of :func:`~cellarium.ml.api.tools.geometric_sketch` (for
+                example ``embedding_module_key``, ``n_pcs`` or ``accelerator``). By default the sketch is made in
+                the embedding of the PCA in ``trained_modules`` (the one under ``"pca"``, if there is one), and if
+                no PCA has been trained a warning says so and a random projection of the normalized, log-transformed
+                counts is used. ``target_n_cells``, ``seed`` and ``return_new_adata`` are set by this method and
+                cannot be given.
+            collect_embeddings: The embeddings to put in ``obsm``: ``True`` for those of all trained modules that
+                are embedding models (PCA and scVI; a module whose embedding cannot be computed is skipped with a
+                warning, as is one whose ``X_<key>`` is already in ``obsm``), ``False`` for none, or the key (or
+                keys) of the modules to embed with, which raises an error if one cannot be computed. A module that
+                needs more data to run (such as scVI's batch column) gets it from ``obs``, as in :meth:`using`.
+                A view only has the modules that were trained on it (or assigned to it).
+            seed: The seed of the random sample and of the geometric sketch.
+            max_gb: The most memory (in GiB) to read the counts into, as in :meth:`to_ram`: by default half of the
+                memory that is available. Nothing is read if the cells would not fit. It does not apply to the cells
+                of a geometric sketch, which the sketch has read already.
+
+        Raises:
+            ValueError: If the arguments do not fit together (for example a ``target_n_cells`` without a
+                ``downsample_method``), or a key of ``collect_embeddings`` is not a trained embedding model.
+            MemoryError: If the cells do not fit in ``max_gb``.
+        """
+        from cellarium.ml.api._to_anndata import to_anndata
+
+        return to_anndata(
+            self, downsample_method, target_n_cells, geometric_sketch_kwargs, collect_embeddings, seed, max_gb
+        )
 
     def _positions_of(self, other: "CellariumData") -> np.ndarray:
         """The positions in these cells of the cells of ``other``, a view of the same root with a subset of them."""

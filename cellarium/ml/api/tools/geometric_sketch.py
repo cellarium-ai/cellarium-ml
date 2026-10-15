@@ -105,6 +105,7 @@ def geometric_sketch(
     n_pcs: int | None = None,
     return_new_adata: bool = True,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
+    seed: int = 0,
 ) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
     """
     Train a plaid geometric sketching model on the data in the datamodule,
@@ -129,21 +130,36 @@ def geometric_sketch(
         accelerator: The accelerator to use for the pass over the data, in ["cpu", "mps", "cuda", "auto"]. The
             sketch itself is kept in tensors on the accelerator (except for "mps", where it is kept on the CPU),
             which is what makes it fast for millions of cells.
+        seed: The random seed of the sketch: of the reservoir sampling and the final selection of cells, of the random
+            projection (if there is no ``embedding_module_key``) and of the order in which the cells are streamed
+            (``datamodule.shuffle_seed`` is set to it for the pass). The same seed on the same data gives the same
+            sketch, up to floating point differences between devices. The cells are shuffled, not read in order,
+            because the grid is set up from the first minibatch, which should be representative of the data.
 
     Returns:
         Dict with keys:
             "obs_names_in_sketch": Pandas series boolean mask with index as all obs_names.
             "adata": The new AnnData object containing only the selected geometric sketch cells
-                (if `return_new_adata` is True).
+                (if `return_new_adata` is True), with the embedding in ``obsm[f"X_{embedding_module_key}"]``
+                (``obsm["X_embedding"]`` if there is no ``embedding_module_key``).
             "module": The trained StreamingPlaidGeometricSketch module (if `return_new_adata` is False).
         Note: stores the same boolean mask (a pandas series indexed by obs_names) in
         ``cdata.obs_computed['in_sketch']``.
     """
     if embedding_module_key is None:
-        return _geometric_sketch(cdata, target_n_cells, None, n_pcs, return_new_adata, accelerator)
+        return _geometric_sketch(cdata, target_n_cells, None, n_pcs, return_new_adata, accelerator, seed)
 
     with cdata.using(embedding_module_key) as trained:
-        return _geometric_sketch(cdata, target_n_cells, trained.module, n_pcs, return_new_adata, accelerator)
+        return _geometric_sketch(
+            cdata,
+            target_n_cells,
+            trained.module,
+            n_pcs,
+            return_new_adata,
+            accelerator,
+            seed,
+            embedding_key=f"X_{embedding_module_key}",
+        )
 
 
 def _geometric_sketch(
@@ -153,6 +169,8 @@ def _geometric_sketch(
     n_pcs: int | None,
     return_new_adata: bool,
     accelerator: Literal["cpu", "mps", "cuda", "auto"],
+    seed: int,
+    embedding_key: str = "X_embedding",
 ) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
     datamodule: CellariumAnnDataDataModule = cdata.datamodule
     if "obs_names_n" not in datamodule.batch_keys:
@@ -167,19 +185,22 @@ def _geometric_sketch(
 
     if embedding_module is None:
         embedding_var_names_g = datamodule.var_names_g if cdata.hvg is None else np.asarray(cdata.hvg.index[cdata.hvg])
-        embedding_module = CellariumModule(
-            cpu_transforms=(
-                [] if cdata.hvg is None else [Filter(filter_list=cdata.hvg.index[cdata.hvg], ordering=True)]
-            ),
-            transforms=[
-                Densify(),
-                NormalizeTotal(),
-                Log1p(),
-            ],
-            model=RandomMatrixProjection(var_names_g=embedding_var_names_g, out_features=128),
-        )
-        # this module is used directly below (not via `trainer.fit`), so it must be configured manually
-        embedding_module.configure_model()
+        # the projection is drawn from the global torch RNG: seed it for this, and leave the RNG as it was
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed)
+            embedding_module = CellariumModule(
+                cpu_transforms=(
+                    [] if cdata.hvg is None else [Filter(filter_list=cdata.hvg.index[cdata.hvg], ordering=True)]
+                ),
+                transforms=[
+                    Densify(),
+                    NormalizeTotal(),
+                    Log1p(),
+                ],
+                model=RandomMatrixProjection(var_names_g=embedding_var_names_g, out_features=128),
+            )
+            # this module is used directly below (not via `trainer.fit`), so it must be configured manually
+            embedding_module.configure_model()
     var_names_g = compute_output_var_names_g(embedding_module, datamodule)
 
     # The embedding module's own cpu_transforms (for example the library size normalization of sparse counts
@@ -209,6 +230,7 @@ def _geometric_sketch(
             projector=None,
             limit_input_to_top_pcs=n_pcs,
             store_cell_data=return_new_adata,
+            seed=seed,
         ),
     )
 
@@ -218,7 +240,13 @@ def _geometric_sketch(
         logger=False,
         enable_checkpointing=False,
     )
-    trainer.fit(module, datamodule)
+    # the retained cells are drawn as the cells stream by, so the order of the stream is part of the seed
+    datamodule_shuffle_seed = datamodule.shuffle_seed
+    datamodule.shuffle_seed = seed
+    try:
+        trainer.fit(module, datamodule)
+    finally:
+        datamodule.shuffle_seed = datamodule_shuffle_seed
 
     reservoir = module.model.get_reservoir(return_cell_data=return_new_adata, max_cells=target_n_cells)
     sketch_obs_names = reservoir["obs_names"]
@@ -277,7 +305,7 @@ def _geometric_sketch(
             X=raw_x_ng,
             obs=pd.DataFrame(index=raw_obs_names),
             var=var,
-            obsm={"X_embedding": embedding},
+            obsm={embedding_key: embedding},
         )
 
     return {

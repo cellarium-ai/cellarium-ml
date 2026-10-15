@@ -217,7 +217,8 @@ def test_geometric_sketch_with_pca_embedding_module_key(cdata, hvg_computed):
 
     adata = result["adata"]
     assert isinstance(adata, ad.AnnData)
-    assert adata.obsm["X_embedding"].shape[1] == 2
+    assert adata.obsm["X_pca"].shape[1] == 2
+    assert "X_embedding" not in adata.obsm
 
 
 def test_geometric_sketch_with_scvi_embedding_module_key_provides_batch_keys_itself(cdata):
@@ -229,7 +230,7 @@ def test_geometric_sketch_with_scvi_embedding_module_key_provides_batch_keys_its
 
     adata = result["adata"]
     assert isinstance(adata, ad.AnnData)
-    assert adata.obsm["X_embedding"].shape[1] == 3
+    assert adata.obsm["X_scvi"].shape[1] == 3
     assert "batch_index_n" not in cdata.datamodule.batch_keys  # and put it back
 
 
@@ -289,6 +290,21 @@ def test_geometric_sketch_returns_exactly_the_target_after_coarsening(make_h5ad_
     # a target beyond the number of cells keeps them all
     result = geometric_sketch(cdata, target_n_cells=1000, accelerator="cpu")
     assert result["obs_names_in_sketch"].sum() == 200  # type: ignore[operator]
+
+
+def test_geometric_sketch_is_reproducible_given_the_seed(make_h5ad_files):
+    cdata = CellariumData(h5ad_paths=make_h5ad_files(n_files=2, cells_per_file=100, n_genes=30))
+    shuffle_seed = cdata.datamodule.shuffle_seed
+
+    def sketch(seed):
+        result = geometric_sketch(cdata, target_n_cells=25, accelerator="cpu", seed=seed)
+        assert isinstance(result["obs_names_in_sketch"], pd.Series)
+        return result["obs_names_in_sketch"].to_numpy()
+
+    first = sketch(seed=3)
+    assert np.array_equal(first, sketch(seed=3))
+    assert not np.array_equal(first, sketch(seed=4))
+    assert cdata.datamodule.shuffle_seed == shuffle_seed  # put back
 
 
 def test_geometric_sketch_return_new_adata_false_gives_no_adata(cdata):
