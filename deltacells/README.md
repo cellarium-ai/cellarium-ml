@@ -4,17 +4,45 @@ Fast, compact, cloud-friendly **tiles of single-cell count matrices**, built for
 
 A dataset is a directory (or bucket prefix) of *tiles*, each one self-contained object holding ~10k cells x all genes. Within a
 tile the counts are stored as per-cell **gene gaps** (delta coding of the sorted gene indices) and **counts**, as byte-planar
-uint16 streams compressed with **zstd** (the rare values that do not fit in a uint16 are stored beside them); a small C core decompresses a tile into CSR arrays in ~0.1 s per core (0.025 s on 8 cores)
-without any intermediate AnnData / Arrow objects. Genes are sorted by decreasing total counts, which is what makes the
+uint16 streams compressed with **zstd** (the rare values that do not fit in a uint16 are stored beside them); a small C core
+decompresses a 10k-cell tile into CSR arrays in ~0.11 s on one core (0.02 s on 8 cores; Xeon 2.3 GHz) without any intermediate
+AnnData / Arrow objects. Genes are sorted by decreasing total counts, which is what makes the
 compression work.
 
-> **Status: alpha (0.1.0).** Developed and tested on macOS arm64 / Python 3.10. The GCS backend has not been exercised against
-> a real bucket. See [Limitations](#limitations).
+> **Status: alpha (0.1.0).** Developed and tested on macOS arm64 and Linux x86-64 / Python 3.10. The GCS tile-reading backend has
+> not been exercised against a real bucket, nor has writing a converted dataset to one. See [Limitations](#limitations).
 
 ## At a glance
 
+### Current numbers (Linux x86-64)
+
+One real shard (10,000 cells x 61,497 genes, human, 2,309 nonzeros per cell), **X only**, on a Google Cloud VM (n1-standard-16:
+Xeon 2.3 GHz, 8 cores / 16 vCPUs), local disk, warm page cache, no network. Reproduce with
+`python benchmarks/compare_formats.py shard.h5ad --only h5ad,deltacells`:
+
+| format | stored X | kB/cell | file -> RAM, 1 thread | 8 threads |
+|---|---|---|---|---|
+| h5ad (as is: original gene order, gzip) | 55.6 MB | 5.56 | 981 ms | n/a (single-threaded reader) |
+| **deltacells** (zstd 19), reused buffers | **18.9 MB** | **1.89** | 118 ms | 26 ms |
+| deltacells (zstd 19), fresh arrays per call | 18.9 MB | 1.89 | 164 ms | 35 ms |
+
+Decoding alone (already in memory; `benchmarks/bench_decode.py`, int32 values, reused buffers; the same for the three tiles of this
+dataset, one of which has no counts above 65535 and two of which do, so the exception frames cost nothing measurable):
+
+| threads | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| decode a 10k-cell tile | 108 ms | 57 ms | 32 ms | 20 ms |
+| cells / s | 93k | 175k | 312k | 497k |
+
+Gathering 5,000 shuffled cells from a decoded tile takes 36 ms. The C core is built with `-fno-wrapv`: CPython's default `-fwrapv`
+made the same code ~12% slower.
+
+### Earlier comparison with other formats (M2 Pro laptop)
+
 One real shard (10,000 cells x 38,094 genes, snRNA-seq, 5,171 nonzeros per cell), **X only** (no obs / var), written in each format
-and read from a local file back into RAM on an M2 Pro laptop (warm page cache, no network). Reproduce with
+and read from a local file back into RAM on an M2 Pro laptop (warm page cache, no network). The TileDB-SOMA and BPCells libraries are not
+installed on the Linux machine above, so this comparison has not been repeated there, and its deltacells rows are from the build
+before the exception format and the `-fno-wrapv` fix. Reproduce with
 `python benchmarks/compare_formats.py shard.h5ad` (the BPCells C++ row needs `benchmarks/bpcells_decode/build.sh` once):
 
 | format | stored X | kB/cell | file -> RAM, 1 thread | 8 threads |
@@ -68,7 +96,7 @@ Needs a C compiler and **libzstd** (headers + library):
 
 ```bash
 conda install zstd                      # or: brew install zstd / apt install libzstd-dev
-pip install -e ".[test]"                # from this directory; extras: torch, h5ad (anndata), obs (pyarrow, pandas), gcs (google-cloud-storage)
+pip install -e ".[test]"                # from this directory; extras: torch, h5ad (anndata), obs (pyarrow, pandas), gcs (google-cloud-storage, gcsfs: needed to convert from / to gs://)
 ```
 
 `ZSTD_ROOT` points the build at a custom zstd prefix; `DELTACELLS_STATIC_ZSTD=1` links it statically. Details in
@@ -80,6 +108,7 @@ Convert h5ad shards of any sizes into a dataset of exact-size tiles (this sorts 
 
 ```bash
 deltacells convert --h5ad-glob "shards/*.h5ad" --output /data/my_dataset --tile-size 10000
+                                            # h5ad files and output can be gs:// too: see "Converting h5ad files" below
 deltacells info /data/my_dataset
 deltacells verify /data/my_dataset          # CRC-checks and decodes every tile
 ```
@@ -126,6 +155,65 @@ with DatasetWriter("/data/out", n_genes=G, tile_size=10_000, gene_order=order, v
 ```
 
 Lower level: `encode_tile(matrix) -> bytes`, `write_tile(path, matrix)`, `Tile(bytes).decode(threads=4)`, `read_tile(path)`.
+
+## Converting h5ad files
+
+`deltacells convert` turns any number of h5ad files (any sizes, local or in Google Cloud Storage) into one dataset of exact-size
+tiles. It sorts the genes, re-chunks the cells, compresses, and stores obs and var. The cells keep the order of the files and of
+the cells within them (the files are naturally sorted, so `shard_2` comes before `shard_10`; `--keep-order` keeps the order you
+give instead). All files need the same `var_names`; `X` should be CSR (dense works but is much slower) with integer counts.
+
+```bash
+deltacells convert --h5ad-glob "shards/*.h5ad" --output /data/my_dataset
+deltacells convert --file-list files.txt --output /data/my_dataset      # one path per line
+```
+
+### From and to Google Cloud Storage
+
+Install the extra (`pip install "deltacells[gcs]"`, which adds `gcsfs`) and authenticate with the default credentials (a VM's
+service account, or `gcloud auth application-default login`). To convert a bucket full of h5ad files, list them into a file
+(`gs://` paths are **not** globbed by the converter; the list is what you convert) and point `--output` at a bucket prefix:
+
+```bash
+gcloud storage ls 'gs://my-bucket/h5ad/*.h5ad' > files.txt          # or: gsutil ls 'gs://my-bucket/h5ad/*.h5ad'
+deltacells convert --file-list files.txt \
+    --output gs://my-bucket/deltacells/my_dataset \
+    --staging-dir /mnt/scratch --workers 12
+```
+
+The list can also be piped (`--file-list -`), mixed with local files, and combined with `--h5ad-glob`; blank lines and lines that
+start with `#` are skipped. Without `--keep-order` the files are naturally sorted; with it the cells follow the order of the list.
+
+What it does, so that nothing has to fit on the local disk:
+
+* **Scan**: the metadata of every file (`var_names`, obs, number of cells) is read with a few ranged reads each, 16 files at a time.
+* **Gene order**: the counts are summed over `--sort-genes-max-files` files (10 by default, spread evenly over the list); those
+  files are downloaded one after the other, then deleted.
+* **Tiles**: each file is downloaded whole into `--staging-dir` just before its first tile needs it, and deleted after its last
+  tile is written. Each finished tile is uploaded at once and deleted locally, obs shards and the small files too, and
+  **`manifest.json` is uploaded last**, so a prefix without a manifest is not a dataset. All network transfers are done by threads
+  of the main process, which hands local files to the worker processes; the workers never touch the network.
+* **Scratch space**: about `5 x workers` input files plus a few tiles (12 workers x 60-100 MB files is a few GB). The run prints its
+  estimate. `--staging-dir` defaults to the system temp directory, so point it at a disk with room. With a local `--output` and local
+  inputs nothing is staged.
+* **Speed**: compression is the bottleneck, not the network. At the default `--level 19` a 10k-cell tile of ~2,300 nonzeros per cell
+  takes about 25 core-seconds to encode (4.9 s with 8 threads), so 16 cores write ~0.6 tiles per second, consuming roughly 50 MB/s of
+  h5ad; in a quick test one process downloaded from GCS at about 340 MB/s. That extrapolates to ~4-5 hours for 100M cells on 16 cores
+  (an estimate, not a measurement). `--level 12` encodes about 4x faster and is 6% larger (`--level 3`: 7x faster, 11% larger). `--workers` defaults to the
+  number of cores, limited by memory (~50 bytes per nonzero of a tile).
+
+Safety:
+
+* `--overwrite` deletes the existing dataset at `--output` first, but **only files that a deltacells dataset has** (the manifest,
+  tiles, obs shards, gene order, ...). If the output holds anything else it stops and deletes nothing; clean it up yourself. It also
+  refuses if an input file lies inside the output. Without `--overwrite` a non-empty output is an error.
+* The input h5ad files are only ever read, never changed or deleted.
+* If a conversion fails (an unreadable file, a tile with too many large counts, a network error after several retries), the tiles
+  already uploaded stay in the bucket but there is no manifest, and the error says so. Start again with `--overwrite`; there is no
+  resume. The output, the arguments and the metadata of every file are checked before anything is deleted or uploaded.
+
+From Python, the same thing is `deltacells.convert.convert_h5ad(["gs://...", ...], "gs://.../out", staging_dir=...)`; in
+cellarium-ml, `cellarium.ml.api.create_deltacells_dataset(h5ad_paths, output, ...)` wraps it (cells in the order of the list).
 
 ## Using it in a DataLoader (and from cellarium-ml)
 
@@ -210,20 +298,23 @@ strings with missing values come back as object arrays with `None`. `to_pandas` 
    or a gap above 65535 (a few counts of very highly expressed genes; a gap only with more than 65,536 genes) is stored as
    65535 plus an entry in a small per-chunk *exception frame*, so the common decoding path is not slower for them.
 3. Each stream is split into byte planes (all low bytes, then all high bytes), compressed with zstd, per chunk of ~1/8 of the
-   tile's nonzeros. Chunks are independent, so a tile decodes in parallel, at ~0.5% size cost.
+   tile's nonzeros. Chunks are independent, so a tile decodes in parallel, at ~0.5% size cost or less.
 4. A tile is a header, a chunk table, `indptr`, and the compressed streams: one object, decodable on its own, CRC-protected.
 
-Measured trade-offs on one real tile (`benchmarks/bench_compression.py`):
+Measured trade-offs on one real tile (`benchmarks/bench_compression.py`; 10,000 cells x 61,497 genes, 23.1M nonzeros; Linux
+x86-64, Xeon 2.3 GHz, Python 3.10):
 
 | gene order | zstd level | chunks | size | decode (1 thread) | encode (8 threads) |
 |---|---|---|---|---|---|
-| sorted | 3 | 8 | 43.1 MB | 138 ms | 0.4 s |
-| sorted | 12 | 8 | 41.2 MB | 129 ms | 1.1 s |
-| sorted | **19** | 8 | **38.4 MB** | **114 ms** | 7.2 s |
-| sorted | 19 | 1 | 38.2 MB | 110 ms | 24.2 s |
-| random | 19 | 8 | 49.3 MB | 119 ms | 8.2 s |
+| sorted | 3 | 8 | 20.8 MB | 125 ms | 0.7 s |
+| sorted | 12 | 8 | 20.0 MB | 125 ms | 1.3 s |
+| sorted | **19** | 8 | **18.8 MB** | **110 ms** | 4.9 s |
+| sorted | 19 | 1 | 18.8 MB | 130 ms | 23.5 s |
+| random | 19 | 8 | 24.9 MB | 104 ms | 5.0 s |
 
-Sorting the genes saves 21-22% at every level; higher zstd levels are smaller *and* decode faster (they only cost compression time).
+Sorting the genes saves 22-24% at every level; level 19 is the smallest and decodes fastest (it only costs compression time). The
+single-thread decode times carry several percent of run-to-run noise (read the rows other than level 19 / 8 chunks as "about the
+same"); the sizes are exact.
 
 ## Limitations
 
@@ -231,9 +322,14 @@ Sorting the genes saves 21-22% at every level; higher zstd levels are smaller *a
   65535 between a cell's consecutive expressed genes (possible with more than 65,536 genes), are stored as exceptions and must be
   rare: the writer refuses a tile with more than `max(1024, nnz / 200)` of either kind, which is not what raw counts look like (a
   sparse-feature space such as ATAC peaks is out of scope). No normalized or float data.
-* **GCS is untested against a real bucket**; the backend is a thin wrapper over `google-cloud-storage` and the pipeline logic is
-  tested with a fake client and the throttled backend. Reads fetch whole tiles with `download_as_bytes` (one extra copy).
-* **Platforms**: tested on macOS arm64 only (Linux x86-64 should work but has not been run); little-endian hosts only.
+* **Reading tiles from GCS is untested against a real bucket**; the backend is a thin wrapper over `google-cloud-storage` and the
+  pipeline logic is tested with a fake client and the throttled backend. Reads fetch whole tiles with `download_as_bytes` (one
+  extra copy).
+* **Converting from / to GCS** (see [Converting h5ad files](#converting-h5ad-files)): reading real `gs://` h5ad files was checked
+  against a real bucket (three files, output byte-identical to converting local copies), but **writing to a `gs://` output has only
+  been tested against an in-memory filesystem**, and a run over thousands of files has not been timed. There is no resume: a failed
+  run is started again with `--overwrite`.
+* **Platforms**: tested on macOS arm64 and on Linux x86-64 (Intel Xeon, Python 3.10); little-endian hosts only.
 * **Obs needs `pyarrow` and `pandas`** and supports categorical, numeric, boolean and string columns (exclude others, e.g.
   datetimes). The obs localization and shard layout are only exercised against local files and the throttled backend; like the
   rest of the GCS path, ranged reads from a real bucket (`GCSBackend.read_range`) are untested. The local cache is uncompressed
@@ -246,12 +342,13 @@ Sorting the genes saves 21-22% at every level; higher zstd levels are smaller *a
   `--no-sort-genes` (or when every file is used) the result depends only on cell order and tile size.
 * **The converter does not shuffle**: a tile holds consecutive cells (a tile that spans the end of one file and the start of the next
   mixes just those two). Shuffle the cells across files first if the input is sorted by donor, tissue, ...
-* Compression at level 19 takes ~7 s per 10k-cell tile with 8 threads (24 s with one chunk); lower levels trade size for speed.
+* Compression at level 19 takes ~5 s per 10k-cell tile with 8 threads (~24 s with one chunk); lower levels trade size for speed
+  (level 12: ~1.3 s, level 3: ~0.7 s, at 6% and 11% larger files).
 
 ## Tests and benchmarks
 
 ```bash
-pytest tests                       # 245 tests: format validation, round trips and edge cases, gather, dataset (prefetch, caching,
+pytest tests                       # 300+ tests: format validation, round trips and edge cases, gather, dataset (prefetch, caching,
                                    # pickling, corruption), obs (schema, localization byte counts, cache races), backends, h5ad
                                    # conversion, CLI, torch / DataLoader, benchmark smoke tests
 python benchmarks/bench_decode.py DATASET

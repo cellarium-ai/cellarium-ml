@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import sys
 import time
 from collections.abc import Sequence
@@ -66,11 +67,26 @@ def _verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_file_list(source: str) -> list[str]:
+    """The paths in a text file (``-`` for stdin): one per line, blank lines and ``#`` comments skipped. A local path is
+    taken literally (it is not a glob pattern); a ``gs://`` path never is."""
+    with sys.stdin if source == "-" else open(source) as f:
+        lines = [line.strip() for line in f]
+    return [p if "://" in p else glob.escape(p) for p in lines if p and not p.startswith("#")]
+
+
 def _convert(args: argparse.Namespace) -> int:
     from deltacells.convert import convert_h5ad
 
+    paths = list(args.h5ad_glob)
+    if args.file_list is not None:
+        paths += _read_file_list(args.file_list)
+    if not paths:
+        print("convert: give the h5ad files with --h5ad-glob and/or --file-list", file=sys.stderr)
+        return 2
     convert_h5ad(
-        args.h5ad_glob, args.output, tile_size=args.tile_size, sort_genes=not args.no_sort_genes, n_chunks=args.chunks,
+        paths, args.output, sort_files=not args.keep_order,
+        tile_size=args.tile_size, sort_genes=not args.no_sort_genes, n_chunks=args.chunks,
         level=args.level, threads=args.threads, workers=args.workers, sort_genes_max_files=args.sort_genes_max_files or None,
         overwrite=args.overwrite, obs=not args.no_obs, var=not args.no_var,
         obs_names=not args.no_obs_names, obs_exclude=[c for c in args.obs_exclude.split(",") if c],
@@ -140,8 +156,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     p = sub.add_parser("convert", help="Convert h5ad shards (any sizes) into a dataset of exact-size tiles.")
     p.add_argument(
-        "--h5ad-glob", nargs="+", required=True,
-        help="One or more (quoted) glob patterns or paths. gs:// files must be listed one by one (not globbed).",
+        "--h5ad-glob", nargs="+", default=[],
+        help="One or more (quoted) glob patterns or paths. gs:// files are not globbed: list them with --file-list.",
+    )  # fmt: skip
+    p.add_argument(
+        "--file-list", default=None, metavar="FILE",
+        help="A text file with one h5ad path per line (local or gs://; '-' reads stdin; blank lines and lines starting "
+        "with # are skipped). Combines with --h5ad-glob. For a bucket: gcloud storage ls 'gs://bucket/prefix/*.h5ad' > files.txt",
+    )  # fmt: skip
+    p.add_argument(
+        "--keep-order", action="store_true",
+        help="Keep the cells in the order of the given paths (default: the files are naturally sorted, so shard_2 < shard_10).",
     )  # fmt: skip
     p.add_argument("--output", required=True, help="A directory, or gs://bucket/prefix.")
     p.add_argument("--tile-size", type=int, default=10_000)

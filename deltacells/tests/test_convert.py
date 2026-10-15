@@ -220,6 +220,47 @@ def test_refuses_existing_output_without_overwrite(tmp_path, full):
     assert open_dataset(out).tile_size == 250
 
 
+def test_cli_convert_from_a_file_list(tmp_path, full, monkeypatch):
+    import io
+
+    write_shards(tmp_path / "in", [100, 200, 230], full)
+    shard = [str(tmp_path / "in" / f"s_{i:03d}.h5ad") for i in range(3)]
+    listing = tmp_path / "files.txt"
+    listing.write_text(f"# the shards, last first\n{shard[2]}\n\n  {shard[0]}  \n{shard[1]}\n")
+    base = ["convert", "--no-sort-genes", "--level", "3", "--threads", "1", "--tile-size", "100"]
+
+    out = str(tmp_path / "ordered")  # --keep-order: the cells follow the list
+    assert main([*base, "--file-list", str(listing), "--keep-order", "--output", out]) == 0
+    assert same(open_dataset(out)[:].to_scipy(), sp.vstack([full[300:], full[:100], full[100:300]]))
+
+    out = str(tmp_path / "sorted")  # by default the files are naturally sorted
+    assert main([*base, "--file-list", str(listing), "--output", out]) == 0
+    assert same(open_dataset(out)[:].to_scipy(), full)
+
+    out = str(tmp_path / "stdin")  # '-' reads the list from stdin, and it combines with --h5ad-glob
+    monkeypatch.setattr("sys.stdin", io.StringIO(f"{shard[0]}\n{shard[1]}\n"))
+    assert main([*base, "--file-list", "-", "--h5ad-glob", shard[2], "--output", out]) == 0
+    assert same(open_dataset(out)[:].to_scipy(), full)
+
+    assert main([*base, "--output", str(tmp_path / "none")]) == 2  # no files at all
+
+
+def test_cli_passes_gs_paths_through_untouched(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_convert(paths, output, **kwargs):
+        seen.update(paths=paths, output=output, **kwargs)
+
+    monkeypatch.setattr("deltacells.convert.convert_h5ad", fake_convert)
+    listing = tmp_path / "files.txt"
+    listing.write_text("gs://bucket/in/a.h5ad\ngs://bucket/in/b[1].h5ad\n/data/c[2].h5ad\n")
+    argv = ["convert", "--file-list", str(listing), "--output", "gs://bucket/out", "--staging-dir", "/scratch"]
+    assert main([*argv, "--keep-order"]) == 0
+    assert seen["paths"] == ["gs://bucket/in/a.h5ad", "gs://bucket/in/b[1].h5ad", "/data/c[[]2].h5ad"]  # local: literal
+    assert seen["output"] == "gs://bucket/out" and seen["sort_files"] is False and seen["staging_dir"] == "/scratch"
+    assert main(argv) == 0 and seen["sort_files"] is True
+
+
 def test_cli_convert_info_verify(tmp_path, full, capsys):
     write_shards(tmp_path / "in", [300, 230], full)
     out = str(tmp_path / "out")

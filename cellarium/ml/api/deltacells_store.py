@@ -97,7 +97,7 @@ def create_deltacells_dataset(
         log: Called with progress messages (``None`` to be silent).
         filesystem: An fsspec filesystem to use for ``gs://`` paths instead of ``gcsfs`` (for testing).
         **convert_kwargs: Further arguments of :func:`deltacells.convert.convert_h5ad`, for example ``level`` (the zstd
-            level, ``19`` by default: the smallest files, but slow to write; ``9`` is about ten times faster and 7%
+            level, ``19`` by default: the smallest files, but slow to write; ``12`` is about four times faster and 6%
             larger), ``max_categories`` or ``var=False``.
 
     Returns:
