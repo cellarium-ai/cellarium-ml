@@ -11,7 +11,7 @@ from cellarium.ml.data import DistributedAnnDataCollection
 from cellarium.ml.transforms import Filter, Log1p, NormalizeTotal
 from cellarium.ml.utilities.core import train_val_split
 from cellarium.ml.utilities.data import AnnDataField, densify
-from tests.common import USE_CUDA, BoringModel
+from tests.common import USE_CUDA, BoringModel, CrashingModel
 
 
 @pytest.mark.parametrize(
@@ -90,6 +90,13 @@ def test_cpu_transforms(
     )
     print("    ... ✓")
 
+    # ensure the cpu_transforms were actually applied to the batches seen during training (i.e. that they
+    # were correctly wired into the dataloader's collate_fn, not silently dropped)
+    print("Checking that CPU transforms were actually applied to batches seen during training... ", end="")
+    expected_num_genes = len(cpu_transforms[0].filter_list) if cpu_transforms is not None else 36601
+    assert module.model.iter_data[0]["x_ng"].shape[1] == expected_num_genes
+    print("✓")
+
     # ensure the data from the dataloader is not filtered
     print("Checking that the data from the dataloader is not filtered outside of the trainer... ", end="")
     for batch in datamodule.train_dataloader():
@@ -130,8 +137,8 @@ def test_cpu_transforms(
 
     print("\nFull loaded module ---------")
     print(loaded_module)
-    assert loaded_module._cpu_transforms_in_module_pipeline, (
-        "Upon manual loading, flag for CPU transforms should be True"
+    assert not loaded_module._cpu_transforms_applied_by_dataloader(), (
+        "Upon manual loading (no trainer attached), CPU transforms should be included in module_pipeline"
     )
     print("    ... ✓")
 
@@ -166,10 +173,48 @@ def test_cpu_transforms(
 
     print("\nFull loaded module ---------")
     print(trainer.model)
-    assert trainer.model._cpu_transforms_in_module_pipeline, (
-        "After Trainer.fit() checkpoint restart, flag for CPU transforms should be True"
+    assert not trainer.model._cpu_transforms_applied_by_dataloader(), (
+        "After Trainer.fit() checkpoint restart finishes, CPU transforms should be included in module_pipeline"
     )
     print("    ... ✓")
+
+
+def test_cpu_transforms_reverted_after_crash(tmp_path: Path) -> None:
+    """
+    A ``CellariumModule`` with ``cpu_transforms`` dispatches them to the datamodule's dataloader
+    for the duration of the trainer run. This must not leak into later, unrelated use of the same
+    (shared, long-lived) datamodule -- including when the run doesn't finish normally, e.g. because
+    training raised an exception. Regression test for that scenario.
+    """
+    datamodule = CellariumAnnDataDataModule(
+        DistributedAnnDataCollection(
+            filenames="https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_0.h5ad",
+            shard_size=100,
+        ),
+        batch_size=100,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=densify),
+            "var_names_g": AnnDataField(attr="var_names"),
+        },
+    )
+    module = CellariumModule(
+        cpu_transforms=[Filter(filter_list=["ENSG00000187642", "ENSG00000078808"])],
+        model=CrashingModel(),
+    )
+    trainer = pl.Trainer(accelerator="cpu", devices=1, max_steps=1, default_root_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="Simulated training crash"):
+        trainer.fit(module, datamodule)
+
+    assert not module._cpu_transforms_applied_by_dataloader(), (
+        "After a crash mid-training, CPU transforms should no longer be excluded from module_pipeline"
+    )
+
+    for batch in datamodule.train_dataloader():
+        assert batch["x_ng"].shape[1] == 36601, (
+            "After a crash mid-training, the datamodule's dataloader should no longer be filtered"
+        )
+        break
 
 
 @pytest.mark.parametrize(
