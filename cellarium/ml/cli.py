@@ -189,17 +189,17 @@ class CheckpointLoader(FileLoader):
 
 def file_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> FileLoader:
     """Construct an object from a file."""
-    return FileLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
+    return FileLoader(**loader.construct_mapping(node))  # type: ignore[arg-type, misc]
 
 
 def file_multi_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> dict:
     """Construct a dict of objects from a file."""
-    return FileMultiLoader(**loader.construct_mapping(node, deep=True))  # type: ignore[arg-type, return-value]
+    return FileMultiLoader(**loader.construct_mapping(node, deep=True))  # type: ignore[arg-type, return-value, misc]
 
 
 def checkpoint_loader_constructor(loader: yaml.SafeLoader, node: yaml.nodes.MappingNode) -> CheckpointLoader:
     """Construct an object from a checkpoint."""
-    return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[arg-type]
+    return CheckpointLoader(**loader.construct_mapping(node))  # type: ignore[arg-type, misc]
 
 
 loader = DefaultLoader
