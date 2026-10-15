@@ -368,6 +368,11 @@ class DatasetWriter:
         """Whether the dataset is uploaded to a remote prefix (and ``root`` is only a scratch directory)."""
         return not self._sink.local
 
+    @property
+    def pending_uploads(self) -> int:
+        """Files that are waiting for, or in, their upload (always 0 for a local output)."""
+        return len(self._uploads)
+
     def _publish(self, name: str) -> None:
         """A file of the dataset is finished in ``root``: upload it (in the background) and delete the local copy. Does
         nothing for a local output, whose files are already where they belong. Raises the error of an upload that failed."""

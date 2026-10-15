@@ -91,7 +91,7 @@ def _convert(args: argparse.Namespace) -> int:
         overwrite=args.overwrite, obs=not args.no_obs, var=not args.no_var,
         obs_names=not args.no_obs_names, obs_exclude=[c for c in args.obs_exclude.split(",") if c],
         max_categories=args.max_categories, obs_tiles_per_file=args.obs_tiles_per_file,
-        staging_dir=args.staging_dir,
+        staging_dir=args.staging_dir, scan_workers=args.scan_workers, progress_interval=args.progress_interval,
     )  # fmt: skip
     return 0
 
@@ -192,6 +192,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--staging-dir", default=None,
         help="Scratch directory for gs:// files (downloaded one at a time and deleted) and tiles waiting to be uploaded "
         "(default: the system temp directory).",
+    )  # fmt: skip
+    p.add_argument(
+        "--scan-workers", type=int, default=None,
+        help="Processes that read the metadata of the files in the first pass (default: about 1.5 per core, up to 24; "
+        "1: in this process, which is much slower for gs:// files).",
+    )  # fmt: skip
+    p.add_argument(
+        "--progress-interval", type=float, default=60.0,
+        help="Seconds between the progress lines (with the speed and the time left) of the phase that is running "
+        "(default: 60; 0: only the line that starts and the one that ends each phase).",
     )  # fmt: skip
     p.add_argument("--no-obs", action="store_true", help="Do not store the cell metadata.")
     p.add_argument("--no-var", action="store_true", help="Do not store the gene table.")

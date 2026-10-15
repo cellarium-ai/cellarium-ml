@@ -19,7 +19,7 @@ import tempfile
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,8 +32,8 @@ from deltacells.sink import get_filesystem, is_remote, retry, split_url
 BLOCK_SIZE = 8 << 20
 
 
-def ordered_map(pool: ThreadPoolExecutor, fn: Callable[[Any], Any], items: Iterable[Any], window: int) -> Iterator[Any]:
-    """``map`` over a thread pool that yields results in order, with at most ``window`` tasks in flight."""
+def ordered_map(pool: Executor, fn: Callable[[Any], Any], items: Iterable[Any], window: int) -> Iterator[Any]:
+    """``map`` over a thread or process pool that yields results in order, with at most ``window`` tasks in flight."""
     it = iter(items)
     pending: deque = deque(pool.submit(fn, x) for x in itertools.islice(it, window))
     while pending:
@@ -192,6 +192,18 @@ class Stager:
     @property
     def scratch(self) -> str | None:
         return self._scratch
+
+    @property
+    def n_staged(self) -> int:
+        """The remote files that are downloaded, or being downloaded, and not released yet."""
+        with self._lock:
+            return len(self._futures)
+
+    @property
+    def staged_bytes(self) -> int:
+        """Their size in bytes (as far as the sizes are known)."""
+        with self._lock:
+            return sum(self._sizes[k] or 0 for k in self._futures)
 
     def _download(self, k: int) -> str:
         assert self._scratch is not None

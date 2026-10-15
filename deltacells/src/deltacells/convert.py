@@ -9,10 +9,11 @@ import glob
 import multiprocessing
 import os
 import re
+import time
 from bisect import bisect_right
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from itertools import accumulate
 
@@ -20,8 +21,9 @@ import numpy as np
 import scipy.sparse as sp
 
 from deltacells.manifest import DEFAULT_OBS_TILES_PER_FILE, Manifest
+from deltacells.progress import DEFAULT_INTERVAL, Progress, format_duration, say_flushed
 from deltacells.sink import is_remote, open_sink
-from deltacells.staging import BYTES_PER_NNZ, Stager, ordered_map, read_h5ad_meta
+from deltacells.staging import BYTES_PER_NNZ, FileMeta, Stager, ordered_map, read_h5ad_meta
 from deltacells.writer import DEFAULT_CHUNKS, DEFAULT_LEVEL, DatasetWriter, write_tile_file
 
 try:  # optional: needed only to store obs / var
@@ -59,7 +61,9 @@ def resolve_files(patterns: Sequence[str] | str, sort: bool = True) -> list[str]
 _BYTES_PER_NNZ = BYTES_PER_NNZ
 _WORKER_BASE_BYTES = 400 * 2**20
 _MEMORY_FRACTION = 0.7  # of the available memory that the workers may use
-_SCAN_THREADS = 16  # files whose metadata is read at the same time, if some are remote
+_SCAN_THREADS = 16  # files whose metadata is read at the same time in threads (see ``_scan_processes``)
+_SCAN_MIN_FILES = 32  # fewer files than this are scanned in this process: starting the processes takes seconds
+_SCAN_PROCESSES_MAX = 24  # the scan waits for the network, so a bit more than one process per core is useful
 
 
 def _cpu_count() -> int:
@@ -67,6 +71,35 @@ def _cpu_count() -> int:
         return len(os.sched_getaffinity(0))
     except AttributeError:  # pragma: no cover
         return os.cpu_count() or 1
+
+
+def _scan_job(job: tuple[str, bool, bool]) -> FileMeta:
+    """Read the metadata of one file, in a scan process (which makes its own filesystem for a remote file)."""
+    path, want_obs, want_var = job
+    return read_h5ad_meta(path, None, obs=want_obs, var=want_var)
+
+
+def _scan_processes(n_files: int, filesystem, scan_workers: int | None) -> int:
+    """How many processes scan the metadata (0: threads in this process).
+
+    h5py serialises the reads it makes through a Python file object (that is how it reads a remote file), so scanning remote
+    files with threads is no faster than with one thread (about 1.3 files/s from GCS); the processes are what makes the scan
+    parallel. They need a filesystem that every process can make for itself, so a ``filesystem`` that is passed in (for
+    testing) is used from threads.
+    """
+    if scan_workers is not None and scan_workers < 1:
+        raise ValueError("scan_workers must be at least 1")
+    if scan_workers == 1:
+        return 0
+    if scan_workers is None:
+        if filesystem is not None or n_files < _SCAN_MIN_FILES:
+            return 0
+        scan_workers = min(_SCAN_PROCESSES_MAX, max(2, 3 * _cpu_count() // 2))
+    elif filesystem is not None:
+        raise ValueError(
+            "scan_workers > 1 cannot be used with a filesystem that is passed in (processes make their own)"
+        )
+    return min(scan_workers, n_files)
 
 
 def _available_memory() -> int | None:
@@ -154,9 +187,16 @@ def _column_sums_job(job: tuple[str, int, int, int]) -> np.ndarray:
     return np.bincount(x.indices, weights=x.data, minlength=n_genes)
 
 
-def _gene_totals(stager: Stager, n_obs: Sequence[int], n_genes: int, step: int, workers: int) -> np.ndarray:
+def _gene_totals(
+    stager: Stager,
+    n_obs: Sequence[int],
+    n_genes: int,
+    step: int,
+    workers: int,
+    on_file: Callable[[], None] | None = None,
+) -> np.ndarray:
     """Total counts of every gene over the files of ``stager`` (each released after its use), reading ``step`` rows at a time
-    (in ``workers`` processes)."""
+    (in ``workers`` processes). ``on_file`` is called when a file is done."""
     totals = np.zeros(n_genes, dtype=np.float64)
     in_flight = max(2, workers)  # files that are being read at the same time
     pool = None if workers == 1 else ProcessPoolExecutor(workers, mp_context=_mp_context())
@@ -172,6 +212,8 @@ def _gene_totals(stager: Stager, n_obs: Sequence[int], n_genes: int, step: int, 
         for future in futures:
             np.add(totals, future.result(), out=totals)
         stager.release(k)
+        if on_file is not None:
+            on_file()
 
     pending: deque = deque()
     try:
@@ -242,7 +284,9 @@ def convert_h5ad(
     var: bool = True,
     staging_dir: str | None = None,
     filesystem=None,
-    log: Callable[[str], None] | None = print,
+    scan_workers: int | None = None,
+    progress_interval: float = DEFAULT_INTERVAL,
+    log: Callable[[str], None] | None = say_flushed,
 ) -> Manifest:
     """Write ``output`` from h5ad files (glob patterns or paths), preserving cell order.
 
@@ -277,15 +321,69 @@ def convert_h5ad(
     :mod:`deltacells.obs`): one pass over all files builds a global vocabulary for each categorical column (columns with more than
     ``max_categories`` distinct values are stored as strings), ``obs_names`` adds the cell names as a string column, and
     ``obs_exclude`` drops columns. With ``var`` the gene table is stored as ``var.parquet``.
+
+    That first pass reads the metadata of every file, in ``scan_workers`` processes (default: about 1.5 per core, up to 24,
+    when there are at least 32 files and no ``filesystem`` is passed in; ``1`` scans in this process, with threads). The
+    processes are started with ``spawn``, so a script that calls this must be guarded by ``if __name__ == "__main__":``.
+
+    ``log`` receives the progress messages (``None``: none). A line about the phase that is running (scan, gene order, tiles,
+    finishing) is written every ``progress_interval`` seconds, the first one after ten seconds, with how far it is, its speed
+    over the last minutes and the time left; ``0`` leaves only the line that starts and the line that ends each phase.
     """
+    progress = Progress(log, progress_interval)
+    try:
+        return _convert_h5ad(
+            progress, time.monotonic(), paths, output,
+            tile_size=tile_size, sort_genes=sort_genes, sort_files=sort_files, n_chunks=n_chunks, level=level,
+            threads=threads, workers=workers, sort_genes_max_files=sort_genes_max_files, overwrite=overwrite,
+            obs=obs, obs_names=obs_names, obs_exclude=obs_exclude, max_categories=max_categories,
+            obs_tiles_per_file=obs_tiles_per_file, var=var, staging_dir=staging_dir, filesystem=filesystem,
+            scan_workers=scan_workers, log=log,
+        )  # fmt: skip
+    finally:
+        progress.close()  # the thread that prints the status lines must not outlive the conversion, whatever happened
+
+
+def _convert_h5ad(
+    progress: Progress,
+    t_start: float,
+    paths: Sequence[str] | str,
+    output: str,
+    *,
+    tile_size: int,
+    sort_genes: bool,
+    sort_files: bool,
+    n_chunks: int,
+    level: int,
+    threads: int | None,
+    workers: int | None,
+    sort_genes_max_files: int | None,
+    overwrite: bool,
+    obs: bool,
+    obs_names: bool,
+    obs_exclude: Sequence[str],
+    max_categories: int,
+    obs_tiles_per_file: int,
+    var: bool,
+    staging_dir: str | None,
+    filesystem,
+    scan_workers: int | None,
+    log: Callable[[str], None] | None,
+) -> Manifest:
+    """The conversion itself (see :func:`convert_h5ad`); ``progress`` reports on its phases."""
     say = log or (lambda _: None)
     if workers is not None and workers < 1:
         raise ValueError("workers must be at least 1")
     if sort_genes_max_files is not None and sort_genes_max_files < 1:
         raise ValueError("sort_genes_max_files must be at least 1 (or None for all the files)")
     files = resolve_files(paths, sort=sort_files)
-    say(f"{len(files)} files: {files[0]} ... {files[-1]}")
-    open_sink(output, filesystem).check(overwrite, files)  # now, so that a mistake does not cost a slow scan
+    say(f"{len(files):,} files: {files[0]} ... {files[-1]}")
+    replaced = open_sink(output, filesystem).check(overwrite, files)  # now, so that a mistake does not cost a slow scan
+    say(
+        f"the output {output} has a dataset of {len(replaced)} files, which will be deleted when the scan is done"
+        if replaced
+        else f"the output {output} is empty"
+    )
     if obs or var:
         try:
             import pandas  # noqa: F401
@@ -296,18 +394,21 @@ def convert_h5ad(
             ) from e
 
     state: dict = {"var_names": None, "var": None, "n_obs": [], "x_bytes": 0, "sizes": []}
+    scan_processes = _scan_processes(len(files), filesystem, scan_workers)
     scan_threads = _SCAN_THREADS if any(is_remote(f) for f in files) else 1
 
     def scan() -> Iterator:
         """One pass over the files (not reading ``X``): checks var_names, counts cells and yields each file's obs frame (or None)."""
-        with ThreadPoolExecutor(scan_threads) as pool:
-            metas = ordered_map(
-                pool,
-                lambda k: read_h5ad_meta(files[k], filesystem, obs=obs, var=k == 0),  # the gene table of the first file
-                range(len(files)),
-                2 * scan_threads,
-            )
-            for k, meta in enumerate(metas):
+        if scan_processes:
+            pool: Executor = ProcessPoolExecutor(scan_processes, mp_context=multiprocessing.get_context("spawn"))
+            jobs = [(files[k], obs, k == 0) for k in range(len(files))]  # the gene table comes from the first file
+            fn, items, window = _scan_job, jobs, 2 * scan_processes
+        else:
+            pool = ThreadPoolExecutor(scan_threads)
+            fn = lambda k: read_h5ad_meta(files[k], filesystem, obs=obs, var=k == 0)  # noqa: E731
+            items, window = range(len(files)), 2 * scan_threads
+        try:
+            for k, meta in enumerate(ordered_map(pool, fn, items, window)):
                 if state["var_names"] is None:
                     state["var_names"], state["var"] = meta.var_names, meta.var
                 elif not np.array_equal(state["var_names"], meta.var_names):
@@ -315,24 +416,44 @@ def convert_h5ad(
                 state["n_obs"].append(meta.n_obs)
                 state["x_bytes"] += meta.x_bytes
                 state["sizes"].append(meta.size)
-                if (k + 1) % 1000 == 0:
-                    say(f"read the metadata of {k + 1} of {len(files)} files")
+                progress.advance()
                 yield _obs_frame(meta.obs, obs_names, obs_exclude) if obs else None
+        except BrokenProcessPool as e:
+            raise RuntimeError(
+                "a process that reads the metadata of the files died; pass scan_workers=1 to read them in this process"
+            ) from e
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
+    how = (
+        f"{scan_processes} processes"
+        if scan_processes
+        else f"{scan_threads} threads"
+        if scan_threads > 1
+        else "this process"
+    )
+    progress.start("scan", len(files), "files", header=f"reading the metadata of {len(files):,} files ({how})")
     schema = None
     if obs:
         schema = ObsSchema.infer(scan(), max_categories=max_categories)
+    else:
+        for _ in scan():
+            pass
+    progress.finish()
+    if schema is not None:
         as_strings = [c.name for c in schema.columns if c.kind == "string"]
         say(
             f"obs: {len(schema.columns)} columns ({sum(c.kind == 'category' for c in schema.columns)} categorical, strings: {as_strings})"
         )
-    else:
-        for _ in scan():
-            pass
     n_obs = state["n_obs"]
     var_names = state["var_names"]
     n_genes = len(var_names)
-    say(f"{sum(n_obs)} cells x {n_genes} genes (cells per file: min {min(n_obs)}, max {max(n_obs)})")
+    known_sizes = [s for s in state["sizes"] if s]
+    total_gb = f", {sum(known_sizes) / 1e9:,.0f} GB" if len(known_sizes) == len(files) else ""
+    say(
+        f"{sum(n_obs):,} cells x {n_genes:,} genes in {len(files):,} files{total_gb} "
+        f"(cells per file: min {min(n_obs):,}, max {max(n_obs):,})"
+    )
 
     n_cells = sum(n_obs)
     if n_cells == 0:
@@ -344,13 +465,14 @@ def convert_h5ad(
     workers = min(workers, n_tiles)
     if threads is None:
         threads = min(max(1, _cpu_count() // workers), 2 * n_chunks)
-    say(f"{n_tiles} tiles, written by {workers} worker process(es) with {threads} compression thread(s) each")
+    say(f"{n_tiles:,} tiles, written by {workers} worker process(es) with {threads} compression thread(s) each")
 
     if sort_genes:
         used = _evenly_spaced(len(files), sort_genes_max_files)
-        say(
-            f"gene order: summing the counts of {len(used)} of {len(files)} files ({sum(n_obs[k] for k in used)} cells)"
-        )
+        progress.start(
+            "gene order", len(used), "files",
+            header=f"gene order: summing the counts of {len(used)} of {len(files):,} files ({sum(n_obs[k] for k in used):,} cells)",
+        )  # fmt: skip
         with Stager(
             [files[k] for k in used],
             [1] * len(used),
@@ -358,8 +480,11 @@ def convert_h5ad(
             sizes=[state["sizes"][k] for k in used],
             filesystem=filesystem,
         ) as sampled:
-            totals = _gene_totals(sampled, [n_obs[k] for k in used], n_genes, tile_size, workers)
+            totals = _gene_totals(
+                sampled, [n_obs[k] for k in used], n_genes, tile_size, workers, on_file=progress.advance
+            )
         gene_order = np.argsort(-totals, kind="stable")
+        progress.finish()
     else:
         used, gene_order = [], None
 
@@ -372,6 +497,8 @@ def convert_h5ad(
         "sort_genes_n_files": len(used),
     }
     # the first change to the output: what is there is deleted now (``overwrite``), after everything above had its chance to fail
+    if replaced:
+        say(f"deleting the {len(replaced):,} files of the dataset that is in {output} ...")
     writer = DatasetWriter(
         output, n_genes=n_genes, tile_size=tile_size, gene_order=gene_order, var_names=list(var_names),
         var=state["var"] if var else None, obs_schema=schema, obs_tiles_per_file=obs_tiles_per_file,
@@ -431,9 +558,20 @@ def convert_h5ad(
         writer.commit_tile(i, n, nnz, n_bytes, obs=obs_table)
         for k in tile_files[i]:
             stager.release(k)
-        say(f"[tile {i + 1}/{n_tiles}] {n} cells, {n_bytes / 1e6:.1f} MB")
+        progress.advance(1, n_bytes)
+
+    def tile_detail() -> str:
+        parts = []
+        if stager.scratch is not None:
+            parts.append(f"{stager.n_staged} files staged ({stager.staged_bytes / 1e9:.1f} GB)")
+        if writer.is_remote:
+            parts.append(f"{writer.pending_uploads} uploads pending")
+        return ", ".join(parts)
 
     init_args = (writer.root, gene_order, n_chunks, level, threads)
+    progress.start(
+        "tiles", n_tiles, "tiles", bytes_label="written", detail=tile_detail, header=f"writing {n_tiles:,} tiles"
+    )
     try:
         if workers == 1:
             _init_tile_worker(*init_args)
@@ -460,7 +598,14 @@ def convert_h5ad(
                 ) from e
             finally:
                 pool.shutdown(wait=True, cancel_futures=True)
+        progress.finish()
+        progress.start(
+            "finishing",
+            header="finishing: the obs shards, the last uploads and the manifest",
+            detail=lambda: f"{writer.pending_uploads} uploads pending" if writer.is_remote else "",
+        )
         manifest = writer.close()
+        progress.finish()
     except BaseException as e:
         writer.abort()
         if writer.is_remote and writer.n_published:
@@ -476,7 +621,10 @@ def convert_h5ad(
     finally:
         stager.close()
     total = sum(manifest.tile_bytes)
-    say(f"done: {manifest.n_tiles} tiles, {total / 1e6:.1f} MB = {total / manifest.n_cells / 1e3:.2f} kB per cell")
+    say(
+        f"done in {format_duration(time.monotonic() - t_start)}: {manifest.n_tiles:,} tiles, {total / 1e6:,.1f} MB = "
+        f"{total / manifest.n_cells / 1e3:.2f} kB per cell"
+    )
     if manifest.has_obs:
         say(f"obs: {sum(manifest.obs_shard_bytes) / 1e6:.1f} MB in {manifest.n_obs_shards} parquet shard(s)")
     return manifest
