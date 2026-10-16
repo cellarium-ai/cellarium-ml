@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData, concat
 from anndata._core.index import _normalize_indices
+from anndata._core.views import DataFrameView
 from anndata.compat import Index, Index1D
 from anndata.experimental.multi_files._anncollection import (
     AnnCollection,
@@ -18,6 +19,7 @@ from anndata.experimental.multi_files._anncollection import (
 from boltons.cacheutils import LRU
 from braceexpand import braceexpand
 
+from cellarium.ml.data.distributed_collection import DistributedCollection
 from cellarium.ml.data.fileio import read_h5ad_file
 from cellarium.ml.data.schema import AnnDataSchema
 
@@ -79,7 +81,7 @@ class DistributedAnnDataCollectionView(AnnCollectionView):
         return obs_names
 
 
-class DistributedAnnDataCollection(AnnCollection):
+class DistributedAnnDataCollection(AnnCollection, DistributedCollection):
     r"""
     Distributed AnnData Collection.
 
@@ -227,20 +229,95 @@ class DistributedAnnDataCollection(AnnCollection):
                 indices_strict=indices_strict,
             )
 
+    @property
+    def var(self) -> pd.DataFrame:
+        """Per-variable annotations, as in the first anndata file."""
+        return self.schema.attr_values["var"]
+
+    @property
+    def reference_adata(self) -> "LazyAnnData":
+        """The first anndata file (read lazily), for attributes that are the same in every file such as ``var``."""
+        return self.adatas[0]
+
+    def _first_obs(self, key: str) -> pd.Series:
+        obs = self.adatas[0].obs
+        if key not in obs:
+            raise ValueError(f"Key '{key}' not found in obs columns: {list(obs.columns)}")
+        return obs[key]
+
+    def obs_categories(self, key: str) -> np.ndarray:
+        """The categories of the categorical ``obs`` column ``key``, as in the first anndata file."""
+        return np.asarray(self._first_obs(key).cat.categories)
+
+    def obs_key_nunique(self, key: str) -> int:
+        """Number of distinct values of the ``obs`` column ``key`` in the first anndata file."""
+        return int(self._first_obs(key).nunique())
+
+    def reset_cache(self) -> None:
+        """Forget the cached anndata files."""
+        self.cache.clear()
+
+    @property
+    def cache_miss_count(self) -> int:
+        """Number of anndata files read so far by this process."""
+        return self.cache.miss_count
+
     def __getitem__(self, index: Index) -> AnnData:
         """
         Materialize and gather anndata files at given indices from the list of lazy anndatas.
 
         :class:`LazyAnnData` instances corresponding to cells in the index are materialized.
         """
+        return self._gather(index, in_groups=False)
+
+    def read(self, index: Index) -> AnnData:
+        """
+        Like indexing, but cells that lie in more files than the cache holds (for example a batch of scattered cells)
+        are read in groups of at most ``max_cache_size`` files, copying the cells of each group out before the next
+        group is read, so no more than ``max_cache_size`` files are ever in memory (and
+        ``cache_size_strictly_enforced`` is never violated).
+        """
+        return self._gather(index, in_groups=True)
+
+    def _gather(self, index: Index, in_groups: bool) -> AnnData:
         oidx, vidx = _normalize_indices(index, self.obs_names, self.var_names)
         adatas_oidx, oidx, vidx, reverse = self._resolve_idx(oidx, vidx)
-        adatas = self.materialize(adatas_oidx, vidx)
-        adata = concat(adatas, merge="same")
-        adata = adata if reverse is None else adata[reverse]
-        # make sure that categorical dtypes are preserved
-        adata.obs = adata.obs.astype(self.schema.attr_values["obs"].dtypes)
-        return adata
+        used = [i for i, adata_oidx in enumerate(adatas_oidx) if adata_oidx is not None]
+        if not in_groups or len(used) <= self.max_cache_size:
+            adatas = self.materialize(adatas_oidx, vidx)
+            adata = concat(adatas, merge="same")
+        else:
+            groups = []
+            for start in range(0, len(used), self.max_cache_size):
+                group = set(used[start : start + self.max_cache_size])
+                group_oidx = [adata_oidx if i in group else None for i, adata_oidx in enumerate(adatas_oidx)]
+                # `concat` copies the cells, which releases the (views of the) files of the group
+                groups.append(concat(self.materialize(group_oidx, vidx), merge="same"))
+            adata = concat(groups, merge="same")
+
+        # make sure that categorical dtypes are preserved. `astype` leaves a categorical column alone if its categories
+        # are those of the schema in a different order (unordered categorical dtypes compare equal), which would make
+        # the codes of a batch differ from those of other batches, so categories are set explicitly.
+        obs = adata.obs
+        for column, dtype in self.schema.attr_values["obs"].dtypes.items():
+            if isinstance(dtype, pd.CategoricalDtype) and isinstance(obs[column].dtype, pd.CategoricalDtype):
+                obs[column] = obs[column].cat.set_categories(dtype.categories, ordered=dtype.ordered)
+            else:
+                obs[column] = obs[column].astype(dtype)
+
+        if reverse is None:
+            return adata
+
+        # `adata[reverse]` restores the order of the requested cells. It is a lazy view of `adata` (the rows of `X` are
+        # only gathered, and copied, when `X` is read), but creating it drops the categories that no cell of the view
+        # uses from its `obs`, which makes the codes of a batch differ from those of other batches. Setting the
+        # categories on the view would turn it into a copy of everything, `X` included, so instead the `obs` of the view
+        # is replaced by the reordered `obs` of `adata`, which still has the categories of the schema. This is what
+        # anndata itself does to set the `obs` of a view, but through private attributes: if a new version of anndata
+        # breaks this, `test_h5ad_batches_have_the_categories_of_the_schema_in_the_schema_order` will fail.
+        view = adata[reverse]
+        view._obs = DataFrameView(adata.obs.iloc[reverse], view_args=(view, "obs"))
+        return view
 
     def materialize(self, adatas_oidx: list[np.ndarray | None], vidx: Index1D) -> list[AnnData]:
         """

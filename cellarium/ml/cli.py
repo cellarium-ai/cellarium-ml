@@ -808,9 +808,11 @@ def geometric_sketch(args: ArgsType = None) -> None:
     CLI to run the :class:`cellarium.ml.models.StreamingPlaidGeometricSketch` model.
 
     Streams cells in a single pass and retains a geometrically diverse sketch by
-    partitioning gene-expression space with locality-sensitive hashing (LSH).  At most
-    ``max_cells_per_bucket`` cells are kept per LSH bucket via reservoir sampling.
-    Training stops after one epoch regardless of ``max_epochs``.
+    partitioning the (embedding) space with a plaid grid that is coarsened whenever more than
+    ``target_voxels`` voxels are occupied.  At most ``max_cells_per_bucket`` cells are kept per
+    voxel via reservoir sampling, and if ``target_n_cells`` is given the sketch stored in
+    ``sketch_obs_names`` at the end has exactly that many cells.  The sketch is kept in tensors on the
+    trainer's device.  Training stops after one epoch regardless of ``max_epochs``.
 
     The ``obs_names_n`` batch key is required so that cell IDs are stored alongside
     expression data.  ``var_names_g`` is derived automatically from the data
@@ -828,8 +830,9 @@ def geometric_sketch(args: ArgsType = None) -> None:
             --data.batch_keys.obs_names_n.attr obs_names \
             --data.batch_size 512 \
             --data.num_workers 4 \
-            --model.model.init_args.n_bits 12 \
-            --model.model.init_args.max_cells_per_bucket 100 \
+            --model.model.init_args.target_voxels 200000 \
+            --model.model.init_args.max_cells_per_bucket 2 \
+            --model.model.init_args.target_n_cells 100000 \
             --trainer.accelerator gpu \
             --trainer.devices 1 \
             --trainer.default_root_dir runs/sketch

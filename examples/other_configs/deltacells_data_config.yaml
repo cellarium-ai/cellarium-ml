@@ -1,0 +1,40 @@
+# The `data:` section of a training config that reads a deltacells dataset instead of h5ad files
+# (replace the `data:` section of any config in examples/ with this one; everything else stays the same).
+#
+# Make the dataset once, from h5ad shards of any sizes:
+#   deltacells convert --h5ad-glob "shards/*.h5ad" --output gs://bucket/my_dataset --tile-size 10000
+# (convert to a local directory and copy it to the bucket, or point `--output` at a local path and use it from there.)
+#
+# - The genes are stored sorted by expression, so `var_names_g` differs from the h5ad order; models identify genes by
+#   `var_names_g`, so nothing else changes.
+# - The obs columns used by `batch_keys` (here `cell_type`) are copied to a node-local cache by the datamodule's
+#   `prepare_data` (once per node, only those columns); categorical obs columns have the dataset's global categories.
+# - Each worker fetches the next tiles in the background (`prefetch_lookahead` shards ahead).
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedDeltaCellsCollection
+    init_args:
+      uri: gs://bucket/my_dataset
+      max_cached_tiles: 1       # decoded tiles kept per worker (about 8 bytes per nonzero each)
+      max_prefetch_tiles: 8     # compressed tiles kept or being fetched per worker
+      io_threads: 4
+      decode_threads: 1         # 1 when each worker has about one core
+      cache_dir: null           # default: $DELTACELLS_CACHE or ~/.cache/deltacells
+      obs_columns: null         # extra obs columns to make local (e.g. for plotting later)
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.to_torch_sparse_csr
+    var_names_g:
+      attr: var_names
+    y_n:
+      attr: obs
+      key: cell_type
+      convert_fn: cellarium.ml.utilities.data.categories_to_codes
+  batch_size: 5000
+  iteration_strategy: cache_efficient
+  shuffle: true
+  shuffle_seed: 0
+  num_workers: 4
+  prefetch_lookahead: 2
+  persistent_workers: true

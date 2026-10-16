@@ -10,7 +10,7 @@ import lightning.pytorch as pl
 import torch
 from anndata import AnnData
 
-from cellarium.ml.data import DistributedAnnDataCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.data import DistributedCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.utilities.core import FunctionComposer, train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
@@ -48,7 +48,9 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     Args:
         dadc:
-            An instance of :class:`~cellarium.ml.data.DistributedAnnDataCollection` or :class:`AnnData`.
+            An instance of a :class:`~cellarium.ml.data.DistributedCollection` (for example
+            :class:`~cellarium.ml.data.DistributedAnnDataCollection` or
+            :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`) or :class:`AnnData`.
         batch_keys:
             Dictionary that specifies which attributes and keys of the :attr:`dadc` to return
             in the batch data and how to convert them. Keys must correspond to
@@ -90,6 +92,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             workers are not seeded with the same seed as the previous run.
         test_mode:
             If ``True`` enables tracking of cache and worker informations.
+        prefetch_lookahead:
+            For collections that can prefetch (for example
+            :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`), the number of upcoming shards that each
+            worker announces ahead of time so they are fetched in the background. Ignored by other collections.
         num_workers:
             How many subprocesses to use for data loading. ``0`` means that the data will be loaded in the main process.
         prefetch_factor:
@@ -106,7 +112,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        dadc: DistributedAnnDataCollection | AnnData,
+        dadc: DistributedCollection | AnnData,
         # IterableDistributedAnnDataCollectionDataset args
         batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField] | None = None,
         batch_size: int = 1,
@@ -120,6 +126,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         pred_size: float | int | None = None,
         worker_seed: int | None = None,
         test_mode: bool = False,
+        prefetch_lookahead: int = 2,
         # DataLoader args
         num_workers: int = 0,
         prefetch_factor: int | None = None,
@@ -146,6 +153,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             self.n_pred = len(dadc)
         self.worker_seed = worker_seed
         self.test_mode = test_mode
+        self.prefetch_lookahead = prefetch_lookahead
         # DataLoader args
         self.num_workers = num_workers
         self.collate_fn = collate_fn
@@ -153,6 +161,15 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.prefetch_factor = prefetch_factor
         self.persistent_workers = persistent_workers
         self.pin_memory = pin_memory
+
+    def prepare_data(self) -> None:
+        """
+        Prepare the data collection for reading the fields in :attr:`batch_keys` (for example, make the needed metadata
+        columns local). Lightning calls this once per node before any worker starts, so that concurrent processes do not
+        all fetch the same data.
+        """
+        if isinstance(self.dadc, DistributedCollection):
+            self.dadc.prepare(self.batch_keys)
 
     def setup(self, stage: str | None = None) -> None:
         """
@@ -175,6 +192,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                prefetch_lookahead=self.prefetch_lookahead,
                 start_idx=0,
                 end_idx=self.n_train,
             )
@@ -191,6 +209,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                prefetch_lookahead=self.prefetch_lookahead,
                 start_idx=self.n_train,
                 end_idx=self.n_train + self.n_val,
             )
@@ -207,6 +226,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                prefetch_lookahead=self.prefetch_lookahead,
                 start_idx=len(self.dadc) - self.n_pred,
                 end_idx=len(self.dadc),
             )
@@ -223,6 +243,16 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 drop_incomplete_batch=self.drop_incomplete_batch,
                 worker_seed=self.worker_seed,
                 test_mode=self.test_mode,
+                prefetch_lookahead=self.prefetch_lookahead,
+            )
+
+    def _check_num_workers(self) -> None:
+        """Raise an error if more workers are requested than the collection can serve (see ``max_num_workers``)."""
+        max_num_workers = getattr(self.dadc, "max_num_workers", None)
+        if max_num_workers is not None and self.num_workers > max_num_workers:
+            raise ValueError(
+                f"num_workers={self.num_workers}, but {type(self.dadc).__name__} supports at most "
+                f"{max_num_workers} dataloader workers (for example, it holds the cells in the memory of this process)."
             )
 
     def _effective_collate_fn(self) -> Callable:
@@ -252,6 +282,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         """Training dataloader."""
+        self._check_num_workers()
         return torch.utils.data.DataLoader(
             self.train_dataset,
             num_workers=self.num_workers,
@@ -263,6 +294,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
         """Validation dataloader."""
+        self._check_num_workers()
         return torch.utils.data.DataLoader(
             self.val_dataset,
             num_workers=self.num_workers,
@@ -274,6 +306,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
         """Prediction dataloader."""
+        self._check_num_workers()
         return torch.utils.data.DataLoader(
             self.predict_dataset,
             num_workers=self.num_workers,
@@ -285,6 +318,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def test_dataloader(self) -> torch.utils.data.DataLoader:
         """Test dataloader."""
+        self._check_num_workers()
         return torch.utils.data.DataLoader(
             self.test_dataset,
             num_workers=self.num_workers,
@@ -386,9 +420,11 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             raise ValueError("var_names_g is not available in the batch keys.")
         anndata_field = self.batch_keys["var_names_g"]
         assert isinstance(anndata_field, AnnDataField)
-        return anndata_field(self.dadc.adatas[0])
+        return anndata_field(self.dadc.reference_adata if isinstance(self.dadc, DistributedCollection) else self.dadc)
 
     def obs_key_nunique(self, key: str):
-        if key not in self.dadc.adatas[0].obs:
-            raise ValueError(f"Key '{key}' not found in obs columns: {list(self.dadc.adatas[0].obs.columns)}")
-        return self.dadc.adatas[0].obs[key].nunique()
+        if isinstance(self.dadc, DistributedCollection):
+            return self.dadc.obs_key_nunique(key)
+        if key not in self.dadc.obs:
+            raise ValueError(f"Key '{key}' not found in obs columns: {list(self.dadc.obs.columns)}")
+        return self.dadc.obs[key].nunique()
