@@ -705,7 +705,7 @@ TWO_DEVICE_CONFIGS = [
                     }
                 ],
                 "model": {
-                    "class_path": "cellarium.ml.models.NonNegativeMatrixFactorization",
+                    "class_path": "cellarium.ml.models.OnlineNonNegativeMatrixFactorization",
                     "init_args": {
                         "k_values": [10],
                         "r": 10,
@@ -811,6 +811,10 @@ TWO_DEVICE_CONFIGS = [
                 "accelerator": "cpu",
                 "devices": devices,
                 "max_epochs": 2,
+                "strategy": {
+                    "class_path": "lightning.pytorch.strategies.DDPStrategy",
+                    "init_args": {"broadcast_buffers": "true"},
+                },
             },
         },
     },
