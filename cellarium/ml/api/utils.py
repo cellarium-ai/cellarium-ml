@@ -8,8 +8,11 @@ os.environ["GLOG_minloglevel"] = "2"
 os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
 os.environ["PYTHONWARNINGS"] = "ignore::FutureWarning"
 
+import ctypes
+import gc
 import multiprocessing as mp
 import shutil
+import sys
 import tempfile
 from collections.abc import Mapping
 from typing import Any, Callable
@@ -22,6 +25,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
+import torch
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 from lightning.pytorch.callbacks import TQDMProgressBar
 from lightning.pytorch.loggers import Logger
@@ -39,6 +43,35 @@ def get_gcs_fs():
 
         _GCS_FS = gcsfs.GCSFileSystem()
     return _GCS_FS
+
+
+def release_unused_memory() -> None:
+    """
+    Give memory that this process has freed back to the operating system, as far as the platform allows.
+
+    After passes over large data, Python and numpy leave freed memory in the allocator's heap, where it still counts
+    against the process (and the machine) even though nothing refers to it. This collects garbage, then asks the C
+    allocator to return what it can (``malloc_trim`` with glibc on Linux, ``malloc_zone_pressure_relief`` on macOS),
+    and empties the cache of the GPU allocator (CUDA or MPS). It is best effort: where a step is not available (other
+    platforms, or a C library without these functions) that step is skipped, and it never raises.
+    """
+    gc.collect()
+    try:
+        if sys.platform.startswith("linux"):
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        elif sys.platform == "darwin":
+            libsystem = ctypes.CDLL("libSystem.dylib")
+            libsystem.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libsystem.malloc_zone_pressure_relief(None, 0)  # all zones, as much as possible
+    except (OSError, AttributeError):
+        pass  # not glibc (for example musl) or the function is missing: nothing to release this way
+    try:
+        if torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass  # a failure to empty a cache must never affect the caller
 
 
 class SeekableHTTPFile:

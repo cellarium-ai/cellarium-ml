@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from cellarium.ml import CellariumPipeline
 from cellarium.ml.api._view_collections import RamCollection, available_memory_bytes, load_into_ram, unwrap_collection
+from cellarium.ml.api.utils import release_unused_memory
 from cellarium.ml.data import DistributedAnnDataCollection
 from cellarium.ml.models import IncrementalPCA, SingleCellVariationalInference
 from cellarium.ml.utilities.data import collate_fn
@@ -209,6 +210,8 @@ def to_anndata(
         positions = found[order].astype(np.int64)
         x = sp.csr_matrix(sketch_adata.X[order], dtype=np.float32)
         sketch_names = sketch_adata.obs_names[order]
+        # the counts are in x now: do not hold the sketch's copy of them (nor the sketch module) for the rest of this
+        del sketch, sketch_adata
 
     selected = cdata if len(positions) == n_obs else cdata[positions]
     if x is None:
@@ -241,4 +244,7 @@ def to_anndata(
                 if explicit:
                     raise
                 warnings.warn(f"The embedding of the module '{key}' could not be computed and is left out: {error}")
-    return anndata.AnnData(X=x, obs=obs, var=var, obsm=obsm)
+    adata = anndata.AnnData(X=x, obs=obs, var=var, obsm=obsm)
+    # the passes over the data above leave a lot of freed memory in the heap: give it back before the caller goes on
+    release_unused_memory()
+    return adata

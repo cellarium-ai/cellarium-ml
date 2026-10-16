@@ -247,6 +247,9 @@ def _geometric_sketch(
         trainer.fit(module, datamodule)
     finally:
         datamodule.shuffle_seed = datamodule_shuffle_seed
+        # the trainer and the module refer to each other, which would keep the module (and the sketch it holds, on
+        # the accelerator) alive until the cyclic garbage collector ran; the module no longer needs the trainer
+        module.trainer = None
 
     reservoir = module.model.get_reservoir(return_cell_data=return_new_adata, max_cells=target_n_cells)
     sketch_obs_names = reservoir["obs_names"]
@@ -287,6 +290,7 @@ def _geometric_sketch(
             missing = np.asarray(sketch_obs_names)[coverage == -1]
             raise ValueError(f"Could not find raw data for sketch obs_names, e.g. {missing[:5].tolist()}")
         raw_x_ng = sp.vstack(raw_x_ng_list, format="csr")
+        del raw_x_ng_list  # the counts are in raw_x_ng now: do not hold a second copy of them
 
         embedding_pos = sketch_index.get_indexer(raw_obs_names)
         embedding = reservoir["x_ng"].to_dense().cpu().numpy()[embedding_pos]

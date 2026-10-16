@@ -399,6 +399,10 @@ def fit_and_register(
         )
         if key is not None:
             cdata.trained_modules[key] = trained
+        # everything needed from the trainer has been recorded above. The module keeps running without it, and a new
+        # fit attaches it to its trainer again; but a module that keeps its trainer keeps the trainer's datamodule,
+        # loops and callbacks alive for as long as the module is in `trained_modules`
+        module.trainer = None
         return trained
 
     try:
@@ -851,7 +855,7 @@ class CellariumData:
                 self._var.index = pd.Index(self._datamodule.var_names_g, name=self._var.index.name)
                 self._var[f"{anndatafield.key or 'var_names'}_original"] = original_names
             else:
-                assert isinstance(anndatafield.key, str)
+                assert anndatafield.key is None or isinstance(anndatafield.key, str)  # None: the var_names
                 _check_var_names_unique(self._datamodule.dadc.var, self._var.index, anndatafield.key)
         self._init_state()
         # lineage: a root is the data that views are taken from (see `CellariumDataView`)
