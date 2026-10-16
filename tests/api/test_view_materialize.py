@@ -42,6 +42,7 @@ def _label_view(cdata, positions, labels, key="subtype"):
 def test_to_ram_returns_a_view_of_the_same_cells_that_reads_from_memory(cdata):
     view = cdata[POSITIONS]
     ram = view.to_ram()
+    assert isinstance(view, CellariumDataView)
     assert isinstance(ram, CellariumDataView)
     assert ram.root is cdata and ram.parent is view
     assert ram.root_indices.tolist() == POSITIONS.tolist()
@@ -223,6 +224,7 @@ def _dense_by_gene(dadc, cells, genes):
 
 def test_to_deltacells_returns_a_view_of_the_same_cells_that_reads_the_new_dataset(cdata, written, tmp_path):
     view, new = written
+    assert isinstance(view, CellariumDataView)
     assert isinstance(new, CellariumDataView)
     assert new.root is cdata and new.parent is view
     assert new.root_indices.tolist() == POSITIONS.tolist()
