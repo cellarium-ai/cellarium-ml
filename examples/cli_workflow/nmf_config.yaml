@@ -1,0 +1,56 @@
+# lightning.pytorch==2.4.0
+seed_everything: true
+trainer:
+  num_nodes: 1
+  max_epochs: 1
+model:
+  cpu_transforms:
+  - class_path: cellarium.ml.transforms.Filter
+    init_args:
+      filter_list:
+        !FileLoader
+        file_path: ${highly_variable_genes_csv}
+        loader_fn: pandas.read_csv
+        attr: "ensembl_id"
+        convert_fn: pandas.Series.to_list
+  transforms: null
+  model:
+    class_path: cellarium.ml.models.NonNegativeMatrixFactorization
+    init_args:
+      var_names_g: null
+      var_names_hvg:
+        !FileLoader
+        file_path: ${highly_variable_genes_csv}
+        loader_fn: pandas.read_csv
+        attr: "ensembl_id"
+        convert_fn: pandas.Series.to_list
+      k_values: ${k_values}
+      r: ${num_repeats}
+      full_g: ${n_genes_total}
+      log_variational: false
+      algorithm: mairal
+  is_initialized: false
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      filenames: /home/jupyter/cellarium-ml/notebooks/tmp/subset/subset_data_{0..38}.h5ad
+      limits: null
+      shard_size: ${shard_size}
+      last_shard_size: ${last_shard_size}
+      max_cache_size: 2
+      cache_size_strictly_enforced: true
+      indices_strict: true
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
+    var_names_g:
+      attr: var_names
+  batch_size: 1024
+  shuffle: true
+  drop_last_indices: false
+  test_mode: false
+  num_workers: 1
+
+ckpt_path: null
