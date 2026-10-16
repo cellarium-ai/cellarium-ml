@@ -77,7 +77,7 @@ def test_nmf_single_device(small_adata: anndata.AnnData, algorithm: Literal["mai
         n_cells_total=n,
     )
     module = CellariumModule(
-        cpu_transforms=[
+        transforms=[
             DivideByScale(
                 scale_g=torch.from_numpy(small_adata.X.std(axis=0)),
                 var_names_g=np.array([f"gene_{i}" for i in range(g)]),
@@ -238,7 +238,7 @@ def run_cellarium_online_nmf(
         n_cells_total=n,
     )
     module = CellariumModule(
-        cpu_transforms=[
+        transforms=[
             DivideByScale(
                 scale_g=x_ng.std(dim=0),
                 var_names_g=var_names_g,
@@ -717,7 +717,7 @@ def _build_datamodule_and_train(
     )
     scale_g = torch.tensor(np.array(adata.X).std(axis=0).astype(np.float32))
     module = CellariumModule(
-        cpu_transforms=[
+        transforms=[
             DivideByScale(
                 scale_g=scale_g,
                 var_names_g=np.array(list(adata.var_names)),

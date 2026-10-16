@@ -2100,12 +2100,9 @@ class NMFOutput:
 
         # TODO fix this hacky manual stuff (appropriate fix would be to call predict on the module
         # and have model predict be infer_loadings)
-        # grab the transforms
-        transforms = []
-        # for transform in self.nmf_module.cpu_transforms:
-        #     transforms.append(transform)
-        for transform in self.nmf_module.transforms:
-            transforms.append(transform)
+        # grab the transforms. module_pipeline includes the cpu_transforms exactly when the dataloader is not
+        # applying them (i.e. no trainer stage is active), and excludes them otherwise to avoid applying them twice
+        transforms = list(self.nmf_module.module_pipeline[:-1])
 
         embedding = []
         index = []
