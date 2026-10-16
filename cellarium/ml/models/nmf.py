@@ -781,7 +781,8 @@ def compute_factors(
 
     for i in range(n_iterations):
         for k in range(n_factors):
-            scalar = A_rkk[:, k, k].view(r, 1, 1)
+            # clamp so a dead factor (A_kk = 0, B_k = 0) keeps its value rather than becoming NaN via 0/0
+            scalar = A_rkk[:, k, k].clamp(min=1e-12).view(r, 1, 1)
             a_r1k = A_rkk[:, k, :].unsqueeze(1)
             b_r1g = B_rkg[:, k, :].unsqueeze(1)
 

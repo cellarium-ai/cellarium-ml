@@ -707,7 +707,7 @@ TWO_DEVICE_CONFIGS = [
                 "model": {
                     "class_path": "cellarium.ml.models.OnlineNonNegativeMatrixFactorization",
                     "init_args": {
-                        "k_values": [10],
+                        "k_values": [5],
                         "r": 10,
                         "algorithm": "mairal",
                         "var_names_g": [
