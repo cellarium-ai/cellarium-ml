@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+import tempfile
 from typing import Literal
 
 import anndata
@@ -14,7 +15,12 @@ from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.models import OnlineNonNegativeMatrixFactorization
-from cellarium.ml.models.nmf import NMFOutput
+from cellarium.ml.models.nmf import (
+    NMFOutput,
+    mairal_sufficient_statistics,
+    online_dictionary_update_fista,
+    online_dictionary_update_mairal,
+)
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField
 
@@ -808,3 +814,113 @@ def test_from_checkpoints_split_by_r(tmp_path, small_adata: anndata.AnnData):
     # exact values: first 2 replicates come from checkpoint 1, last 3 from checkpoint 2
     expected = torch.cat([d_tensors_1[3], d_tensors_2[3]], dim=0)
     assert torch.allclose(combined, expected), "Combined D tensor values do not match concatenation of source tensors"
+
+
+def test_mairal_sufficient_statistics_are_additive():
+    """Sums over disjoint sets of cells add up to the sums over all cells."""
+    torch.manual_seed(0)
+    r, n, k, g = 3, 20, 4, 7
+    loadings_rnk = torch.rand(r, n, k)
+    x_ng = torch.rand(n, g)
+
+    AtA_full, AtX_full, n_full = mairal_sufficient_statistics(loadings_rnk, x_ng)
+    AtA_1, AtX_1, n_1 = mairal_sufficient_statistics(loadings_rnk[:, :7], x_ng[:7])
+    AtA_2, AtX_2, n_2 = mairal_sufficient_statistics(loadings_rnk[:, 7:], x_ng[7:])
+
+    assert n_1 + n_2 == n_full
+    torch.testing.assert_close(AtA_1 + AtA_2, AtA_full)
+    torch.testing.assert_close(AtX_1 + AtX_2, AtX_full)
+
+
+def _mairal_update_worker(rank: int, world_size: int, init_file: str, x_ng: torch.Tensor, out_dir: str) -> None:
+    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    torch.manual_seed(0)
+    r, k, g = 2, 3, x_ng.shape[1]
+    out = online_dictionary_update_mairal(
+        x_ng=x_ng[rank::world_size],  # uneven split is fine: the sums are divided by the global n
+        factors_rkg=torch.rand(r, k, g),
+        A_rkk=torch.zeros(r, k, k),
+        B_rkg=torch.zeros(r, k, g),
+        alpha_tol=0.0,  # always run all iterations so the per-cell solves do not depend on the partition
+        D_tol=0.0,
+    )
+    torch.save(out, os.path.join(out_dir, f"rank{rank}.pt"))
+    torch.distributed.destroy_process_group()
+
+
+def test_online_dictionary_update_mairal_multi_process_matches_single_process():
+    world_size = 2
+    torch.manual_seed(1)
+    x_ng = torch.rand(31, 8)  # odd number of cells so the two ranks have different batch sizes
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        init_file = os.path.join(tmp_dir, "init")
+        torch.multiprocessing.spawn(
+            _mairal_update_worker, args=(world_size, init_file, x_ng, tmp_dir), nprocs=world_size, join=True
+        )
+        rank_results = [torch.load(os.path.join(tmp_dir, f"rank{rank}.pt")) for rank in range(world_size)]
+
+    torch.manual_seed(0)
+    r, k, g = 2, 3, x_ng.shape[1]
+    expected = online_dictionary_update_mairal(
+        x_ng=x_ng,
+        factors_rkg=torch.rand(r, k, g),
+        A_rkk=torch.zeros(r, k, k),
+        B_rkg=torch.zeros(r, k, g),
+        alpha_tol=0.0,
+        D_tol=0.0,
+    )
+
+    for result in rank_results:
+        for key in ("A_rkk", "B_rkg", "factors_rkg"):
+            torch.testing.assert_close(result[key], expected[key], rtol=1e-4, atol=1e-5)
+
+
+def _fista_update_worker(
+    rank: int, world_size: int, init_file: str, x_ng: torch.Tensor, loadings_rnk: torch.Tensor, out_dir: str
+) -> None:
+    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    torch.manual_seed(0)
+    r, k, g = loadings_rnk.shape[0], loadings_rnk.shape[2], x_ng.shape[1]
+    out = online_dictionary_update_fista(
+        x_ng=x_ng[rank::world_size],
+        factors_rkg=torch.rand(r, k, g),
+        loadings_rnk=loadings_rnk[:, rank::world_size].contiguous(),
+        A_rkk=torch.zeros(r, k, k),
+        B_rkg=torch.zeros(r, k, g),
+        n_iterations=20,
+    )
+    torch.save(out, os.path.join(out_dir, f"rank{rank}.pt"))
+    torch.distributed.destroy_process_group()
+
+
+def test_online_dictionary_update_fista_multi_process_matches_single_process():
+    world_size = 2
+    r, k, g = 2, 3, 8
+    torch.manual_seed(1)
+    x_ng = torch.rand(31, g)  # odd number of cells so the two ranks have different batch sizes
+    loadings_rnk = torch.rand(r, 31, k)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        init_file = os.path.join(tmp_dir, "init")
+        torch.multiprocessing.spawn(
+            _fista_update_worker,
+            args=(world_size, init_file, x_ng, loadings_rnk, tmp_dir),
+            nprocs=world_size,
+            join=True,
+        )
+        rank_results = [torch.load(os.path.join(tmp_dir, f"rank{rank}.pt")) for rank in range(world_size)]
+
+    torch.manual_seed(0)
+    expected = online_dictionary_update_fista(
+        x_ng=x_ng,
+        factors_rkg=torch.rand(r, k, g),
+        loadings_rnk=loadings_rnk,
+        A_rkk=torch.zeros(r, k, k),
+        B_rkg=torch.zeros(r, k, g),
+        n_iterations=20,
+    )
+
+    for result in rank_results:
+        for key in ("A_rkk", "B_rkg", "factors_rkg"):
+            torch.testing.assert_close(result[key], expected[key], rtol=1e-4, atol=1e-5)

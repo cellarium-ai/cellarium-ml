@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import os
+import tempfile
 
 import anndata
 import lightning.pytorch as pl
@@ -161,3 +162,27 @@ def test_amortized_nmf_infer_loadings(small_adata: anndata.AnnData) -> None:
     rec_error = nmf_output.calculate_reconstruction_error(k_values=[k])
     assert k in rec_error
     assert np.isfinite(rec_error[k]), f"Reconstruction error should be finite, got {rec_error[k]}"
+
+
+def _mean_across_ranks_worker(rank: int, world_size: int, init_file: str, out_dir: str) -> None:
+    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    out = AmortizedOnlineNonNegativeMatrixFactorization._mean_across_ranks(
+        [1.0 + rank, None, 10.0 * rank], device=torch.device("cpu")
+    )
+    torch.save(out, os.path.join(out_dir, f"rank{rank}.pt"))
+    torch.distributed.destroy_process_group()
+
+
+def test_mean_across_ranks():
+    world_size = 2
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        torch.multiprocessing.spawn(
+            _mean_across_ranks_worker,
+            args=(world_size, os.path.join(tmp_dir, "init"), tmp_dir),
+            nprocs=world_size,
+            join=True,
+        )
+        results = [torch.load(os.path.join(tmp_dir, f"rank{rank}.pt")) for rank in range(world_size)]
+
+    for result in results:
+        assert result == [1.5, None, 5.0]

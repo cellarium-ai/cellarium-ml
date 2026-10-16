@@ -861,9 +861,6 @@ def online_dictionary_update_nmf_torch_hals(
             "B_rkg": The updated matrix B.
     """
 
-    n, g = x_ng.shape
-    r, _, _ = factors_rkg.shape
-
     # inplace update loadings_rnk
     nmf_torch_update_loadings_hals_with_compile(
         x_ng=x_ng,
@@ -874,9 +871,12 @@ def online_dictionary_update_nmf_torch_hals(
     )
 
     with torch.no_grad():
-        # update A and B, Mairal Algorithm 1 step 5 and 6
-        A_rkk = exponential_decay_rho * A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
-        B_rkg = exponential_decay_rho * B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+        # update A and B, Mairal Algorithm 1 step 5 and 6 (sums are taken over the cells of all ranks if distributed)
+        AtA_rkk, AtX_rkg, n_global = all_reduce_mairal_sufficient_statistics(
+            *mairal_sufficient_statistics(loadings_rnk, x_ng)
+        )
+        A_rkk = exponential_decay_rho * A_rkk + AtA_rkk / n_global
+        B_rkg = exponential_decay_rho * B_rkg + AtX_rkg / n_global
 
     # inplace update factors_rkg
     nmf_torch_update_factors_hals_with_compile(
@@ -919,9 +919,6 @@ def online_dictionary_update_fista(
             "B_rkg": The updated matrix B.
     """
 
-    n, g = x_ng.shape
-    r, _, _ = factors_rkg.shape
-
     # update loadings_rnk
     loadings_rnk, loadings_history = nmf_compute_loadings_fista(
         x_ng=x_ng,
@@ -932,9 +929,12 @@ def online_dictionary_update_fista(
     )
 
     with torch.no_grad():
-        # update A and B, Mairal Algorithm 1 step 5 and 6
-        A_rkk = exponential_decay_rho * A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
-        B_rkg = exponential_decay_rho * B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+        # update A and B, Mairal Algorithm 1 step 5 and 6 (sums are taken over the cells of all ranks if distributed)
+        AtA_rkk, AtX_rkg, n_global = all_reduce_mairal_sufficient_statistics(
+            *mairal_sufficient_statistics(loadings_rnk, x_ng)
+        )
+        A_rkk = exponential_decay_rho * A_rkk + AtA_rkk / n_global
+        B_rkg = exponential_decay_rho * B_rkg + AtX_rkg / n_global
 
     # update factors_rkg
     factors_rkg, factors_history = nmf_compute_factors_fista(
@@ -958,6 +958,56 @@ def online_dictionary_update_fista(
     return result
 
 
+def _distributed_world_size() -> int:
+    """Number of processes in the default process group, or 1 if not running distributed."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
+    return 1
+
+
+def mairal_sufficient_statistics(
+    loadings_rnk: torch.Tensor,
+    x_ng: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """
+    Per-minibatch sums that Mairal's matrices A and B accumulate. These are linear in the cells, so sums computed
+    on disjoint sets of cells can simply be added together.
+
+    Args:
+        loadings_rnk: The loadings (Mairal's alpha) of the cells in the minibatch.
+        x_ng: The data for the cells in the minibatch.
+
+    Returns:
+        Tuple of the sum over cells of alpha alpha^T (shape r, k, k), the sum over cells of alpha x^T
+        (shape r, k, g), and the number of cells.
+    """
+    r, n, _ = loadings_rnk.shape
+    g = x_ng.shape[1]
+    alpha_t_rkn = loadings_rnk.transpose(1, 2)
+    return torch.bmm(alpha_t_rkn, loadings_rnk), torch.bmm(alpha_t_rkn, x_ng.expand(r, n, g)), n
+
+
+def all_reduce_mairal_sufficient_statistics(
+    AtA_rkk: torch.Tensor,
+    AtX_rkg: torch.Tensor,
+    n: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """
+    Sum the output of :func:`mairal_sufficient_statistics` across all processes, if running distributed.
+    This makes the result equivalent to a single minibatch made of the union of every rank's cells.
+    """
+    if _distributed_world_size() == 1:
+        return AtA_rkk, AtX_rkg, n
+
+    n_t = torch.tensor([n], dtype=AtA_rkk.dtype, device=AtA_rkk.device)
+    packed = torch.cat([AtA_rkk.flatten(), AtX_rkg.flatten(), n_t])
+    torch.distributed.all_reduce(packed, op=torch.distributed.ReduceOp.SUM)
+    AtA_size = AtA_rkk.numel()
+    AtA_rkk = packed[:AtA_size].view_as(AtA_rkk)
+    AtX_rkg = packed[AtA_size : AtA_size + AtX_rkg.numel()].view_as(AtX_rkg)
+    return AtA_rkk, AtX_rkg, int(round(packed[-1].item()))
+
+
 def online_dictionary_update_mairal(
     x_ng: torch.Tensor,
     factors_rkg: torch.Tensor,
@@ -970,9 +1020,13 @@ def online_dictionary_update_mairal(
     """
     Algorithm 1 from Mairal et al. [1] for online dictionary learning.
 
+    When running with multiple processes, the minibatch statistics used to update A and B are summed across ranks
+    (and divided by the global number of cells), so that the update equals that of a single minibatch containing
+    every rank's cells. All ranks must therefore call this function the same number of times.
+
     Args:
         x_ng: The data.
-        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
+        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D). Must be identical on all ranks.
         A_rkk: Mairal's matrix A.
         B_rkg: Mairal's matrix B.
         n_iterations: The number of iterations to perform.
@@ -985,9 +1039,6 @@ def online_dictionary_update_mairal(
             "A_rkk": The updated matrix A.
             "B_rkg": The updated matrix B.
     """
-
-    n, g = x_ng.shape
-    r, _, _ = factors_rkg.shape
 
     # TODO benchmark compute_loadings vs solve_nnls_fista
     # update loadings, Mairal Algorithm 1 step 4
@@ -1002,9 +1053,13 @@ def online_dictionary_update_mairal(
     ).transpose(1, 2)
 
     with torch.no_grad():
-        # update A and B, Mairal Algorithm 1 step 5 and 6
-        A_rkk = A_rkk + torch.bmm(loadings_rnk.transpose(1, 2), loadings_rnk) / n
-        B_rkg = B_rkg + torch.bmm(loadings_rnk.transpose(1, 2), x_ng.expand(r, n, g)) / n
+        # update A and B, Mairal Algorithm 1 step 5 and 6. When running distributed, the sums are taken over the
+        # cells of all ranks, so every rank ends up with the same A, B (and thus the same updated D).
+        AtA_rkk, AtX_rkg, n_global = all_reduce_mairal_sufficient_statistics(
+            *mairal_sufficient_statistics(loadings_rnk, x_ng)
+        )
+        A_rkk = A_rkk + AtA_rkk / n_global
+        B_rkg = B_rkg + AtX_rkg / n_global
 
         # TODO benchmark compute_factors vs compute_factors_nmf_torch_online_mu
         # update D, Mairal Algorithm 1 step 7
@@ -1289,6 +1344,10 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+
+        if self.algorithm == "nmf_torch_hals" and _distributed_world_size() > 1:
+            # the per-cell loadings are rank-local buffers, which DDP would overwrite with rank 0's values
+            raise NotImplementedError("algorithm='nmf_torch_hals' does not support multi-process training.")
 
         # handle the mapping of obs_names to indices for local latents
         minibatch_indices_n: torch.Tensor | None = None

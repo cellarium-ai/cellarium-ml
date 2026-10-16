@@ -17,6 +17,7 @@ from cellarium.ml.models.nmf import (
     NMFInitSklearnRandom,
     NMFInitUniformRandom,
     NonNegativeMatrixFactorization,
+    _distributed_world_size,
     compute_reconstruction_error_compiled,
     frobenius_loss_trace_compiled,
     nmf_frobenius_loss,
@@ -336,6 +337,19 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                 "lightning.pytorch.strategies.DDPStrategy is set to True"
             )
 
+    @staticmethod
+    def _mean_across_ranks(values: list[float | None], device: torch.device) -> list[float | None]:
+        """
+        Average each value across all processes (a no-op when not distributed). Which entries are ``None`` must be
+        the same on every rank, which holds since the windows are filled at the same global steps on all ranks.
+        """
+        world_size = _distributed_world_size()
+        if world_size == 1:
+            return values
+        values_t = torch.tensor([0.0 if v is None else v for v in values], dtype=torch.float32, device=device)
+        torch.distributed.all_reduce(values_t, op=torch.distributed.ReduceOp.SUM)
+        return [None if v is None else float(m) / world_size for v, m in zip(values, values_t.tolist())]
+
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         step = trainer.global_step
         if step == 0:
@@ -445,6 +459,11 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             self._recon_loss_window_sum[k] = 0.0
             self._recon_loss_window_count[k] = 0
 
+            # the decisions below (cooldown, stopping, forgetting) must be identical on every rank, so use the
+            # losses averaged across ranks rather than each rank's local losses
+            current_encoder_loss, current_recon_loss = self._mean_across_ranks(
+                [current_encoder_loss, current_recon_loss], device=D_rkg.device
+            )
             # log per-k reconstruction loss (raw window average)
             if current_recon_loss is not None:
                 module.log(f"k={k}_rec_error", current_recon_loss, prog_bar=False)
