@@ -173,8 +173,8 @@ def x_correlated_mean_nmf_ng(alpha_correlated_nk, d_correlated_kg) -> torch.Tens
 
 
 @pytest.fixture(scope="module")
-def fixture_x_correlated_mean_nmf_ng(fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg) -> torch.Tensor:
-    return x_correlated_mean_nmf_ng(fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg)
+def fixture_x_correlated_mean_nmf_ng(fixture_alpha_correlated_nk, fixture_d_correlated_kg) -> torch.Tensor:
+    return x_correlated_mean_nmf_ng(fixture_alpha_correlated_nk, fixture_d_correlated_kg)
 
 
 @pytest.fixture(scope="module")
@@ -554,6 +554,9 @@ def test_online_nmf_against_sklearn(
         case _:
             raise ValueError(f"unexpected data: {data}")
 
+    # correlated programs make the NMF solution less unique, so allow more disagreement between the methods
+    loading_similarity_threshold = 0.9 if data.endswith("_correlated") else 0.95
+    factor_truth_gap_tolerance = 0.02 if data.endswith("_correlated") else 0.01
     # assert that the cellarium loadings match truth as much as the sklearn loadings do
     pairwise_cellarium_loading_similarity_nn = pairwise_cosine_similarity_cdist(
         cellarium_loadings_nk,
@@ -584,9 +587,11 @@ def test_online_nmf_against_sklearn(
         )
     if not (total_cs_factor_similarity > 0.9):
         messages.append(f"cellarium and sklearn factors are not very similar: {total_cs_factor_similarity}")
-    if not (total_cs_loading_similarity > 0.95):
+    if not (total_cs_loading_similarity > loading_similarity_threshold):
         messages.append(f"cellarium and sklearn loadings are not very similar: {total_cs_loading_similarity:.4f}")
-    if not (total_factor_sklearn_truth_similarity - total_factor_cellarium_truth_similarity <= 0.01):
+    if not (
+        total_factor_sklearn_truth_similarity - total_factor_cellarium_truth_similarity <= factor_truth_gap_tolerance
+    ):
         messages.append(
             f"cellarium factors are substantially less similar to truth than sklearn factors: "
             f"{total_factor_sklearn_truth_similarity - total_factor_cellarium_truth_similarity:.4f}"
