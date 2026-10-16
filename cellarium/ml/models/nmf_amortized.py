@@ -363,7 +363,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         if not at_period_boundary:
             return
 
-        module = trainer.model
+        module = trainer.lightning_module
         assert isinstance(module, pl.LightningModule)
 
         # --- log reconstruction error EMA ---
