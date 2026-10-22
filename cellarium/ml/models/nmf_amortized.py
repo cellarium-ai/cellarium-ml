@@ -18,7 +18,7 @@ from cellarium.ml.models.nmf import (
     NMFInitUniformRandom,
     NonNegativeMatrixFactorization,
     _distributed_world_size,
-    compute_reconstruction_error_compiled,
+    compute_x_squared_sum,
     frobenius_loss_trace_compiled,
     nmf_frobenius_loss,
     online_dictionary_update_fista,
@@ -284,6 +284,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
 
         encoder_losses: list[torch.Tensor] = []
         nmf_reconstruction_errors: list[torch.Tensor] = []
+        x_squared_sum = compute_x_squared_sum(x_ng)
         for k in self.k_values:
             if self._k_done[k]:
                 continue
@@ -303,6 +304,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                     x_ng=x_ng,
                     h_rnk=solver_loadings_rnk,
                     w_rkg=factors_rkg,
+                    x_squared_sum=x_squared_sum,
                 )
                 nmf_reconstruction_error = squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
                 nmf_reconstruction_errors.append(nmf_reconstruction_error)
@@ -612,13 +614,15 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         nmf_reconstruction_errors = []
+        x_squared_sum = compute_x_squared_sum(x_ng)
         for k in self.k_values:
             factors_rkg = getattr(self, f"D_{k}_rkg")
             encoder_loadings_rnk = self.encoder(x_ng, factors_rkg.detach())
-            squared_error_r = compute_reconstruction_error_compiled(
+            squared_error_r = frobenius_loss_trace_compiled(
                 x_ng=x_ng,
-                loadings_rnk=encoder_loadings_rnk,
-                factors_rkg=factors_rkg,
+                h_rnk=encoder_loadings_rnk,
+                w_rkg=factors_rkg,
+                x_squared_sum=x_squared_sum,
             )
             nmf_reconstruction_error = squared_error_r.mean() / (x_ng.shape[0] * x_ng.shape[1])
             nmf_reconstruction_errors.append(nmf_reconstruction_error)

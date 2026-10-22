@@ -15,9 +15,13 @@ from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.models import OnlineNonNegativeMatrixFactorization
+from cellarium.ml.models import nmf as nmf_module
 from cellarium.ml.models.nmf import (
     NMFOutput,
+    compute_x_squared_sum,
+    frobenius_loss_trace_compiled,
     mairal_sufficient_statistics,
+    nmf_frobenius_loss,
     online_dictionary_update_fista,
     online_dictionary_update_mairal,
 )
@@ -929,3 +933,162 @@ def test_online_dictionary_update_fista_multi_process_matches_single_process():
     for result in rank_results:
         for key in ("A_rkk", "B_rkg", "factors_rkg"):
             torch.testing.assert_close(result[key], expected[key], rtol=1e-4, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# frobenius_loss_trace_compiled
+# ---------------------------------------------------------------------------
+
+
+def _direct_squared_error_r(x_ng: torch.Tensor, h_rnk: torch.Tensor, w_rkg: torch.Tensor) -> torch.Tensor:
+    """Reference per-replicate ``||X - H W||_F^2``, materializing the reconstruction in float64."""
+    reconstruction_rng = torch.einsum("rnk,rkg->rng", h_rnk.double(), w_rkg.double())
+    return (x_ng.double().unsqueeze(0) - reconstruction_rng).pow(2).sum(dim=(1, 2))
+
+
+def _assert_squared_error_close(
+    actual_r: torch.Tensor, expected_r: torch.Tensor, x_ng: torch.Tensor, rtol: float, x_norm_atol: float = 0.0
+) -> None:
+    """
+    The trace expansion cancels terms of size ``||X||^2``, so when the fit is good the achievable absolute
+    accuracy is set by ``||X||^2`` rather than by the (much smaller) loss. ``x_norm_atol`` is that
+    absolute tolerance as a fraction of ``||X||^2``.
+    """
+    atol = x_norm_atol * x_ng.double().pow(2).sum().item()
+    torch.testing.assert_close(actual_r.double(), expected_r, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "r, n, k, g",
+    [(1, 16, 3, 8), (4, 50, 5, 20), (3, 7, 1, 11), (2, 1, 4, 9), (5, 64, 8, 6)],
+)
+def test_frobenius_loss_trace_matches_direct_on_random_inputs(r: int, n: int, k: int, g: int):
+    torch.manual_seed(0)
+    x_ng = 5 * torch.rand(n, g)
+    h_rnk = torch.rand(r, n, k)
+    w_rkg = torch.rand(r, k, g)
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    assert actual_r.shape == (r,)
+    _assert_squared_error_close(actual_r, _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
+)
+def test_frobenius_loss_trace_on_nmf_fit(
+    x_nmf_ng: dict[str, torch.Tensor],
+    data: str,
+    fixture_d_correlated_kg: torch.Tensor,
+    fixture_d_uncorrelated_kg: torch.Tensor,
+    fixture_alpha_correlated_nk: torch.Tensor,
+    fixture_alpha_uncorrelated_nk: torch.Tensor,
+):
+    """Loss of a good NMF fit (the true factors and loadings) to realistic simulated data."""
+    if data.endswith("_correlated"):
+        alpha_nk, d_kg = fixture_alpha_correlated_nk, fixture_d_correlated_kg
+    else:
+        alpha_nk, d_kg = fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg
+    x_ng = x_nmf_ng[data]
+
+    # the simulation rescales the mean so that cells sum to g on average; apply the same scale to the loadings
+    scale = x_ng.shape[1] / (alpha_nk @ d_kg).sum(dim=-1).mean()
+    h_rnk = torch.stack([alpha_nk * scale, 0.9 * alpha_nk * scale])
+    w_rkg = d_kg.unsqueeze(0).repeat(2, 1, 1)
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    _assert_squared_error_close(
+        actual_r, _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-4, x_norm_atol=1e-6
+    )
+    # and it agrees with the plain (single replicate) loss used elsewhere in the module
+    for replicate in range(2):
+        direct = nmf_frobenius_loss(x_ng=x_ng, loadings_nk=h_rnk[replicate], factors_kg=w_rkg[replicate])
+        _assert_squared_error_close(
+            actual_r[replicate : replicate + 1], direct.double().reshape(1), x_ng, rtol=1e-4, x_norm_atol=1e-6
+        )
+
+
+def test_frobenius_loss_trace_is_nonnegative_for_an_exact_fit():
+    """With ``X = H W`` exactly the loss is zero up to rounding, and the clamp keeps it from going negative."""
+    torch.manual_seed(0)
+    h_rnk = torch.rand(1, 40, 4)
+    w_rkg = torch.rand(1, 4, 25)
+    x_ng = h_rnk[0] @ w_rkg[0]
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    assert (actual_r >= 0).all()
+    assert actual_r.item() <= 1e-5 * x_ng.pow(2).sum().item()
+
+
+def test_frobenius_loss_trace_precomputed_x_squared_sum_matches_default():
+    torch.manual_seed(0)
+    x_ng = torch.rand(30, 12)
+    h_rnk = torch.rand(3, 30, 4)
+    w_rkg = torch.rand(3, 4, 12)
+
+    default_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+    precomputed_r = frobenius_loss_trace_compiled(
+        x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg, x_squared_sum=compute_x_squared_sum(x_ng)
+    )
+
+    torch.testing.assert_close(precomputed_r, default_r, rtol=0, atol=0)
+
+
+def test_frobenius_loss_trace_is_additive_over_cells():
+    """Sums over disjoint sets of cells add up to the sum over all cells."""
+    torch.manual_seed(0)
+    n, split = 40, 17
+    x_ng = torch.rand(n, 12)
+    h_rnk = torch.rand(3, n, 4)
+    w_rkg = torch.rand(3, 4, 12)
+
+    full_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+    part1_r = frobenius_loss_trace_compiled(x_ng=x_ng[:split], h_rnk=h_rnk[:, :split], w_rkg=w_rkg)
+    part2_r = frobenius_loss_trace_compiled(x_ng=x_ng[split:], h_rnk=h_rnk[:, split:], w_rkg=w_rkg)
+
+    _assert_squared_error_close(part1_r + part2_r, full_r.double(), x_ng, rtol=1e-5)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_frobenius_loss_trace_output_dtype_and_no_graph(dtype: torch.dtype):
+    torch.manual_seed(0)
+    x_ng = torch.rand(10, 6, dtype=dtype)
+    h_rnk = torch.rand(2, 10, 3, dtype=dtype)
+    w_rkg = torch.rand(2, 3, 6, dtype=dtype, requires_grad=True)
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    assert actual_r.dtype == dtype
+    assert not actual_r.requires_grad
+
+
+def test_frobenius_loss_trace_with_float32_reductions(monkeypatch: pytest.MonkeyPatch):
+    """Simulate a device without float64 (MPS): the reductions stay in float32 and remain accurate enough."""
+    monkeypatch.setattr(nmf_module, "_reduction_dtype", lambda device: torch.float32)
+    torch.manual_seed(0)
+    r, n, k, g = 3, 512, 6, 200
+    # a rough NMF-like fit: counts explained by a low-rank mean, so the residual is a large fraction of ||X||^2
+    h_rnk = torch.rand(r, n, k)
+    w_rkg = torch.rand(r, k, g)
+    x_ng = torch.poisson(torch.einsum("nk,kg->ng", h_rnk[0], w_rkg[0]))
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    _assert_squared_error_close(actual_r, _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-5)
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires MPS")
+def test_frobenius_loss_trace_on_mps():
+    torch.manual_seed(0)
+    r, n, k, g = 3, 512, 6, 200
+    h_rnk = torch.rand(r, n, k)
+    w_rkg = torch.rand(r, k, g)
+    x_ng = torch.poisson(torch.einsum("nk,kg->ng", h_rnk[0], w_rkg[0]))
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng.to("mps"), h_rnk=h_rnk.to("mps"), w_rkg=w_rkg.to("mps"))
+
+    assert actual_r.device.type == "mps"
+    _assert_squared_error_close(actual_r.cpu(), _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-5)

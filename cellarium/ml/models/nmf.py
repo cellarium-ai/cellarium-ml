@@ -180,23 +180,21 @@ def nmf_frobenius_loss(x_ng: torch.Tensor, loadings_nk: torch.Tensor, factors_kg
     return F.mse_loss(torch.matmul(loadings_nk, factors_kg), x_ng, reduction="sum")
 
 
-@torch.compile()
-@torch.no_grad()
-def compute_reconstruction_error_compiled(
-    x_ng: torch.Tensor, loadings_rnk: torch.Tensor, factors_rkg: torch.Tensor
-) -> torch.Tensor:
-    # Compute reconstruction: WH for current batch using einsum
-    # loadings_rnk: (r, batch_size, k), factors_rkg: (r, k, g)
-    # -> reconstruction_rng: (r, batch_size, g)
-    reconstruction_rng = torch.einsum("rnk,rkg->rng", loadings_rnk, factors_rkg)
+def _reduction_dtype(device: torch.device) -> torch.dtype:
+    """Widest float the device supports, for the scalar reductions in the Frobenius loss.
 
-    # Compute squared reconstruction error using einsum
-    # x_ng: (batch_size, g) -> expand to (r, batch_size, g) and compute ||X - WH||_F^2
-    x_expanded_rng = x_ng.unsqueeze(0).expand(loadings_rnk.shape[0], -1, -1)  # (r, batch_size, g)
+    MPS has no float64 at all, so there the reductions stay in float32.  That is accurate to
+    roughly 1e-6 relative to the loss unless the fit is nearly exact.
+    """
+    return torch.float32 if device.type == "mps" else torch.float64
 
-    # Compute squared Frobenius norm for each replicate
-    squared_error_r = F.mse_loss(x_expanded_rng, reconstruction_rng, reduction="none").sum(dim=[1, 2])
-    return squared_error_r
+
+def compute_x_squared_sum(x_ng: torch.Tensor) -> torch.Tensor:
+    """
+    ``||X||_F^2`` as a scalar, for sharing across calls to :func:`frobenius_loss_trace_compiled`
+    (e.g. when looping over ``k``) rather than recomputing it each time.
+    """
+    return x_ng.pow(2).sum(dtype=_reduction_dtype(x_ng.device))
 
 
 @torch.compile()
@@ -205,39 +203,38 @@ def frobenius_loss_trace_compiled(
     x_ng: torch.Tensor,
     h_rnk: torch.Tensor,
     w_rkg: torch.Tensor,
-    # x_squared_sum: torch.Tensor | None = None,
+    x_squared_sum: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Per-replicate ``||X - H W||_F^2`` computed *without* materializing the reconstruction.
 
     Uses :math:`\\|X - HW\\|_F^2 = \\|X\\|^2 - 2\\langle HX, W\\rangle + \\langle H^\\top H,
     WW^\\top\\rangle`, so the intermediates are ``(r, k, g)`` and ``(r, k, k)`` rather than
-    ``(r, n, g)``.  At ``r=100, n=2048, g=2000`` that is 80 MB instead of 1.6 GB.  And because
-    ``H`` is detached and ``X`` is data, both ``HX`` and ``H^T H`` are autograd constants: the
-    entire backward reduces to :math:`\\nabla_W = -2 HX + 2 (H^\\top H) W`.
+    ``(r, n, g)``.  At ``r=100, n=2048, g=2000`` that is 80 MB instead of 1.6 GB.
 
-    This is why the loss is Frobenius rather than Poisson KL.  KL does not factorize this way, and
-    its Poisson justification does not survive per-gene rescaling of the input anyway.
+    The three scalar terms are reduced in float64 where the device supports it (float32 on MPS),
+    which removes cancellation in the final combination.  The ``(r, k, g)`` and ``(r, k, k)``
+    contractions themselves run in the input dtype.
 
     Args:
         x_ng: Data, shape ``(n, g)``.
         h_rnk: Loadings, shape ``(r, n, k)``.
         w_rkg: Factors, shape ``(r, k, g)``.
-        x_squared_sum: Optional precomputed ``(x_ng ** 2).sum()``, shared across replicates.
+        x_squared_sum: Optional precomputed :func:`compute_x_squared_sum` of ``x_ng``, shared across
+            calls that use the same ``x_ng``.  Computed here if not given.
 
     Returns:
         Sum of squared errors per replicate, shape ``(r,)``.
     """
-    # if x_squared_sum is None:
-    #     x_squared_sum = x_ng.pow(2).sum()
-    x_squared_sum = x_ng.pow(2).sum()
+    reduction_dtype = _reduction_dtype(x_ng.device)
+    if x_squared_sum is None:
+        x_squared_sum = compute_x_squared_sum(x_ng)
     hx_rkg = torch.einsum("rnk,ng->rkg", h_rnk, x_ng)
     hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
     wwt_rkk = torch.einsum("rkg,rjg->rkj", w_rkg, w_rkg)
-    cross_r = (hx_rkg * w_rkg).sum(dim=(-2, -1))
-    quad_r = (hth_rkk * wwt_rkk).sum(dim=(-2, -1))
-    # Upcasting only the three reduced scalars is free and removes any cancellation concern.
-    sse_r = x_squared_sum.double() - 2.0 * cross_r.double() + quad_r.double()
+    cross_r = (hx_rkg * w_rkg).sum(dim=(-2, -1), dtype=reduction_dtype)
+    quad_r = (hth_rkk * wwt_rkk).sum(dim=(-2, -1), dtype=reduction_dtype)
+    sse_r = x_squared_sum.to(reduction_dtype) - 2.0 * cross_r + quad_r
     return sse_r.clamp(min=0.0).to(w_rkg.dtype)
 
 
@@ -1301,14 +1298,16 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         Simple and efficient NMF reconstruction loss computation.
         Computes ||X - WH||_F^2 for the current batch.
         """
+        x_squared_sum = compute_x_squared_sum(x_ng)
         for i, k in enumerate(self.k_values):
             factors_rkg = getattr(self, f"D_{k}_rkg")  # (r, k, g)
             loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]  # (r, batch_size, k)
 
-            squared_error_r = compute_reconstruction_error_compiled(
+            squared_error_r = frobenius_loss_trace_compiled(
                 x_ng=x_ng,
-                loadings_rnk=loadings_rnk,
-                factors_rkg=factors_rkg,
+                h_rnk=loadings_rnk,
+                w_rkg=factors_rkg,
+                x_squared_sum=x_squared_sum,
             )  # (r,)
 
             # Accumulate the squared error
