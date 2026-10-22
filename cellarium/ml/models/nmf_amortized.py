@@ -20,6 +20,7 @@ from cellarium.ml.models.nmf import (
     _distributed_world_size,
     compute_x_squared_sum,
     frobenius_loss_trace_compiled,
+    l1_normalize_factors,
     nmf_frobenius_loss,
     online_dictionary_update_fista,
     online_dictionary_update_nmf_torch_hals,
@@ -249,8 +250,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
             raise ValueError(f"Unknown solver: {self.solver}")
 
         # further L1 normalize D
-        D_rkg = updated_values["factors_rkg"]
-        D_rkg = F.normalize(D_rkg.view(-1, D_rkg.shape[-1]), p=1, dim=-1, eps=1e-8).view_as(D_rkg)
+        D_rkg = l1_normalize_factors(updated_values["factors_rkg"])
 
         # update running values
         setattr(self, f"A_{k}_rkk", updated_values["A_rkk"])

@@ -20,10 +20,10 @@ from cellarium.ml.models.nmf import (
     NMFOutput,
     compute_x_squared_sum,
     frobenius_loss_trace_compiled,
+    l1_normalize_factors,
     mairal_sufficient_statistics,
     nmf_frobenius_loss,
     online_dictionary_update_fista,
-    online_dictionary_update_mairal,
 )
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField
@@ -54,8 +54,8 @@ cell_type_coherence_factor = 20
 gene_set_sparsity_factor = 0.1
 
 
-@pytest.mark.parametrize("algorithm", ["mairal", "nmf_torch_hals"])
-def test_nmf_single_device(small_adata: anndata.AnnData, algorithm: Literal["mairal", "nmf_torch_hals"]):
+@pytest.mark.parametrize("solver", ["fista", "hals"])
+def test_nmf_single_device(small_adata: anndata.AnnData, solver: Literal["fista", "hals"]):
     n, g = small_adata.shape
     k_values = [3, 4]
     devices = 1  # int(os.environ.get("TEST_DEVICES", "1"))
@@ -77,7 +77,7 @@ def test_nmf_single_device(small_adata: anndata.AnnData, algorithm: Literal["mai
         var_names_g=[f"gene_{i}" for i in range(g)],
         k_values=k_values,
         r=5,
-        algorithm=algorithm,
+        solver=solver,
         n_cells_total=n,
     )
     module = CellariumModule(
@@ -204,7 +204,7 @@ def run_cellarium_online_nmf(
     x_ng: torch.Tensor,
     var_names_g: np.ndarray,
     k: int,
-    algorithm: Literal["mairal", "nmf_torch_hals"],
+    solver: Literal["fista", "hals"],
     seed: int,
     n_batches: int,
     devices,
@@ -237,7 +237,7 @@ def run_cellarium_online_nmf(
     cellarium_nmf = OnlineNonNegativeMatrixFactorization(
         var_names_g=var_names_g.tolist(),
         k_values=[k],
-        algorithm=algorithm,
+        solver=solver,
         r=1,
         n_cells_total=n,
     )
@@ -371,7 +371,7 @@ def similarity_matrix_assign_rows_to_columns(
 
 def run_online_nmf_and_sklearn_multi_device(
     x_ng: torch.Tensor,
-    algorithm: Literal["mairal", "nmf_torch_hals"],
+    solver: Literal["fista", "hals"],
     k: int = simulated_k,
     seed: int = 0,
     n_cellarium_batches: int = 1,
@@ -383,7 +383,7 @@ def run_online_nmf_and_sklearn_multi_device(
     cellarium_loadings_nk, cellarium_factors_kg = run_cellarium_online_nmf(
         x_ng=x_ng,
         var_names_g=var_names_g,
-        algorithm=algorithm,
+        solver=solver,
         k=k,
         devices=devices,
         seed=seed,
@@ -415,7 +415,7 @@ def run_online_nmf_and_sklearn_multi_device(
     return loadings, factors
 
 
-@pytest.mark.parametrize("algorithm", ["mairal", "nmf_torch_hals"])
+@pytest.mark.parametrize("solver", ["fista", "hals"])
 @pytest.mark.parametrize(
     "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
 )
@@ -423,7 +423,7 @@ def run_online_nmf_and_sklearn_multi_device(
 def test_online_nmf_against_sklearn(
     x_nmf_ng: dict[str, torch.Tensor],
     data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
-    algorithm: Literal["mairal", "nmf_torch_hals"],
+    solver: Literal["fista", "hals"],
     fixture_d_correlated_kg: torch.Tensor,
     fixture_d_uncorrelated_kg: torch.Tensor,
     fixture_alpha_correlated_nk: torch.Tensor,
@@ -436,7 +436,7 @@ def test_online_nmf_against_sklearn(
     loadings, factors = run_online_nmf_and_sklearn_multi_device(
         x_ng,
         n_cellarium_batches=n_cellarium_batches,
-        algorithm=algorithm,
+        solver=solver,
     )
     transform = DivideByScale(
         scale_g=x_ng.std(dim=0),
@@ -721,7 +721,7 @@ def _build_datamodule_and_train(
         var_names_g=list(adata.var_names),
         k_values=k_values,
         r=r,
-        algorithm="mairal",
+        solver="fista",
         init="uniform_random",
     )
     scale_g = torch.tensor(np.array(adata.X).std(axis=0).astype(np.float32))
@@ -839,50 +839,6 @@ def test_mairal_sufficient_statistics_are_additive():
     assert n_1 + n_2 == n_full
     torch.testing.assert_close(AtA_1 + AtA_2, AtA_full)
     torch.testing.assert_close(AtX_1 + AtX_2, AtX_full)
-
-
-def _mairal_update_worker(rank: int, world_size: int, init_file: str, x_ng: torch.Tensor, out_dir: str) -> None:
-    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
-    torch.manual_seed(0)
-    r, k, g = 2, 3, x_ng.shape[1]
-    out = online_dictionary_update_mairal(
-        x_ng=x_ng[rank::world_size],  # uneven split is fine: the sums are divided by the global n
-        factors_rkg=torch.rand(r, k, g),
-        A_rkk=torch.zeros(r, k, k),
-        B_rkg=torch.zeros(r, k, g),
-        alpha_tol=0.0,  # always run all iterations so the per-cell solves do not depend on the partition
-        D_tol=0.0,
-    )
-    torch.save(out, os.path.join(out_dir, f"rank{rank}.pt"))
-    torch.distributed.destroy_process_group()
-
-
-def test_online_dictionary_update_mairal_multi_process_matches_single_process():
-    world_size = 2
-    torch.manual_seed(1)
-    x_ng = torch.rand(31, 8)  # odd number of cells so the two ranks have different batch sizes
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        init_file = os.path.join(tmp_dir, "init")
-        torch.multiprocessing.spawn(
-            _mairal_update_worker, args=(world_size, init_file, x_ng, tmp_dir), nprocs=world_size, join=True
-        )
-        rank_results = [torch.load(os.path.join(tmp_dir, f"rank{rank}.pt")) for rank in range(world_size)]
-
-    torch.manual_seed(0)
-    r, k, g = 2, 3, x_ng.shape[1]
-    expected = online_dictionary_update_mairal(
-        x_ng=x_ng,
-        factors_rkg=torch.rand(r, k, g),
-        A_rkk=torch.zeros(r, k, k),
-        B_rkg=torch.zeros(r, k, g),
-        alpha_tol=0.0,
-        D_tol=0.0,
-    )
-
-    for result in rank_results:
-        for key in ("A_rkk", "B_rkg", "factors_rkg"):
-            torch.testing.assert_close(result[key], expected[key], rtol=1e-4, atol=1e-5)
 
 
 def _fista_update_worker(
@@ -1092,3 +1048,121 @@ def test_frobenius_loss_trace_on_mps():
 
     assert actual_r.device.type == "mps"
     _assert_squared_error_close(actual_r.cpu(), _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# OnlineNonNegativeMatrixFactorization solvers
+# ---------------------------------------------------------------------------
+
+
+def _small_online_nmf(solver: Literal["fista", "hals"], g: int = 8):
+    return OnlineNonNegativeMatrixFactorization(
+        var_names_g=[f"gene_{i}" for i in range(g)], k_values=[3, 4], r=2, solver=solver, n_cells_total=30
+    )
+
+
+@pytest.mark.parametrize("solver, stores_loadings", [("fista", False), ("hals", True)])
+def test_online_nmf_stores_loadings_per_solver(solver: Literal["fista", "hals"], stores_loadings: bool):
+    model = _small_online_nmf(solver)
+
+    assert model.stores_loadings is stores_loadings
+    for k in model.k_values:
+        assert hasattr(model, f"loadings_{k}_rnk") is stores_loadings
+
+
+def test_online_nmf_rejects_unknown_solver():
+    with pytest.raises(ValueError, match="Unknown solver"):
+        OnlineNonNegativeMatrixFactorization(
+            var_names_g=["gene_0", "gene_1"],
+            k_values=[2],
+            r=1,
+            solver="mairal",  # type: ignore[arg-type]
+        )
+
+
+def test_online_nmf_hals_requires_n_cells_total():
+    with pytest.raises(ValueError, match="n_cells_total"):
+        OnlineNonNegativeMatrixFactorization(var_names_g=["gene_0", "gene_1"], k_values=[2], r=1, solver="hals")
+
+
+def test_online_nmf_hals_does_not_support_multi_process(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(nmf_module, "_distributed_world_size", lambda: 2)
+    model = _small_online_nmf("hals")
+
+    with pytest.raises(NotImplementedError, match="multi-process"):
+        model(
+            x_ng=torch.rand(10, 8),
+            var_names_g=model.var_names_g,
+            obs_names_n=np.array([f"cell_{i}" for i in range(10)]),
+        )
+
+
+def test_online_nmf_fista_needs_no_obs_names_and_normalizes_factors():
+    torch.manual_seed(0)
+    model = _small_online_nmf("fista")
+
+    for _ in range(3):
+        model(x_ng=torch.rand(30, 8), var_names_g=model.var_names_g)
+
+    for k in model.k_values:
+        factors_rkg = model.factors_dict[k]
+        torch.testing.assert_close(factors_rkg.sum(dim=-1), torch.ones(factors_rkg.shape[:2]))
+        assert (factors_rkg >= 0).all()
+        assert getattr(model, f"A_{k}_rkk").abs().sum() > 0  # the sufficient statistics were accumulated
+
+
+def test_l1_normalize_factors():
+    factors_rkg = torch.tensor([[[1.0, 3.0, 0.0], [0.0, 0.0, 0.0]], [[2.0, 2.0, 4.0], [5.0, 0.0, 5.0]]])
+
+    normalized_rkg = l1_normalize_factors(factors_rkg)
+
+    expected_rkg = torch.tensor([[[0.25, 0.75, 0.0], [0.0, 0.0, 0.0]], [[0.25, 0.25, 0.5], [0.5, 0.0, 0.5]]])
+    torch.testing.assert_close(normalized_rkg, expected_rkg)  # an all-zero row stays zero rather than becoming NaN
+
+
+def test_online_nmf_hals_persists_loadings_of_the_minibatch_cells():
+    """The loadings the HALS solver computes for a minibatch are written back to the per-cell buffers."""
+    torch.manual_seed(0)
+    n = 30
+    model = _small_online_nmf("hals")
+    x_ng = torch.rand(n, 8)
+    obs_names_n = np.array([f"cell_{i}" for i in range(n)])
+    before = {k: getattr(model, f"loadings_{k}_rnk").clone() for k in model.k_values}
+
+    model(x_ng=x_ng[:10], var_names_g=model.var_names_g, obs_names_n=obs_names_n[:10])
+
+    seen_n = torch.tensor([model.obs_names_to_index_map[name] for name in obs_names_n[:10]])
+    unseen_n = torch.tensor([i for i in range(n) if i not in seen_n.tolist()])
+    for k in model.k_values:
+        after_rnk = getattr(model, f"loadings_{k}_rnk")
+        assert not torch.equal(after_rnk[:, seen_n], before[k][:, seen_n])  # the minibatch cells were updated
+        torch.testing.assert_close(after_rnk[:, unseen_n], before[k][:, unseen_n], rtol=0, atol=0)  # others were not
+        assert (after_rnk >= 0).all()
+
+
+def test_online_nmf_hals_stored_loadings_improve_the_fit():
+    """The stored loadings are the solver's fit of each cell, so they reconstruct the data
+    better than the initial ones."""
+    torch.manual_seed(0)
+    n, g = 30, 8
+    model = _small_online_nmf("hals")
+    x_ng = torch.rand(n, 3) @ torch.rand(3, g)  # low rank, so there is a good fit to find
+    obs_names_n = np.array([f"cell_{i}" for i in range(n)])
+    k = 3
+
+    def stored_loadings_error_r() -> torch.Tensor:
+        # the cells were all seen in the first forward, so the index map is complete after it
+        index_n = torch.tensor([model.obs_names_to_index_map[name] for name in obs_names_n])
+        return frobenius_loss_trace_compiled(
+            x_ng=x_ng, h_rnk=getattr(model, f"loadings_{k}_rnk")[:, index_n], w_rkg=model.factors_dict[k]
+        )
+
+    model(x_ng=x_ng, var_names_g=model.var_names_g, obs_names_n=obs_names_n)
+    error_after_one_pass_r = stored_loadings_error_r()
+    for _ in range(4):
+        model(x_ng=x_ng, var_names_g=model.var_names_g, obs_names_n=obs_names_n)
+    error_after_five_passes_r = stored_loadings_error_r()
+
+    # the data has squared norm of about n * g * E[x^2]; the stored loadings must explain a good part of it
+    assert (error_after_five_passes_r < 0.5 * x_ng.pow(2).sum()).all()
+    assert (error_after_five_passes_r <= error_after_one_pass_r * 1.0001).all()

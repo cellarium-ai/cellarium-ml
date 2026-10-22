@@ -709,7 +709,7 @@ TWO_DEVICE_CONFIGS = [
                     "init_args": {
                         "k_values": [5],
                         "r": 10,
-                        "algorithm": "mairal",
+                        "solver": "fista",
                         "var_names_g": [
                             "ENSG00000187642",
                             "ENSG00000078808",

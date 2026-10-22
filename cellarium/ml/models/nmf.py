@@ -499,127 +499,6 @@ def find_local_minima(mean_neighbor_distance_m: torch.Tensor, n_bins: int = 100)
     return candidate_values
 
 
-def compute_loadings(
-    x_ng: torch.Tensor,
-    factors_rkg: torch.Tensor,
-    n_iterations: int,
-    alpha_tol: float = 1e-5,
-) -> torch.Tensor:
-    """
-    Algorithm 1 step 4 from Mairal et al. [1] for computing the loadings.
-
-    Args:
-        x_ng: The data.
-        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
-        n_iterations: The max number of iterations to perform.
-        alpha_tol: The tolerance for the change in alpha for stopping.
-
-    Returns:
-        The computed loadings.
-    """
-    n, _ = x_ng.shape
-    r, n_factors, g = factors_rkg.shape
-
-    # initialization
-    alpha_rnk = torch.rand((r, n, n_factors), device=factors_rkg.device).abs()
-    # alpha_rnk = torch.zeros((r, n, n_factors), device=factors_rkg.device)
-
-    with torch.no_grad():
-        for rep in range(r):
-            D_kg = factors_rkg[rep]  # (k, g)
-
-            # scaled random based on data statistics
-            data_scale = torch.mean(x_ng)
-            factor_scale = torch.mean(torch.abs(D_kg))
-            if factor_scale > 1e-10:
-                init_scale = data_scale / (factor_scale * n_factors)
-                alpha_rnk[rep] = init_scale * torch.rand((n, n_factors), device=factors_rkg.device)
-            else:
-                # last resort - simple uniform random
-                alpha_rnk[rep] = 0.1 * torch.rand((n, n_factors), device=factors_rkg.device)
-
-    alpha_buffer_rnk = alpha_rnk.clone()
-
-    DDT = torch.bmm(factors_rkg, factors_rkg.transpose(1, 2))
-    xDT = torch.bmm(x_ng.expand(r, n, g), factors_rkg.transpose(1, 2))
-
-    for i in range(n_iterations):
-        for k in range(n_factors):
-            scalar = DDT[:, k, k].view(r, 1, 1)
-            a_rk1 = DDT[:, :, k].unsqueeze(2)
-            b_rn1 = xDT[:, :, k].unsqueeze(2)
-
-            # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
-            u_r1g = torch.clamp(
-                alpha_rnk[:, :, k].unsqueeze(2) + (b_rn1 - torch.bmm(alpha_rnk, a_rk1)) / scalar,
-                min=0.0,
-            )
-            alpha_rnk[:, :, k] = u_r1g.squeeze(2)
-
-        alpha_max_diff = (
-            F.mse_loss(alpha_rnk, alpha_buffer_rnk, reduction="none").sum(dim=[-2, -1])
-            / alpha_rnk.square().sum(dim=[-2, -1])
-        ).max()
-        if alpha_max_diff <= alpha_tol:
-            break
-        alpha_buffer_rnk = alpha_rnk.clone()
-
-    return alpha_rnk
-
-
-def compute_factors(
-    A_rkk: torch.Tensor,
-    B_rkg: torch.Tensor,
-    factors_rkg: torch.Tensor,
-    n_iterations: int,
-    D_tol: float = 2e-5,
-) -> torch.Tensor:
-    """
-    Algorithm 2 from Mairal et al. [1] for computing the dictionary update.
-
-    Args:
-        A_rkk: Mairal's matrix A.
-        B_rkg: Mairal's matrix B.
-        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D).
-        n_iterations: The number of iterations to perform.
-        D_tol: The tolerance for the change in D for stopping.
-
-    Returns:
-        The updated dictionary.
-    """
-    factors_buffer_rkg = factors_rkg.clone()
-    updated_factors_rkg = factors_rkg.clone()
-    r, n_factors, g = factors_rkg.shape
-
-    for i in range(n_iterations):
-        for k in range(n_factors):
-            # clamp so a dead factor (A_kk = 0, B_k = 0) keeps its value rather than becoming NaN via 0/0
-            scalar = A_rkk[:, k, k].clamp(min=1e-12).view(r, 1, 1)
-            a_r1k = A_rkk[:, k, :].unsqueeze(1)
-            b_r1g = B_rkg[:, k, :].unsqueeze(1)
-
-            # Algorithm 2 line 3 with added non-negativity constraint, also possibly wrong
-            u_r1g = torch.clamp(
-                updated_factors_rkg[:, k, :].unsqueeze(1) + (b_r1g - torch.bmm(a_r1k, updated_factors_rkg)) / scalar,
-                min=0.0,
-            )
-
-            updated_factors_r1g = u_r1g / torch.clamp(
-                torch.linalg.vector_norm(u_r1g, ord=2, dim=-1, keepdim=True), min=1.0
-            )
-            updated_factors_rkg[:, k, :] = updated_factors_r1g.squeeze(1)
-
-        D_max_diff = (
-            F.mse_loss(updated_factors_rkg, factors_buffer_rkg, reduction="none").sum(dim=[-2, -1])
-            / updated_factors_rkg.square().sum(dim=[-2, -1])
-        ).max()
-        if D_max_diff <= D_tol:
-            break
-        factors_buffer_rkg = updated_factors_rkg.clone()
-
-    return updated_factors_rkg
-
-
 def online_dictionary_update_nmf_torch_hals(
     x_ng: torch.Tensor,
     factors_rkg: torch.Tensor,
@@ -749,6 +628,16 @@ def online_dictionary_update_fista(
     return result
 
 
+def l1_normalize_factors(factors_rkg: torch.Tensor) -> torch.Tensor:
+    """
+    L1-normalize each gene expression program (each row of ``factors_rkg``).
+
+    The unconstrained NNLS dictionary update of :func:`online_dictionary_update_fista` leaves the scale of
+    ``factors_rkg`` free (the loadings absorb it), so the caller normalizes after each update to keep it fixed.
+    """
+    return F.normalize(factors_rkg, p=1, dim=-1, eps=1e-8)
+
+
 def _distributed_world_size() -> int:
     """Number of processes in the default process group, or 1 if not running distributed."""
     if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -797,81 +686,6 @@ def all_reduce_mairal_sufficient_statistics(
     AtA_rkk = packed[:AtA_size].view_as(AtA_rkk)
     AtX_rkg = packed[AtA_size : AtA_size + AtX_rkg.numel()].view_as(AtX_rkg)
     return AtA_rkk, AtX_rkg, int(round(packed[-1].item()))
-
-
-def online_dictionary_update_mairal(
-    x_ng: torch.Tensor,
-    factors_rkg: torch.Tensor,
-    A_rkk: torch.Tensor,
-    B_rkg: torch.Tensor,
-    n_iterations: int = 100,
-    alpha_tol: float = 1e-5,
-    D_tol: float = 1e-5,
-) -> dict[str, torch.Tensor]:
-    """
-    Algorithm 1 from Mairal et al. [1] for online dictionary learning.
-
-    When running with multiple processes, the minibatch statistics used to update A and B are summed across ranks
-    (and divided by the global number of cells), so that the update equals that of a single minibatch containing
-    every rank's cells. All ranks must therefore call this function the same number of times.
-
-    Args:
-        x_ng: The data.
-        factors_rkg: The matrix of gene expression programs (Mairal's dictionary D). Must be identical on all ranks.
-        A_rkk: Mairal's matrix A.
-        B_rkg: Mairal's matrix B.
-        n_iterations: The number of iterations to perform.
-        alpha_tol: The tolerance for the change in alpha for stopping.
-        D_tol: The tolerance for the change in D for stopping.
-
-    Returns:
-        dict with keys:
-            "factors_rkg": The updated dictionary factors_rkg.
-            "A_rkk": The updated matrix A.
-            "B_rkg": The updated matrix B.
-    """
-
-    # TODO benchmark compute_loadings vs solve_nnls_fista
-    # update loadings, Mairal Algorithm 1 step 4
-    # loadings_rnk = compute_loadings(
-    #     x_ng=x_ng,
-    #     factors_rkg=factors_rkg,
-    #     n_iterations=n_iterations,
-    #     alpha_tol=alpha_tol,
-    # )
-    loadings_rnk = solve_nnls_fista(
-        factors_rkg.transpose(1, 2), x_ng.t(), tol=alpha_tol, max_iter=n_iterations
-    ).transpose(1, 2)
-
-    with torch.no_grad():
-        # update A and B, Mairal Algorithm 1 step 5 and 6. When running distributed, the sums are taken over the
-        # cells of all ranks, so every rank ends up with the same A, B (and thus the same updated D).
-        AtA_rkk, AtX_rkg, n_global = all_reduce_mairal_sufficient_statistics(
-            *mairal_sufficient_statistics(loadings_rnk, x_ng)
-        )
-        A_rkk = A_rkk + AtA_rkk / n_global
-        B_rkg = B_rkg + AtX_rkg / n_global
-
-        # update D, Mairal Algorithm 1 step 7
-        updated_factors_rkg = compute_factors(
-            factors_rkg=factors_rkg,
-            A_rkk=A_rkk,
-            B_rkg=B_rkg,
-            n_iterations=n_iterations,
-            D_tol=D_tol,
-        )
-
-    return {"factors_rkg": updated_factors_rkg, "A_rkk": A_rkk, "B_rkg": B_rkg}
-
-
-def init_weights(m):
-    classname = m.__class__.__name__
-    if classname.find("BatchNorm") != -1:
-        torch.nn.init.normal_(m.weight, 1.0, 0.02)
-        torch.nn.init.zeros_(m.bias)
-    elif classname.find("Linear") != -1:
-        torch.nn.init.xavier_normal_(m.weight)
-        torch.nn.init.zeros_(m.bias)
 
 
 class NMFInit:
@@ -988,12 +802,16 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         var_names_g: The variable names schema for the input data: should be highly variable genes.
         k_values: A list of the number of gene expression programs to infer.
         r: Number of NMF replicates (for consensus).
-        algorithm: The algorithm to use for the online NMF. Currently only "mairal" is supported.
+        solver: The solver for the loadings and dictionary updates, in ["fista", "hals"].
+            ``"fista"`` (FISTA for non-negative least squares) recomputes each minibatch's loadings from scratch, so
+            memory does not grow with the number of cells, and it supports multi-process training.
+            ``"hals"`` (hierarchical alternating least squares, following nmf-torch) stores the loadings of every
+            cell (see :attr:`stores_loadings`), requires ``n_cells_total`` and ``obs_names_n``, and does not
+            support multi-process training.
         init: The initialization method to use for the NMF factors, in ["sklearn_random", "uniform_random"].
         transformed_data_mean: The mean of the transformed data, used for initialization if an only if
             `init` is "sklearn_random".
-        n_cells_total: The total number of cells in the dataset, used for initialization if and only if
-            `algorithm` is "nmf_torch_hals".
+        n_cells_total: The total number of cells in the dataset, used if and only if `solver` is "hals".
     """
 
     def __init__(
@@ -1001,18 +819,19 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         var_names_g: Sequence[str],
         k_values: list[int],
         r: int,
-        algorithm: Literal["mairal", "nmf_torch_hals"] = "mairal",
+        solver: Literal["fista", "hals"] = "fista",
         init: Literal["sklearn_random", "uniform_random"] = "uniform_random",
         transformed_data_mean: None | float = None,
         n_cells_total: int | None = None,
     ) -> None:
         super().__init__(var_names_g=var_names_g, k_values=k_values)
         g = len(self.var_names_g)
-        self.algorithm = algorithm
+        if solver not in ("fista", "hals"):
+            raise ValueError(f"Unknown solver: {solver}")
+        self.solver = solver
         self.obs_names_to_index_map: dict[str, int] = {}  # used for local latents
-        if algorithm == "nmf_torch_hals":
-            if n_cells_total is None:
-                raise ValueError("n_cells_total must be provided for nmf_torch_hals algorithm")
+        if self.stores_loadings and n_cells_total is None:
+            raise ValueError("n_cells_total must be provided when solver='hals'")
         self.r = r
         self.transformed_data_mean = transformed_data_mean
         self.init = init
@@ -1024,12 +843,11 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             self.register_buffer(f"A_{i}_rkk", torch.empty(r, i, i))
             self.register_buffer(f"B_{i}_rkg", torch.empty(r, i, g))
             self.register_buffer(f"D_{i}_rkg", torch.empty(r, i, g))
-            if self.algorithm == "nmf_torch_hals":
+            if self.stores_loadings:
                 assert isinstance(n_cells_total, int)
                 self.register_buffer(f"loadings_{i}_rnk", torch.empty(r, n_cells_total, i))  # initialized later
 
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
-        self._D_tol = 1e-5
         self._alpha_tol = 1e-5
         self._hals_tol = 1e-4
         self.reset_parameters()
@@ -1047,14 +865,23 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             getattr(self, f"A_{i}_rkk").zero_()
             getattr(self, f"B_{i}_rkg").zero_()
             init_fn(getattr(self, f"D_{i}_rkg"), k=i, transformed_data_mean=self.transformed_data_mean)
-            if self.algorithm == "nmf_torch_hals":
+            if self.stores_loadings:
                 init_fn(getattr(self, f"loadings_{i}_rnk"), k=i, transformed_data_mean=self.transformed_data_mean)
 
-        if self.algorithm == "nmf_torch_hals":
+        if self.stores_loadings:
             self._prev_err_rk: torch.Tensor | None = None
             self._init_err_rk: torch.Tensor | None = None
             self._err_running_sum_rk = torch.zeros((self.r, len(self.k_values)), device=self._dummy_param.device)
             self._cells_seen_in_epoch = 0  # Track cells seen in current epoch
+
+    @property
+    def stores_loadings(self) -> bool:
+        """
+        Whether the loadings of every cell are stored across minibatches, as buffers of shape
+        ``(r, n_cells_total, k)``. True for the ``"hals"`` solver, which warm-starts from them; False for ``"fista"``,
+        which recomputes each minibatch's loadings from scratch.
+        """
+        return self.solver == "hals"
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
@@ -1075,22 +902,22 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         B_rkg = getattr(self, f"B_{k}_rkg")
         factors_rkg = getattr(self, f"D_{k}_rkg")
 
-        if self.algorithm == "mairal":
-            # run algorithm 1
-            updated_values = online_dictionary_update_mairal(
+        if self.solver == "fista":
+            # the loadings of the minibatch are solved from scratch, so nothing per-cell is stored
+            updated_values = online_dictionary_update_fista(
                 x_ng=x_ng,
                 factors_rkg=factors_rkg,
+                loadings_rnk=torch.zeros(self.r, x_ng.shape[0], k, dtype=factors_rkg.dtype, device=factors_rkg.device),
                 A_rkk=A_rkk,
                 B_rkg=B_rkg,
-                n_iterations=100,
-                alpha_tol=self._alpha_tol,
-                D_tol=self._D_tol,
             )
-        elif self.algorithm == "nmf_torch_hals":
+            updated_factors_rkg = l1_normalize_factors(updated_values["factors_rkg"])
+        else:
             assert isinstance(minibatch_indices_n, torch.Tensor), (
-                "minibatch_indices_n must be provided for nmf_torch_hals algorithm"
+                "minibatch_indices_n must be provided for solver='hals'"
             )
-            loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]
+            stored_loadings_rnk = getattr(self, f"loadings_{k}_rnk")
+            loadings_rnk = stored_loadings_rnk[:, minibatch_indices_n, :]  # a copy, which hals updates in place
             # run nmf-torch hals online update
             updated_values = online_dictionary_update_nmf_torch_hals(
                 x_ng=x_ng,
@@ -1098,17 +925,15 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 loadings_rnk=loadings_rnk,
                 A_rkk=A_rkk,
                 B_rkg=B_rkg,
-                # n_iterations=100,
-                # alpha_tol=self._alpha_tol,
-                # D_tol=self._D_tol,
             )
-        else:
-            raise ValueError(f"Unknown algorithm: {self.algorithm}")
+            updated_factors_rkg = updated_values["factors_rkg"]
+            # store the updated loadings of the minibatch cells, to warm-start the next time these cells are seen
+            stored_loadings_rnk[:, minibatch_indices_n, :] = loadings_rnk
 
         # update running values
         setattr(self, f"A_{k}_rkk", updated_values["A_rkk"])
         setattr(self, f"B_{k}_rkg", updated_values["B_rkg"])
-        setattr(self, f"D_{k}_rkg", updated_values["factors_rkg"])
+        setattr(self, f"D_{k}_rkg", updated_factors_rkg)
 
     def forward(
         self,
@@ -1128,14 +953,14 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
-        if self.algorithm == "nmf_torch_hals" and _distributed_world_size() > 1:
+        if self.stores_loadings and _distributed_world_size() > 1:
             # the per-cell loadings are rank-local buffers, which DDP would overwrite with rank 0's values
-            raise NotImplementedError("algorithm='nmf_torch_hals' does not support multi-process training.")
+            raise NotImplementedError("solver='hals' does not support multi-process training.")
 
         # handle the mapping of obs_names to indices for local latents
         minibatch_indices_n: torch.Tensor | None = None
-        if self.algorithm == "nmf_torch_hals":
-            assert obs_names_n is not None, "obs_names_n must be provided for nmf_torch_hals algorithm"
+        if self.stores_loadings:
+            assert obs_names_n is not None, "obs_names_n must be provided for solver='hals'"
             new_obs_names = set(obs_names_n.tolist()) - set(self.obs_names_to_index_map.keys())
             if len(new_obs_names) > 0:
                 self.obs_names_to_index_map |= {
@@ -1144,7 +969,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             vectorized_lookup = np.vectorize(lambda x: self.obs_names_to_index_map[x])
             minibatch_indices_n = torch.from_numpy(vectorized_lookup(obs_names_n)).to(x_ng.device)
 
-        if self.algorithm == "nmf_torch_hals":
+        if self.stores_loadings:
             # for error computation to assess convergence
             if self._init_err_rk is None:
                 assert isinstance(minibatch_indices_n, torch.Tensor)
@@ -1159,7 +984,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         for k in self.k_values:
             self.online_dictionary_update(x_ng=x_ng, k=k, minibatch_indices_n=minibatch_indices_n)
 
-        if self.algorithm == "nmf_torch_hals":
+        if self.stores_loadings:
             # for error computation to assess convergence
             assert isinstance(minibatch_indices_n, torch.Tensor)
             self._loss(x_ng=x_ng, minibatch_indices_n=minibatch_indices_n)
@@ -1201,13 +1026,9 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 "lightning.pytorch.strategies.DDPStrategy is set to True"
             )
 
-    def _trace(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        # batched frobenius inner product
-        return torch.einsum("rij,rij->r", a, b)
-
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         # convergence criterion check
-        if self.algorithm == "nmf_torch_hals":
+        if self.stores_loadings:
             cur_err_rk = self._err_running_sum_rk / self._cells_seen_in_epoch
             assert isinstance(self._prev_err_rk, torch.Tensor)
             assert isinstance(self._init_err_rk, torch.Tensor)
@@ -1247,13 +1068,6 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         D_kg = consensus_factors[k]["consensus_D_kg"]
         assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
 
-        # compute loadings, Mairal Algorithm 1 step 4
-        # alpha_nk = compute_loadings(
-        #     x_ng=x_ng,
-        #     factors_rkg=D_kg.to(x_ng.device).unsqueeze(0),
-        #     n_iterations=1000,
-        #     alpha_tol=self._alpha_tol,
-        # ).squeeze(0)
         alpha_nk = (
             solve_nnls_fista(
                 D_kg.to(x_ng.device).unsqueeze(0).transpose(1, 2),
@@ -1640,14 +1454,14 @@ class NMFOutput:
         }
         all_k_values = sorted(final_d_per_k.keys())
 
-        # Build a shell model.  algorithm="mairal" avoids allocating loadings_{k}_rnk buffers
-        # (which would be (r, n_cells_total, k) and are the root cause of the memory problem).
+        # Build a shell model.  solver="fista" does not store loadings, which avoids allocating loadings_{k}_rnk
+        # buffers (which would be (r, n_cells_total, k) and are the root cause of the memory problem).
         # r=1 is a placeholder; every D buffer is overwritten immediately below.
         combined_model = OnlineNonNegativeMatrixFactorization(
             var_names_g=list(reference_var_names_g),
             k_values=all_k_values,
             r=1,
-            algorithm="mairal",
+            solver="fista",
             init="uniform_random",
         )
         for k, d_tensor in final_d_per_k.items():
