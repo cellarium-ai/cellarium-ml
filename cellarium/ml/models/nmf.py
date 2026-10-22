@@ -549,67 +549,7 @@ def nmf_torch_update_factors_hals_with_compile(
         relative_change = max_change / torch.clamp(mean_w.max(), min=1e-12)
 
         if relative_change < w_tol:
-            # print(f"NMF HALS factors update converged in {total_iterations} iterations.")
             break
-    # else:
-    #     print("NMF HALS factors update reached max iterations without convergence.")
-
-
-# def efficient_ols_all_cols(X, Y, XtX, XtY, normalize_y=True):
-#     """
-#     https://github.com/dylkot/cNMF/blob/7833a75484169cf448f8956224447cb110f4ba3d/src/cnmf/cnmf.py#L55
-#     Solve OLS: Beta = (X^T X)^{-1} X^T Y,
-#     accumulating X^T X and X^T Y in row-batches.
-
-#     Optionally mean/variance-normalize each column of Y *globally*
-#     (using the entire dataset's mean/var), while still only converting
-#     each row-batch to dense on-the-fly.
-
-#     Parameters
-#     ----------
-#     X : np.ndarray, shape (n_samples, n_predictors)
-#         Predictor matrix.
-#     Y : np.ndarray or scipy.sparse.spmatrix, shape (n_samples, n_targets)
-#         Outcomes. Each column is one target variable.
-#     batch_size : int
-#         Number of rows to process per chunk.
-#     normalize_y : bool
-#         If True, compute global mean & var of Y columns, then subtract mean
-#         and divide by std for each batch.
-
-#     Returns
-#     -------
-#     Beta : np.ndarray, shape (n_predictors, n_targets)
-#         The OLS coefficients for each target.
-#     """
-
-#     def _get_mean_var(X):
-#         scaler = StandardScaler(with_mean=False)
-#         scaler.fit(X)
-#         return (scaler.mean_, scaler.var_)
-
-#     # -- Optionally compute global mean & variance of Y columns
-#     if normalize_y:
-#         meanY, varY = _get_mean_var(Y)
-
-#         # Avoid zero or near-zero std
-#         eps = 1e-12
-#         varY[varY < eps] = eps
-#         stdY = np.sqrt(varY)
-
-#     # -- Optionally apply normalization
-#     if normalize_y:
-#         Y = (Y - meanY) / stdY
-
-#     # -- Accumulate partial sums
-#     XtX += X.T @ X
-#     XtY += X.T @ Y
-
-#     # -- Solve the normal equations
-#     #    Beta = (X^T X)^(-1) X^T Y
-#     #    Using lstsq for stability.
-#     Beta, residuals, rank, s = np.linalg.lstsq(XtX, XtY, rcond=None)
-#     return Beta, XtX, XtY
 
 
 def find_local_minima(mean_neighbor_distance_m: torch.Tensor, n_bins: int = 100) -> list[float]:
@@ -806,27 +746,6 @@ def compute_factors(
         factors_buffer_rkg = updated_factors_rkg.clone()
 
     return updated_factors_rkg
-
-
-# def compute_factors_nmf_torch_online_mu(
-#     A_rkk: torch.Tensor,
-#     B_rkg: torch.Tensor,
-#     factors_rkg: torch.Tensor,
-#     n_iterations: int,
-#     D_tol: float = 2e-5,
-# ) -> torch.Tensor:
-#     updated_factors_rkg = factors_rkg
-
-#     for _ in range(n_iterations):
-#         denom_rkg = torch.bmm(A_rkk, factors_rkg)
-#         rates_rkg = B_rkg / torch.clamp(denom_rkg, min=1e-10)
-#         rates_rkg[denom_rkg < 1e-10] = 0.0
-#         cur_max = (torch.abs(1.0 - rates_rkg) * updated_factors_rkg).max()
-#         updated_factors_rkg = factors_rkg * rates_rkg
-#         if cur_max <= D_tol:
-#             break
-
-#     return updated_factors_rkg
 
 
 def online_dictionary_update_nmf_torch_hals(
@@ -1061,7 +980,6 @@ def online_dictionary_update_mairal(
         A_rkk = A_rkk + AtA_rkk / n_global
         B_rkg = B_rkg + AtX_rkg / n_global
 
-        # TODO benchmark compute_factors vs compute_factors_nmf_torch_online_mu
         # update D, Mairal Algorithm 1 step 7
         updated_factors_rkg = compute_factors(
             factors_rkg=factors_rkg,
@@ -1070,13 +988,6 @@ def online_dictionary_update_mairal(
             n_iterations=n_iterations,
             D_tol=D_tol,
         )
-        # updated_factors_rkg = compute_factors_nmf_torch_online_mu(
-        #     factors_rkg=factors_rkg,
-        #     A_rkk=A_rkk,
-        #     B_rkg=B_rkg,
-        #     n_iterations=n_iterations,
-        #     D_tol=D_tol,
-        # )
 
     return {"factors_rkg": updated_factors_rkg, "A_rkk": A_rkk, "B_rkg": B_rkg}
 
@@ -1406,21 +1317,6 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         # Track cells seen in this epoch
         self._cells_seen_in_epoch += x_ng.shape[0]
 
-    # def _loss(self, x_ng: torch.Tensor, minibatch_indices_n: torch.Tensor) -> None:
-    #     with torch.no_grad():
-    #         for i, k in enumerate(self.k_values):
-    #             factors_rkg = getattr(self, f"D_{k}_rkg")
-    #             loadings_rnk = getattr(self, f"loadings_{k}_rnk")[:, minibatch_indices_n, :]
-    #             xWT_rnk = torch.einsum("ng,rkg->rnk", x_ng, factors_rkg)
-    #             h_rnk = loadings_rnk
-    #             hth_rkk = torch.einsum("rnk,rnj->rkj", h_rnk, h_rnk)
-    #             WWT_rkk = torch.einsum("rkg,rjg->rkj", factors_rkg, factors_rkg)
-    #             X_SS_half = (x_ng.norm(p=2) ** 2 / 2).double()
-    #             sum_h_err_r = self._trace(WWT_rkk, hth_rkk) / 2.0 - self._trace(h_rnk, xWT_rnk)
-    #             # Accumulate squared error, don't take sqrt yet
-    #             self._err_running_sum_rk[:, i] += 2.0 * (sum_h_err_r + X_SS_half)
-    #     self._cells_seen_in_epoch += x_ng.shape[0]
-
     def on_train_start(self, trainer: pl.Trainer) -> None:
         if trainer.world_size > 1:
             assert isinstance(trainer.strategy, DDPStrategy), (
@@ -1438,8 +1334,6 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         # convergence criterion check
         if self.algorithm == "nmf_torch_hals":
-            # Take sqrt of accumulated squared errors and normalize by number of cells seen
-            # cur_err_rk = torch.sqrt(self._err_running_sum_rk / self._cells_seen_in_epoch)
             cur_err_rk = self._err_running_sum_rk / self._cells_seen_in_epoch
             assert isinstance(self._prev_err_rk, torch.Tensor)
             assert isinstance(self._init_err_rk, torch.Tensor)
@@ -1449,9 +1343,6 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 trainer.should_stop = True
                 print(f"Stopping early: converged, loss={cur_err_rk}")
 
-            # print(f"Epoch {trainer.current_epoch} convergence stat: {current_overall_err_rk.max()}")
-            # print(f"Per-cell loss - Current max: {cur_err_rk.max():.6f}, Previous: {self._prev_err_rk.max():.6f}")
-            # print(f"Per-cell loss - Current mean: {cur_err_rk.mean():.6f}, Previous: {self._prev_err_rk.mean():.6f}")
             self._prev_err_rk = cur_err_rk.clone()
             self._err_running_sum_rk.zero_()
             self._cells_seen_in_epoch = 0  # Reset for next epoch
@@ -1732,7 +1623,6 @@ def k_selection_plot(
     plt.ylabel("Reconstruction error", color="r")
     plt.gca().tick_params(axis="y", colors="r")
     plt.grid(False)
-    # plt.show()
 
 
 def plot_clustermap(
@@ -1761,7 +1651,6 @@ def plot_clustermap(
     )
     cg.ax_row_dendrogram.set_visible(False)
     cg.ax_col_dendrogram.set_visible(False)
-    # cg.cax.set_visible(False)
     cg.cax.set_ylabel("Euclidean distance")
     cg.ax_heatmap.set_title(f"k = {k}")
     plt.show()
@@ -1779,7 +1668,6 @@ def plot_clustermap(
     plt.ylabel("Number of NMF factors\n(total is replicates times k)")
     plt.xlabel(f"Average distance to nearest {consensus_output[k]['n_neighbors']} neighbors")
     plt.xlim([-0.05, 1.05])
-    # plt.show()
 
 
 def is_subclass_by_name(instance, class_name):
@@ -1791,50 +1679,6 @@ class NMFOutput:
     """
     A class to facilitate interaction with a trained NMF model and computation of downstream outputs.
     """
-
-    @staticmethod
-    def combine_nmf_modules(nmf_modules: list["cellarium.ml.CellariumModule"]) -> "cellarium.ml.CellariumModule":
-        """
-        Combine multiple NMF modules trained with different k into a single module for consensus analysis.
-
-        Args:
-            nmf_modules: A list of NMF modules trained with different k.
-        Returns:
-            A single NMF module with the same model architecture but with factors from all input modules.
-        """
-        import cellarium.ml
-
-        if len(nmf_modules) == 0:
-            raise ValueError("nmf_modules list cannot be empty")
-
-        models: list[OnlineNonNegativeMatrixFactorization] = []
-        for module in nmf_modules:
-            if not isinstance(module.model, OnlineNonNegativeMatrixFactorization):
-                raise ValueError("All modules must have an OnlineNonNegativeMatrixFactorization model")
-            models.append(module.model)
-
-        base_module = nmf_modules[0]
-        base_model = models[0]
-        combined_model = OnlineNonNegativeMatrixFactorization(
-            var_names_g=list(base_model.var_names_g),
-            k_values=[k for model in models for k in model.k_values],
-            r=base_model.r,
-            algorithm=base_model.algorithm,
-            init=base_model.init,
-            transformed_data_mean=base_model.transformed_data_mean,
-        )
-
-        # copy factors from each module into combined model
-        for model in models:
-            for k in model.k_values:
-                setattr(combined_model, f"D_{k}_rkg", getattr(model, f"D_{k}_rkg").clone())
-
-        combined_module = cellarium.ml.CellariumModule(
-            transforms=list(base_module.cpu_transforms) + list(base_module.transforms),
-            model=combined_model,
-            is_initialized=True,
-        )
-        return combined_module
 
     @classmethod
     def from_checkpoints(
@@ -2359,139 +2203,3 @@ class NMFOutput:
                 consensus_output=self.consensus,
                 k=k_val,
             )
-
-
-def kotliar_compute_hvgs(
-    mean_g: np.ndarray,
-    var_g: np.ndarray,
-    var_names_g: np.ndarray,
-    num_genes: int | None = 2000,
-    expected_fano_threshold: float | None = None,
-    minimal_mean: float = 0.5,
-    plot: bool = False,
-):
-    """
-    Helper function to run the highly variable gene selection procedure from Kotliar et al. 2019,
-    implemented in the function ``get_highvar_genes_sparse`` in the dylkot/cNMF repository.
-    Modified to work in cellarium based on a run of a onepass_mean_var_std model on the data.
-
-    NOTE: taken from
-    https://github.com/dylkot/cNMF/blob/5dbc5baaa0b9079b55bce554d801caa235a50457/src/cnmf/cnmf.py#L136-L188
-
-    Args:
-        mean_g: The mean expression levels of genes
-        var_g: The variance of expression levels of genes
-        var_names_g: The names of the genes
-        num_genes: The number of highly variable genes to select. If None, uses a threshold-based approach
-        expected_fano_threshold: If num_genes is None, this threshold is used to select highly variable genes
-            based on their Fano factor relative to the expected Fano factor. If None, a default threshold is
-            computed based on the standard deviation of the Fano factors of genes that pass a winsorized box filter.
-        minimal_mean: The minimum mean expression level for a gene to be considered highly variable.
-            This is used only in the threshold-based approach (i.e. when num_genes is None)
-        plot: Whether to plot the mean-variance relationship and the Fano factor distribution. Useful for debugging.
-
-    Returns:
-        A DataFrame with columns
-        - mean: The mean expression level of each gene
-        - var: The variance of each gene
-        - fano: The Fano factor of each gene (variance / mean)
-        - fano_fit: The expected Fano factor of each gene based on the fitted line
-        - fano_ratio: The ratio of the observed Fano factor to the expected Fano factor
-        - highly_variable: A boolean indicating whether the gene is selected as highly variable
-    """
-
-    df = pd.DataFrame({"mean_g": mean_g, "var_g": var_g, "fano_g": var_g / mean_g}, index=var_names_g)
-
-    # Find parameters for expected fano line
-    top_genes = df["mean_g"].sort_values(ascending=False)[:20].index
-    A = (np.sqrt(df["var_g"]) / df["mean_g"])[top_genes].min()
-
-    w_mean_low, w_mean_high = df["mean_g"].quantile([0.10, 0.90])
-    w_fano_low, w_fano_high = df["fano_g"].quantile([0.10, 0.90])
-    winsor_box_logic = (
-        (df["fano_g"] > w_fano_low)
-        & (df["fano_g"] < w_fano_high)
-        & (df["mean_g"] > w_mean_low)
-        & (df["mean_g"] < w_mean_high)
-    )
-    fano_median = df["fano_g"][winsor_box_logic].median()
-    B = np.sqrt(fano_median)
-
-    df["fano_fit_g"] = (A**2) * df["mean_g"] + (B**2)
-    df["fano_ratio_g"] = df["fano_g"] / df["fano_fit_g"]
-
-    # Identify high var genes
-    if num_genes is not None:
-        hvg_var_names = df["fano_ratio_g"].sort_values(ascending=False).index[:num_genes]
-        hvg_logic_g = df.index.isin(hvg_var_names)
-        T = None
-    else:
-        if not expected_fano_threshold:
-            T = 1.0 + df["fano_g"][winsor_box_logic].std()
-        else:
-            T = expected_fano_threshold
-        hvg_logic_g = (df["fano_ratio_g"] > T) & (df["mean_g"] > minimal_mean)
-
-    df["highly_variable_g"] = hvg_logic_g
-
-    if plot:
-        import matplotlib.pyplot as plt
-
-        plt.figure(figsize=(12, 3.5))
-        plt.subplot(1, 3, 1)
-        plt.scatter(df["mean_g"], df["var_g"], s=2, alpha=1, color="lightgray", label="All genes")
-        plt.scatter(
-            df["mean_g"][hvg_logic_g],
-            df["var_g"][hvg_logic_g],
-            s=4,
-            alpha=0.2,
-            color="r",
-            label="Highly variable genes",
-        )
-        plt.xscale("log")
-        plt.yscale("log")
-        plt.xlabel("Mean expression")
-        plt.ylabel("Variance of expression")
-        plt.title("Gene mean vs. variance")
-        plt.legend()
-
-        plt.subplot(1, 3, 2)
-        plt.scatter(df["mean_g"], df["fano_g"], s=2, alpha=1, color="lightgray", label="All genes")
-        plt.scatter(
-            df["mean_g"][hvg_logic_g],
-            df["fano_g"][hvg_logic_g],
-            s=4,
-            alpha=0.2,
-            color="r",
-            label="Highly variable genes",
-        )
-        order = np.argsort(df["mean_g"])
-        plt.plot(df["mean_g"][order], df["fano_fit_g"][order], color="k", linestyle="--")
-        plt.xscale("log")
-        plt.yscale("log")
-        plt.xlabel("Mean expression")
-        plt.ylabel("Fano factor")
-        plt.title("Gene mean vs. Fano factor")
-        plt.legend()
-
-        plt.subplot(1, 3, 3)
-        plt.scatter(df["mean_g"], df["fano_ratio_g"], s=2, alpha=1, color="lightgray", label="All genes")
-        plt.scatter(
-            df["mean_g"][hvg_logic_g],
-            df["fano_ratio_g"][hvg_logic_g],
-            s=4,
-            alpha=0.2,
-            color="r",
-            label="Highly variable genes",
-        )
-        plt.xscale("log")
-        plt.yscale("log")
-        plt.xlabel("Mean expression")
-        plt.ylabel("Fano ratio")
-        plt.title("Gene mean vs. Fano ratio")
-        plt.legend()
-        plt.tight_layout()
-        # plt.show()
-
-    df = df.rename(columns={c: c.split("_g")[0] for c in df.columns})
-    return df
