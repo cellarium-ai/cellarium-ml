@@ -32,7 +32,6 @@ dependencies = [
   "pyarrow",
   "pyro-ppl>=1.9.1",
   "pytest",
-  "scikit-learn",
   "scikit-misc==0.5.1",
   "torch>=2.2.0",
   "transformers",
@@ -51,6 +50,7 @@ test = [
   "tenacity",
   "tensorboard",
   "torchvision",
+  "scikit-learn",
   "scvi-tools==1.3.3",
   "zarr==2.18.3",
 ]
