@@ -299,70 +299,6 @@ def solve_nnls_fista(A, B, max_iter=1000, tol=1e-6):
     return x
 
 
-@torch.no_grad()
-def nmf_torch_update_loadings_hals(
-    x_ng: torch.Tensor,
-    w_rkg: torch.Tensor,
-    h_rnk: torch.Tensor,
-    max_iter: int = 200,
-    h_tol: float = 0.05,
-    # l1_reg_H: float = 0.0,
-    # l2_reg_H: float = 0.0,
-) -> None:
-    # https://github.com/lilab-bcb/nmf-torch/blob/188747777c30e72626a14fe9b9d57c0ffda3efbb/
-    # nmf/nmf_models/_nmf_online_hals.py#L64C13-L88C34
-    # Online update H.
-    assert x_ng.shape[0] == h_rnk.shape[-2]
-    assert x_ng.shape[1] == w_rkg.shape[-1]
-    assert w_rkg.shape[-2] == h_rnk.shape[-1]
-
-    # wwT_rkk = torch.bmm(w_rkg, w_rkg.transpose(1, 2))
-    wwT_rkk = torch.einsum("rkg,rhg->rkh", w_rkg, w_rkg)
-    # xwT_rnk = torch.bmm(x_ng.unsqueeze(0), w_rkg.transpose(1, 2))
-    xwT_rnk = torch.einsum("ng,rkg->rnk", x_ng, w_rkg)
-
-    nonconverged_logic_r = torch.ones(h_rnk.shape[0], device=h_rnk.device).bool()
-
-    for i in range(max_iter):
-        cur_max_r = torch.zeros(h_rnk.shape[0], device=h_rnk.device)
-
-        # TODO this does unnecessary compute on reps that have already converged
-        # but would it be faster this way if compiled with torch.compile()?
-        # alternatively could do the compute only on non-converged reps by indexing
-        for k in range(h_rnk.shape[-1]):
-            # numer_rn1 = xwT_rnk[..., k] - torch.bmm(h_rnk, wwT_rkk[..., k])
-            numer_rn = xwT_rnk[..., k] - torch.einsum("rnk,rk->rn", h_rnk, wwT_rkk[..., k])
-            # if l1_reg_H > 0.0:
-            #     numer -= l1_reg_H
-            # if l2_reg_H > 0.0:
-            #     denom = WWT[k, k] + l2_reg_H
-            #     hvec = h[:, k] * (WWT[k, k] / denom) + numer / denom
-            # else:
-            h_rn = h_rnk[..., k]
-            hvec_rn = h_rn + numer_rn / wwT_rkk[:, k, k].unsqueeze(-1)
-            if torch.isnan(hvec_rn).sum() > 0:
-                # hvec_rn1[:] = 0.0  # divide zero error: set hvec to 0
-                hvec_rn.fill_(0.0)
-            else:
-                hvec_rn = torch.clamp(hvec_rn, min=0.0)
-            cur_max_r = torch.max(cur_max_r, (h_rn - hvec_rn).abs().max())
-            h_rnk[nonconverged_logic_r, :, k] = hvec_rn[nonconverged_logic_r, ...]
-
-        # remove replicates meeting stop criteria from further updates
-        nonconverged_logic_r = (
-            nonconverged_logic_r  # once converged, always converged
-            & ((cur_max_r / h_rnk.mean(dim=(-2, -1))) >= h_tol)
-        )
-
-        # if j + 1 < max_iter and cur_max / h_rnk.mean() < h_tol:
-        if nonconverged_logic_r.sum() == 0:
-            print(f"NMF HALS loadings update converged in {i + 1} iterations.")
-            break
-
-    if i == max_iter - 1:
-        print("NMF HALS loadings update reached max iterations without convergence.")
-
-
 @torch.compile()
 @torch.no_grad()
 def nmf_torch_update_loadings_hals_compiled(
@@ -370,11 +306,10 @@ def nmf_torch_update_loadings_hals_compiled(
     w_rkg: torch.Tensor,
     h_rnk: torch.Tensor,
     max_iter: int = 200,
-    h_tol: float = 0.05,
-) -> tuple[torch.Tensor, int]:
+) -> None:
     """
-    Compiled version of HALS loadings update.
-    Returns updated h_rnk and number of iterations to convergence.
+    Compiled version of the HALS loadings update, run for exactly ``max_iter`` iterations.
+    Updates ``h_rnk`` in place; convergence is checked by the caller between calls.
     """
     assert x_ng.shape[0] == h_rnk.shape[-2]
     assert x_ng.shape[1] == w_rkg.shape[-1]
@@ -394,8 +329,6 @@ def nmf_torch_update_loadings_hals_compiled(
             denom = wwT_rkk[:, k, k].unsqueeze(-1)
             hvec_rn = torch.where(denom > 1e-12, torch.clamp(h_rn + numer_rn / denom, min=0.0), torch.zeros_like(h_rn))
             h_rnk[..., k] = hvec_rn
-
-    return h_rnk, max_iter
 
 
 @torch.no_grad()
@@ -418,8 +351,7 @@ def nmf_torch_update_loadings_hals_with_compile(
         current_chunk = min(chunk_size, max_iter - total_iterations)
 
         # Run compiled function for a chunk of iterations
-        h_rnk_new, _ = nmf_torch_update_loadings_hals_compiled(x_ng, w_rkg, h_rnk, current_chunk, h_tol)
-        h_rnk.copy_(h_rnk_new)
+        nmf_torch_update_loadings_hals_compiled(x_ng, w_rkg, h_rnk, current_chunk)
 
         total_iterations += current_chunk
 
@@ -435,59 +367,6 @@ def nmf_torch_update_loadings_hals_with_compile(
     #     print("NMF HALS loadings update reached max iterations without convergence.")
 
 
-@torch.no_grad()
-def nmf_torch_update_factors_hals(
-    w_rkg: torch.Tensor,
-    A_rkk: torch.Tensor,
-    B_rkg: torch.Tensor,
-    max_iter: int = 200,
-    w_tol: float = 0.05,
-) -> None:
-    # https://github.com/lilab-bcb/nmf-torch/blob/188747777c30e72626a14fe9b9d57c0ffda3efbb/
-    # nmf/nmf_models/_nmf_online_hals.py#L106C13-L127C26
-
-    nonconverged_logic_r = torch.ones(A_rkk.shape[0], device=A_rkk.device).bool()
-
-    # Online update W.
-    for j in range(max_iter):
-        cur_max_r = torch.zeros(A_rkk.shape[0], device=A_rkk.device)
-
-        # TODO this does unnecessary compute on reps that have already converged
-        # but would it be faster this way if compiled with torch.compile()?
-        # alternatively could do the compute only on non-converged reps by indexing
-        for k in range(A_rkk.shape[-1]):
-            # numer_r1g = B_rkg[:, k, :] - torch.bmm(A_rkk[:, k, :], w_rkg)
-            numer_rg = B_rkg[:, k, :] - torch.einsum("rk,rkg->rg", A_rkk[:, k, :], w_rkg)
-            # if l1_reg_W > 0.0:
-            #     numer -= l1_reg_W
-            # if l2_reg_W > 0.0:
-            #     denom = A[k, k] + l2_reg_W
-            #     w_new = self.W[k, :] * (A[k, k] / denom) + numer / denom
-            # else:
-            w_new_rg = w_rkg[:, k, :] + numer_rg / A_rkk[:, k, k].unsqueeze(-1)
-            if torch.isnan(w_new_rg).sum() > 0:
-                # w_new_r1g[:] = 0.0 # divide zero error: set w_new to 0
-                w_new_rg.fill_(0.0)
-            else:
-                w_new_rg = torch.clamp(w_new_rg, min=0.0)
-            cur_max_r = torch.max(cur_max_r, (w_rkg[:, k, :] - w_new_rg).abs().max())
-            w_rkg[nonconverged_logic_r, k, :] = w_new_rg[nonconverged_logic_r, ...]
-
-        # remove replicates meeting stop criteria from further updates
-        nonconverged_logic_r = (
-            nonconverged_logic_r  # once converged, always converged
-            & ((cur_max_r / w_rkg.mean(dim=(-2, -1))) >= w_tol)
-        )
-
-        # if j + 1 < max_iter and cur_max_r / w_rkg.mean() < w_tol:
-        if nonconverged_logic_r.sum() == 0:
-            print(f"NMF HALS factors update converged in {j + 1} iterations.")
-            break
-
-    if j == max_iter - 1:
-        print("NMF HALS factors update reached max iterations without convergence.")
-
-
 @torch.compile()
 @torch.no_grad()
 def nmf_torch_update_factors_hals_compiled(
@@ -495,11 +374,10 @@ def nmf_torch_update_factors_hals_compiled(
     A_rkk: torch.Tensor,
     B_rkg: torch.Tensor,
     max_iter: int = 200,
-    w_tol: float = 0.05,
-) -> tuple[torch.Tensor, int]:
+) -> None:
     """
-    Compiled version of HALS factors update.
-    Returns updated w_rkg and number of iterations to convergence.
+    Compiled version of the HALS factors update, run for exactly ``max_iter`` iterations.
+    Updates ``w_rkg`` in place; convergence is checked by the caller between calls.
     """
     # Use a fixed number of iterations instead of dynamic convergence
     # This makes the function more amenable to compilation
@@ -511,8 +389,6 @@ def nmf_torch_update_factors_hals_compiled(
             # Avoid division by zero using torch.where instead of manual checks
             w_new_rg = torch.where(torch.isnan(w_new_rg), torch.zeros_like(w_new_rg), torch.clamp(w_new_rg, min=0.0))
             w_rkg[:, k, :] = w_new_rg
-
-    return w_rkg, max_iter
 
 
 @torch.no_grad()
@@ -535,8 +411,7 @@ def nmf_torch_update_factors_hals_with_compile(
         current_chunk = min(chunk_size, max_iter - total_iterations)
 
         # Run compiled function for a chunk of iterations
-        w_rkg_new, _ = nmf_torch_update_factors_hals_compiled(w_rkg, A_rkk, B_rkg, current_chunk, w_tol)
-        w_rkg.copy_(w_rkg_new)
+        nmf_torch_update_factors_hals_compiled(w_rkg, A_rkk, B_rkg, current_chunk)
 
         total_iterations += current_chunk
 
