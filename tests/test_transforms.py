@@ -594,6 +594,19 @@ def test_cell_filter_all_n_indexed_tensors_filtered_consistently(cell_filter_bat
         assert val.shape[0] == n_kept, f"{key} has inconsistent first dimension after filtering"
 
 
+def test_cell_filter_filters_numpy_per_cell_arrays(cell_filter_batch):
+    # SOCAM passes cl_names_n as a numpy string array; it must be filtered with
+    # the same mask as x_ng or cross_entropy crashes on a batch-size mismatch.
+    batch = dict(cell_filter_batch)
+    cl_names_n = np.array([f"label_{i}" for i in range(_N)])
+    batch["cl_names_n"] = cl_names_n
+    result = CellFilter(min_count_per_cell=_THRESHOLD)(**batch)
+    n_kept = result["x_ng"].shape[0]
+    assert n_kept == 7
+    assert result["cl_names_n"].shape[0] == n_kept
+    assert result["cl_names_n"].tolist() == [f"label_{i}" for i in range(7)]
+
+
 def test_cell_filter_gene_indexed_array_not_in_return(cell_filter_batch):
     # var_names_g is a numpy array — must not appear in the returned dict
     result = CellFilter(min_count_per_cell=_THRESHOLD)(**cell_filter_batch)
