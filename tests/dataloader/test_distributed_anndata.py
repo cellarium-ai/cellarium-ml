@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import importlib.util
 import os
 import pickle
 from pathlib import Path
@@ -9,6 +10,12 @@ import numpy as np
 import pandas as pd
 import pytest
 from anndata import AnnData
+
+if importlib.util.find_spec("anndata.compat.Index") is None:
+    # anndata 0.13.x +
+    dtype_deprecated = True
+else:
+    dtype_deprecated = False
 
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
@@ -49,9 +56,10 @@ def adatas_path(tmp_path: Path):
         },
         index=[f"gene{i:03d}" for i in range(n_gene)],
     )
+    dtype_kwargs = {"dtype": X.dtype} if not dtype_deprecated else {}
     adata = AnnData(
         X,
-        dtype=X.dtype,
+        **dtype_kwargs,
         obs=obs,
         var=var,
         layers={"L": L},
@@ -69,22 +77,31 @@ def adatas_path(tmp_path: Path):
 
 @pytest.fixture
 def adt(adatas_path: Path):
-    # single anndata
-    adt = read_h5ad_file(str(os.path.join(adatas_path, "adata.h5ad")))
+    # single anndata in memory
+    adt = read_h5ad_file(str(os.path.join(adatas_path, "adata.h5ad")), backed=None)
     return adt
 
 
-@pytest.fixture(params=[(i, j) for i in (1, 2, 3) for j in (True, False)])
+@pytest.fixture(
+    params=[(i, j, k) for i in (1, 2, 3) for j in (True, False) for k in (None, "r")],
+    ids=[
+        f"cache{i}-enforce{j}-{'memory' if k is None else 'backed'}"
+        for i in (1, 2, 3)
+        for j in (True, False)
+        for k in (None, "r")
+    ],
+)
 def dat(adatas_path: Path, request: pytest.FixtureRequest):
     # distributed anndata
     filenames = str(os.path.join(adatas_path, "adata.{000..002}.h5ad"))
     limits = [2, 5, 10]
-    max_cache_size, cache_size_strictly_enforced = request.param
+    max_cache_size, cache_size_strictly_enforced, backed_mode = request.param
     dat = DistributedAnnDataCollection(
         filenames,
         limits,
         max_cache_size=max_cache_size,
         cache_size_strictly_enforced=cache_size_strictly_enforced,
+        backed=backed_mode,
     )
     return dat
 
