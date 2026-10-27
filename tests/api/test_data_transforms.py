@@ -65,6 +65,9 @@ def test_seurat_v3_recipe_builds_the_module_without_writing_csv(cdata):
         (OnePassRecipe(), OnePassRecipe(log1p=True, batch_key="a"), False),
         (OnePassRecipe(target_count=500), OnePassRecipe(), False),
         (OnePassRecipe(eps=0.1), OnePassRecipe(), False),
+        (OnePassRecipe(normalize_total=False), OnePassRecipe(), False),
+        (OnePassRecipe(), OnePassRecipe(normalize_total=False), False),
+        (OnePassRecipe(normalize_total=False), OnePassRecipe(normalize_total=False), True),
         (OnePassRecipe(), SeuratV3Recipe(), False),
         (SeuratV3Recipe(), SeuratV3Recipe(), True),
         (SeuratV3Recipe(), SeuratV3Recipe(batch_key="a"), False),  # the batches change what the model computes
@@ -93,7 +96,19 @@ def test_fingerprint_describes_what_is_computed():
     assert OnePassRecipe().fingerprint() == "normalize_total(target_count=10000, eps=1e-06)"
     assert OnePassRecipe(log1p=True).fingerprint() == "normalize_total(target_count=10000, eps=1e-06) > log1p"
     assert OnePassRecipe(batch_key="a").fingerprint().endswith(" by a")
+    assert OnePassRecipe(normalize_total=False).fingerprint() == "raw counts"
+    assert OnePassRecipe(normalize_total=False, log1p=True).fingerprint() == "raw counts > log1p"
     assert SeuratV3Recipe().fingerprint() == "hvg_seurat_v3"
+
+
+def test_onepass_recipe_without_normalization_has_no_cpu_transforms(cdata):
+    recipe = OnePassRecipe(normalize_total=False)
+    assert recipe.cpu_transforms() == []
+    assert [type(t) for t in recipe.transforms()] == [Densify]
+
+    module = recipe.build_module(cdata)
+    module.configure_model()
+    assert len(module.cpu_transforms) == 0
 
 
 def test_fit_or_reuse_without_key_leaves_trained_modules_alone(cdata, fits):

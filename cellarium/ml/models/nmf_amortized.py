@@ -21,10 +21,8 @@ from cellarium.ml.models.nmf import (
     compute_x_squared_sum,
     frobenius_loss_trace_compiled,
     l1_normalize_factors,
-    nmf_frobenius_loss,
     online_dictionary_update_fista,
     online_dictionary_update_nmf_torch_hals,
-    solve_nnls_fista,
 )
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -147,7 +145,6 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         # for training the encoder
         self.encoder_loss_fn = torch.nn.SmoothL1Loss(reduction="mean")
 
-        self._alpha_tol = 1e-5
         self.encoder_improvement_threshold = encoder_improvement_threshold
         self.reconstruction_improvement_threshold = reconstruction_improvement_threshold
         self.trigger_patience = trigger_patience
@@ -560,40 +557,6 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
     def on_end(self, trainer: pl.Trainer) -> None:
         trainer.save_checkpoint(trainer.default_root_dir + "/NMF.ckpt")
 
-    @torch.no_grad()
-    def infer_loadings(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        consensus_factors: dict[int, dict[str, torch.Tensor | float]],
-        k: int,
-        normalize: bool = False,
-        obs_names_n: np.ndarray | None = None,
-    ) -> torch.Tensor:
-        """
-        Infer the loadings of each program for the input count matrix.
-        To be run after the model has been trained.
-        """
-        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        D_kg = consensus_factors[k]["consensus_D_kg"]
-        assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
-
-        alpha_nk = (
-            solve_nnls_fista(  # TODO cehck if we can use other fista solver
-                D_kg.to(x_ng.device).unsqueeze(0).transpose(1, 2),
-                x_ng.t(),
-                tol=self._alpha_tol * 0.1,
-                max_iter=1000,
-            )
-            .transpose(1, 2)
-            .squeeze(0)
-        )
-
-        if normalize:
-            alpha_nk = F.normalize(alpha_nk, p=1, dim=-1)
-
-        return alpha_nk
-
     def validate(
         self,
         trainer: pl.Trainer,
@@ -643,50 +606,3 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         # Logging to TensorBoard by default
         if self._val_nmf_loss_ema is not None:
             pl_module.log("val_nmf_loss", self._val_nmf_loss_ema, sync_dist=True, on_epoch=True)
-
-    @torch.no_grad()
-    def reconstruction_error(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        consensus_factors: dict[int, dict[str, torch.Tensor | float]],
-    ) -> dict[int, float]:
-        """
-        Compute the reconstruction error for each k_value using trained consensus factors D_kg.
-
-        Args:
-            x_ng: Gene counts matrix.
-            var_names_g: The list of the variable names in the input data.
-            consensus_factors: The consensus factors for each k_value are in consensus_factors[k]["consensus_D_kg"].
-
-        Returns:
-            A dictionary mapping each k_value to its reconstruction error.
-        """
-        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-
-        rec_error = {}
-        for k in consensus_factors.keys():
-            D_kg = consensus_factors[k]["consensus_D_kg"]
-            assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
-            if (D_kg == 0).all():
-                raise ValueError("D_kg is all zeros, please train the model and run compute_consensus_factors() first")
-
-            alpha_nk = self.infer_loadings(
-                x_ng=x_ng,
-                var_names_g=var_names_g,
-                consensus_factors=consensus_factors,
-                k=k,
-                normalize=False,
-            ).squeeze(0)
-
-            rec_error[k] = (
-                nmf_frobenius_loss(
-                    x_ng=x_ng,
-                    loadings_nk=alpha_nk.to(x_ng.device),
-                    factors_kg=D_kg.to(x_ng.device),
-                )
-                .sum()
-                .item()
-            )
-
-        return rec_error

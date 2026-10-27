@@ -14,10 +14,10 @@ import torch
 from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml.api._cnmf_consensus import consensus_factors
 from cellarium.ml.models import OnlineNonNegativeMatrixFactorization
 from cellarium.ml.models import nmf as nmf_module
 from cellarium.ml.models.nmf import (
-    NMFOutput,
     compute_x_squared_sum,
     frobenius_loss_trace_compiled,
     l1_normalize_factors,
@@ -266,16 +266,15 @@ def run_cellarium_online_nmf(
     torch.manual_seed(seed)
     trainer.fit(module, datamodule)
 
-    # get loadings and factors using NMFOutput
-    nmf_output = NMFOutput(nmf_module=module, datamodule=datamodule)
-    nmf_output.compute_consensus_factors(k_values=k, density_threshold=1, local_neighborhood_size=0.3)
-    cellarium_loadings_dataframe = nmf_output.compute_loadings(k=k, normalize=False)
-    cellarium_loadings_nk = torch.tensor(cellarium_loadings_dataframe.values).float()
-    assert isinstance(cellarium_loadings_nk, torch.Tensor)
-    # Get consensus factors from nmf_output instead of the raw model
-    consensus_factors = nmf_output.consensus[k]["consensus_D_kg"]
-    assert isinstance(consensus_factors, torch.Tensor), "consensus_D_kg must be a tensor"
-    cellarium_factors_kg = consensus_factors
+    # the consensus of the replicates, and from it the loadings of all the cells (preprocessed as in training)
+    consensus = consensus_factors(module.model.factors_dict[k], density_threshold=1, local_neighborhood_size=0.3)
+    assert module.pipeline is not None
+    batch = module.pipeline[:-1]({"x_ng": x_ng.clone(), "var_names_g": var_names_g})
+    cellarium_loadings_nk = module.model.infer_loadings(
+        x_ng=batch["x_ng"], var_names_g=batch["var_names_g"], consensus_factors={k: consensus}, k=k, normalize=False
+    )
+    cellarium_factors_kg = consensus["consensus_D_kg"]
+    assert isinstance(cellarium_factors_kg, torch.Tensor), "consensus_D_kg must be a tensor"
 
     return cellarium_loadings_nk, cellarium_factors_kg
 
@@ -683,146 +682,6 @@ def test_consensus_matches_kotliar():
 
 def test_refit_all_genes_matches_kotliar():
     pass
-
-
-# ---------------------------------------------------------------------------
-# Helpers shared by from_checkpoints tests
-# ---------------------------------------------------------------------------
-
-
-def _build_datamodule_and_train(
-    adata: anndata.AnnData,
-    k_values: list[int],
-    r: int,
-    tmp_path_for_ckpt: str,
-    seed: int = 0,
-) -> tuple[str, dict[int, torch.Tensor], CellariumAnnDataDataModule]:
-    """
-    Train an OnlineNMF model for 1 epoch, save a checkpoint, and return
-    the D_{k}_rkg tensors (cloned, detached) keyed by k.
-    Returns a tuple of (ckpt_path, dict[int, torch.Tensor], datamodule).
-    """
-    import os
-
-    n, g = adata.shape
-    batch_size = max(1, n // 4)
-
-    dm = CellariumAnnDataDataModule(
-        dadc=adata,
-        batch_size=batch_size,
-        batch_keys={
-            "x_ng": AnnDataField(attr="X", convert_fn=None),
-            "var_names_g": AnnDataField(attr="var_names"),
-            "obs_names_n": AnnDataField(attr="obs_names"),
-        },
-    )
-
-    nmf = OnlineNonNegativeMatrixFactorization(
-        var_names_g=list(adata.var_names),
-        k_values=k_values,
-        r=r,
-        solver="fista",
-        init="uniform_random",
-    )
-    scale_g = torch.tensor(np.array(adata.X).std(axis=0).astype(np.float32))
-    module = CellariumModule(
-        transforms=[
-            DivideByScale(
-                scale_g=scale_g,
-                var_names_g=np.array(list(adata.var_names)),
-                eps=1e-4,
-            ),
-            Filter(list(adata.var_names)),
-        ],
-        model=nmf,
-    )
-
-    torch.manual_seed(seed)
-    trainer = pl.Trainer(
-        barebones=True,
-        accelerator="cpu",
-        devices=1,
-        max_epochs=1,
-        default_root_dir=tmp_path_for_ckpt,
-    )
-    trainer.fit(module, dm)
-
-    # capture D tensors right off the trained model (before checkpoint round-trip)
-    d_tensors = {k: module.model.factors_dict[k].detach().clone() for k in k_values}
-
-    ckpt_path = os.path.join(tmp_path_for_ckpt, "model.ckpt")
-    trainer.save_checkpoint(ckpt_path)
-
-    return ckpt_path, d_tensors, dm
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-def test_from_checkpoints_split_by_k(tmp_path, small_adata: anndata.AnnData):
-    """
-    Two checkpoints cover disjoint k values.  Verify that from_checkpoints:
-    - produces an NMFOutput whose model has the union of k values
-    - preserves the exact D_{k}_rkg tensors from each source checkpoint
-    - does NOT allocate loadings_{k}_rnk buffers on the combined model
-    """
-    ckpt1, d_tensors_1, dm = _build_datamodule_and_train(
-        small_adata, k_values=[2, 3], r=2, tmp_path_for_ckpt=str(tmp_path / "run1"), seed=0
-    )
-    ckpt2, d_tensors_2, _ = _build_datamodule_and_train(
-        small_adata, k_values=[4, 5], r=2, tmp_path_for_ckpt=str(tmp_path / "run2"), seed=1
-    )
-
-    nmf_output = NMFOutput.from_checkpoints([ckpt1, ckpt2], datamodule=dm)
-
-    combined_model = nmf_output.nmf_module.model
-    assert isinstance(combined_model, OnlineNonNegativeMatrixFactorization)
-
-    # correct k_values
-    assert set(combined_model.k_values) == {2, 3, 4, 5}
-
-    # D tensors preserved exactly from each checkpoint
-    for k, expected in {**d_tensors_1, **d_tensors_2}.items():
-        actual = combined_model.factors_dict[k]
-        assert actual.shape == expected.shape, f"Shape mismatch for k={k}"
-        assert torch.allclose(actual, expected), f"D_{k}_rkg values changed after from_checkpoints"
-
-    # no loadings buffers allocated
-    for k in combined_model.k_values:
-        assert not hasattr(combined_model, f"loadings_{k}_rnk"), (
-            f"loadings_{k}_rnk should not exist on the combined shell model"
-        )
-
-
-def test_from_checkpoints_split_by_r(tmp_path, small_adata: anndata.AnnData):
-    """
-    Two checkpoints share the same k values but have different numbers of replicates.
-    Verify that from_checkpoints concatenates D tensors along dim 0 (the r dimension).
-    """
-    ckpt1, d_tensors_1, dm = _build_datamodule_and_train(
-        small_adata, k_values=[3], r=2, tmp_path_for_ckpt=str(tmp_path / "run1"), seed=0
-    )
-    ckpt2, d_tensors_2, _ = _build_datamodule_and_train(
-        small_adata, k_values=[3], r=3, tmp_path_for_ckpt=str(tmp_path / "run2"), seed=1
-    )
-
-    g = small_adata.n_vars
-
-    nmf_output = NMFOutput.from_checkpoints([ckpt1, ckpt2], datamodule=dm)
-
-    combined_model = nmf_output.nmf_module.model
-    assert isinstance(combined_model, OnlineNonNegativeMatrixFactorization)
-
-    combined = combined_model.factors_dict[3]
-
-    # combined replicate count is 2 + 3 = 5
-    assert combined.shape == (5, 3, g), f"Expected shape (5, 3, {g}), got {combined.shape}"
-
-    # exact values: first 2 replicates come from checkpoint 1, last 3 from checkpoint 2
-    expected = torch.cat([d_tensors_1[3], d_tensors_2[3]], dim=0)
-    assert torch.allclose(combined, expected), "Combined D tensor values do not match concatenation of source tensors"
 
 
 def test_mairal_sufficient_statistics_are_additive():

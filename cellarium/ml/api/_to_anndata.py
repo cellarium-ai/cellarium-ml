@@ -13,7 +13,7 @@ from torch.utils._pytree import tree_map
 from tqdm import tqdm
 
 from cellarium.ml import CellariumPipeline
-from cellarium.ml.api._view_collections import RamCollection, available_memory_bytes, load_into_ram, unwrap_collection
+from cellarium.ml.api._view_collections import RamCollection, load_into_ram, unwrap_collection
 from cellarium.ml.api.utils import release_unused_memory
 from cellarium.ml.data import DistributedAnnDataCollection
 from cellarium.ml.models import IncrementalPCA, SingleCellVariationalInference
@@ -179,7 +179,7 @@ def to_anndata(
     clashing = [f"computed_{key}" for key in obs_computed if f"computed_{key}" in all_columns]
     if clashing:
         raise ValueError(f"obs already has the columns {clashing}, which obs_computed would be added to.")
-    max_bytes = int(max_gb * 2**30) if max_gb is not None else available_memory_bytes() // 2
+    max_bytes = cdata._max_bytes(max_gb)
 
     if downsample_method is not None and target_n_cells >= n_obs:  # type: ignore[operator]
         downsample_method = None  # every cell is kept, so there is nothing to sample or sketch

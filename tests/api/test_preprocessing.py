@@ -128,7 +128,13 @@ def test_highly_variable_genes_seurat_and_kotliar_share_one_onepass_fit(cdata, f
     assert len(fits) == 1
     assert cdata.trained_modules["onepass"] is trained
     assert cdata.trained_modules["again"] is trained
-    assert trained.config == {"target_count": 10_000, "eps": 1e-6, "log1p": False, "batch_key": None}
+    assert trained.config == {
+        "target_count": 10_000,
+        "eps": 1e-6,
+        "log1p": False,
+        "batch_key": None,
+        "normalize_total": True,
+    }
 
 
 def test_highly_variable_genes_onepass_with_batches_serves_a_call_without_but_not_the_reverse(cdata, fits):

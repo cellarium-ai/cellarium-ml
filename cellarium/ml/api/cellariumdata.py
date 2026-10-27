@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import json
+import math
 import os
 import tempfile
 import warnings
@@ -17,9 +18,12 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import scipy.sparse
 import torch
+from lightning.fabric.utilities.apply_func import move_data_to_device
+from tqdm.auto import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
+from cellarium.ml.api._obsm_storage import RowSubset, subset_rows
 from cellarium.ml.api._view_collections import (
     RamCollection,
     ViewCollection,
@@ -29,7 +33,13 @@ from cellarium.ml.api._view_collections import (
 )
 from cellarium.ml.api.deltacells_store import write_collection_to_deltacells
 from cellarium.ml.api.utils import LossHistory, get_h5ad_files_limits, write_obs_parquet
-from cellarium.ml.data import DistributedAnnDataCollection, DistributedCollection, DistributedDeltaCellsCollection
+from cellarium.ml.data import (
+    DistributedAnnDataCollection,
+    DistributedCollection,
+    DistributedDeltaCellsCollection,
+    IterableDistributedAnnDataCollectionDataset,
+)
+from cellarium.ml.utilities.core import FunctionComposer
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
 
 
@@ -758,14 +768,45 @@ def _clone_datamodule(
     return clone
 
 
-def _subset_rows(value: Any, positions: np.ndarray) -> Any:
-    """The rows ``positions`` of a per-cell value (array, sparse matrix, tensor, Series or DataFrame), as a copy."""
+class _PositionedDataset(IterableDistributedAnnDataCollectionDataset):
+    """
+    The dataset of :meth:`CellariumData.predict_batches`: it adds the positions of the cells of each batch (in the
+    collection that it reads, which is the order of the cells of the data) to the batch, as ``"row_indices_n"``.
+    """
+
+    def __getitem__(self, idx: Any) -> Any:
+        data = super().__getitem__(idx)
+        if isinstance(idx, slice):
+            positions = np.arange(*idx.indices(len(self.dadc)), dtype=np.int64)
+        else:
+            positions = np.atleast_1d(np.asarray(idx, dtype=np.int64))
+        data["row_indices_n"] = positions
+        return data
+
+
+def _device_of(module: torch.nn.Module) -> torch.device | None:
+    """The device of the first parameter or buffer of ``module``, or ``None`` if it has none."""
+    for tensor in (*module.parameters(), *module.buffers()):
+        return tensor.device
+    return None
+
+
+def _subset_rows(value: Any, positions: np.ndarray, max_bytes: int | None = None) -> Any:
+    """
+    The rows ``positions`` of a per-cell value (array, sparse matrix, tensor, Series or DataFrame), as a copy.
+
+    A value that lives on disk (a :class:`numpy.memmap`, or a :class:`~cellarium.ml.api._obsm_storage.RowSubset` of
+    one) is read into memory, unless ``max_bytes`` is given and the rows take more than that: then they stay on disk
+    and are returned as a lazy :class:`~cellarium.ml.api._obsm_storage.RowSubset`, which copies nothing.
+    """
     if isinstance(value, (pd.Series, pd.DataFrame)):
         return value.iloc[positions].copy()
     if scipy.sparse.issparse(value):
         return value.tocsr()[positions]
     if isinstance(value, torch.Tensor):
         return value[torch.from_numpy(positions)].clone()
+    if isinstance(value, (np.memmap, RowSubset)):
+        return subset_rows(value, positions, max_bytes)
     return np.asarray(value)[positions]
 
 
@@ -785,11 +826,19 @@ class CellariumData:
     the ``var`` columns that are unique. With ``var_names_make_unique=True`` the later copies of a repeated name are
     instead suffixed (``"TBCE"``, ``"TBCE-1"``, ...), as in :func:`anndata.utils.make_index_unique`, and the names as
     they were stay in ``var`` as the column ``"<var_key>_original"`` (``"var_names_original"`` without a ``var_key``).
+
+    ``max_gb`` is the memory budget (in GiB) for what api functions hold in memory: the cells read by :meth:`to_ram` and
+    :meth:`to_anndata`, and per-cell results stored in ``obsm`` (which go to a temporary file when they do not fit,
+    and which a view reads into memory only if its rows fit). Views inherit it. By default it is half of the memory that
+    is available, taking any container limit into account. It can be changed at any time with the :attr:`max_gb`
+    attribute.
     """
 
     def __init__(
         self,
         h5ad_paths: list[str] | None = None,
+        deltacells_uri: str | None = None,
+        deltacells_kwargs: dict[str, Any] | None = None,
         total_mrna_umis_column: str | None = None,
         var_key: str | None = None,
         obs_columns: dict[str, tuple[str, Callable]] = {},
@@ -800,10 +849,8 @@ class CellariumData:
         nexus_extract_uniform_sizes: bool | None = None,
         datamodule_num_workers: int = 0,
         obs_parquet_path: str | None = None,
-        *,
-        deltacells_uri: str | None = None,
-        deltacells_kwargs: dict[str, Any] | None = None,
         var_names_make_unique: bool = False,
+        max_gb: float | None = None,
     ):
         if (h5ad_paths is None) == (deltacells_uri is None):
             raise ValueError("Provide exactly one of h5ad_paths and deltacells_uri.")
@@ -842,6 +889,7 @@ class CellariumData:
             )
             self._obs = DeltaCellsLazyObs(self._datamodule.dadc)
         self._stage = stage
+        self.max_gb = max_gb
         self._deltacells_uri = deltacells_uri
         self._deltacells_kwargs = dict(deltacells_kwargs or {})
         self._var = self._datamodule.dadc.var.copy()
@@ -890,6 +938,23 @@ class CellariumData:
         return len(self._datamodule.dadc)
 
     @property
+    def max_gb(self) -> float | None:
+        """The memory budget (in GiB) for what api functions hold in memory, or ``None``
+        for half of what is available."""
+        return self._max_gb
+
+    @max_gb.setter
+    def max_gb(self, value: float | None) -> None:
+        if value is not None and value <= 0:
+            raise ValueError(f"max_gb must be positive, got {value}.")
+        self._max_gb = value
+
+    def _max_bytes(self, max_gb: float | None = None) -> int:
+        """The memory budget in bytes: ``max_gb`` if given, else :attr:`max_gb`, else half of the available memory."""
+        max_gb = self._max_gb if max_gb is None else max_gb
+        return int(max_gb * 2**30) if max_gb is not None else available_memory_bytes() // 2
+
+    @property
     def deltacells_uri(self) -> str | None:
         """The location of the deltacells dataset that these cells are read from, or ``None`` if they are not."""
         return self._deltacells_uri
@@ -928,16 +993,15 @@ class CellariumData:
         Views of it read from the same memory. Calling this on data that is already in memory returns it as it is.
 
         Args:
-            max_gb: The most memory (in GiB) to use. By default half of the memory that is available, taking any
-                container limit into account.
+            max_gb: The most memory (in GiB) to use. By default the :attr:`max_gb` of this data, which by default is
+                half of the memory that is available, taking any container limit into account.
 
         Raises:
             MemoryError: If the cells do not fit.
         """
         if isinstance(unwrap_collection(self._datamodule.dadc), RamCollection):
             return self  # type: ignore[return-value]
-        max_bytes = int(max_gb * 2**30) if max_gb is not None else available_memory_bytes() // 2
-        ram = load_into_ram(self._datamodule.dadc, max_bytes)
+        ram = load_into_ram(self._datamodule.dadc, self._max_bytes(max_gb))
         return CellariumDataView(self, np.arange(self.n_obs, dtype=np.int64), collection=ram, num_workers=0)
 
     def to_deltacells(
@@ -1047,9 +1111,10 @@ class CellariumData:
                 needs more data to run (such as scVI's batch column) gets it from ``obs``, as in :meth:`using`.
                 A view only has the modules that were trained on it (or assigned to it).
             seed: The seed of the random sample and of the geometric sketch.
-            max_gb: The most memory (in GiB) to read the counts into, as in :meth:`to_ram`: by default half of the
-                memory that is available. Nothing is read if the cells would not fit. It does not apply to the cells
-                of a geometric sketch, which the sketch has read already.
+            max_gb: The most memory (in GiB) to read the counts into, as in :meth:`to_ram`: by default the
+                :attr:`max_gb` of this data (half of the memory that is available, unless set). Nothing is read if the
+                cells would not fit. It does not apply to the cells of a geometric sketch, which the sketch has read
+                already.
 
         Raises:
             ValueError: If the arguments do not fit together (for example a ``target_n_cells`` without a
@@ -1185,6 +1250,108 @@ class CellariumData:
         with temporary_batch_keys(self._datamodule, trained.batch_keys):
             yield trained
 
+    def predict_batches(
+        self,
+        module: CellariumModule | None = None,
+        device: str | torch.device | None = None,
+        batch_size: int | None = None,
+        desc: str = "Reading cells",
+    ) -> Iterator[dict[str, Any]]:
+        """
+        Iterate over batches of all the cells (and no others, once each), for passes that compute something from
+        every cell. Works for views as for the data they are taken from: it reads the cells of this data.
+
+        Unlike the dataloaders of the datamodule, this does not shuffle, drop cells or depend on a trainer: the batches
+        cover exactly the cells of this data, in an order that is not the order of the cells (the data is read
+        efficiently, by dataloader workers each reading a contiguous stretch), so every batch carries the positions of
+        its cells as ``batch["row_indices_n"]`` (a tensor of positions in this data, i.e. in ``obs``) for putting
+        per-cell results in their place. The batch has the fields of ``datamodule.batch_keys``, which include
+        ``"x_ng"``, ``"var_names_g"`` and ``"obs_names_n"``, and the iteration raises a ``RuntimeError`` at the end if
+        it did not cover all the cells.
+
+        With a ``module``, each batch is what the model of the module would see: the module's ``cpu_transforms`` are
+        applied by the dataloader workers (as in training), and the rest of its ``transforms`` (those of
+        ``module.transforms``) are applied here, on ``device``, under ``torch.no_grad()``. The model itself is not
+        applied. The module is put in ``eval`` mode, and its transforms are moved to ``device`` for the iteration, and
+        restored when it ends. Without a ``module`` the batches are as the datamodule reads them, with no transforms
+        at all (so for example no gene filter), for the caller to transform.
+
+        Example:
+            >>> for batch in cdata.predict_batches(trained.module, device="cuda"):
+            ...     x_ng = batch["x_ng"]  # transformed as the model of trained.module sees it, on the GPU
+            ...     positions = batch["row_indices_n"]
+
+        Args:
+            module: A configured (or configurable) :class:`~cellarium.ml.core.CellariumModule` whose transforms to
+                apply.
+            device: The device to move the batches to (and the module's transforms), or ``None`` to leave them where
+                they are (the cpu).
+            batch_size: The number of cells per batch (up to), by default that of the datamodule.
+            desc: The label of the progress bar.
+
+        Yields:
+            The batches, as dictionaries.
+        """
+        datamodule = self._datamodule
+        datamodule._check_num_workers()
+        batch_size = datamodule.batch_size if batch_size is None else batch_size
+        n_obs = self.n_obs
+
+        collate_fn: Callable = datamodule.collate_fn
+        if module is not None:
+            module.configure_model()  # idempotent; makes the transforms accessible
+            if len(module.cpu_transforms) > 0:
+                collate_fn = FunctionComposer(first_applied=collate_fn, second_applied=module.cpu_transforms)
+        # the settings that matter for completeness are fixed here, not taken from the datamodule (which is set up for
+        # training, e.g. shuffled). `cache_efficient` reads each worker's contiguous stretch of cells, which is much
+        # faster than `same_order` but yields batches out of order: hence the positions
+        dataset = _PositionedDataset(
+            dadc=datamodule.dadc,
+            batch_keys=dict(datamodule.batch_keys),
+            batch_size=batch_size,
+            iteration_strategy="cache_efficient",
+            shuffle=False,
+            drop_last_indices=False,
+            drop_incomplete_batch=False,
+            worker_seed=datamodule.worker_seed,
+            prefetch_lookahead=datamodule.prefetch_lookahead,
+        )
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            num_workers=datamodule.num_workers,
+            collate_fn=collate_fn,
+            prefetch_factor=datamodule.prefetch_factor,
+            persistent_workers=False,
+            pin_memory=datamodule.pin_memory,
+        )
+
+        target = None if device is None else torch.device(device)
+        was_training = module.training if module is not None else False
+        original_device = _device_of(module.transforms) if module is not None else None
+        if module is not None:
+            module.eval()
+            if target is not None:
+                module.transforms.to(target)
+        try:
+            seen = 0
+            for batch in tqdm(loader, total=math.ceil(n_obs / batch_size), desc=desc, unit="batch"):
+                positions = batch.pop("row_indices_n")  # stays on the cpu
+                if target is not None:
+                    batch = move_data_to_device(batch, target)
+                if module is not None:
+                    with torch.no_grad():
+                        batch = module.transforms(batch)
+                batch["row_indices_n"] = positions
+                seen += len(positions)
+                yield batch
+            if seen != n_obs:
+                raise RuntimeError(f"The batches covered {seen} cells, but there are {n_obs}.")
+        finally:
+            if module is not None:
+                if target is not None and original_device is not None:
+                    module.transforms.to(original_device)
+                module.train(was_training)
+
     @property
     def hvg(self) -> pd.Series | None:
         """Boolean HVG mask aligned to var_names_g, or None if not set."""
@@ -1285,10 +1452,14 @@ class CellariumDataView(CellariumData):
         self._datamodule = _clone_datamodule(parent.datamodule, collection, self._stage, num_workers)
         self._obs = ViewLazyObs(self._root.obs, self._root_indices)  # type: ignore[arg-type]
         self._var = parent.var.copy()
+        self.max_gb = parent.max_gb
         self._init_state()
+        # entries on disk stay there, as a lazy view of the parent's file, if the view's rows do not fit in memory
+        on_disk = any(isinstance(value, (np.memmap, RowSubset)) for value in parent.obsm.values())
+        max_bytes = parent._max_bytes() if on_disk else None
         for source, target in ((parent.obsm, self._obsm), (parent.obs_computed, self._obs_computed)):
             for key, value in source.items():
                 try:
-                    target[key] = _subset_rows(value, positions)
+                    target[key] = _subset_rows(value, positions, max_bytes)
                 except (TypeError, ValueError, IndexError) as error:
                     warnings.warn(f"'{key}' of the parent could not be restricted to the view and is left out: {error}")

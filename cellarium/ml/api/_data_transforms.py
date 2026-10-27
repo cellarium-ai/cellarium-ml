@@ -39,7 +39,8 @@ class OnePassRecipe:
     """
     A :class:`~cellarium.ml.models.OnePassMeanVarStd` over the library-size normalized (and optionally log1p
     transformed) counts of all genes, with per-``batch_key`` statistics if ``batch_key`` is given. The pooled
-    ``mean_g`` and ``std_g`` do not depend on the batches.
+    ``mean_g`` and ``std_g`` do not depend on the batches. With ``normalize_total=False`` the counts are not
+    normalized (``target_count`` and ``eps`` then do nothing).
 
     The defaults of ``target_count`` and ``eps`` are those of :class:`~cellarium.ml.transforms.NormalizeTotal`.
     """
@@ -48,9 +49,12 @@ class OnePassRecipe:
     eps: float = 1e-6
     log1p: bool = False
     batch_key: str | None = None
+    normalize_total: bool = True
 
     def cpu_transforms(self) -> list[nn.Module]:
         """The transforms to run on the cpu, in front of any gene :class:`~cellarium.ml.transforms.Filter`."""
+        if not self.normalize_total:
+            return []
         return [NormalizeTotal(target_count=self.target_count, eps=self.eps)]
 
     def transforms(self) -> list[nn.Module]:
@@ -81,13 +85,16 @@ class OnePassRecipe:
         """
         return (
             isinstance(other, OnePassRecipe)
-            and (other.target_count, other.eps, other.log1p) == (self.target_count, self.eps, self.log1p)
+            and (other.target_count, other.eps, other.log1p, other.normalize_total)
+            == (self.target_count, self.eps, self.log1p, self.normalize_total)
             and (self.batch_key is None or other.batch_key == self.batch_key)
         )
 
     def fingerprint(self) -> str:
         """A short description of the statistics, for the record of what was computed."""
         steps = [f"normalize_total(target_count={self.target_count}, eps={self.eps})"]
+        if not self.normalize_total:
+            steps = ["raw counts"]
         if self.log1p:
             steps.append("log1p")
         batches = "" if self.batch_key is None else f" by {self.batch_key}"

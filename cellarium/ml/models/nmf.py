@@ -1,69 +1,25 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import copy
-import gc
-import logging
 import math
-import sys
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal, Optional
-
-if TYPE_CHECKING:
-    import cellarium.ml
+from typing import Literal
 
 import lightning.pytorch as pl
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
-import tqdm as _tqdm_module
 from lightning.pytorch.strategies import DDPStrategy
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-from tqdm.auto import tqdm
 
 from cellarium.ml.models.model import CellariumModel
-from cellarium.ml.models.ols import StreamingOrdinaryLeastSquares
-from cellarium.ml.transforms import DivideByScale, Filter, NormalizeTotal, ZScore
-from cellarium.ml.utilities.core import call_func_with_batch
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
 )
 
 warnings.filterwarnings("ignore")
-
-
-def _fresh_tqdm(iterable, **kwargs):
-    # Clear any stale tqdm instances left by a previous Lightning interrupt so
-    # that tqdm.auto can properly render a live Jupyter widget for this bar.
-    _tqdm_module.tqdm._instances.clear()
-    return tqdm(iterable, **kwargs)
-
-
-def _get_logger():
-    """Get a logger that works well in both regular Python and Jupyter notebooks."""
-    logger = logging.getLogger(__name__)
-
-    # Only configure if not already configured
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        formatter = logging.Formatter(
-            fmt="%(name)s - %(levelname)s - %(message)s",
-        )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-        # Prevent propagation to avoid duplicate messages
-        logger.propagate = False
-
-    return logger
-
-
-logger = _get_logger()
 
 
 @torch.compile()
@@ -719,9 +675,12 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
     """
     Abstract base class for non-negative matrix factorization implementations.
 
-    This class defines the interface that all NMF implementations must provide
-    to work with NMFOutput, which can run consensus and downstream analyses.
+    An implementation only has to provide the learned factors of each replicate (:attr:`factors_dict`). Given
+    consensus factors computed from them (see :class:`~cellarium.ml.api.NMFOutput`), the loadings of new cells and the
+    reconstruction error are the same for every implementation, so they are implemented here.
     """
+
+    _alpha_tol = 1e-5
 
     def __init__(self, var_names_g: Sequence[str], k_values: list[int], **kwargs):
         super().__init__()
@@ -742,33 +701,52 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
         """
         pass
 
-    @abstractmethod
+    @torch.no_grad()
     def infer_loadings(
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
         consensus_factors: dict[int, dict[str, torch.Tensor | float]],
         k: int,
-        normalize: bool = True,
+        normalize: bool = False,
         obs_names_n: np.ndarray | None = None,
     ) -> torch.Tensor:
         """
-        Infer the loadings of each program for the input count matrix.
+        Infer the loadings of each program for the input count matrix, by non-negative least squares against the
+        consensus factors. To be run after the model has been trained and consensus factors have been computed.
 
         Args:
-            x_ng: Gene counts matrix
-            var_names_g: Variable names
-            consensus_factors: Consensus factors from consensus computation
-            k: Number of factors
-            normalize: Whether to normalize loadings
-            obs_names_n: Cell names
+            x_ng: Gene counts matrix.
+            var_names_g: The list of the variable names in the input data.
+            consensus_factors: The consensus factors for each k value are in ``consensus_factors[k]["consensus_D_kg"]``.
+            k: Number of factors.
+            normalize: Whether to normalize the loadings of each cell to sum to 1.
+            obs_names_n: Cell names (not used).
 
         Returns:
-            Loadings tensor of shape (n, k)
+            Loadings tensor of shape (n, k).
         """
-        pass
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+        D_kg = consensus_factors[k]["consensus_D_kg"]
+        assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
 
-    @abstractmethod
+        alpha_nk = (
+            solve_nnls_fista(
+                D_kg.to(x_ng.device).unsqueeze(0).transpose(1, 2),
+                x_ng.t(),
+                tol=self._alpha_tol * 0.1,
+                max_iter=1000,
+            )
+            .transpose(1, 2)
+            .squeeze(0)
+        )
+
+        if normalize:
+            alpha_nk = F.normalize(alpha_nk, p=1, dim=-1)
+
+        return alpha_nk
+
+    @torch.no_grad()
     def reconstruction_error(
         self,
         x_ng: torch.Tensor,
@@ -776,17 +754,45 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
         consensus_factors: dict[int, dict[str, torch.Tensor | float]],
     ) -> dict[int, float]:
         """
-        Compute reconstruction error for each k value.
+        Compute the reconstruction error for each k value in ``consensus_factors``, using the consensus factors
+        ``consensus_factors[k]["consensus_D_kg"]``.
 
         Args:
-            x_ng: Gene counts matrix
-            var_names_g: Variable names
-            consensus_factors: Consensus factors from consensus computation
+            x_ng: Gene counts matrix.
+            var_names_g: The list of the variable names in the input data.
+            consensus_factors: The consensus factors for each k value.
 
         Returns:
-            Dictionary mapping k -> reconstruction error
+            A dictionary mapping each k value to its reconstruction error.
         """
-        pass
+        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
+
+        rec_error = {}
+        for k in consensus_factors.keys():
+            D_kg = consensus_factors[k]["consensus_D_kg"]
+            assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
+            if (D_kg == 0).all():
+                raise ValueError("D_kg is all zeros, please train the model and compute consensus factors first")
+
+            alpha_nk = self.infer_loadings(
+                x_ng=x_ng,
+                var_names_g=var_names_g,
+                consensus_factors=consensus_factors,
+                k=k,
+                normalize=False,
+            ).squeeze(0)
+
+            rec_error[k] = (
+                nmf_frobenius_loss(
+                    x_ng=x_ng,
+                    loadings_nk=alpha_nk.to(x_ng.device),
+                    factors_kg=D_kg.to(x_ng.device),
+                )
+                .sum()
+                .item()
+            )
+
+        return rec_error
 
 
 class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
@@ -848,7 +854,6 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
                 self.register_buffer(f"loadings_{i}_rnk", torch.empty(r, n_cells_total, i))  # initialized later
 
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
-        self._alpha_tol = 1e-5
         self._hals_tol = 1e-4
         self.reset_parameters()
 
@@ -1049,845 +1054,3 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
 
     def on_end(self, trainer: pl.Trainer) -> None:
         trainer.save_checkpoint(trainer.default_root_dir + "/NMF.ckpt")
-
-    @torch.no_grad()
-    def infer_loadings(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        consensus_factors: dict[int, dict[str, torch.Tensor | float]],
-        k: int,
-        normalize: bool = False,
-        obs_names_n: np.ndarray | None = None,
-    ) -> torch.Tensor:
-        """
-        Infer the loadings of each program for the input count matrix.
-        To be run after the model has been trained.
-        """
-        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        D_kg = consensus_factors[k]["consensus_D_kg"]
-        assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
-
-        alpha_nk = (
-            solve_nnls_fista(
-                D_kg.to(x_ng.device).unsqueeze(0).transpose(1, 2),
-                x_ng.t(),
-                tol=self._alpha_tol * 0.1,
-                max_iter=1000,
-            )
-            .transpose(1, 2)
-            .squeeze(0)
-        )
-
-        if normalize:
-            alpha_nk = F.normalize(alpha_nk, p=1, dim=-1)
-
-        return alpha_nk
-
-    @torch.no_grad()
-    def reconstruction_error(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        consensus_factors: dict[int, dict[str, torch.Tensor | float]],
-    ) -> dict[int, float]:
-        """
-        Compute the reconstruction error for each k_value using trained consensus factors D_kg.
-
-        Args:
-            x_ng: Gene counts matrix.
-            var_names_g: The list of the variable names in the input data.
-            consensus_factors: The consensus factors for each k_value are in consensus_factors[k]["consensus_D_kg"].
-
-        Returns:
-            A dictionary mapping each k_value to its reconstruction error.
-        """
-        assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-
-        rec_error = {}
-        for k in consensus_factors.keys():
-            D_kg = consensus_factors[k]["consensus_D_kg"]
-            assert isinstance(D_kg, torch.Tensor), "consensus_D_kg must be a tensor"
-            if (D_kg == 0).all():
-                raise ValueError("D_kg is all zeros, please train the model and run compute_consensus_factors() first")
-
-            alpha_nk = self.infer_loadings(
-                x_ng=x_ng,
-                var_names_g=var_names_g,
-                consensus_factors=consensus_factors,
-                k=k,
-                normalize=False,
-            ).squeeze(0)
-
-            rec_error[k] = (
-                nmf_frobenius_loss(
-                    x_ng=x_ng,
-                    loadings_nk=alpha_nk.to(x_ng.device),
-                    factors_kg=D_kg.to(x_ng.device),
-                )
-                .sum()
-                .item()
-            )
-
-        return rec_error
-
-
-def consensus(D_rkg: torch.Tensor, density_threshold: float, local_neighborhood_size: float, plot_only=False):
-    assert local_neighborhood_size > 0 and local_neighborhood_size < 1, (
-        "local_neighborhood_size must be between 0 and 1"
-    )
-    assert density_threshold > 0 and density_threshold <= 1, "density_threshold must be > 0 and <= 1"
-    r, num_component, g = D_rkg.shape
-    d_norm_rkg = F.normalize(D_rkg, dim=-1, p=2)
-    d_norm_mg = d_norm_rkg.reshape(r * num_component, g)
-
-    if r > 1:
-        n_neighbors = int(r * local_neighborhood_size)
-        if n_neighbors < 2:
-            raise UserWarning(
-                f"local_neighborhood_size {local_neighborhood_size} is too small for k={num_component}. "
-                f"n_neighbors = int(replicates * local_neighborhood_size) = {n_neighbors}. "
-                "We want n_neighbors >= 2. Increase local_neighborhood_size."
-            )
-
-        # euclidean distance to every other run
-        euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
-        euclidean_dist_mm.fill_diagonal_(0)  # correct for roundoff errors that may be present
-
-        # top n_neighbors plus self (distance 0)
-        n_nearest_dist_including_self_mL, _ = torch.topk(euclidean_dist_mm, n_neighbors + 1, largest=False)
-
-        # distances to top n_neighbors
-        n_nearest_dist_ml = n_nearest_dist_including_self_mL[:, 1:]
-
-        # mean distance to top n_neighbors
-        mean_neighbor_distance_m = n_nearest_dist_ml.mean(dim=1)
-
-        if plot_only:
-            import matplotlib.pyplot as plt
-
-            plt.figure(figsize=(5, 2))
-            plt.hist(mean_neighbor_distance_m.cpu().numpy(), bins=75)
-            plt.title(f"Local Neighborhood Distances: k = {num_component}")
-            plt.ylabel("Number of NMF factors\n(total is replicates times k)")
-            plt.xlabel(f"Average distance to nearest {n_neighbors} neighbors")
-            plt.xlim([-0.05, 1.05])
-            # plt.show()
-            return
-
-        # filter out runs considered outliers based on threshold
-        logic = mean_neighbor_distance_m < density_threshold
-        euclidean_dist_ff = euclidean_dist_mm[logic, :][:, logic]
-        n_nearest_dist_fl = n_nearest_dist_ml[logic, :]
-        d_norm_fg = d_norm_mg[logic, :]
-
-        if len(d_norm_fg) == 0:
-            raise UserWarning(
-                f"No samples found for k={num_component} after applying density threshold {density_threshold}. "
-                "Please run with plot=True and consult histogram"
-            )
-
-        # run k-means clustering on the remaining f programs
-        df_d_norm_fg = pd.DataFrame(d_norm_fg.cpu().numpy())
-        kmeans = KMeans(n_clusters=num_component, n_init=10, random_state=1)
-        kmeans.fit(df_d_norm_fg)
-        kmeans_cluster_labels_f = pd.Series(kmeans.labels_ + 1, index=df_d_norm_fg.index)
-
-        # compute the consensus k programs as the median of each cluster
-        median_D_kg = df_d_norm_fg.groupby(kmeans_cluster_labels_f).median()
-        median_D_kg = torch.tensor(median_D_kg.values)
-
-        silhouette = silhouette_score(df_d_norm_fg.values, kmeans_cluster_labels_f, metric="euclidean")
-
-    else:
-        euclidean_dist_ff = None
-        n_nearest_dist_fl = None
-        n_nearest_dist_ml = None
-        n_neighbors = 0
-        median_D_kg = D_rkg.reshape(r * num_component, g)  # just grab the factor without normalization if r=1
-        silhouette = 1.0
-
-    factors_kg = F.normalize(median_D_kg, dim=-1, p=1)
-
-    return {
-        "filtered_euclidean_distance_matrix": euclidean_dist_ff,
-        "filtered_neighbor_distances": n_nearest_dist_fl,
-        "all_neighbor_distances": n_nearest_dist_ml,
-        "n_neighbors": n_neighbors,
-        "consensus_D_kg": factors_kg,
-        "stability": silhouette,
-        "local_neighborhood_size": local_neighborhood_size,
-        "density_threshold": density_threshold,
-    }
-
-
-def plot_density_histograms(
-    nmf_model: NonNegativeMatrixFactorization,
-    local_neighborhood_size: float = 0.3,
-    k_values: list[int] | None = None,
-):
-    """
-    Plot a histogram of local neighborhood distances for each value of k.
-
-    Args:
-        local_neighborhood_size: Determines number of neighbors to use for calculating kNN distance as
-            int(local_neighborhood_size * replicates)
-        k_values: A list of k values to plot histograms for (default: None, which loops over all k values)
-    """
-    if k_values is None:
-        k_values = nmf_model.k_values
-    for k in k_values:
-        consensus(
-            D_rkg=getattr(nmf_model, f"D_{k}_rkg"),
-            density_threshold=0.5,  # ignored when plot_only=True
-            local_neighborhood_size=local_neighborhood_size,
-            plot_only=True,
-        )
-
-
-def compute_consensus_factors(
-    nmf_model: NonNegativeMatrixFactorization,
-    k_values: list[int] | None = None,
-    density_threshold: float = 0.5,
-    local_neighborhood_size: float = 0.3,
-) -> dict[int, dict[str, torch.Tensor | float]]:
-    """
-    Run the consensus step of consensus NMF, and store the consensus factors as attributes of `nmf_model`.
-
-    Args:
-        nmf_model: The trained NMF model.
-        k_values: k-values to compute consensus for.
-        density_threshold: The threshold for the density of the local neighborhood.
-        local_neighborhood_size: The size of the local neighborhood.
-
-    Returns:
-        A dictionary of the consensus outputs for each value in k_values, keyed by k_values.
-    """
-    torch.manual_seed(0)
-    if k_values is None:
-        k_values = nmf_model.k_values
-
-    consensus_stat = {}
-    for k in k_values:
-        D_rkg = nmf_model.factors_dict[k]
-        consensus_output = consensus(
-            D_rkg=D_rkg,
-            density_threshold=density_threshold,
-            local_neighborhood_size=local_neighborhood_size,
-            plot_only=False,
-        )
-        consensus_stat[k] = consensus_output
-
-    return consensus_stat
-
-
-def k_selection_plot(
-    consensus_output: dict[int, dict[str, float | torch.Tensor]],
-    reconstruction_error: dict[int, float],
-):
-    from matplotlib import pyplot as plt
-
-    k_values = list(consensus_output.keys())
-    assert set(consensus_output.keys()) == set(reconstruction_error.keys()), (
-        "consensus_output and reconstruction_error keys k do not match"
-    )
-
-    silhouette_scores = {}
-    for k in k_values:
-        silhouette_scores[k] = consensus_output[k]["stability"]
-    eval_metrics = pd.DataFrame.from_dict(silhouette_scores, orient="index")
-    eval_metrics.columns = ["stability"]
-    eval_metrics["rec_error"] = reconstruction_error
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(eval_metrics.index, eval_metrics["stability"], "o-", color="b")
-    plt.grid(True)
-    plt.ylabel("Stability", color="b")
-    plt.xlabel("Number of components: k")
-    plt.xticks(k_values)
-    plt.gca().tick_params(axis="y", colors="b")
-    plt.twinx()
-    plt.plot(eval_metrics.index, eval_metrics["rec_error"], "o-", color="r")
-    plt.ylabel("Reconstruction error", color="r")
-    plt.gca().tick_params(axis="y", colors="r")
-    plt.grid(False)
-
-
-def plot_clustermap(
-    consensus_output: dict[int, dict[str, float | torch.Tensor]],
-    k: int,
-):
-    import matplotlib.pyplot as plt
-
-    try:
-        import seaborn as sns
-    except ImportError:
-        print("Seaborn is not installed. Please install with `pip install seaborn`")
-        return
-
-    filtered_dist_matrix = consensus_output[k]["filtered_euclidean_distance_matrix"]
-    assert isinstance(filtered_dist_matrix, torch.Tensor)
-    cg = sns.clustermap(
-        filtered_dist_matrix.cpu().numpy(),
-        row_cluster=True,
-        col_cluster=True,
-        cbar_pos=(0.05, 0.25, 0.03, 0.15),
-        figsize=(5, 5),
-        xticklabels=False,
-        yticklabels=False,
-        rasterized=True,
-    )
-    cg.ax_row_dendrogram.set_visible(False)
-    cg.ax_col_dendrogram.set_visible(False)
-    cg.cax.set_ylabel("Euclidean distance")
-    cg.ax_heatmap.set_title(f"k = {k}")
-    plt.show()
-
-    plt.figure(figsize=(5, 2))
-    all_neighbor_distances = consensus_output[k]["all_neighbor_distances"]
-    assert isinstance(all_neighbor_distances, torch.Tensor), "all_neighbor_distances must be a tensor"
-    dists = all_neighbor_distances.mean(dim=1).cpu().numpy()
-    plt.hist(dists, bins=75)
-    plt.vlines(consensus_output[k]["density_threshold"], 0, plt.gca().get_ylim()[1], colors="r")
-    plt.title(
-        f"Local Neighborhood Distances: k = {k}\ndensity_threshold filters "
-        f"{100 * (dists > consensus_output[k]['density_threshold']).mean():.1f}% of runs"
-    )
-    plt.ylabel("Number of NMF factors\n(total is replicates times k)")
-    plt.xlabel(f"Average distance to nearest {consensus_output[k]['n_neighbors']} neighbors")
-    plt.xlim([-0.05, 1.05])
-
-
-def is_subclass_by_name(instance, class_name):
-    # Search the Method Resolution Order for the target class name
-    return any(c.__name__ == class_name for c in type(instance).__mro__)
-
-
-class NMFOutput:
-    """
-    A class to facilitate interaction with a trained NMF model and computation of downstream outputs.
-    """
-
-    @classmethod
-    def from_checkpoints(
-        cls,
-        checkpoint_paths: list[str],
-        datamodule: "cellarium.ml.CellariumAnnDataDataModule",
-        map_location: str | torch.device = "cpu",
-    ) -> "NMFOutput":
-        """
-        Construct an :class:`NMFOutput` from a list of checkpoint files, loading one checkpoint
-        at a time to avoid holding all model weights in memory simultaneously.
-
-        Two checkpoint splitting strategies are supported (and may be freely mixed):
-
-        - **Split-by-k**: each checkpoint was trained on a disjoint set of k values.  The
-          ``D_{k}_rkg`` tensors are placed directly into the combined model.
-        - **Split-by-r**: each checkpoint was trained on the same k values but with a different
-          (possibly smaller) number of replicates.  The ``D_{k}_rkg`` tensors are concatenated
-          along the replicate dimension (dim 0).
-
-        .. note::
-            All checkpoints are assumed to have been trained with identical transforms and the
-            same set of HVGs (``var_names_g``).  Only ``var_names_g`` is validated for
-            consistency across checkpoints; transform agreement is not checked.
-
-        Args:
-            checkpoint_paths: Ordered list of paths to ``.ckpt`` files produced by training an
-                :class:`OnlineNonNegativeMatrixFactorization` model.
-            datamodule: The datamodule to use for consensus and downstream analyses.
-            map_location: Device onto which checkpoint tensors are loaded.  Defaults to
-                ``"cpu"`` to keep peak memory low regardless of GPU availability.
-
-        Returns:
-            A fully constructed :class:`NMFOutput` instance whose ``nmf_module.model`` carries
-            the union of all ``D_{k}_rkg`` factor tensors from every checkpoint.
-        """
-        import cellarium.ml
-
-        if not checkpoint_paths:
-            raise ValueError("checkpoint_paths must not be empty")
-
-        # d_tensors_per_k accumulates a list of (r_i, k, g) tensors for each k value seen.
-        # Multiple checkpoints may contribute tensors for the same k (split-by-r scenario);
-        # they will be concatenated along dim 0.
-        d_tensors_per_k: dict[int, list[torch.Tensor]] = {}
-        reference_var_names_g: np.ndarray | None = None
-        saved_transforms: list | None = None
-
-        for i, path in _fresh_tqdm(enumerate(checkpoint_paths), total=len(checkpoint_paths)):
-            module = cellarium.ml.CellariumModule.load_from_checkpoint(path, map_location=map_location, strict=False)
-
-            model = module.model
-            if not is_subclass_by_name(model, "NonNegativeMatrixFactorization"):
-                raise ValueError(
-                    f"Checkpoint {path!r} model must be NonNegativeMatrixFactorization, got {type(model).__name__}"
-                )
-
-            if reference_var_names_g is None:
-                reference_var_names_g = model.var_names_g.copy()
-                # Fold cpu_transforms in front of transforms so the combined module
-                # needs no cpu_transforms machinery.
-                saved_transforms = list(module.cpu_transforms) + list(module.transforms)
-            else:
-                if not np.array_equal(model.var_names_g, reference_var_names_g):
-                    raise ValueError(
-                        f"var_names_g mismatch between checkpoint 0 and checkpoint {i} ({path!r}). "
-                        "All checkpoints must have been trained on the same set of HVGs."
-                    )
-
-            for k in model.k_values:
-                d_tensor = model.factors_dict[k].cpu().clone()  # shape (r_i, k, g)
-                if k not in d_tensors_per_k:
-                    d_tensors_per_k[k] = []
-                d_tensors_per_k[k].append(d_tensor)
-
-            del module
-            gc.collect()
-
-        assert reference_var_names_g is not None
-        assert saved_transforms is not None
-
-        # For split-by-r: concatenate tensors along the replicate dimension.
-        final_d_per_k: dict[int, torch.Tensor] = {
-            k: torch.cat(tensors, dim=0) for k, tensors in d_tensors_per_k.items()
-        }
-        all_k_values = sorted(final_d_per_k.keys())
-
-        # Build a shell model.  solver="fista" does not store loadings, which avoids allocating loadings_{k}_rnk
-        # buffers (which would be (r, n_cells_total, k) and are the root cause of the memory problem).
-        # r=1 is a placeholder; every D buffer is overwritten immediately below.
-        combined_model = OnlineNonNegativeMatrixFactorization(
-            var_names_g=list(reference_var_names_g),
-            k_values=all_k_values,
-            r=1,
-            solver="fista",
-            init="uniform_random",
-        )
-        for k, d_tensor in final_d_per_k.items():
-            # PyTorch routes setattr through _buffers when the name is a registered buffer,
-            # so this correctly replaces the (1, k, g) placeholder with (r_combined, k, g).
-            setattr(combined_model, f"D_{k}_rkg", d_tensor)
-
-        # is_initialized=True prevents configure_model() from calling reset_parameters(),
-        # which would overwrite the D tensors we just set.
-        # cpu_transforms are folded into transforms to avoid the cpu_transforms machinery.
-        combined_module = cellarium.ml.CellariumModule(
-            cpu_transforms=None,
-            transforms=saved_transforms if saved_transforms else None,
-            model=combined_model,
-            is_initialized=True,
-        )
-        # configure_model() sets up the pipeline so that nmf_module.model is accessible.
-        # With is_initialized=True it is a no-op with respect to parameter initialisation.
-        combined_module.configure_model()
-
-        return cls(nmf_module=combined_module, datamodule=datamodule)
-
-    def __init__(
-        self,
-        nmf_module: "cellarium.ml.CellariumModule",
-        datamodule: "cellarium.ml.CellariumAnnDataDataModule",
-    ):
-        """
-        Initialize the NMFOutput class.
-
-        Args:
-            nmf_module: The trained NMF module to use.
-            datamodule: The data module to use.
-        """
-        self.datamodule = datamodule
-        self.datamodule.setup(stage="predict")  # can remove cpu transforms from datamodule
-        self.nmf_module = nmf_module
-        self.nmf_module.setup(stage="predict")  # send cpu transforms to datamodule, but only if these share a Trainer
-        self._consensus: dict = {}
-        self._rec_error: dict | None = None
-        self._tpm_D_kg: torch.Tensor | None = None
-        self._tpm_A_kk: torch.Tensor | None = None
-        self._tpm_B_kg: torch.Tensor | None = None
-        if not isinstance(self.nmf_module.model, NonNegativeMatrixFactorization):
-            raise ValueError("NMFOutput requires nmf_module with a NonNegativeMatrixFactorization in nmf_module.model")
-        # Extract Filter and DivideByScale from the full transform list (cpu + gpu).
-        # These are used by _refit, which receives raw data and must filter and normalize
-        # internally (because it also needs the raw all-gene data for the TPM branch).
-        _all_transforms = list(nmf_module.cpu_transforms) + list(nmf_module.transforms)
-        self._hvg_filter: Filter | None = next((t for t in _all_transforms if isinstance(t, Filter)), None)
-        self._scale_normalizer: DivideByScale | None = next(
-            (t for t in _all_transforms if isinstance(t, DivideByScale)), None
-        )
-
-    def __repr__(self) -> str:
-        indent = "    "
-        return (
-            f"NMFOutput(\n{indent}nmf_module="
-            + str(self.nmf_module).replace("\n", f"\n{indent}{indent}")
-            + f",\n{indent}datamodule="
-            + str(self.datamodule).replace("\n", f"\n{indent}{indent}")
-            + "\n)\n"
-            + f"with consensus {list(self._consensus.keys())}"
-        )
-
-    def plot_density_histograms(self, k_values: int | list[int] | None = None, local_neighborhood_size: float = 0.3):
-        """
-        Plot density histograms for the given choice of local_neighborhood_size.
-
-        Args:
-            local_neighborhood_size: The fraction of replicate runs that are considered neighbors.
-            k_values: The list of k values to plot. If None, use all available k values.
-        """
-        if isinstance(k_values, int):
-            k_values = [k_values]
-        assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
-        plot_density_histograms(
-            nmf_model=self.nmf_module.model,
-            local_neighborhood_size=local_neighborhood_size,
-            k_values=k_values,
-        )
-
-    def compute_consensus_factors(
-        self, k_values: int | list[int], density_threshold: float, local_neighborhood_size: float = 0.3
-    ) -> None:
-        """
-        Run the "consensus" step of consensus NMF by filtering outliers and clustering replicates,
-        taking the median program in each cluster.
-
-        Args:
-            density_threshold: The density threshold to use for filtering. Kotliar default is 0.5
-            local_neighborhood_size: The local neighborhood size to use for clustering. Kotliar default is 0.3
-
-        Returns:
-            None, but updates :attr:`_consensus`, accessible via the property :property:`consensus`.
-        """
-        assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
-
-        if isinstance(k_values, int):
-            k_values = [k_values]
-
-        consensus_output = compute_consensus_factors(
-            nmf_model=self.nmf_module.model,
-            k_values=k_values,
-            density_threshold=density_threshold,
-            local_neighborhood_size=local_neighborhood_size,
-        )
-        self._consensus = self._consensus | consensus_output
-        self._rec_error = None  # remove this value, as it wil need updating with new consensus factors
-
-    @property
-    def consensus(self) -> dict[int, dict[str, torch.Tensor | float]]:
-        if len(self._consensus) > 0:
-            return self._consensus
-        raise UserWarning("Compute a consensus using compute_consensus_factors() -- entails hyperparameter choices")
-
-    def calculate_reconstruction_error(self, k_values: list[int] | None = None) -> dict[int, float]:
-        """
-        Calculate the reconstruction error for each k value.
-        Stores the output in :property:`reconstruction_error`.
-
-        Returns:
-            dict[int, float]: The reconstruction error for each k value.
-        """
-        assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
-        rec_error = {k: 0.0 for k in self.nmf_module.model.k_values}
-        for batch in _fresh_tqdm(self.datamodule.predict_dataloader()):
-            for transform in self.nmf_module.transforms:
-                batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
-            errors_keyed_by_k = self.nmf_module.model.reconstruction_error(
-                x_ng=batch["x_ng"],
-                var_names_g=batch["var_names_g"],
-                consensus_factors=self.consensus,
-            )
-            for k, error in errors_keyed_by_k.items():
-                rec_error[k] += error
-
-        self._rec_error = rec_error
-        return rec_error
-
-    @property
-    def reconstruction_error(self) -> dict[int, float]:
-        if self._rec_error is not None:
-            return self._rec_error
-        raise UserWarning("Compute reconstruction error using calculate_reconstruction_error()")
-
-    @torch.no_grad()
-    def compute_loadings(
-        self,
-        k: int,
-        datamodule: Optional["cellarium.ml.CellariumAnnDataDataModule"] = None,
-        normalize: bool = True,
-    ) -> pd.DataFrame:
-        """
-        Compute the per-cell factor loadings for a given k.
-
-        Args:
-            k: The number of consensus NMF factors
-            datamodule: The datamodule to use for prediction. If None, uses the current datamodule
-                and all its data. If provided, it can be a smaller subset of data.
-            normalize: Whether to normalize the loadings to sum to 1.
-        """
-        assert isinstance(self.nmf_module.model, NonNegativeMatrixFactorization)
-        if datamodule is None:
-            datamodule = self.datamodule
-        else:
-            datamodule.setup(stage="predict")  # as this may not have been called... cpu_transforms are tricky here
-
-        # TODO fix this hacky manual stuff (appropriate fix would be to call predict on the module
-        # and have model predict be infer_loadings)
-        # grab the transforms. module_pipeline includes the cpu_transforms exactly when the dataloader is not
-        # applying them (i.e. no trainer stage is active), and excludes them otherwise to avoid applying them twice
-        transforms = list(self.nmf_module.module_pipeline[:-1])
-
-        embedding = []
-        index = []
-        for batch in _fresh_tqdm(datamodule.predict_dataloader()):
-            # apply transforms to the data before inferring loadings
-            for transform in transforms:
-                batch |= transform(x_ng=batch["x_ng"], var_names_g=batch["var_names_g"])
-
-            alpha_nk = self.nmf_module.model.infer_loadings(
-                x_ng=batch["x_ng"],
-                var_names_g=batch["var_names_g"],
-                obs_names_n=batch.get("obs_names_n", None),
-                consensus_factors=self.consensus,
-                k=k,
-                normalize=normalize,
-            )
-            embedding += [alpha_nk.cpu()]
-            index.extend(batch["obs_names_n"])
-
-        return pd.DataFrame(torch.cat(embedding).numpy(), index=index)
-
-    @torch.no_grad()
-    def refit_consensus_factors_zscored_tpm_all_genes(
-        self,
-        k: int,
-        normalize_loadings: bool = False,
-        mean_g: torch.Tensor | None = None,
-        std_g: torch.Tensor | None = None,
-        var_names_g: np.ndarray | None = None,
-    ) -> dict[str, torch.Tensor | np.ndarray]:
-        """
-        Refit the consensus factors using all genes, after TPM normalization, and Z-scoring.
-
-        Args:
-            k: The run identifier, i.e. the number of factors to use from self.consensus to refit.
-            normalize_loadings: Whether to normalize the inferred loadings. False for Kotliar default.
-            mean_g: The mean expression of each gene for Z-scoring.
-                NOTE: should be TPM normalized stats.
-            std_g: The standard deviation of each gene for Z-scoring.
-            var_names_g: The names of the genes for Z-scoring.
-
-        Returns:
-            A dictionary mapping factor indices to their refitted loadings.
-        """
-        if k not in self.consensus:
-            raise KeyError(f"Missing consensus_factors key k={k}. Choose from {list(self.consensus.keys())}")
-        assert self.datamodule is not None, "datamodule must be present to refit consensus factors"
-        if mean_g is None or std_g is None or var_names_g is None:
-            raise ValueError("mean_g, std_g, and var_names_g must all be provided for Z-scoring")
-        self.datamodule.setup(stage="predict")
-
-        # set up transforms
-        refit_transforms = [
-            NormalizeTotal(target_count=1_000_000),
-            ZScore(mean_g=mean_g, std_g=std_g, var_names_g=var_names_g, eps=1e-12),
-        ]
-        inference_transforms = self.nmf_module.transforms
-
-        # set up streaming OLS solver
-        ols_solver = None
-
-        dataloader = self.datamodule.predict_dataloader()
-        for full_batch in _fresh_tqdm(dataloader):
-            # get the batch used for inference (HVGs, same transforms as used for training)
-            inference_batch = copy.deepcopy(full_batch)
-            for transform in inference_transforms:
-                inference_batch |= call_func_with_batch(transform.forward, batch=inference_batch)
-
-            # infer per-cell loadings for consensus factors for this minibatch
-            loadings_nk = self.nmf_module.model.infer_loadings(
-                x_ng=inference_batch["x_ng"],
-                var_names_g=inference_batch["var_names_g"],
-                obs_names_n=inference_batch.get("obs_names_n", None),
-                consensus_factors=self.consensus,
-                k=k,
-                normalize=normalize_loadings,
-            )
-
-            # get the batch used for refitting (all genes, TPM normalized, Z-scored globally - different from training)
-            for transform in refit_transforms:
-                full_batch |= call_func_with_batch(transform.forward, batch=full_batch)
-
-            # incremental OLS fit update
-            if ols_solver is None:
-                ols_solver = StreamingOrdinaryLeastSquares(
-                    var_names_g=np.arange(k).astype(str),
-                    n_targets=len(full_batch["var_names_g"]),
-                    univariate=False,
-                    ridge_penalty=0.0,
-                )
-            assert isinstance(ols_solver, StreamingOrdinaryLeastSquares)
-            ols_solver.update(x_ng=loadings_nk, y_nk=full_batch["x_ng"])
-
-        # finalize OLS fit
-        assert ols_solver is not None, "datamodule predict dataloader yielded no batches"
-        factors_kg = ols_solver.solve()
-        return {"factors_kg": factors_kg, "var_names_g": full_batch["var_names_g"]}
-
-    def default_k_selection_plot(self):
-        """
-        Make a k-selection plot with stability and reconstruction error curves as a function of k.
-        This uses the Kotliar default hyperparameters to run consensus.
-        """
-        density_threshold_default = 0.5
-        local_neighborhood_size_default = 0.3
-
-        logger.info("Computing consensus factors with default hyperparameters...")
-        self.compute_consensus_factors(
-            k_values=self.nmf_module.model.k_values,
-            density_threshold=density_threshold_default,
-            local_neighborhood_size=local_neighborhood_size_default,
-        )
-
-        logger.info("Calculating reconstruction error (requires an entire pass through the data)...")
-        self.calculate_reconstruction_error()
-
-        k_selection_plot(
-            consensus_output=self.consensus,
-            reconstruction_error=self.reconstruction_error,
-        )
-
-    def maximal_stability_k_selection_plot(
-        self,
-        fast_or_exhaustive: str = "fast",
-        density_threshold_limits: list = [0.05, 0.3],
-        local_neighborhood_size: float = 0.3,
-        max_tolerable_fraction_eliminated: float = 0.3,
-    ):
-        """
-        Make a k-selection plot with stability and reconstruction error curves as a function of k.
-        This uses the Kotliar default hyperparameter for local_neighborhood_size, but then makes
-        the determination of density_threshold into an optimization problem, which it solves separately
-        for each k. Arguably, this is an even better way to ultimately choose k.
-
-        Args:
-            fast_or_exhaustive: Whether to use fast or exhaustive search for density thresholds.
-            density_threshold_limits: The lower and upper bounds for the density threshold search.
-            local_neighborhood_size: Determines the number of neighboring runs to average distances over.
-            max_tolerable_fraction_eliminated: Do not consider a density_threshold which eliminates more than
-                this fraction of NMF runs.
-        """
-        logger.info("Computing consensus factors, searching for best density thresholds...")
-        for k in _fresh_tqdm(self.nmf_module.model.k_values):
-            if fast_or_exhaustive == "fast":
-                # try to look for local minima in the density histogram
-                # first compute preliminary consensus to get neighbor distances
-                if k not in self._consensus:
-                    self.compute_consensus_factors(
-                        k_values=[k],
-                        density_threshold=0.5,  # high threshold to include most data points
-                        local_neighborhood_size=local_neighborhood_size,
-                    )
-                n_nearest_dist_ml = self.consensus[k]["all_neighbor_distances"]
-                assert isinstance(n_nearest_dist_ml, torch.Tensor)
-                mean_neighbor_distance_m = n_nearest_dist_ml.mean(dim=1)
-                candidate_values = [
-                    dt
-                    for dt in find_local_minima(mean_neighbor_distance_m)
-                    if (
-                        (dt >= density_threshold_limits[0])
-                        and (dt <= density_threshold_limits[1])
-                        and (mean_neighbor_distance_m > dt).float().mean() <= max_tolerable_fraction_eliminated
-                    )
-                ]
-                if not candidate_values:
-                    logger.warning(
-                        f"Unable to find local minima in k={k} density histogram... 'fast' mode "
-                        "will fall back to 'exhaustive'"
-                    )
-                    candidate_values = np.arange(
-                        density_threshold_limits[0], density_threshold_limits[1], 0.01
-                    ).tolist()
-            elif fast_or_exhaustive == "exhaustive":
-                candidate_values = np.arange(density_threshold_limits[0], density_threshold_limits[1], 0.01).tolist()
-            else:
-                raise ValueError("fast_or_exhaustive must be 'fast' or 'exhaustive'")
-
-            best_density_threshold = 0.05
-            max_stability = 0.0
-            for density_threshold in candidate_values:
-                self.compute_consensus_factors(
-                    k_values=[k],
-                    density_threshold=density_threshold,
-                    local_neighborhood_size=local_neighborhood_size,
-                )
-                # check for improvement
-                stability = self.consensus[k]["stability"]
-                assert isinstance(stability, (int, float)), "stability must be a number"
-                if stability > max_stability:
-                    max_stability = stability
-                    best_density_threshold = density_threshold
-
-            # recompute best density threshold, storing results
-            self.compute_consensus_factors(
-                k_values=[k],
-                density_threshold=best_density_threshold,
-                local_neighborhood_size=local_neighborhood_size,
-            )
-
-        logger.info("Computing reconstruction errors...")
-        self.calculate_reconstruction_error()
-
-        k_selection_plot(
-            consensus_output=self.consensus,
-            reconstruction_error=self.reconstruction_error,
-        )
-
-    def k_selection_plot(self):
-        """
-        Make the k-selection plot with stability and reconstruction error curves as a function of k.
-        """
-        k_selection_plot(
-            consensus_output=self.consensus,
-            reconstruction_error=self.reconstruction_error,
-        )
-
-    def plot_clustermap(self, k: int | list[int] | None, density_threshold: float | None = None):
-        """
-        Make a clustermap plot of replicate factors to see how they cluster.
-
-        Args:
-            k: The number of components for NMF.
-            density_threshold: The density threshold for filtering factors. If None, it will use
-                the cached computation of consensus for k. If a value is provided, it will
-                recompute consensus with that density_threshold before plotting, and the new
-                consensus results will be cached.
-        """
-        if k is None:
-            k_values = self.nmf_module.model.k_values
-        else:
-            if isinstance(k, int):
-                k_values = [k]
-            elif isinstance(k, list):
-                k_values = k
-            else:
-                raise ValueError("k must be int or None")
-
-        if density_threshold is not None:
-            # Check if we need to recompute consensus
-            first_k = k_values[0] if k_values else list(self.consensus.keys())[0]
-            if first_k in self.consensus:
-                current_threshold = self.consensus[first_k]["density_threshold"]
-                if density_threshold != current_threshold:
-                    self.compute_consensus_factors(
-                        k_values=k_values,
-                        density_threshold=density_threshold,
-                    )
-
-        for k_val in k_values:
-            if k_val not in self.nmf_module.model.k_values:
-                raise ValueError(f"Invalid k value for trained model. Choose from {self.nmf_module.model.k_values}")
-
-            plot_clustermap(
-                consensus_output=self.consensus,
-                k=k_val,
-            )

@@ -12,8 +12,8 @@ import pytest
 import torch
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml.api._cnmf_consensus import consensus_factors
 from cellarium.ml.models import AmortizedOnlineNonNegativeMatrixFactorization
-from cellarium.ml.models.nmf import NMFOutput
 from cellarium.ml.models.nmf_amortized import BilinearLoadingsEncoder
 from cellarium.ml.transforms import DivideByScale, Filter
 from cellarium.ml.utilities.data import AnnDataField
@@ -140,10 +140,10 @@ def test_bilinear_loadings_encoder_output_shape() -> None:
 
 
 def test_amortized_nmf_infer_loadings(small_adata: anndata.AnnData) -> None:
-    """After training, NMFOutput can compute consensus factors and per-cell loadings."""
+    """After training, consensus factors give per-cell loadings and a reconstruction error."""
     n, g = small_adata.shape
     k = 3
-    # r=1 keeps the test fast and avoids the n_neighbors >= 2 requirement in compute_consensus_factors
+    # r=1 keeps the test fast and avoids the n_neighbors >= 2 requirement of the consensus
     r = 1
     dm = _make_datamodule(small_adata, batch_size=n // 2)
     dm.setup(stage="fit")
@@ -151,15 +151,22 @@ def test_amortized_nmf_infer_loadings(small_adata: anndata.AnnData) -> None:
     trainer = pl.Trainer(barebones=True, accelerator="cpu", devices=1, max_epochs=2)
     trainer.fit(module, dm)
 
-    nmf_output = NMFOutput(nmf_module=module, datamodule=dm)
     # density_threshold=1 keeps all replicates regardless of density score
-    nmf_output.compute_consensus_factors(k_values=k, density_threshold=1, local_neighborhood_size=0.3)
+    consensus = {k: consensus_factors(module.model.factors_dict[k], density_threshold=1, local_neighborhood_size=0.3)}
+    assert module.pipeline is not None
+    batch = module.pipeline[:-1](
+        {"x_ng": torch.from_numpy(small_adata.X).float(), "var_names_g": np.array(small_adata.var_names)}
+    )
 
-    loadings_df = nmf_output.compute_loadings(k=k, normalize=False)
-    assert loadings_df.shape == (n, k)
-    assert (loadings_df.values >= 0).all(), "Loadings should be non-negative"
+    loadings_nk = module.model.infer_loadings(
+        x_ng=batch["x_ng"], var_names_g=batch["var_names_g"], consensus_factors=consensus, k=k, normalize=False
+    )
+    assert loadings_nk.shape == (n, k)
+    assert (loadings_nk >= 0).all(), "Loadings should be non-negative"
 
-    rec_error = nmf_output.calculate_reconstruction_error(k_values=[k])
+    rec_error = module.model.reconstruction_error(
+        x_ng=batch["x_ng"], var_names_g=batch["var_names_g"], consensus_factors=consensus
+    )
     assert k in rec_error
     assert np.isfinite(rec_error[k]), f"Reconstruction error should be finite, got {rec_error[k]}"
 

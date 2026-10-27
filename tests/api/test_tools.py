@@ -86,7 +86,13 @@ def test_pca_reuses_the_zscore_statistics(cdata, hvg_computed, fits):
     pca(cdata, n_components=2, accelerator="cpu", key_added="other_pca")  # another n_components: same statistics
 
     assert len(fits) == n_fits_by_hvg + 1
-    assert fits[-1] == {"target_count": 10_000, "eps": 1e-6, "log1p": True, "batch_key": None}
+    assert fits[-1] == {
+        "target_count": 10_000,
+        "eps": 1e-6,
+        "log1p": True,
+        "batch_key": None,
+        "normalize_total": True,
+    }
 
 
 def test_pca_without_zscore_fits_no_statistics(cdata, hvg_computed, fits):

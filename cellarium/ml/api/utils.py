@@ -15,7 +15,7 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Mapping
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import anndata
 import h5py
@@ -43,6 +43,17 @@ def get_gcs_fs():
 
         _GCS_FS = gcsfs.GCSFileSystem()
     return _GCS_FS
+
+
+def resolve_device(accelerator: Literal["cpu", "mps", "cuda", "auto"]) -> torch.device:
+    """The device for ``accelerator``: the best available of cuda, mps and cpu for ``"auto"``."""
+    if accelerator == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(accelerator)
 
 
 def release_unused_memory() -> None:
