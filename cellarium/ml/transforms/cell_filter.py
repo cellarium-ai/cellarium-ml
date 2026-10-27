@@ -12,10 +12,10 @@ class CellFilter(nn.Module):
     Exactly one of ``min_count_per_cell`` or ``min_nonzero_genes_per_cell`` may be
     set to a positive value; setting both is an error.
 
-    Any :class:`torch.Tensor` value in the batch whose first dimension matches the
-    number of input cells (``x_ng.shape[0]``) is filtered consistently.  Non-tensor
-    values and tensors whose first dimension differs from ``n`` (e.g. gene-indexed
-    arrays) are left unchanged.
+    Any per-cell array (torch tensor or numpy array) in the batch whose first
+    dimension matches the number of input cells (``x_ng.shape[0]``) is filtered
+    consistently.  Non-array values and arrays whose first dimension differs
+    from ``n`` (e.g. gene-indexed arrays) are left unchanged.
 
     When both thresholds are ``0`` (default) the transform is a no-op: an empty dict
     is returned and the pipeline merge leaves the batch unmodified.  The transform is
@@ -79,10 +79,11 @@ class CellFilter(nn.Module):
         else:
             return {}
 
+        mask_np = mask.detach().cpu().numpy()
         return {
-            key: value[mask]
+            key: (value[mask] if isinstance(value, torch.Tensor) else value[mask_np])
             for key, value in kwargs.items()
-            if isinstance(value, torch.Tensor) and value.ndim >= 1 and value.shape[0] == n
+            if getattr(value, "ndim", 0) >= 1 and value.shape[0] == n
         }
 
     def __repr__(self) -> str:
