@@ -165,6 +165,19 @@ def series_to_str_list(x: pd.Series) -> list[str]:
     return x.astype(str).to_list()
 
 
+def read_indexed_csv_as_dataframe(file_path: str) -> pd.DataFrame:
+    """
+    Read a CSV file into a pandas DataFrame with the first column as the index.
+
+    Args:
+        file_path: Path to the CSV file.
+
+    Returns:
+        A pandas DataFrame with the first column as the index.
+    """
+    return pd.read_csv(file_path, index_col=0)
+
+
 def keep_sparse(x: scipy.sparse.spmatrix) -> scipy.sparse.spmatrix:
     """
     Identity function for scipy sparse matrices.

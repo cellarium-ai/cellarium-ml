@@ -62,6 +62,11 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
             Strategy to use for iterating through the dataset. Options are ``same_order`` and ``cache_efficient``.
             ``same_order`` will iterate through the dataset in the same order independent of the number of replicas
             and workers. ``cache_efficient`` will try to minimize the amount of anndata files fetched by each worker.
+        val_iteration_strategy:
+            Strategy to use for iterating through the validation dataset. Options are ``same_order`` and
+            ``cache_efficient``. ``same_order`` will iterate through the dataset in the same order independent of
+            the number of replicas and workers. ``cache_efficient`` will try to minimize the amount of anndata files
+            fetched by each worker.
         shuffle:
             If ``True``, the data is reshuffled at every epoch.
         shuffle_seed:
@@ -117,6 +122,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         batch_keys: dict[str, dict[str, AnnDataField] | AnnDataField] | None = None,
         batch_size: int = 1,
         iteration_strategy: Literal["same_order", "cache_efficient"] = "cache_efficient",
+        val_iteration_strategy: Literal["same_order", "cache_efficient"] = "same_order",
         shuffle: bool = False,
         shuffle_seed: int = 0,
         drop_last_indices: bool = False,
@@ -145,6 +151,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         self.iteration_strategy = iteration_strategy
         self.shuffle = shuffle
         self.shuffle_seed = shuffle_seed
+        self.val_iteration_strategy = val_iteration_strategy
         self.drop_last_indices = drop_last_indices
         self.n_train, self.n_val = train_val_split(len(dadc), train_size, val_size)
         if pred_size is not None:
@@ -202,7 +209,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 dadc=self.dadc,
                 batch_keys=self.batch_keys,
                 batch_size=self.batch_size,
-                iteration_strategy="same_order",
+                iteration_strategy=self.val_iteration_strategy,
                 shuffle=False,
                 shuffle_seed=self.shuffle_seed,
                 drop_last_indices=self.drop_last_indices,

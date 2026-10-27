@@ -1,0 +1,1168 @@
+# Copyright Contributors to the Cellarium project.
+# SPDX-License-Identifier: BSD-3-Clause
+
+import os
+import tempfile
+from typing import Literal
+
+import anndata
+import lightning.pytorch as pl
+import numpy as np
+import pandas as pd
+import pytest
+import torch
+from sklearn.decomposition import NMF
+
+from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml.models import OnlineNonNegativeMatrixFactorization
+from cellarium.ml.models import nmf as nmf_module
+from cellarium.ml.models.nmf import (
+    NMFOutput,
+    compute_x_squared_sum,
+    frobenius_loss_trace_compiled,
+    l1_normalize_factors,
+    mairal_sufficient_statistics,
+    nmf_frobenius_loss,
+    online_dictionary_update_fista,
+)
+from cellarium.ml.transforms import DivideByScale, Filter
+from cellarium.ml.utilities.data import AnnDataField
+
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
+
+@pytest.fixture
+def small_adata():
+    n, g, k = 1000, 10, 3
+    rng = np.random.default_rng(0)
+    z_nk = rng.standard_normal(size=(n, k), dtype=np.float32)
+    w_kg = rng.standard_normal(size=(k, g), dtype=np.float32)
+    sigma = 0.6
+    noise = sigma * rng.standard_normal(size=(n, g), dtype=np.float32)
+    x_ng = z_nk @ w_kg + noise
+    return anndata.AnnData(X=x_ng, var=pd.DataFrame(index=[f"gene_{i}" for i in range(g)]))
+
+
+# set the number of cells, genes, cell types, and factors
+n = 1000
+g = 100
+n_celltypes = 5
+simulated_k = 3
+
+# other constants
+cell_type_coherence_factor = 20
+gene_set_sparsity_factor = 0.1
+
+
+@pytest.mark.parametrize("solver", ["fista", "hals"])
+def test_nmf_single_device(small_adata: anndata.AnnData, solver: Literal["fista", "hals"]):
+    n, g = small_adata.shape
+    k_values = [3, 4]
+    devices = 1  # int(os.environ.get("TEST_DEVICES", "1"))
+
+    # dataloader
+    batch_size = n // 2
+    dm = CellariumAnnDataDataModule(
+        dadc=small_adata,
+        batch_size=batch_size,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),
+            "var_names_g": AnnDataField(attr="var_names"),
+            "obs_names_n": AnnDataField(attr="obs_names"),
+        },
+    )
+    dm.setup(stage="fit")
+    # model
+    nmf = OnlineNonNegativeMatrixFactorization(
+        var_names_g=[f"gene_{i}" for i in range(g)],
+        k_values=k_values,
+        r=5,
+        solver=solver,
+        n_cells_total=n,
+    )
+    module = CellariumModule(
+        transforms=[
+            DivideByScale(
+                scale_g=torch.from_numpy(small_adata.X.std(axis=0)),
+                var_names_g=np.array([f"gene_{i}" for i in range(g)]),
+                eps=1e-4,
+            ),
+            Filter([f"gene_{i}" for i in range(g)]),
+        ],
+        model=nmf,
+    )
+    # trainer
+    trainer = pl.Trainer(
+        barebones=True,
+        accelerator="cpu",
+        devices=devices,
+        max_epochs=1,
+    )
+    # fit
+    trainer.fit(module, dm)
+
+
+def d_uncorrelated_kg(k, g, gene_set_sparsity_factor=gene_set_sparsity_factor) -> torch.Tensor:
+    """Gene programs for NMF which are uncorrelated."""
+    torch.manual_seed(0)
+    d_kg = torch.distributions.Dirichlet(gene_set_sparsity_factor * torch.ones(g)).sample([k])
+    return d_kg
+
+
+@pytest.fixture(scope="module")
+def fixture_d_uncorrelated_kg() -> torch.Tensor:
+    return d_uncorrelated_kg(simulated_k, g)
+
+
+def d_correlated_kg(k, g, gene_set_sparsity_factor=gene_set_sparsity_factor) -> torch.Tensor:
+    """Gene programs for NMF which are somewhat correlated (some genes always off for example)."""
+    torch.manual_seed(0)
+    d_g = torch.distributions.Dirichlet(gene_set_sparsity_factor * 100 * torch.ones(g)).sample()
+    d_kg = torch.distributions.Dirichlet(gene_set_sparsity_factor * 100 * d_g).sample([k])
+    return d_kg
+
+
+@pytest.fixture(scope="module")
+def fixture_d_correlated_kg() -> torch.Tensor:
+    return d_correlated_kg(simulated_k, g)
+
+
+def alpha_uncorrelated_nk() -> torch.Tensor:
+    """Cell loadings for NMF which are uncorrelated."""
+    torch.manual_seed(0)
+    alpha_nk = torch.distributions.Dirichlet(torch.ones(simulated_k)).sample([n])
+    return alpha_nk
+
+
+@pytest.fixture(scope="module")
+def fixture_alpha_uncorrelated_nk() -> torch.Tensor:
+    return alpha_uncorrelated_nk()
+
+
+def alpha_correlated_nk(n, k, n_celltypes) -> torch.Tensor:
+    """Cell loadings for NMF which are correlated within celltype blocks."""
+    torch.manual_seed(0)
+    alpha_ck = torch.distributions.Dirichlet(torch.ones(k)).sample([n_celltypes])
+    alpha_nk = (
+        torch.distributions.Dirichlet(cell_type_coherence_factor * alpha_ck + 1e-5)
+        .sample([n // n_celltypes])
+        .reshape(n, k)
+    )
+    return alpha_nk
+
+
+@pytest.fixture(scope="module")
+def fixture_alpha_correlated_nk() -> torch.Tensor:
+    return alpha_correlated_nk(n, simulated_k, n_celltypes)
+
+
+def x_uncorrelated_mean_nmf_ng(alpha_uncorrelated_nk, d_uncorrelated_kg) -> torch.Tensor:
+    """Data created by a sparse NMF process with no correlation between the underlying factors."""
+    x_ng = alpha_uncorrelated_nk @ d_uncorrelated_kg
+    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g
+    return x_ng
+
+
+@pytest.fixture(scope="module")
+def fixture_x_uncorrelated_mean_nmf_ng(fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg) -> torch.Tensor:
+    return x_uncorrelated_mean_nmf_ng(fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg)
+
+
+def x_correlated_mean_nmf_ng(alpha_correlated_nk, d_correlated_kg) -> torch.Tensor:
+    """Data created by a sparse NMF process where the underlying factors are
+    drawn from the same dirichlet distribution."""
+    x_ng = alpha_correlated_nk @ d_correlated_kg
+    x_ng = x_ng / x_ng.sum(dim=-1).mean() * g
+    return x_ng
+
+
+@pytest.fixture(scope="module")
+def fixture_x_correlated_mean_nmf_ng(fixture_alpha_correlated_nk, fixture_d_correlated_kg) -> torch.Tensor:
+    return x_correlated_mean_nmf_ng(fixture_alpha_correlated_nk, fixture_d_correlated_kg)
+
+
+@pytest.fixture(scope="module")
+def x_nmf_ng(fixture_x_uncorrelated_mean_nmf_ng, fixture_x_correlated_mean_nmf_ng) -> dict[str, torch.Tensor]:
+    """Data created by an NMF process with gaussian/poisson sampling noise
+    and (no) correlation between the underlying factors and loadings."""
+    torch.manual_seed(0)
+    sigma = 0.1
+    out = {}
+    for name, mean_ng in zip(
+        ["uncorrelated", "correlated"], [fixture_x_uncorrelated_mean_nmf_ng, fixture_x_correlated_mean_nmf_ng]
+    ):
+        # gaussian noise but clamped to be non-negative
+        noise = sigma * torch.randn_like(mean_ng)
+        out[f"gaussian_{name}"] = torch.clamp(mean_ng + noise, min=0.0)
+        # poisson noise
+        out[f"poisson_{name}"] = torch.distributions.Poisson(mean_ng).sample()
+
+    return out
+
+
+def run_cellarium_online_nmf(
+    x_ng: torch.Tensor,
+    var_names_g: np.ndarray,
+    k: int,
+    solver: Literal["fista", "hals"],
+    seed: int,
+    n_batches: int,
+    devices,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    n, g = x_ng.shape
+
+    # Create anndata object and datamodule
+    import anndata
+    import pandas as pd
+
+    adata = anndata.AnnData(
+        X=x_ng.numpy(), var=pd.DataFrame(index=var_names_g), obs=pd.DataFrame(index=[f"cell_{i}" for i in range(n)])
+    )
+
+    # datamodule
+    batch_size = n // n_batches
+    from cellarium.ml.utilities.data import AnnDataField
+
+    datamodule = CellariumAnnDataDataModule(
+        dadc=adata,
+        batch_size=batch_size,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),
+            "var_names_g": AnnDataField(attr="var_names"),
+            "obs_names_n": AnnDataField(attr="obs_names"),
+        },
+    )
+
+    # model
+    cellarium_nmf = OnlineNonNegativeMatrixFactorization(
+        var_names_g=var_names_g.tolist(),
+        k_values=[k],
+        solver=solver,
+        r=1,
+        n_cells_total=n,
+    )
+    module = CellariumModule(
+        transforms=[
+            DivideByScale(
+                scale_g=x_ng.std(dim=0),
+                var_names_g=var_names_g,
+                eps=1e-4,
+            ),
+            # Filter(var_names_g.tolist()),
+        ],
+        model=cellarium_nmf,
+    )
+
+    # trainer
+    trainer = pl.Trainer(
+        barebones=False,
+        accelerator="cpu",
+        devices=devices,
+        max_epochs=10,
+        strategy="auto" if devices == 1 else pl.strategies.DDPStrategy(broadcast_buffers=True),
+    )
+
+    # fit
+    torch.manual_seed(seed)
+    trainer.fit(module, datamodule)
+
+    # get loadings and factors using NMFOutput
+    nmf_output = NMFOutput(nmf_module=module, datamodule=datamodule)
+    nmf_output.compute_consensus_factors(k_values=k, density_threshold=1, local_neighborhood_size=0.3)
+    cellarium_loadings_dataframe = nmf_output.compute_loadings(k=k, normalize=False)
+    cellarium_loadings_nk = torch.tensor(cellarium_loadings_dataframe.values).float()
+    assert isinstance(cellarium_loadings_nk, torch.Tensor)
+    # Get consensus factors from nmf_output instead of the raw model
+    consensus_factors = nmf_output.consensus[k]["consensus_D_kg"]
+    assert isinstance(consensus_factors, torch.Tensor), "consensus_D_kg must be a tensor"
+    cellarium_factors_kg = consensus_factors
+
+    return cellarium_loadings_nk, cellarium_factors_kg
+
+
+def run_sklearn_nmf(x_norm_ng: torch.Tensor, k: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    # sklearn nmf fit
+    sklearn_nmf = NMF(
+        n_components=k,
+        init="random",
+        solver="cd",
+        beta_loss="frobenius",
+        # solver="mu",
+        # beta_loss="kullback-leibler",
+        max_iter=1000,
+        tol=1e-4,
+        random_state=seed,
+    )
+    sklearn_loadings_nk = torch.from_numpy(sklearn_nmf.fit_transform(x_norm_ng)).float()
+    sklearn_factors_kg = torch.from_numpy(sklearn_nmf.components_).float()
+    return sklearn_loadings_nk, sklearn_factors_kg
+
+
+def pairwise_cosine_similarity_cdist(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
+    # Normalize each tensor along the g dimension
+    tensor1_norm_kg = tensor1_kg / tensor1_kg.norm(dim=1, keepdim=True)
+    tensor2_norm_kg = tensor2_kg / tensor2_kg.norm(dim=1, keepdim=True)
+
+    # Compute squared Euclidean distance
+    squared_euclidean_dist_kk = torch.cdist(tensor1_norm_kg, tensor2_norm_kg, p=2) ** 2
+
+    # Convert to cosine similarity
+    cosine_similarity_matrix_kk = 1 - squared_euclidean_dist_kk / 2
+    return cosine_similarity_matrix_kk
+
+
+def pairwise_spearman_correlation(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
+    def rank_transform(tensor: torch.Tensor) -> torch.Tensor:
+        """Returns the ranks of elements along each row."""
+        ranks = tensor.argsort(dim=1).argsort(dim=1).to(torch.float)
+        return ranks
+
+    # Rank-transform both tensors
+    ranked_tensor1_kg = rank_transform(tensor1_kg)
+    ranked_tensor2_kg = rank_transform(tensor2_kg)
+
+    # Normalize ranks (zero mean, unit variance)
+    ranked_tensor1_kg = (ranked_tensor1_kg - ranked_tensor1_kg.mean(dim=1, keepdim=True)) / ranked_tensor1_kg.std(
+        dim=1, unbiased=False, keepdim=True
+    )
+    ranked_tensor2_kg = (ranked_tensor2_kg - ranked_tensor2_kg.mean(dim=1, keepdim=True)) / ranked_tensor2_kg.std(
+        dim=1, unbiased=False, keepdim=True
+    )
+
+    # Compute the Pearson correlation (dot product normalized by the number of elements)
+    spearman_matrix_kk = ranked_tensor1_kg @ ranked_tensor2_kg.T / ranked_tensor1_kg.shape[1]
+
+    return spearman_matrix_kk
+
+
+def pairwise_pearson_correlation(tensor1_kg: torch.Tensor, tensor2_kg: torch.Tensor) -> torch.Tensor:
+    # Normalize (zero mean, unit variance)
+    norm_tensor1_kg = (tensor1_kg - tensor1_kg.mean(dim=1, keepdim=True)) / tensor1_kg.std(
+        dim=1, unbiased=False, keepdim=True
+    )
+    norm_tensor2_kg = (tensor2_kg - tensor2_kg.mean(dim=1, keepdim=True)) / tensor2_kg.std(
+        dim=1, unbiased=False, keepdim=True
+    )
+
+    # Compute the Pearson correlation (dot product normalized by the number of elements)
+    pearson_matrix_kk = norm_tensor1_kg @ norm_tensor2_kg.T / norm_tensor1_kg.shape[1]
+
+    return pearson_matrix_kk
+
+
+def similarity_matrix_assign_rows_to_columns(
+    similarity_kk: torch.Tensor,
+) -> tuple[torch.Tensor, np.ndarray, np.ndarray]:
+    assert similarity_kk.shape[0] == similarity_kk.shape[1], "Similarity matrix must be square"
+    assert similarity_kk.shape[0] > 0, "Similarity matrix must have at least one row and column"
+
+    from scipy.optimize import linear_sum_assignment
+
+    cost_kk = -similarity_kk
+
+    # Solve the assignment problem
+    row_indices, col_indices = linear_sum_assignment(cost_kk)
+
+    # Compute the total mean similarity
+    total_similarity = similarity_kk[row_indices, col_indices].sum() / similarity_kk.shape[0]
+
+    return total_similarity, np.asarray(row_indices), np.asarray(col_indices)
+
+
+def run_online_nmf_and_sklearn_multi_device(
+    x_ng: torch.Tensor,
+    solver: Literal["fista", "hals"],
+    k: int = simulated_k,
+    seed: int = 0,
+    n_cellarium_batches: int = 1,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    devices = int(os.environ.get("TEST_DEVICES", "1"))
+    var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
+
+    # cellarium nmf fit
+    cellarium_loadings_nk, cellarium_factors_kg = run_cellarium_online_nmf(
+        x_ng=x_ng,
+        var_names_g=var_names_g,
+        solver=solver,
+        k=k,
+        devices=devices,
+        seed=seed,
+        n_batches=n_cellarium_batches,
+    )
+
+    # sklearn nmf fit
+    transform = DivideByScale(
+        scale_g=x_ng.std(dim=0),
+        var_names_g=var_names_g,
+        eps=1e-4,
+    )
+    x_norm_ng = transform(x_ng=x_ng, var_names_g=var_names_g)["x_ng"]
+    sklearn_loadings_nk, sklearn_factors_kg = run_sklearn_nmf(
+        x_norm_ng=x_norm_ng,
+        k=k,
+        seed=seed,
+    )
+
+    loadings = {
+        "cellarium": cellarium_loadings_nk,
+        "sklearn": sklearn_loadings_nk,
+    }
+    factors = {
+        "cellarium": cellarium_factors_kg,
+        "sklearn": sklearn_factors_kg,
+    }
+
+    return loadings, factors
+
+
+@pytest.mark.parametrize("solver", ["fista", "hals"])
+@pytest.mark.parametrize(
+    "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
+)
+@pytest.mark.parametrize("n_cellarium_batches", [1, 2, 10], ids=["fullbatch", "2batches", "10batches"])
+def test_online_nmf_against_sklearn(
+    x_nmf_ng: dict[str, torch.Tensor],
+    data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
+    solver: Literal["fista", "hals"],
+    fixture_d_correlated_kg: torch.Tensor,
+    fixture_d_uncorrelated_kg: torch.Tensor,
+    fixture_alpha_correlated_nk: torch.Tensor,
+    fixture_alpha_uncorrelated_nk: torch.Tensor,
+    n_cellarium_batches: int,
+):
+    # run both methods
+    x_ng = x_nmf_ng[data]
+    var_names_g = np.array([f"gene_{i}" for i in range(x_ng.shape[1])])
+    loadings, factors = run_online_nmf_and_sklearn_multi_device(
+        x_ng,
+        n_cellarium_batches=n_cellarium_batches,
+        solver=solver,
+    )
+    transform = DivideByScale(
+        scale_g=x_ng.std(dim=0),
+        var_names_g=var_names_g,
+        eps=1e-4,
+    )
+    x_norm_ng = transform(x_ng=x_ng, var_names_g=var_names_g)["x_ng"]
+    cellarium_loadings_nk = loadings["cellarium"]
+    cellarium_factors_kg = factors["cellarium"]
+    sklearn_loadings_nk = loadings["sklearn"]
+    sklearn_factors_kg = factors["sklearn"]
+
+    d_correlated_kg = fixture_d_correlated_kg
+    d_uncorrelated_kg = fixture_d_uncorrelated_kg
+    alpha_correlated_nk = fixture_alpha_correlated_nk
+    alpha_uncorrelated_nk = fixture_alpha_uncorrelated_nk
+
+    # assert that fraction of variance explained by each method is similar
+    frobenius_norm_data = torch.norm(x_norm_ng, "fro")
+    sklearn_reconstruction_ng = torch.matmul(sklearn_loadings_nk, sklearn_factors_kg)
+    cellarium_reconstruction_ng = torch.matmul(cellarium_loadings_nk, cellarium_factors_kg)
+    print(f"x_norm_ng:\n{x_norm_ng}")
+    print(f"sklearn_reconstruction_ng:\n{sklearn_reconstruction_ng}")
+    print(f"cellarium_reconstruction_ng:\n{cellarium_reconstruction_ng}")
+    frobenius_norm_sklearn_residual = torch.norm(x_norm_ng - sklearn_reconstruction_ng, "fro")
+    frobenius_norm_cellarium_residual = torch.norm(x_norm_ng - cellarium_reconstruction_ng, "fro")
+    explained_variance_ratio_sklearn = 1 - (frobenius_norm_sklearn_residual**2) / (frobenius_norm_data**2)
+    explained_variance_ratio_cellarium = 1 - (frobenius_norm_cellarium_residual**2) / (frobenius_norm_data**2)
+    print(f"explained_variance_ratio_sklearn: {explained_variance_ratio_sklearn}")
+    print(f"explained_variance_ratio_cellarium: {explained_variance_ratio_cellarium}")
+
+    # assert that the NMF loss is similar
+    nmf_loss_sklearn = torch.nn.functional.mse_loss(x_norm_ng, sklearn_reconstruction_ng)
+    nmf_loss_cellarium = torch.nn.functional.mse_loss(x_norm_ng, cellarium_reconstruction_ng)
+    print(f"nmf_loss_sklearn: {nmf_loss_sklearn}")
+    print(f"nmf_loss_cellarium: {nmf_loss_cellarium}")
+
+    # Debugging stuff
+    print(f"Original data shape: {x_norm_ng.shape}")
+    print(f"Cellarium factors shape: {cellarium_factors_kg.shape}")
+    print(f"Cellarium loadings shape: {cellarium_loadings_nk.shape}")
+    print(f"Sklearn factors shape: {sklearn_factors_kg.shape}")
+    print(f"Sklearn loadings shape: {sklearn_loadings_nk.shape}")
+
+    # Check if factors have negative values (they shouldn't for NMF)
+    print(f"Cellarium factors min: {cellarium_factors_kg.min()}")
+    print(f"Cellarium loadings min: {cellarium_loadings_nk.min()}")
+    print(f"Sklearn factors min: {sklearn_factors_kg.min()}")
+    print(f"Sklearn loadings min: {sklearn_loadings_nk.min()}")
+
+    # Check the scales
+    print(f"Original data mean: {x_norm_ng.mean()}, std: {x_norm_ng.std()}")
+    print(
+        f"Cellarium reconstruction mean: {cellarium_reconstruction_ng.mean()}, std: {cellarium_reconstruction_ng.std()}"
+    )
+    print(f"Sklearn reconstruction mean: {sklearn_reconstruction_ng.mean()}, std: {sklearn_reconstruction_ng.std()}")
+
+    # assert that the factors are similar
+    pairwise_factor_similarity_kk = pairwise_cosine_similarity_cdist(cellarium_factors_kg, sklearn_factors_kg)
+    total_cs_factor_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_factor_similarity_kk
+    )
+    print(
+        f"pairwise_factor_similarity_kk (cellarium and sklearn):"
+        f"\n{pairwise_factor_similarity_kk[row_indices, :][:, col_indices]}"
+    )
+    print(f"total cellarium-sklearn factor mean similarity: {total_cs_factor_similarity}")
+
+    # assert that the loadings are similar
+    pairwise_loading_similarity_nn = pairwise_cosine_similarity_cdist(
+        cellarium_loadings_nk,
+        sklearn_loadings_nk,
+    )
+    total_cs_loading_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_loading_similarity_nn
+    )
+    print(f"pairwise_loading_similarity_nn:\n{pairwise_loading_similarity_nn[row_indices, :][:, col_indices]}")
+    print(f"total cellarium-sklearn loading mean similarity: {total_cs_loading_similarity}")
+
+    # truth
+    if data.split("_")[-1] == "correlated":
+        truth_factors_kg = d_correlated_kg
+        truth_loadings_nk = alpha_correlated_nk
+    else:
+        truth_factors_kg = d_uncorrelated_kg
+        truth_loadings_nk = alpha_uncorrelated_nk
+
+    # assert that the cellarium factors match truth as much as the sklearn factors do
+    pairwise_cellarium_factor_similarity_kk = pairwise_cosine_similarity_cdist(cellarium_factors_kg, truth_factors_kg)
+    total_factor_cellarium_truth_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_cellarium_factor_similarity_kk
+    )
+    print(
+        f"pairwise_cellarium_factor_similarity_kk (cellarium and truth):"
+        f"\n{pairwise_cellarium_factor_similarity_kk[row_indices, :][:, col_indices]}"
+    )
+    print(f"total mean cellarium factor similarity to truth: {total_factor_cellarium_truth_similarity}")
+    pairwise_sklearn_factor_similarity_kk = pairwise_cosine_similarity_cdist(sklearn_factors_kg, truth_factors_kg)
+    total_factor_sklearn_truth_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_sklearn_factor_similarity_kk
+    )
+    print(
+        f"pairwise_sklearn_factor_similarity_kk (sklearn and truth):"
+        f"\n{pairwise_sklearn_factor_similarity_kk[row_indices, :][:, col_indices]}"
+    )
+    print(f"total mean sklearn factor similarity to truth: {total_factor_sklearn_truth_similarity}")
+
+    # specific threshold for each data type, intended to prevent performance regressions
+    # these can be bumped up if performance is improved
+    match data:
+        case "gaussian_correlated":
+            threshold: float = 0.2
+        case "gaussian_uncorrelated":
+            threshold = 0.55
+        case "poisson_correlated":
+            threshold = 0.15
+        case "poisson_uncorrelated":
+            threshold = 0.75
+        case _:
+            raise ValueError(f"unexpected data: {data}")
+
+    # correlated programs make the NMF solution less unique, so allow more disagreement between the methods
+    loading_similarity_threshold = 0.9 if data.endswith("_correlated") else 0.95
+    factor_truth_gap_tolerance = 0.02 if data.endswith("_correlated") else 0.01
+    # assert that the cellarium loadings match truth as much as the sklearn loadings do
+    pairwise_cellarium_loading_similarity_nn = pairwise_cosine_similarity_cdist(
+        cellarium_loadings_nk,
+        truth_loadings_nk,
+    )
+    total_loading_cellarium_truth_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_cellarium_loading_similarity_nn
+    )
+    print(
+        f"pairwise_cellarium_loading_similarity_nn (cellarium and truth):\n"
+        f"{pairwise_cellarium_loading_similarity_nn[row_indices, :][:, col_indices]}"
+    )
+    print(f"total mean loading cellarium-truth similarity: {total_loading_cellarium_truth_similarity}")
+    pairwise_sklearn_loading_similarity_nn = pairwise_cosine_similarity_cdist(sklearn_loadings_nk, truth_loadings_nk)
+    total_loading_sklearn_truth_similarity, row_indices, col_indices = similarity_matrix_assign_rows_to_columns(
+        pairwise_sklearn_loading_similarity_nn
+    )
+    print(
+        f"pairwise_sklearn_loading_similarity_nn (sklearn and truth):"
+        f"\n{pairwise_sklearn_loading_similarity_nn[row_indices, :][:, col_indices]}"
+    )
+    print(f"total mean loading sklearn-truth similarity: {total_loading_sklearn_truth_similarity}")
+
+    messages = []
+    if not (torch.abs(nmf_loss_sklearn - nmf_loss_cellarium) < 0.1):
+        messages.append(
+            f"cellarium and sklearn loss is not very similar: {torch.abs(nmf_loss_sklearn - nmf_loss_cellarium):.4f}"
+        )
+    if not (total_cs_factor_similarity > 0.9):
+        messages.append(f"cellarium and sklearn factors are not very similar: {total_cs_factor_similarity}")
+    if not (total_cs_loading_similarity > loading_similarity_threshold):
+        messages.append(f"cellarium and sklearn loadings are not very similar: {total_cs_loading_similarity:.4f}")
+    if not (
+        total_factor_sklearn_truth_similarity - total_factor_cellarium_truth_similarity <= factor_truth_gap_tolerance
+    ):
+        messages.append(
+            f"cellarium factors are substantially less similar to truth than sklearn factors: "
+            f"{total_factor_sklearn_truth_similarity - total_factor_cellarium_truth_similarity:.4f}"
+        )
+    if not (total_loading_sklearn_truth_similarity - total_loading_cellarium_truth_similarity <= 0.08):
+        messages.append(
+            f"cellarium loadings are substantially less similar to truth than sklearn loadings: "
+            f"{total_loading_sklearn_truth_similarity - total_loading_cellarium_truth_similarity:.4f}"
+        )
+    if not (total_factor_cellarium_truth_similarity > threshold):
+        messages.append(
+            f"cellarium factors are not very similar to truth: {total_factor_cellarium_truth_similarity:.4f}"
+        )
+    if not (total_loading_cellarium_truth_similarity > 0.65):
+        messages.append(
+            f"cellarium loadings are not very similar to truth: {total_loading_cellarium_truth_similarity:.4f}"
+        )
+
+    if len(messages) > 0:
+        raise ValueError("; ".join(messages))
+
+
+@pytest.mark.skip(reason="NMF does not yet work with multiple devices")
+@pytest.mark.parametrize(
+    "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
+)
+def test_online_nmf_against_sklearn_multi_device(
+    x_nmf_ng: dict[str, torch.Tensor],
+    data: Literal["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"],
+    fixture_d_correlated_kg: torch.Tensor,
+    fixture_d_uncorrelated_kg: torch.Tensor,
+    fixture_alpha_correlated_nk: torch.Tensor,
+    fixture_alpha_uncorrelated_nk: torch.Tensor,
+):
+    pass
+
+
+def kotliar_get_norm_counts(counts: anndata.AnnData, high_variance_genes_filter: list[str]) -> anndata.AnnData:
+    """
+    Slightly modified, taken from
+    https://github.com/dylkot/cNMF/blob/7833a75484169cf448f8956224447cb110f4ba3d/src/cnmf/cnmf.py#L487
+
+    Args:
+        counts: Scanpy AnnData object (cells x genes) containing raw counts. Filtered such that
+        no genes or cells with 0 counts
+
+    high_variance_genes_filter: A pre-specified list of genes considered to be high-variance.
+        Only these genes will be used during factorization of the counts matrix.
+        Must match the .var index of counts.
+
+    Returns:
+        normcounts: anndata.AnnData, shape (cells, num_highvar_genes)
+            Has a `.X` count matrix containing only the high variance genes with columns (genes)
+            normalized to unit variance
+
+    """
+    ## Subset out high-variance genes
+    norm_counts = counts[:, high_variance_genes_filter].copy()
+    norm_counts.X = norm_counts.X.astype(np.float64)
+
+    ## Scale genes to unit variance
+    norm_counts.X /= norm_counts.X.std(axis=0, ddof=1)
+    if np.isnan(norm_counts.X).sum().sum() > 0:
+        print("Warning NaNs in normalized counts matrix")
+
+    ## Check for any cells that have 0 counts of the overdispersed genes
+    zerocells = np.array(norm_counts.X.sum(axis=1) == 0).reshape(-1)
+    if zerocells.sum() > 0:
+        examples = norm_counts.obs.index[np.ravel(zerocells)]
+        raise Exception(
+            f"Error: {zerocells.sum()} cells have zero counts of overdispersed genes. E.g. {', '.join(examples[:4])}. "
+            "Filter those cells and re-run or adjust the number of overdispersed genes. Quitting!"
+        )
+
+    return norm_counts
+
+
+def test_preprocessing_matches_kotliar():
+    pass
+
+
+def test_consensus_matches_kotliar():
+    pass
+
+
+def test_refit_all_genes_matches_kotliar():
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by from_checkpoints tests
+# ---------------------------------------------------------------------------
+
+
+def _build_datamodule_and_train(
+    adata: anndata.AnnData,
+    k_values: list[int],
+    r: int,
+    tmp_path_for_ckpt: str,
+    seed: int = 0,
+) -> tuple[str, dict[int, torch.Tensor], CellariumAnnDataDataModule]:
+    """
+    Train an OnlineNMF model for 1 epoch, save a checkpoint, and return
+    the D_{k}_rkg tensors (cloned, detached) keyed by k.
+    Returns a tuple of (ckpt_path, dict[int, torch.Tensor], datamodule).
+    """
+    import os
+
+    n, g = adata.shape
+    batch_size = max(1, n // 4)
+
+    dm = CellariumAnnDataDataModule(
+        dadc=adata,
+        batch_size=batch_size,
+        batch_keys={
+            "x_ng": AnnDataField(attr="X", convert_fn=None),
+            "var_names_g": AnnDataField(attr="var_names"),
+            "obs_names_n": AnnDataField(attr="obs_names"),
+        },
+    )
+
+    nmf = OnlineNonNegativeMatrixFactorization(
+        var_names_g=list(adata.var_names),
+        k_values=k_values,
+        r=r,
+        solver="fista",
+        init="uniform_random",
+    )
+    scale_g = torch.tensor(np.array(adata.X).std(axis=0).astype(np.float32))
+    module = CellariumModule(
+        transforms=[
+            DivideByScale(
+                scale_g=scale_g,
+                var_names_g=np.array(list(adata.var_names)),
+                eps=1e-4,
+            ),
+            Filter(list(adata.var_names)),
+        ],
+        model=nmf,
+    )
+
+    torch.manual_seed(seed)
+    trainer = pl.Trainer(
+        barebones=True,
+        accelerator="cpu",
+        devices=1,
+        max_epochs=1,
+        default_root_dir=tmp_path_for_ckpt,
+    )
+    trainer.fit(module, dm)
+
+    # capture D tensors right off the trained model (before checkpoint round-trip)
+    d_tensors = {k: module.model.factors_dict[k].detach().clone() for k in k_values}
+
+    ckpt_path = os.path.join(tmp_path_for_ckpt, "model.ckpt")
+    trainer.save_checkpoint(ckpt_path)
+
+    return ckpt_path, d_tensors, dm
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+def test_from_checkpoints_split_by_k(tmp_path, small_adata: anndata.AnnData):
+    """
+    Two checkpoints cover disjoint k values.  Verify that from_checkpoints:
+    - produces an NMFOutput whose model has the union of k values
+    - preserves the exact D_{k}_rkg tensors from each source checkpoint
+    - does NOT allocate loadings_{k}_rnk buffers on the combined model
+    """
+    ckpt1, d_tensors_1, dm = _build_datamodule_and_train(
+        small_adata, k_values=[2, 3], r=2, tmp_path_for_ckpt=str(tmp_path / "run1"), seed=0
+    )
+    ckpt2, d_tensors_2, _ = _build_datamodule_and_train(
+        small_adata, k_values=[4, 5], r=2, tmp_path_for_ckpt=str(tmp_path / "run2"), seed=1
+    )
+
+    nmf_output = NMFOutput.from_checkpoints([ckpt1, ckpt2], datamodule=dm)
+
+    combined_model = nmf_output.nmf_module.model
+    assert isinstance(combined_model, OnlineNonNegativeMatrixFactorization)
+
+    # correct k_values
+    assert set(combined_model.k_values) == {2, 3, 4, 5}
+
+    # D tensors preserved exactly from each checkpoint
+    for k, expected in {**d_tensors_1, **d_tensors_2}.items():
+        actual = combined_model.factors_dict[k]
+        assert actual.shape == expected.shape, f"Shape mismatch for k={k}"
+        assert torch.allclose(actual, expected), f"D_{k}_rkg values changed after from_checkpoints"
+
+    # no loadings buffers allocated
+    for k in combined_model.k_values:
+        assert not hasattr(combined_model, f"loadings_{k}_rnk"), (
+            f"loadings_{k}_rnk should not exist on the combined shell model"
+        )
+
+
+def test_from_checkpoints_split_by_r(tmp_path, small_adata: anndata.AnnData):
+    """
+    Two checkpoints share the same k values but have different numbers of replicates.
+    Verify that from_checkpoints concatenates D tensors along dim 0 (the r dimension).
+    """
+    ckpt1, d_tensors_1, dm = _build_datamodule_and_train(
+        small_adata, k_values=[3], r=2, tmp_path_for_ckpt=str(tmp_path / "run1"), seed=0
+    )
+    ckpt2, d_tensors_2, _ = _build_datamodule_and_train(
+        small_adata, k_values=[3], r=3, tmp_path_for_ckpt=str(tmp_path / "run2"), seed=1
+    )
+
+    g = small_adata.n_vars
+
+    nmf_output = NMFOutput.from_checkpoints([ckpt1, ckpt2], datamodule=dm)
+
+    combined_model = nmf_output.nmf_module.model
+    assert isinstance(combined_model, OnlineNonNegativeMatrixFactorization)
+
+    combined = combined_model.factors_dict[3]
+
+    # combined replicate count is 2 + 3 = 5
+    assert combined.shape == (5, 3, g), f"Expected shape (5, 3, {g}), got {combined.shape}"
+
+    # exact values: first 2 replicates come from checkpoint 1, last 3 from checkpoint 2
+    expected = torch.cat([d_tensors_1[3], d_tensors_2[3]], dim=0)
+    assert torch.allclose(combined, expected), "Combined D tensor values do not match concatenation of source tensors"
+
+
+def test_mairal_sufficient_statistics_are_additive():
+    """Sums over disjoint sets of cells add up to the sums over all cells."""
+    torch.manual_seed(0)
+    r, n, k, g = 3, 20, 4, 7
+    loadings_rnk = torch.rand(r, n, k)
+    x_ng = torch.rand(n, g)
+
+    AtA_full, AtX_full, n_full = mairal_sufficient_statistics(loadings_rnk, x_ng)
+    AtA_1, AtX_1, n_1 = mairal_sufficient_statistics(loadings_rnk[:, :7], x_ng[:7])
+    AtA_2, AtX_2, n_2 = mairal_sufficient_statistics(loadings_rnk[:, 7:], x_ng[7:])
+
+    assert n_1 + n_2 == n_full
+    torch.testing.assert_close(AtA_1 + AtA_2, AtA_full)
+    torch.testing.assert_close(AtX_1 + AtX_2, AtX_full)
+
+
+def _fista_update_worker(
+    rank: int, world_size: int, init_file: str, x_ng: torch.Tensor, loadings_rnk: torch.Tensor, out_dir: str
+) -> None:
+    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    torch.manual_seed(0)
+    r, k, g = loadings_rnk.shape[0], loadings_rnk.shape[2], x_ng.shape[1]
+    out = online_dictionary_update_fista(
+        x_ng=x_ng[rank::world_size],
+        factors_rkg=torch.rand(r, k, g),
+        loadings_rnk=loadings_rnk[:, rank::world_size].contiguous(),
+        A_rkk=torch.zeros(r, k, k),
+        B_rkg=torch.zeros(r, k, g),
+        n_iterations=20,
+    )
+    torch.save(out, os.path.join(out_dir, f"rank{rank}.pt"))
+    torch.distributed.destroy_process_group()
+
+
+def test_online_dictionary_update_fista_multi_process_matches_single_process():
+    world_size = 2
+    r, k, g = 2, 3, 8
+    torch.manual_seed(1)
+    x_ng = torch.rand(31, g)  # odd number of cells so the two ranks have different batch sizes
+    loadings_rnk = torch.rand(r, 31, k)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        init_file = os.path.join(tmp_dir, "init")
+        torch.multiprocessing.spawn(
+            _fista_update_worker,
+            args=(world_size, init_file, x_ng, loadings_rnk, tmp_dir),
+            nprocs=world_size,
+            join=True,
+        )
+        rank_results = [torch.load(os.path.join(tmp_dir, f"rank{rank}.pt")) for rank in range(world_size)]
+
+    torch.manual_seed(0)
+    expected = online_dictionary_update_fista(
+        x_ng=x_ng,
+        factors_rkg=torch.rand(r, k, g),
+        loadings_rnk=loadings_rnk,
+        A_rkk=torch.zeros(r, k, k),
+        B_rkg=torch.zeros(r, k, g),
+        n_iterations=20,
+    )
+
+    for result in rank_results:
+        for key in ("A_rkk", "B_rkg", "factors_rkg"):
+            torch.testing.assert_close(result[key], expected[key], rtol=1e-4, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# frobenius_loss_trace_compiled
+# ---------------------------------------------------------------------------
+
+
+def _direct_squared_error_r(x_ng: torch.Tensor, h_rnk: torch.Tensor, w_rkg: torch.Tensor) -> torch.Tensor:
+    """Reference per-replicate ``||X - H W||_F^2``, materializing the reconstruction in float64."""
+    reconstruction_rng = torch.einsum("rnk,rkg->rng", h_rnk.double(), w_rkg.double())
+    return (x_ng.double().unsqueeze(0) - reconstruction_rng).pow(2).sum(dim=(1, 2))
+
+
+def _assert_squared_error_close(
+    actual_r: torch.Tensor, expected_r: torch.Tensor, x_ng: torch.Tensor, rtol: float, x_norm_atol: float = 0.0
+) -> None:
+    """
+    The trace expansion cancels terms of size ``||X||^2``, so when the fit is good the achievable absolute
+    accuracy is set by ``||X||^2`` rather than by the (much smaller) loss. ``x_norm_atol`` is that
+    absolute tolerance as a fraction of ``||X||^2``.
+    """
+    atol = x_norm_atol * x_ng.double().pow(2).sum().item()
+    torch.testing.assert_close(actual_r.double(), expected_r, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "r, n, k, g",
+    [(1, 16, 3, 8), (4, 50, 5, 20), (3, 7, 1, 11), (2, 1, 4, 9), (5, 64, 8, 6)],
+)
+def test_frobenius_loss_trace_matches_direct_on_random_inputs(r: int, n: int, k: int, g: int):
+    torch.manual_seed(0)
+    x_ng = 5 * torch.rand(n, g)
+    h_rnk = torch.rand(r, n, k)
+    w_rkg = torch.rand(r, k, g)
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    assert actual_r.shape == (r,)
+    _assert_squared_error_close(actual_r, _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "data", ["gaussian_correlated", "gaussian_uncorrelated", "poisson_correlated", "poisson_uncorrelated"]
+)
+def test_frobenius_loss_trace_on_nmf_fit(
+    x_nmf_ng: dict[str, torch.Tensor],
+    data: str,
+    fixture_d_correlated_kg: torch.Tensor,
+    fixture_d_uncorrelated_kg: torch.Tensor,
+    fixture_alpha_correlated_nk: torch.Tensor,
+    fixture_alpha_uncorrelated_nk: torch.Tensor,
+):
+    """Loss of a good NMF fit (the true factors and loadings) to realistic simulated data."""
+    if data.endswith("_correlated"):
+        alpha_nk, d_kg = fixture_alpha_correlated_nk, fixture_d_correlated_kg
+    else:
+        alpha_nk, d_kg = fixture_alpha_uncorrelated_nk, fixture_d_uncorrelated_kg
+    x_ng = x_nmf_ng[data]
+
+    # the simulation rescales the mean so that cells sum to g on average; apply the same scale to the loadings
+    scale = x_ng.shape[1] / (alpha_nk @ d_kg).sum(dim=-1).mean()
+    h_rnk = torch.stack([alpha_nk * scale, 0.9 * alpha_nk * scale])
+    w_rkg = d_kg.unsqueeze(0).repeat(2, 1, 1)
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    _assert_squared_error_close(
+        actual_r, _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-4, x_norm_atol=1e-6
+    )
+    # and it agrees with the plain (single replicate) loss used elsewhere in the module
+    for replicate in range(2):
+        direct = nmf_frobenius_loss(x_ng=x_ng, loadings_nk=h_rnk[replicate], factors_kg=w_rkg[replicate])
+        _assert_squared_error_close(
+            actual_r[replicate : replicate + 1], direct.double().reshape(1), x_ng, rtol=1e-4, x_norm_atol=1e-6
+        )
+
+
+def test_frobenius_loss_trace_is_nonnegative_for_an_exact_fit():
+    """With ``X = H W`` exactly the loss is zero up to rounding, and the clamp keeps it from going negative."""
+    torch.manual_seed(0)
+    h_rnk = torch.rand(1, 40, 4)
+    w_rkg = torch.rand(1, 4, 25)
+    x_ng = h_rnk[0] @ w_rkg[0]
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    assert (actual_r >= 0).all()
+    assert actual_r.item() <= 1e-5 * x_ng.pow(2).sum().item()
+
+
+def test_frobenius_loss_trace_precomputed_x_squared_sum_matches_default():
+    torch.manual_seed(0)
+    x_ng = torch.rand(30, 12)
+    h_rnk = torch.rand(3, 30, 4)
+    w_rkg = torch.rand(3, 4, 12)
+
+    default_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+    precomputed_r = frobenius_loss_trace_compiled(
+        x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg, x_squared_sum=compute_x_squared_sum(x_ng)
+    )
+
+    torch.testing.assert_close(precomputed_r, default_r, rtol=0, atol=0)
+
+
+def test_frobenius_loss_trace_is_additive_over_cells():
+    """Sums over disjoint sets of cells add up to the sum over all cells."""
+    torch.manual_seed(0)
+    n, split = 40, 17
+    x_ng = torch.rand(n, 12)
+    h_rnk = torch.rand(3, n, 4)
+    w_rkg = torch.rand(3, 4, 12)
+
+    full_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+    part1_r = frobenius_loss_trace_compiled(x_ng=x_ng[:split], h_rnk=h_rnk[:, :split], w_rkg=w_rkg)
+    part2_r = frobenius_loss_trace_compiled(x_ng=x_ng[split:], h_rnk=h_rnk[:, split:], w_rkg=w_rkg)
+
+    _assert_squared_error_close(part1_r + part2_r, full_r.double(), x_ng, rtol=1e-5)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_frobenius_loss_trace_output_dtype_and_no_graph(dtype: torch.dtype):
+    torch.manual_seed(0)
+    x_ng = torch.rand(10, 6, dtype=dtype)
+    h_rnk = torch.rand(2, 10, 3, dtype=dtype)
+    w_rkg = torch.rand(2, 3, 6, dtype=dtype, requires_grad=True)
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    assert actual_r.dtype == dtype
+    assert not actual_r.requires_grad
+
+
+def test_frobenius_loss_trace_with_float32_reductions(monkeypatch: pytest.MonkeyPatch):
+    """Simulate a device without float64 (MPS): the reductions stay in float32 and remain accurate enough."""
+    monkeypatch.setattr(nmf_module, "_reduction_dtype", lambda device: torch.float32)
+    torch.manual_seed(0)
+    r, n, k, g = 3, 512, 6, 200
+    # a rough NMF-like fit: counts explained by a low-rank mean, so the residual is a large fraction of ||X||^2
+    h_rnk = torch.rand(r, n, k)
+    w_rkg = torch.rand(r, k, g)
+    x_ng = torch.poisson(torch.einsum("nk,kg->ng", h_rnk[0], w_rkg[0]))
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng, h_rnk=h_rnk, w_rkg=w_rkg)
+
+    _assert_squared_error_close(actual_r, _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-5)
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires MPS")
+def test_frobenius_loss_trace_on_mps():
+    torch.manual_seed(0)
+    r, n, k, g = 3, 512, 6, 200
+    h_rnk = torch.rand(r, n, k)
+    w_rkg = torch.rand(r, k, g)
+    x_ng = torch.poisson(torch.einsum("nk,kg->ng", h_rnk[0], w_rkg[0]))
+
+    actual_r = frobenius_loss_trace_compiled(x_ng=x_ng.to("mps"), h_rnk=h_rnk.to("mps"), w_rkg=w_rkg.to("mps"))
+
+    assert actual_r.device.type == "mps"
+    _assert_squared_error_close(actual_r.cpu(), _direct_squared_error_r(x_ng, h_rnk, w_rkg), x_ng, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# OnlineNonNegativeMatrixFactorization solvers
+# ---------------------------------------------------------------------------
+
+
+def _small_online_nmf(solver: Literal["fista", "hals"], g: int = 8):
+    return OnlineNonNegativeMatrixFactorization(
+        var_names_g=[f"gene_{i}" for i in range(g)], k_values=[3, 4], r=2, solver=solver, n_cells_total=30
+    )
+
+
+@pytest.mark.parametrize("solver, stores_loadings", [("fista", False), ("hals", True)])
+def test_online_nmf_stores_loadings_per_solver(solver: Literal["fista", "hals"], stores_loadings: bool):
+    model = _small_online_nmf(solver)
+
+    assert model.stores_loadings is stores_loadings
+    for k in model.k_values:
+        assert hasattr(model, f"loadings_{k}_rnk") is stores_loadings
+
+
+def test_online_nmf_rejects_unknown_solver():
+    with pytest.raises(ValueError, match="Unknown solver"):
+        OnlineNonNegativeMatrixFactorization(
+            var_names_g=["gene_0", "gene_1"],
+            k_values=[2],
+            r=1,
+            solver="mairal",  # type: ignore[arg-type]
+        )
+
+
+def test_online_nmf_hals_requires_n_cells_total():
+    with pytest.raises(ValueError, match="n_cells_total"):
+        OnlineNonNegativeMatrixFactorization(var_names_g=["gene_0", "gene_1"], k_values=[2], r=1, solver="hals")
+
+
+def test_online_nmf_hals_does_not_support_multi_process(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(nmf_module, "_distributed_world_size", lambda: 2)
+    model = _small_online_nmf("hals")
+
+    with pytest.raises(NotImplementedError, match="multi-process"):
+        model(
+            x_ng=torch.rand(10, 8),
+            var_names_g=model.var_names_g,
+            obs_names_n=np.array([f"cell_{i}" for i in range(10)]),
+        )
+
+
+def test_online_nmf_fista_needs_no_obs_names_and_normalizes_factors():
+    torch.manual_seed(0)
+    model = _small_online_nmf("fista")
+
+    for _ in range(3):
+        model(x_ng=torch.rand(30, 8), var_names_g=model.var_names_g)
+
+    for k in model.k_values:
+        factors_rkg = model.factors_dict[k]
+        torch.testing.assert_close(factors_rkg.sum(dim=-1), torch.ones(factors_rkg.shape[:2]))
+        assert (factors_rkg >= 0).all()
+        assert getattr(model, f"A_{k}_rkk").abs().sum() > 0  # the sufficient statistics were accumulated
+
+
+def test_l1_normalize_factors():
+    factors_rkg = torch.tensor([[[1.0, 3.0, 0.0], [0.0, 0.0, 0.0]], [[2.0, 2.0, 4.0], [5.0, 0.0, 5.0]]])
+
+    normalized_rkg = l1_normalize_factors(factors_rkg)
+
+    expected_rkg = torch.tensor([[[0.25, 0.75, 0.0], [0.0, 0.0, 0.0]], [[0.25, 0.25, 0.5], [0.5, 0.0, 0.5]]])
+    torch.testing.assert_close(normalized_rkg, expected_rkg)  # an all-zero row stays zero rather than becoming NaN
+
+
+def test_online_nmf_hals_persists_loadings_of_the_minibatch_cells():
+    """The loadings the HALS solver computes for a minibatch are written back to the per-cell buffers."""
+    torch.manual_seed(0)
+    n = 30
+    model = _small_online_nmf("hals")
+    x_ng = torch.rand(n, 8)
+    obs_names_n = np.array([f"cell_{i}" for i in range(n)])
+    before = {k: getattr(model, f"loadings_{k}_rnk").clone() for k in model.k_values}
+
+    model(x_ng=x_ng[:10], var_names_g=model.var_names_g, obs_names_n=obs_names_n[:10])
+
+    seen_n = torch.tensor([model.obs_names_to_index_map[name] for name in obs_names_n[:10]])
+    unseen_n = torch.tensor([i for i in range(n) if i not in seen_n.tolist()])
+    for k in model.k_values:
+        after_rnk = getattr(model, f"loadings_{k}_rnk")
+        assert not torch.equal(after_rnk[:, seen_n], before[k][:, seen_n])  # the minibatch cells were updated
+        torch.testing.assert_close(after_rnk[:, unseen_n], before[k][:, unseen_n], rtol=0, atol=0)  # others were not
+        assert (after_rnk >= 0).all()
+
+
+def test_online_nmf_hals_stored_loadings_improve_the_fit():
+    """The stored loadings are the solver's fit of each cell, so they reconstruct the data
+    better than the initial ones."""
+    torch.manual_seed(0)
+    n, g = 30, 8
+    model = _small_online_nmf("hals")
+    x_ng = torch.rand(n, 3) @ torch.rand(3, g)  # low rank, so there is a good fit to find
+    obs_names_n = np.array([f"cell_{i}" for i in range(n)])
+    k = 3
+
+    def stored_loadings_error_r() -> torch.Tensor:
+        # the cells were all seen in the first forward, so the index map is complete after it
+        index_n = torch.tensor([model.obs_names_to_index_map[name] for name in obs_names_n])
+        return frobenius_loss_trace_compiled(
+            x_ng=x_ng, h_rnk=getattr(model, f"loadings_{k}_rnk")[:, index_n], w_rkg=model.factors_dict[k]
+        )
+
+    model(x_ng=x_ng, var_names_g=model.var_names_g, obs_names_n=obs_names_n)
+    error_after_one_pass_r = stored_loadings_error_r()
+    for _ in range(4):
+        model(x_ng=x_ng, var_names_g=model.var_names_g, obs_names_n=obs_names_n)
+    error_after_five_passes_r = stored_loadings_error_r()
+
+    # the data has squared norm of about n * g * E[x^2]; the stored loadings must explain a good part of it
+    assert (error_after_five_passes_r < 0.5 * x_ng.pow(2).sum()).all()
+    assert (error_after_five_passes_r <= error_after_one_pass_r * 1.0001).all()

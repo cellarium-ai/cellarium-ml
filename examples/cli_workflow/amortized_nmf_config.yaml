@@ -1,0 +1,59 @@
+# lightning.pytorch==2.5.2
+#
+# Amortized online non-negative matrix factorization (NMF) with the FISTA solver, for consensus NMF (cNMF).
+# An encoder network predicts the cell loadings that warm-start the solver, so no per-cell loadings are stored.
+#
+#   cellarium-ml amortized_nmf fit --config amortized_nmf_config.yaml
+#
+# The gene list (var_names_g), the number of cells (total_n_cells) and the batch size (batch_size) of the model are
+# derived automatically from the data and the transforms.
+# To factorize only highly variable genes, add a Filter transform in front of the model, e.g.
+#
+#   model:
+#     cpu_transforms:
+#     - class_path: cellarium.ml.transforms.Filter
+#       init_args:
+#         filter_list: [ENSG00000187642, ENSG00000078808, ...]
+#
+# Training stops early, before max_epochs, once every value in k_values has converged.
+# For multi-device training set trainer.devices and use the DDP strategy with broadcast_buffers: true.
+seed_everything: true
+trainer:
+  accelerator: auto
+  devices: 1
+  num_nodes: 1
+  max_epochs: 100
+  default_root_dir: /tmp/test_examples/amortized_nmf
+model:
+  model:
+    class_path: cellarium.ml.models.AmortizedOnlineNonNegativeMatrixFactorization
+    init_args:
+      k_values:
+      - 5
+      - 6
+      - 7
+      r: 10
+      latent_dim: 64
+      solver: fista
+  # the optimizer trains the encoder; without it the encoder stays at its random initialization
+  optim_fn: torch.optim.Adam
+  optim_kwargs:
+    lr: 0.001
+data:
+  dadc:
+    class_path: cellarium.ml.data.DistributedAnnDataCollection
+    init_args:
+      filenames: https://storage.googleapis.com/dsp-cellarium-cas-public/test-data/test_{0..3}.h5ad
+      shard_size: 100
+      max_cache_size: 2
+      obs_columns_to_validate: []
+  batch_keys:
+    x_ng:
+      attr: X
+      convert_fn: cellarium.ml.utilities.data.densify
+    var_names_g:
+      attr: var_names
+  batch_size: 100
+  shuffle: true
+  num_workers: 2
+ckpt_path: null
