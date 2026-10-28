@@ -298,8 +298,8 @@ class DistributedDeltaCellsCollection(DistributedCollection):
 
     def reset_cache(self) -> None:
         self.dataset.close()
-        self._miss_base = self.dataset.stats["tiles_fetched"]
+        self._miss_base = int(self.dataset.stats["tiles_fetched"])
 
     @property
     def cache_miss_count(self) -> int:
-        return self.dataset.stats["tiles_fetched"] - self._miss_base
+        return int(self.dataset.stats["tiles_fetched"]) - self._miss_base
