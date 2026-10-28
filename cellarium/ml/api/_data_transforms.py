@@ -111,10 +111,16 @@ class SeuratV3Recipe:
         """The data fields beyond ``cdata.datamodule.batch_keys`` that the module needs in order to run."""
         return _batch_keys(self.batch_key)
 
-    def build_module(self, cdata: CellariumData, n_top_genes: int) -> CellariumModule:
+    def build_module(
+        self,
+        cdata: CellariumData,
+        n_top_genes: int,
+        accumulator_dtype: Literal["float32", "float64"] = "float64",
+    ) -> CellariumModule:
         """
         ``n_top_genes`` is what the model precomputes when it is fit; the fitted statistics do not depend on it, so
-        the result can be read for any number of genes.
+        the result can be read for any number of genes. ``accumulator_dtype`` is the precision of the model's sums,
+        which has to be float32 on a device without float64 (MPS).
         """
         n_batch = 1 if self.batch_key is None else cdata.datamodule.obs_key_nunique(self.batch_key)
         return CellariumModule(
@@ -125,6 +131,7 @@ class SeuratV3Recipe:
                 use_batch_key=self.batch_key is not None,
                 n_batch=n_batch,
                 output_path=None,
+                accumulator_dtype=accumulator_dtype,
             ),
         )
 

@@ -156,7 +156,9 @@ def test_highly_variable_genes_unbatched_after_batched_matches_a_fresh_fit(cdata
     fresh_df = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
     assert len(fits) == 2
 
-    pd.testing.assert_frame_equal(reused_df, fresh_df, rtol=1e-4)
+    # the two fits sum their float32 accumulators in a different order, which moves a normalized dispersion by ~1e-6
+    # (an absolute tolerance is needed for the values that are near zero)
+    pd.testing.assert_frame_equal(reused_df, fresh_df, rtol=1e-4, atol=1e-5)
 
 
 def test_highly_variable_genes_seurat_v3_reused_for_other_n_top_genes_but_exact_on_batch_key(cdata, fits):
@@ -169,6 +171,37 @@ def test_highly_variable_genes_seurat_v3_reused_for_other_n_top_genes_but_exact_
     highly_variable_genes(cdata, n_top_genes=10, flavor="seurat_v3", batch_key="cell_type", accelerator="cpu")
     highly_variable_genes(cdata, n_top_genes=10, flavor="seurat_v3", accelerator="cpu")
     assert [config["batch_key"] for config in fits] == [None, "cell_type"]
+
+
+@pytest.mark.parametrize(
+    "device, expected_dtype",
+    [("mps", "float32"), ("cpu", "float64"), ("cuda", "float64")],
+    ids=lambda value: str(value),
+)
+def test_highly_variable_genes_seurat_v3_picks_the_accumulator_dtype_from_the_device(
+    cdata, monkeypatch, device, expected_dtype
+):
+    # the device is faked: only the model's dtype is looked at (the fit itself runs on the cpu)
+    monkeypatch.setattr("cellarium.ml.api.preprocessing.hvg.resolve_device", lambda accelerator: torch.device(device))
+    highly_variable_genes(cdata, n_top_genes=10, flavor="seurat_v3", accelerator="cpu")
+    model = cdata.trained_modules["hvg_seurat_v3"].module.model
+    assert isinstance(model, HVGSeuratV3)
+    assert model.accumulator_dtype == expected_dtype
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires MPS")
+def test_highly_variable_genes_seurat_v3_runs_on_mps(cdata, monkeypatch):
+    mps_df = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat_v3", batch_key="cell_type", accelerator="mps")
+    assert mps_df["highly_variable"].sum() == 10
+
+    # the same float32 arithmetic on the cpu gives nearly the same result. It is not exact, and a float64 fit
+    # differs by about 1% for one gene: on data this small the LOESS fit of genes with equal means is sensitive to
+    # the rounding of the means (the precision of float32 against float64 is tested on larger data in
+    # tests/test_hvg_seurat_v3.py)
+    cdata._fit_cache.clear()
+    monkeypatch.setattr("cellarium.ml.api.preprocessing.hvg.resolve_device", lambda accelerator: torch.device("mps"))
+    cpu_df = highly_variable_genes(cdata, n_top_genes=10, flavor="seurat_v3", batch_key="cell_type", accelerator="cpu")
+    np.testing.assert_allclose(mps_df["variances_norm"], cpu_df["variances_norm"], rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("flavor", ["seurat", "seurat_v3"])

@@ -7,6 +7,7 @@ import pandas as pd
 
 from cellarium.ml.api._data_transforms import OnePassRecipe, SeuratV3Recipe, fit_or_reuse
 from cellarium.ml.api.cellariumdata import CellariumData
+from cellarium.ml.api.utils import resolve_device
 from cellarium.ml.models import HVGSeuratV3, OnePassMeanVarStd
 from cellarium.ml.preprocessing import kotliar_compute_highly_variable_genes, seurat_compute_highly_variable_genes
 
@@ -68,6 +69,8 @@ def highly_variable_genes(
             accelerator,
             key_added="hvg_seurat_v3" if key_added is None else key_added,
             n_top_genes=n_top_genes,
+            # MPS has no float64
+            accumulator_dtype="float32" if resolve_device(accelerator).type == "mps" else "float64",
         )
         model = trained.module.model
         assert isinstance(model, HVGSeuratV3)
