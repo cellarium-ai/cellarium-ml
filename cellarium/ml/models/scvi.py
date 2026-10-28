@@ -1470,7 +1470,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         # log annealed loss for progress bar / on-step visibility
         if isinstance(output["loss"], torch.Tensor):
-            pl_module.log("val_loss", output["loss"], sync_dist=True, on_epoch=True, batch_size=n)
+            pl_module.log("val_loss", output["loss"], sync_dist=True, on_epoch=True, batch_size=n, prog_bar=True)
 
         # accumulate exact ELBO (no annealing)
         kl_batch = output["kl_divergence_batch"]

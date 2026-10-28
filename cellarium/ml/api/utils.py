@@ -8,18 +8,27 @@ os.environ["GLOG_minloglevel"] = "2"
 os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
 os.environ["PYTHONWARNINGS"] = "ignore::FutureWarning"
 
+import ctypes
+import gc
 import multiprocessing as mp
 import shutil
+import sys
 import tempfile
-from typing import Callable
+from collections.abc import Mapping
+from typing import Any, Callable, Literal
 
 import anndata
 import h5py
+import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
+import torch
+from lightning.fabric.utilities.rank_zero import rank_zero_only
+from lightning.pytorch.callbacks import TQDMProgressBar
+from lightning.pytorch.loggers import Logger
 from tqdm import tqdm
 
 # Create a global placeholder for the process workers so they only authenticate once.
@@ -34,6 +43,46 @@ def get_gcs_fs():
 
         _GCS_FS = gcsfs.GCSFileSystem()
     return _GCS_FS
+
+
+def resolve_device(accelerator: Literal["cpu", "mps", "cuda", "auto"]) -> torch.device:
+    """The device for ``accelerator``: the best available of cuda, mps and cpu for ``"auto"``."""
+    if accelerator == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(accelerator)
+
+
+def release_unused_memory() -> None:
+    """
+    Give memory that this process has freed back to the operating system, as far as the platform allows.
+
+    After passes over large data, Python and numpy leave freed memory in the allocator's heap, where it still counts
+    against the process (and the machine) even though nothing refers to it. This collects garbage, then asks the C
+    allocator to return what it can (``malloc_trim`` with glibc on Linux, ``malloc_zone_pressure_relief`` on macOS),
+    and empties the cache of the GPU allocator (CUDA or MPS). It is best effort: where a step is not available (other
+    platforms, or a C library without these functions) that step is skipped, and it never raises.
+    """
+    gc.collect()
+    try:
+        if sys.platform.startswith("linux"):
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        elif sys.platform == "darwin":
+            libsystem = ctypes.CDLL("libSystem.dylib")
+            libsystem.malloc_zone_pressure_relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libsystem.malloc_zone_pressure_relief(None, 0)  # all zones, as much as possible
+    except (OSError, AttributeError):
+        pass  # not glibc (for example musl) or the function is missing: nothing to release this way
+    try:
+        if torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass  # a failure to empty a cache must never affect the caller
 
 
 class SeekableHTTPFile:
@@ -129,16 +178,23 @@ def get_h5ad_file_obs(h5ad_path: str) -> pd.DataFrame:
     return obs
 
 
+def _h5ad_source(h5ad_paths: list[str]) -> str:
+    """Where the h5ad files live, for progress bar labels: GCS, URLs, local files or mixed locations."""
+    sources = {
+        "GCS" if path.startswith("gs://") else "URLs" if path.startswith(("http://", "https://")) else "local files"
+        for path in h5ad_paths
+    }
+    return sources.pop() if len(sources) == 1 else "mixed locations"
+
+
 def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
     """
     Get the number of cells using a process pool that terminates instantly.
     """
+    desc = f"Reading n_obs from {_h5ad_source(h5ad_paths)}"
     # opt for a quick for loop if the number of files is small
     if len(h5ad_paths) < 40:
-        return [
-            get_h5ad_file_n_cells(h5ad_path)
-            for h5ad_path in tqdm(h5ad_paths, desc="Reading n_obs from h5ad files", unit="file")
-        ]
+        return [get_h5ad_file_n_cells(h5ad_path) for h5ad_path in tqdm(h5ad_paths, desc=desc, unit="file")]
 
     ctx = mp.get_context("spawn")
     pool = ctx.Pool(processes=12)
@@ -149,7 +205,7 @@ def get_h5ad_files_n_cells(h5ad_paths: list[str]) -> list[int]:
             tqdm(
                 pool.imap(get_h5ad_file_n_cells, h5ad_paths),
                 total=len(h5ad_paths),
-                desc="Reading n_obs from GCS",
+                desc=desc,
                 unit="file",
             )
         )
@@ -249,6 +305,7 @@ def write_obs_parquet(h5ad_paths: list[str], output_path: str, processes: int = 
     if not h5ad_paths:
         raise ValueError("h5ad_paths must be a non-empty list")
 
+    desc = f"Reading obs from {_h5ad_source(h5ad_paths)}"
     tmpdir = tempfile.mkdtemp(prefix="cellarium_obs_parquet_")
     try:
         shard_paths = [os.path.join(tmpdir, f"{i:08d}.parquet") for i in range(len(h5ad_paths))]
@@ -256,7 +313,7 @@ def write_obs_parquet(h5ad_paths: list[str], output_path: str, processes: int = 
 
         # opt for a quick for loop if the number of files is small
         if len(h5ad_paths) < 40:
-            for a in tqdm(args, desc="Reading obs from h5ad files", unit="file"):
+            for a in tqdm(args, desc=desc, unit="file"):
                 _write_obs_shard(a)
         else:
             ctx = mp.get_context("spawn")
@@ -268,7 +325,7 @@ def write_obs_parquet(h5ad_paths: list[str], output_path: str, processes: int = 
                     tqdm(
                         pool.imap_unordered(_write_obs_shard, args),
                         total=len(args),
-                        desc="Reading obs from GCS",
+                        desc=desc,
                         unit="file",
                     )
                 )
@@ -334,3 +391,69 @@ def h5ad_paths_from_google_bucket(gs_bucket_path: str) -> list[str]:
     fs = get_gcs_fs()
     paths = fs.ls(gs_bucket_path[5:])
     return [f"gs://{path}" for path in paths if path.endswith(".h5ad")]
+
+
+class PreciseProgressBar(TQDMProgressBar):
+    """
+    A :class:`~lightning.pytorch.callbacks.TQDMProgressBar` that shows float metrics with ``significant_digits``
+    significant digits. tqdm shows numbers with 3 (e.g. ``1.52e+3``), which hides small changes in large values
+    such as a loss in the thousands.
+    """
+
+    def __init__(self, *args: Any, significant_digits: int = 5, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.significant_digits = significant_digits
+
+    def get_metrics(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> dict[str, int | str | float | dict[str, float]]:
+        metrics = super().get_metrics(trainer, pl_module)
+        # tqdm leaves strings as they are
+        return {k: f"{v:.{self.significant_digits}g}" if isinstance(v, float) else v for k, v in metrics.items()}
+
+
+class LossHistory(Logger):
+    """
+    An in-memory Lightning logger that records every metric the module logs, at the cadence it is logged, with no
+    files written. Pass it as ``logger=`` to :class:`lightning.pytorch.Trainer` (and set ``log_every_n_steps``, which
+    controls how often per-step metrics such as ``train_loss`` are recorded; epoch-level metrics such as ``val_loss``
+    are recorded once per epoch). Lightning skips the pre-training validation sanity check, so it is not recorded.
+
+    The record is :attr:`history`, a long-format table with columns ``step``, ``epoch``, ``metric`` and ``value``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._steps: list[int | None] = []
+        self._epochs: list[int | None] = []
+        self._metrics: list[str] = []
+        self._values: list[float] = []
+
+    @property
+    def name(self) -> str:
+        return "loss_history"
+
+    @property
+    def version(self) -> str:
+        return ""
+
+    @rank_zero_only
+    def log_hyperparams(self, params: Any, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    @rank_zero_only
+    def log_metrics(self, metrics: Mapping[str, float], step: int | None = None) -> None:
+        metrics = dict(metrics)
+        epoch = metrics.pop("epoch", None)
+        for metric, value in metrics.items():
+            self._steps.append(step)
+            self._epochs.append(None if epoch is None else int(epoch))
+            self._metrics.append(metric)
+            self._values.append(float(value))
+
+    @property
+    def history(self) -> pd.DataFrame:
+        """The logged metrics as a long-format table with columns ``step``, ``epoch``, ``metric``, ``value``."""
+        return pd.DataFrame(
+            {"step": self._steps, "epoch": self._epochs, "metric": self._metrics, "value": self._values}
+        )

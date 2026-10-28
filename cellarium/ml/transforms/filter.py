@@ -10,7 +10,7 @@ import scipy.sparse
 import torch
 from torch import nn
 
-from cellarium.ml.utilities.data import to_scipy_coo, to_scipy_csr, to_torch_sparse_coo, to_torch_sparse_csr
+from cellarium.ml.utilities.data import sparse_tensor_to_scipy_csr, to_torch_sparse_coo, to_torch_sparse_csr
 from cellarium.ml.utilities.testing import (
     assert_columns_and_array_lengths_equal,
 )
@@ -151,16 +151,15 @@ class Filter(nn.Module):
         if scipy.sparse.issparse(x_ng):
             return self._forward_sparse(x_ng, var_names_g, to_torch_sparse_fn=to_torch_sparse_csr)
 
-        if isinstance(x_ng, torch.Tensor) and x_ng.layout == torch.sparse_csr:
-            # Torch has no efficient column indexing for sparse CSR tensors; delegate to scipy,
-            # which does, via a zero-copy view of the same underlying buffers.
-            return self._forward_sparse(to_scipy_csr(x_ng), var_names_g, to_torch_sparse_fn=to_torch_sparse_csr)
-
-        if isinstance(x_ng, torch.Tensor) and x_ng.layout == torch.sparse_coo:
-            # scipy's coo_matrix doesn't support column indexing at all, so convert to CSR for
-            # the filtering step, then back to COO for output -- the only sparse layout the mps
-            # accelerator (the source of COO x_ng) can hold.
-            return self._forward_sparse(to_scipy_coo(x_ng).tocsr(), var_names_g, to_torch_sparse_fn=to_torch_sparse_coo)
+        if isinstance(x_ng, torch.Tensor) and x_ng.layout in (torch.sparse_csr, torch.sparse_coo):
+            # Torch has no efficient column indexing for sparse tensors; delegate to scipy, which does (CSR is a
+            # zero-copy view; scipy's coo_matrix has no column indexing, so COO is converted to CSR for the filtering).
+            # The output has the layout the input arrived in: COO is the only sparse layout the mps accelerator
+            # (the source of COO x_ng) can hold.
+            to_torch_sparse_fn = to_torch_sparse_csr if x_ng.layout == torch.sparse_csr else to_torch_sparse_coo
+            return self._forward_sparse(
+                sparse_tensor_to_scipy_csr(x_ng), var_names_g, to_torch_sparse_fn=to_torch_sparse_fn
+            )
 
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
 

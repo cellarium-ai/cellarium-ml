@@ -16,6 +16,7 @@ from lightning.pytorch.strategies import DDPStrategy
 
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.models.model import CellariumModel
+from cellarium.ml.utilities.distributed import get_rank_and_num_replicas
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -50,17 +51,22 @@ class HVGSeuratV3(CellariumModel):
     """
     Compute highly variable genes using the Seurat v3 method in two Lightning epochs.
 
-    **Epoch 0** — streams data to accumulate per-batch mean and variance.
+    **Epoch 0** — streams data to accumulate per-batch mean and variance. The sums are of the counts minus a
+    per-batch, per-gene shift (the mean of the first cells seen from that batch), so that the variance is not
+    computed as a difference of two large, nearly equal numbers.
 
     Between epochs — fits a LOESS model of ``log10(var) ~ log10(mean)`` per batch
     to estimate a regularized standard deviation and per-cell clip value.
 
     **Epoch 1** — streams data again, clips counts per cell at the batch-level
-    ``clip_val``, and accumulates clipped sums.
+    ``clip_val``, and accumulates the sum of squared deviations of the clipped counts from the batch mean.
 
     After epoch 1 (``on_train_epoch_end``) — computes normalized variance per
     batch, ranks genes, and writes ``self.hvg_dfs`` (and optionally a CSV
     file at ``output_path``).
+
+    Both epochs use only sums of positive terms or of shifted values, so the accumulators can be float32
+    (see ``accumulator_dtype``) with little loss of accuracy.
 
     The ``flavor`` argument controls how genes are ranked across batches when
     ``n_batch > 1``, matching the two multi-batch modes in Scanpy:
@@ -99,6 +105,8 @@ class HVGSeuratV3(CellariumModel):
         batch_n_cell_minimum: Minimum number of cells required for a batch to be considered valid.
         n_batch_minimum: Minimum number of batches in which the gene is in n_top_genes highly variable
             for a gene to make the final list.
+        accumulator_dtype: The dtype of the accumulators, ``"float64"`` (default) or ``"float32"``. Use
+            ``"float32"`` on devices without float64 support (MPS).
     """
 
     _VALID_FLAVORS = frozenset({"seurat_v3", "seurat_v3_paper"})
@@ -114,10 +122,15 @@ class HVGSeuratV3(CellariumModel):
         output_path: str | None = "hvg_seurat_v3_output.csv",
         batch_n_cell_minimum: int = 2,
         n_batch_minimum: int = 1,
+        accumulator_dtype: Literal["float32", "float64"] = "float64",
     ) -> None:
         super().__init__()
         if flavor not in self._VALID_FLAVORS:
             raise ValueError(f"flavor must be one of {sorted(self._VALID_FLAVORS)}, got {flavor!r}")
+        if accumulator_dtype not in ("float32", "float64"):
+            raise ValueError(f"accumulator_dtype must be 'float32' or 'float64', got {accumulator_dtype!r}")
+        self.accumulator_dtype = accumulator_dtype
+        dtype = getattr(torch, accumulator_dtype)
         self.var_names_g = var_names_g
         n_vars = len(var_names_g)
         self.n_vars = n_vars
@@ -153,25 +166,32 @@ class HVGSeuratV3(CellariumModel):
 
         self._current_epoch: int = 0
 
-        # Epoch-0 buffers: shape (n_batch, n_vars)
+        # Epoch-0 buffers: shape (n_batch, n_vars). The sums are of ``x - x_shift_bg``, not of ``x``.
+        # The cell count is int64 so that it stays exact past 2**24 cells (a float32 count stops incrementing there).
+        self.x_shift_bg: torch.Tensor
+        self.x_shift_set_b: torch.Tensor
         self.x_sums_bg: torch.Tensor
         self.x_squared_sums_bg: torch.Tensor
         self.x_size_b: torch.Tensor
-        self.register_buffer("x_sums_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
-        self.register_buffer("x_squared_sums_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
-        self.register_buffer("x_size_b", torch.zeros(n_batch))
+        self.register_buffer("x_shift_bg", torch.zeros(n_batch, n_vars, dtype=dtype))
+        self.register_buffer("x_shift_set_b", torch.zeros(n_batch, dtype=torch.bool))
+        self.register_buffer("x_sums_bg", torch.zeros(n_batch, n_vars, dtype=dtype))
+        self.register_buffer("x_squared_sums_bg", torch.zeros(n_batch, n_vars, dtype=dtype))
+        self.register_buffer("x_size_b", torch.zeros(n_batch, dtype=torch.int64))
+        # whether every batch has a shift (a cache, to skip the work of finding shifts once they all are set)
+        self._shifts_complete = False
 
         # Set between epochs by on_train_epoch_end after epoch 0: shape (n_batch, n_vars)
+        self.mean_bg: torch.Tensor
         self.clip_val_bg: torch.Tensor
         self.reg_std_bg: torch.Tensor
-        self.register_buffer("clip_val_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
-        self.register_buffer("reg_std_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
+        self.register_buffer("mean_bg", torch.zeros(n_batch, n_vars, dtype=dtype))
+        self.register_buffer("clip_val_bg", torch.zeros(n_batch, n_vars, dtype=dtype))
+        self.register_buffer("reg_std_bg", torch.zeros(n_batch, n_vars, dtype=dtype))
 
-        # Epoch-1 buffers: shape (n_batch, n_vars)
-        self.counts_sum_bg: torch.Tensor
-        self.sq_counts_sum_bg: torch.Tensor
-        self.register_buffer("counts_sum_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
-        self.register_buffer("sq_counts_sum_bg", torch.zeros(n_batch, n_vars, dtype=torch.float64))
+        # Epoch-1 buffer: shape (n_batch, n_vars), the sum over cells of (clipped count - batch mean) ** 2
+        self.clipped_sq_dev_sum_bg: torch.Tensor
+        self.register_buffer("clipped_sq_dev_sum_bg", torch.zeros(n_batch, n_vars, dtype=dtype))
 
         # Dummy parameter so Lightning treats this as a trainable module
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
@@ -180,14 +200,17 @@ class HVGSeuratV3(CellariumModel):
         self.hvg_dfs: dict[int, pd.DataFrame] | None = None
 
     def reset_parameters(self) -> None:
+        self.x_shift_bg.zero_()
+        self.x_shift_set_b.zero_()
         self.x_sums_bg.zero_()
         self.x_squared_sums_bg.zero_()
         self.x_size_b.zero_()
+        self.mean_bg.zero_()
         self.clip_val_bg.zero_()
         self.reg_std_bg.zero_()
-        self.counts_sum_bg.zero_()
-        self.sq_counts_sum_bg.zero_()
+        self.clipped_sq_dev_sum_bg.zero_()
         self._dummy_param.data.zero_()
+        self._shifts_complete = False
 
     def on_train_epoch_start(self, trainer: pl.Trainer) -> None:
         """Cache the current epoch number so forward() can branch on it."""
@@ -228,31 +251,50 @@ class HVGSeuratV3(CellariumModel):
 
         return {}
 
+    def _set_new_shifts(self, x_ng: torch.Tensor, batch_idx_n: torch.Tensor) -> None:
+        """
+        Set the shift of every batch that has cells in ``x_ng`` and no shift yet to the mean of those cells (over
+        all processes, so that every process has the same shifts). The shift only has to be near the mean of the
+        batch: any constant gives the same answer, but a near one avoids the loss of precision.
+        """
+        if self._shifts_complete:
+            return
+        idx_exp_ng = batch_idx_n.unsqueeze(1).expand_as(x_ng)
+        sums_bg = torch.zeros(self.n_batch, self.n_vars, dtype=x_ng.dtype, device=x_ng.device)
+        sums_bg.scatter_add_(0, idx_exp_ng, x_ng)
+        counts_b = torch.bincount(batch_idx_n, minlength=self.n_batch)
+        _, world_size = get_rank_and_num_replicas()
+        if world_size > 1:
+            dist.all_reduce(sums_bg)
+            dist.all_reduce(counts_b)
+        new_b = (counts_b > 0) & ~self.x_shift_set_b
+        mean_bg = sums_bg / counts_b.clamp(min=1).unsqueeze(1)
+        self.x_shift_bg = torch.where(new_b.unsqueeze(1), mean_bg, self.x_shift_bg)
+        self.x_shift_set_b = self.x_shift_set_b | new_b
+        self._shifts_complete = bool(self.x_shift_set_b.all())
+
     def _accumulate_epoch0(self, x_ng: torch.Tensor, batch_idx_n: torch.Tensor) -> None:
-        n_cells = x_ng.shape[0]
-        x64_ng = x_ng.double()
-        idx_exp_ng = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
-        sums_contrib_bg = torch.zeros(self.n_batch, self.n_vars, dtype=torch.float64, device=x_ng.device)
-        sq_sums_contrib_bg = torch.zeros(self.n_batch, self.n_vars, dtype=torch.float64, device=x_ng.device)
-        sums_contrib_bg.scatter_add_(0, idx_exp_ng, x64_ng)
-        sq_sums_contrib_bg.scatter_add_(0, idx_exp_ng, x64_ng**2)
+        x_ng = x_ng.to(self.x_sums_bg.dtype)
+        self._set_new_shifts(x_ng, batch_idx_n)
+        dev_ng = x_ng - self.x_shift_bg[batch_idx_n]
+        idx_exp_ng = batch_idx_n.unsqueeze(1).expand_as(dev_ng)
+        sums_contrib_bg = torch.zeros_like(self.x_sums_bg)
+        sq_sums_contrib_bg = torch.zeros_like(self.x_squared_sums_bg)
+        sums_contrib_bg.scatter_add_(0, idx_exp_ng, dev_ng)
+        sq_sums_contrib_bg.scatter_add_(0, idx_exp_ng, dev_ng**2)
         self.x_sums_bg = self.x_sums_bg + sums_contrib_bg
         self.x_squared_sums_bg = self.x_squared_sums_bg + sq_sums_contrib_bg
         self.x_size_b = self.x_size_b + torch.bincount(batch_idx_n, minlength=self.n_batch)
 
     def _accumulate_epoch1(self, x_ng: torch.Tensor, batch_idx_n: torch.Tensor) -> None:
-        n_cells = x_ng.shape[0]
-        x64_ng = x_ng.double()
-        # Per-cell clip value: shape (n_cells, n_vars)
-        per_cell_clip_ng = self.clip_val_bg[batch_idx_n]  # float64
-        x_clipped_ng = torch.minimum(x64_ng, per_cell_clip_ng)
-        idx_exp_ng = batch_idx_n.unsqueeze(1).expand(n_cells, self.n_vars)
-        sums_contrib_bg = torch.zeros(self.n_batch, self.n_vars, dtype=torch.float64, device=x_ng.device)
-        sq_sums_contrib_bg = torch.zeros(self.n_batch, self.n_vars, dtype=torch.float64, device=x_ng.device)
-        sums_contrib_bg.scatter_add_(0, idx_exp_ng, x_clipped_ng)
-        sq_sums_contrib_bg.scatter_add_(0, idx_exp_ng, x_clipped_ng**2)
-        self.counts_sum_bg = self.counts_sum_bg + sums_contrib_bg
-        self.sq_counts_sum_bg = self.sq_counts_sum_bg + sq_sums_contrib_bg
+        x_ng = x_ng.to(self.clipped_sq_dev_sum_bg.dtype)
+        # Per-cell clip value and batch mean: shape (n_cells, n_vars)
+        x_clipped_ng = torch.minimum(x_ng, self.clip_val_bg[batch_idx_n])
+        dev_ng = x_clipped_ng - self.mean_bg[batch_idx_n]
+        idx_exp_ng = batch_idx_n.unsqueeze(1).expand_as(dev_ng)
+        sq_dev_contrib_bg = torch.zeros_like(self.clipped_sq_dev_sum_bg)
+        sq_dev_contrib_bg.scatter_add_(0, idx_exp_ng, dev_ng**2)
+        self.clipped_sq_dev_sum_bg = self.clipped_sq_dev_sum_bg + sq_dev_contrib_bg
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
         """Validation: if in a distributed setting, use DDP with broadcast_buffers=False."""
@@ -283,8 +325,9 @@ class HVGSeuratV3(CellariumModel):
         if trainer.global_rank == 0:
             self._compute_clip_val()
 
-        # 3. Broadcast clip_val_bg to all ranks so epoch-1 can use it
+        # 3. Broadcast mean_bg, clip_val_bg and reg_std_bg to all ranks so epoch-1 can use them
         if trainer.world_size > 1:
+            dist.broadcast(self.mean_bg, src=0)
             dist.broadcast(self.clip_val_bg, src=0)
             dist.broadcast(self.reg_std_bg, src=0)
 
@@ -296,9 +339,11 @@ class HVGSeuratV3(CellariumModel):
             N = self.x_size_b[b].item()
             if N < self.batch_n_cell_minimum:
                 continue
-            sums = self.x_sums_bg[b].cpu().numpy()
-            sq_sums = self.x_squared_sums_bg[b].cpu().numpy()
-            mean_g = sums / N
+            # the statistics are computed on the host in float64, from sums of the shifted counts
+            shift_g = self.x_shift_bg[b].cpu().numpy().astype(np.float64)
+            sums = self.x_sums_bg[b].cpu().numpy().astype(np.float64)
+            sq_sums = self.x_squared_sums_bg[b].cpu().numpy().astype(np.float64)
+            mean_g = shift_g + sums / N
             # Unbiased (sample) variance with Bessel's correction, matching Scanpy's correction=1
             var_g = (sq_sums - sums**2 / N) / (N - 1)
 
@@ -313,16 +358,17 @@ class HVGSeuratV3(CellariumModel):
             reg_std = np.sqrt(10**estimated_var)  # shape (n_vars,)
             clip_val = reg_std * np.sqrt(N) + mean_g
 
-            self.reg_std_bg[b] = torch.tensor(reg_std)
-            self.clip_val_bg[b] = torch.tensor(clip_val)
+            dtype, device = self.reg_std_bg.dtype, self.reg_std_bg.device
+            self.mean_bg[b] = torch.as_tensor(mean_g, dtype=dtype, device=device)
+            self.reg_std_bg[b] = torch.as_tensor(reg_std, dtype=dtype, device=device)
+            self.clip_val_bg[b] = torch.as_tensor(clip_val, dtype=dtype, device=device)
 
     def _finish_epoch1(self, trainer: pl.Trainer) -> None:
         trainer.should_stop = True
 
         # 1. Reduce epoch-1 buffers to rank 0
         if trainer.world_size > 1:
-            dist.reduce(self.counts_sum_bg, dst=0, op=dist.ReduceOp.SUM)
-            dist.reduce(self.sq_counts_sum_bg, dst=0, op=dist.ReduceOp.SUM)
+            dist.reduce(self.clipped_sq_dev_sum_bg, dst=0, op=dist.ReduceOp.SUM)
 
         # 2. Rank 0: compute norm_var, rank, select top genes, build DataFrame and optionally save to CSV
         if trainer.global_rank == 0:
@@ -330,7 +376,7 @@ class HVGSeuratV3(CellariumModel):
             var_df: pd.DataFrame | None = None
             datamodule = getattr(trainer, "datamodule", None)
             if isinstance(datamodule, CellariumAnnDataDataModule):
-                var_df = datamodule.dadc.schema.attr_values["var"]
+                var_df = datamodule.dadc.var
             else:
                 warnings.warn(
                     "HVGSeuratV3: trainer.datamodule is not a CellariumAnnDataDataModule; "
@@ -354,14 +400,12 @@ class HVGSeuratV3(CellariumModel):
             N = self.x_size_b[b].item()
             if N < self.batch_n_cell_minimum:
                 continue
-            mean_g = (self.x_sums_bg[b] / N).cpu().numpy().astype(np.float64)
             reg_std_g = self.reg_std_bg[b].cpu().numpy().astype(np.float64)
-            sum_g = self.counts_sum_bg[b].cpu().numpy().astype(np.float64)
-            sq_sum_g = self.sq_counts_sum_bg[b].cpu().numpy().astype(np.float64)
+            sq_dev_sum_g = self.clipped_sq_dev_sum_bg[b].cpu().numpy().astype(np.float64)
 
             denom_g = (N - 1) * reg_std_g**2
             with np.errstate(divide="ignore", invalid="ignore"):
-                norm_gene_var_g = (N * mean_g**2 + sq_sum_g - 2 * mean_g * sum_g) / denom_g
+                norm_gene_var_g = sq_dev_sum_g / denom_g
             norm_gene_var_g[np.isnan(norm_gene_var_g)] = 0.0
             norm_gene_var_bg[b] = norm_gene_var_g
 
@@ -372,7 +416,9 @@ class HVGSeuratV3(CellariumModel):
         norm_gene_vars_valid_vg = norm_gene_var_bg[valid_b]
 
         # Rank genes within each valid batch v
-        hvg_rank_vg = np.argsort(np.argsort(-norm_gene_vars_valid_vg, axis=1), axis=1).astype(np.float32)
+        # (genes with identical counts in a batch tie exactly; a stable sort breaks the tie by gene order, instead of
+        # by whatever the unstable sort does with the rounding noise of the other genes)
+        hvg_rank_vg = np.argsort(np.argsort(-norm_gene_vars_valid_vg, axis=1, kind="stable"), axis=1).astype(np.float32)
         num_batches_high_var_v = (hvg_rank_vg < n_top_genes).sum(axis=0).astype(int)
         hvg_rank_vg[hvg_rank_vg >= n_top_genes] = np.nan
         masked_hvg_rank_vg = np.ma.masked_invalid(hvg_rank_vg)

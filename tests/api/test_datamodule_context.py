@@ -9,8 +9,8 @@ from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
 # --- temporary_batch_keys() -------------------------------------------------------------------
 
 
-def test_temporary_batch_keys_injects_and_restores_single_entry(cdata):
-    datamodule = cdata.datamodule
+def test_temporary_batch_keys_injects_and_restores_single_entry(h5ad_cdata):
+    datamodule = h5ad_cdata.datamodule
     original_batch_keys = set(datamodule.batch_keys.keys())
     original_obs_columns_to_validate = datamodule.dadc.obs_columns_to_validate
     assert "batch_index_n" not in original_batch_keys
@@ -38,9 +38,25 @@ def test_temporary_batch_keys_injects_and_restores_multiple_entries(cdata):
     with temporary_batch_keys(datamodule, extra_batch_keys):
         assert "batch_index_n" in datamodule.batch_keys
         assert "other_batch_index_n" in datamodule.batch_keys
-        assert datamodule.dadc.obs_columns_to_validate == ["cell_type"]
+        assert getattr(datamodule.dadc, "obs_columns_to_validate", ["cell_type"]) == ["cell_type"]  # h5ad only
 
     assert set(datamodule.batch_keys.keys()) == original_batch_keys
+
+
+def test_temporary_batch_keys_makes_new_obs_columns_local_for_deltacells(cdata):
+    from cellarium.ml.data import DistributedDeltaCellsCollection
+
+    datamodule = cdata.datamodule
+    if not isinstance(datamodule.dadc, DistributedDeltaCellsCollection):
+        pytest.skip("deltacells only")
+    obs = datamodule.dadc.dataset.obs
+    assert "n_counts" not in obs.localized_columns()
+
+    with temporary_batch_keys(datamodule, {"counts_n": AnnDataField(attr="obs", key="n_counts")}):
+        assert "n_counts" in obs.localized_columns()
+        assert "counts_n" in next(iter(datamodule.train_dataloader()))
+
+    assert "counts_n" not in datamodule.batch_keys
 
 
 def test_temporary_batch_keys_restores_preexisting_entry(cdata):
@@ -62,7 +78,7 @@ def test_temporary_batch_keys_restores_preexisting_entry(cdata):
 def test_temporary_batch_keys_restores_on_exception(cdata):
     datamodule = cdata.datamodule
     original_batch_keys = set(datamodule.batch_keys.keys())
-    original_obs_columns_to_validate = datamodule.dadc.obs_columns_to_validate
+    original_obs_columns_to_validate = getattr(datamodule.dadc, "obs_columns_to_validate", None)  # h5ad only
 
     with pytest.raises(RuntimeError):
         with temporary_batch_keys(
@@ -71,7 +87,7 @@ def test_temporary_batch_keys_restores_on_exception(cdata):
             raise RuntimeError("boom")
 
     assert set(datamodule.batch_keys.keys()) == original_batch_keys
-    assert datamodule.dadc.obs_columns_to_validate == original_obs_columns_to_validate
+    assert getattr(datamodule.dadc, "obs_columns_to_validate", None) == original_obs_columns_to_validate
 
 
 # --- temporary_val_split() --------------------------------------------------------------------
