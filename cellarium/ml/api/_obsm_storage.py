@@ -76,7 +76,7 @@ class RowSubset:
         if any(part is Ellipsis or part is None for part in parts):
             raise IndexError("`...` and `None` are not supported; index np.asarray(x) instead.")
         rows = self._positions[parts[0]]
-        result = self._base[(rows, *parts[1:])]
+        result = self._base[(rows,) + parts[1:]]
         # a plain ndarray in memory, even where numpy returns a view of the file (for a single row)
         return np.array(result) if isinstance(result, np.ndarray) else result
 

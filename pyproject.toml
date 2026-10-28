@@ -25,6 +25,7 @@ dependencies = [
   "boltons",
   "braceexpand",
   "crick>=0.0.4",
+  "deltacells",
   "google-cloud-storage",
   "jsonargparse[signatures]==4.27.7",
   "lightning>=2.2.0,<=2.5.2",
