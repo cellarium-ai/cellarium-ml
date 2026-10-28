@@ -173,6 +173,17 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path, algorithm: Literal["n
     assert model.algorithm == loaded_model.algorithm
 
 
+@pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
+def test_cell_count_is_exact_beyond_float32_integers(algorithm: Literal["naive", "shifted_data"]):
+    """A float32 count would stay at 2**24 when 1 is added to it."""
+    var_names_g = np.array(["x"])
+    onepass = OnePassMeanVarStd(var_names_g=var_names_g, algorithm=algorithm)
+    assert onepass.x_size_b.dtype == torch.int64
+    onepass.x_size_b[0] = 2**24
+    onepass(x_ng=torch.ones(3, 1), var_names_g=var_names_g)
+    assert onepass.x_size_b[0].item() == 2**24 + 3
+
+
 @pytest.mark.parametrize("mean", [1, 100])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["float32", "float64"])
 @pytest.mark.parametrize("algorithm", ["naive", "shifted_data"])
