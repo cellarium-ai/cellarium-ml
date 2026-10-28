@@ -5,6 +5,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
+import deltacells
 import numpy as np
 import pandas as pd
 import scipy.sparse
@@ -17,19 +18,6 @@ logger = logging.getLogger(__name__)
 
 #: Attributes of an AnnData that a :class:`DeltaCellsBatch` provides (and so :class:`AnnDataField` can read).
 SUPPORTED_ATTRS = ("X", "obs", "obs_names", "var", "var_names")
-
-
-def _import_deltacells() -> Any:
-    try:
-        import deltacells
-    except ImportError as e:  # pragma: no cover
-        raise ImportError("DistributedDeltaCellsCollection requires the `deltacells` package.") from e
-    if not hasattr(deltacells, "open_dataset"):  # e.g. an unrelated directory named `deltacells` on sys.path
-        raise ImportError(
-            "Found a module named `deltacells` that is not the deltacells package; "
-            "install it (`pip install -e deltacells`)."
-        )
-    return deltacells
 
 
 def _obs_columns_needed(batch_keys: Any, available: Sequence[str]) -> list[str]:
@@ -209,7 +197,6 @@ class DistributedDeltaCellsCollection(DistributedCollection):
         verify: bool = False,
         obs_columns: Sequence[str] | None = None,
     ) -> None:
-        deltacells = _import_deltacells()
         self.uri = uri
         self.extra_obs_columns = list(obs_columns or [])
         self.dataset = deltacells.open_dataset(

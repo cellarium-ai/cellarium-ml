@@ -9,10 +9,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from deltacells.convert import convert_h5ad
+from deltacells.obs import ObsSchema
+from deltacells.writer import DatasetWriter
 from tqdm import tqdm
 
 from cellarium.ml.api._view_collections import _obs_frame
-from cellarium.ml.data.distributed_deltacells import _import_deltacells
 
 _GCS_PREFIX = "gs://"
 _MAX_COUNT = 2**31 - 1  # the largest count that deltacells can store
@@ -110,9 +112,6 @@ def create_deltacells_dataset(
     Returns:
         ``output``.
     """
-    _import_deltacells()  # a clear error if deltacells is missing
-    from deltacells.convert import convert_h5ad
-
     files = _check_h5ad_paths(h5ad_paths)
     convert = dict(
         obs=True,  # the api reads the obs_names of every batch
@@ -161,10 +160,6 @@ def write_collection_to_deltacells(
     Returns:
         ``output``.
     """
-    _import_deltacells()  # a clear error if deltacells is missing
-    from deltacells.obs import ObsSchema
-    from deltacells.writer import DatasetWriter
-
     n = len(collection)
     tile_starts = list(range(0, n, tile_size))
 
