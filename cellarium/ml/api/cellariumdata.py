@@ -15,6 +15,7 @@ import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import scipy.sparse
 import torch
@@ -22,6 +23,7 @@ from lightning.fabric.utilities.apply_func import move_data_to_device
 from tqdm.auto import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
 from cellarium.ml.api._obsm_storage import RowSubset, subset_rows
 from cellarium.ml.api._view_collections import (
@@ -41,6 +43,11 @@ from cellarium.ml.data import (
 )
 from cellarium.ml.utilities.core import FunctionComposer
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
+
+# a pass over a view reads this many times as much of the data as the view's cells need (or more) ...
+_READ_AMPLIFICATION_WARNING = 5.0
+# ... and it is only worth a warning if the view's cells are in at least this many shards
+_MIN_SHARDS_FOR_READ_AMPLIFICATION_WARNING = 10
 
 
 def _make_names_unique(names: Any) -> np.ndarray:
@@ -248,13 +255,18 @@ class ObsComputedMapping(ObsmMapping):
         super().__init__(n_obs, *args, **kwargs)
         self._owner = owner
 
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if isinstance(value, pd.Series):
+            value = self._owner._series_by_cell(value, f"obs_computed['{key}']")
+        super().__setitem__(key, value)
+
     def update_from(self, view: "CellariumData", key: str, as_key: str | None = None, overwrite: bool = True) -> None:
         """
         Copy the values ``view.obs_computed[key]`` (for example the subtypes found by clustering a subset of the
         cells) to the cells they belong to in this data, as ``obs_computed[as_key]`` (``key`` by default).
 
         ``view`` must descend from the same root as this data, and its cells must be among this data's. The entry is
-        a :class:`pandas.Series` indexed by the obs names, with pandas' nullable dtypes (``string`` or ``category``
+        a :class:`pandas.Series` indexed by the cell IDs, with pandas' nullable dtypes (``string`` or ``category``
         for labels, ``Int64``, ``boolean``, floats). Cells that the view does not hold are missing (NA). If the entry
         already exists, its values for those cells are kept, so that several views can each fill in their cells of one
         entry; the values it already has for cells of the view are replaced, except where the view's value is missing.
@@ -262,8 +274,7 @@ class ObsComputedMapping(ObsmMapping):
 
         Args:
             view: The view (or the data itself, or any other data from the same root) that computed the values.
-            key: The key of the values in ``view.obs_computed``. If it is a Series, its index must be exactly
-                ``view.obs.index``.
+            key: The key of the values in ``view.obs_computed``.
             as_key: The key to store them under here, if not ``key``.
             overwrite: If ``False``, raise an error instead of replacing a value that is already present.
 
@@ -277,19 +288,23 @@ class ObsComputedMapping(ObsmMapping):
         positions = owner._positions_of(view)
         if key not in view.obs_computed:
             raise KeyError(f"No '{key}' in the obs_computed of the view. Available: {list(view.obs_computed)}")
-        n = owner.n_obs
-        raw = view.obs_computed[key]
-        if isinstance(raw, pd.Series) and not raw.index.equals(view.obs.index):
-            raise ValueError(f"The index of obs_computed['{key}'] of the view must be exactly the index of view.obs.")
-        values = _per_cell_series(raw, view.n_obs, f"obs_computed['{key}'] of the view")
-        target = key if as_key is None else as_key
+        values = _per_cell_series(view.obs_computed[key], view.n_obs, f"obs_computed['{key}'] of the view")
+        self._put(key if as_key is None else as_key, values, positions, key, overwrite)
 
+    def _put(self, target: str, values: pd.Series, positions: np.ndarray, source: str, overwrite: bool) -> None:
+        """
+        Write ``values`` (nullable, one per position) into ``obs_computed[target]`` for the cells at ``positions`` of
+        the owner, keeping what the entry has for its other cells (they are missing if it did not exist). ``source`` is
+        what the values are called in error messages.
+        """
+        owner = self._owner
+        n = owner.n_obs
         if target not in self:
             merged = values.set_axis(positions).reindex(np.arange(n))
         else:
             existing = _per_cell_series(self[target], n, f"obs_computed['{target}']")
-            merged = self._merge(existing, values, positions, key, target, overwrite)
-        merged.index = owner.obs.index
+            merged = self._merge(existing, values, positions, source, target, overwrite)
+        merged.index = owner.cell_ids
         self[target] = merged
 
     @staticmethod
@@ -415,6 +430,7 @@ def fit_and_register(
         module.trainer = None
         return trained
 
+    cdata._warn_if_read_amplified("Training the model")
     try:
         trainer.fit(module, cdata.datamodule)
     except (KeyboardInterrupt, SystemExit, NameError):
@@ -499,32 +515,47 @@ class LazyObs:
         index_col = self._index_column_name
         return [name for name in self._get_dataset().schema.names if name != index_col]
 
-    def _read(self, columns: list[str] | None, filter: ds.Expression | None = None) -> pd.DataFrame:
-        index_col = self._index_column_name
-        arrow_columns = None if columns is None else [index_col, *columns]
-        table = self._get_dataset().to_table(columns=arrow_columns, filter=filter)
-        return table.to_pandas()
-
     @property
     def index(self) -> pd.Index:
-        """The obs index (the cell names), in cell order."""
-        return self._read(columns=[]).index
+        """The cell IDs, in cell order: the positions ``0, 1, ...`` of the cells
+        (see :mod:`~cellarium.ml.api._cell_ids`).
+        The frames and Series that are read from here are indexed by them, so no cell name is read along."""
+        return pd.RangeIndex(len(self), name=CELL_ID_COLUMN)
+
+    @property
+    def names(self) -> pd.Index:
+        """The obs names (the cell names), in cell order. These are read from the database when asked for."""
+        return self._names_at(None)
+
+    def _names_at(self, positions: np.ndarray | None) -> pd.Index:
+        """The obs names of the cells at ``positions`` (all cells if ``None``)."""
+        dataset, index_col = self._get_dataset(), self._index_column_name
+        if positions is None:
+            table = dataset.to_table(columns=[index_col])
+        else:  # only these rows are kept in memory, not the names of all the cells
+            table = dataset.take(pa.array(positions, type=pa.int64()), columns=[index_col])
+        return table.to_pandas().index
 
     def _take(self, positions: np.ndarray | None, columns: list[str]) -> pd.DataFrame:
-        """The ``columns`` of the cells at ``positions`` (all cells if ``None``), in the order of ``positions``.
+        """The ``columns`` of the cells at ``positions`` (all cells if ``None``), in the order of ``positions``, indexed
+        by the cell IDs.
 
         Assumes that row ``i`` of the parquet database is cell ``i`` of the data, as it is when the database is built
         from the h5ad files.
         """
-        index_col = self._index_column_name
-        table = self._get_dataset().to_table(columns=[index_col, *columns])
+        ids = self.index if positions is None else pd.Index(positions, dtype=np.int64, name=CELL_ID_COLUMN)
+        if not columns:
+            return pd.DataFrame(index=ids)
+        table = self._get_dataset().to_table(columns=list(columns))
         if positions is not None:
             table = table.take(pa.array(positions, type=pa.int64()))
-        return table.to_pandas()
+        df = table.to_pandas()
+        df.index = ids
+        return df
 
     def __getitem__(self, key: str | list[str]) -> pd.DataFrame | pd.Series:
         columns = [key] if isinstance(key, str) else list(key)
-        df = self._read(columns=columns)
+        df = self._take(None, columns)
         return df[key] if isinstance(key, str) else df
 
     @property
@@ -533,14 +564,17 @@ class LazyObs:
 
     def iter_batches(self, batch_size: int = 100_000, columns: list[str] | None = None) -> Iterator[pd.DataFrame]:
         """Stream `obs` in chunks of `pd.DataFrame`, for full-corpus processing without loading it all at once."""
-        index_col = self._index_column_name
-        arrow_columns = None if columns is None else [index_col, *columns]
-        for batch in self._get_dataset().to_batches(batch_size=batch_size, columns=arrow_columns):
-            yield batch.to_pandas()
+        columns = self.columns if columns is None else list(columns)
+        start = 0
+        for batch in self._get_dataset().to_batches(batch_size=batch_size, columns=columns):
+            df = batch.to_pandas()
+            df.index = pd.RangeIndex(start, start + len(df), name=CELL_ID_COLUMN)
+            start += len(df)
+            yield df
 
     def to_frame(self) -> pd.DataFrame:
         """Materialize the entire `obs` dataframe into memory."""
-        return self._read(columns=None)
+        return self._take(None, self.columns)
 
     def __repr__(self) -> str:
         # build the database first if need be, so that `parquet_path` is set by the time it is formatted
@@ -551,39 +585,45 @@ class LazyObs:
 
 
 class _LazyObsLoc:
-    """Implements `LazyObs.loc[row_labels]` / `LazyObs.loc[row_labels, columns]`."""
+    """Implements `LazyObs.loc[row_labels]` / `LazyObs.loc[row_labels, columns]`: the cells are selected by their obs
+    names, and the frame that is returned is indexed by their cell IDs."""
 
     def __init__(self, lazy_obs: LazyObs):
         self._lazy_obs = lazy_obs
 
     def __getitem__(self, key) -> pd.DataFrame:
+        lazy_obs = self._lazy_obs
         row_key, col_key = key if isinstance(key, tuple) else (key, None)
         row_labels = [row_key] if isinstance(row_key, str) else list(row_key)
-        columns = None if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
+        columns = lazy_obs.columns if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
 
-        index_col = self._lazy_obs._index_column_name
-        filter_expr = ds.field(index_col).isin(row_labels)
-        df = self._lazy_obs._read(columns=columns, filter=filter_expr)
-
-        missing = set(row_labels) - set(df.index)
-        if missing:
+        # find the rows of the cells in arrow, without turning the names of all the cells into python strings
+        index_col = lazy_obs._index_column_name
+        names = lazy_obs._get_dataset().to_table(columns=[index_col]).column(index_col)
+        matches = pc.is_in(names, value_set=pa.array(row_labels).cast(names.type))
+        found = np.flatnonzero(matches.to_pandas().to_numpy())
+        found_names = pd.Index(names.take(pa.array(found, type=pa.int64())).to_pandas())
+        order = found_names.get_indexer(row_labels)
+        if (order < 0).any():
+            missing = [label for label, o in zip(row_labels, order) if o < 0]
             raise KeyError(f"Labels not found in obs index: {sorted(missing)[:5]}")
-
-        return df.loc[row_labels]
+        return lazy_obs._take(found[order].astype(np.int64), columns)
 
 
 class DeltaCellsLazyObs:
     """
     A queryable view over the ``obs`` of a :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`, with the same
     interface as :class:`LazyObs`. Only the columns (and cells) a query asks for are read; categorical columns are
-    pandas categoricals with the dataset's global categories. The ``obs_names`` of the dataset are the index of the
-    returned frames, and ``.loc`` selects by them.
+    pandas categoricals with the dataset's global categories. The returned frames are indexed by the cell IDs: those
+    in the dataset's ``cellarium_cell_id`` column if it has one (see :mod:`~cellarium.ml.api._cell_ids`), and the
+    positions of the cells if not. The ``obs_names`` of the dataset are :attr:`names`, and ``.loc`` selects by them.
     """
 
     _NAMES = "obs_names"
 
     def __init__(self, dadc: DistributedDeltaCellsCollection):
         self._dadc = dadc
+        self._cell_ids: pd.Index | None = None
 
     @property
     def _store(self) -> Any:
@@ -599,7 +639,8 @@ class DeltaCellsLazyObs:
     def columns(self) -> list[str]:
         return [c for c in self._store.columns if c != self._NAMES]
 
-    def _index(self, indices: np.ndarray | None = None) -> pd.Index:
+    def _names_at(self, indices: np.ndarray | None = None) -> pd.Index:
+        """The obs names of the cells at ``indices`` (all cells if ``None``)."""
         if indices is None:
             names = self._store.to_pandas(self._NAMES)[self._NAMES]
         else:
@@ -607,9 +648,20 @@ class DeltaCellsLazyObs:
         return pd.Index(np.asarray(names, dtype=object), name=self._NAMES)
 
     @property
+    def names(self) -> pd.Index:
+        """The obs names (the cell names), in cell order."""
+        return self._names_at()
+
+    @property
     def index(self) -> pd.Index:
-        """The obs index (the cell names), in cell order."""
-        return self._index()
+        """The cell IDs, in cell order (see :mod:`~cellarium.ml.api._cell_ids`)."""
+        if self._cell_ids is None:
+            if CELL_ID_COLUMN in self._store.columns:
+                ids = np.asarray(self._store.to_pandas([CELL_ID_COLUMN])[CELL_ID_COLUMN], dtype=np.int64)
+                self._cell_ids = pd.Index(ids, name=CELL_ID_COLUMN)
+            else:
+                self._cell_ids = pd.RangeIndex(len(self), name=CELL_ID_COLUMN)
+        return self._cell_ids
 
     def _take(self, indices: np.ndarray | None, columns: list[str]) -> pd.DataFrame:
         if not columns:
@@ -618,7 +670,7 @@ class DeltaCellsLazyObs:
             df = self._store.to_pandas(columns)
         else:
             df = self._store.take_pandas(indices, columns, warn=False)
-        df.index = self._index(indices)
+        df.index = self.index if indices is None else self.index[indices]
         return df
 
     def __getitem__(self, key: str | list[str]) -> pd.DataFrame | pd.Series:
@@ -656,7 +708,7 @@ class _DeltaCellsLazyObsLoc:
         row_labels = [row_key] if isinstance(row_key, str) else list(row_key)
         columns = lazy_obs.columns if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
 
-        names = pd.Index(np.asarray(lazy_obs._store.to_pandas(lazy_obs._NAMES)[lazy_obs._NAMES], dtype=object))
+        names = lazy_obs.names
         missing = pd.Index(row_labels)[~pd.Index(row_labels).isin(names)]
         if len(missing):
             raise KeyError(f"Labels not found in obs index: {sorted(missing)[:5]}")
@@ -675,6 +727,7 @@ class ViewLazyObs:
         self._source = source
         self._positions = positions
         self._names: pd.Index | None = None
+        self._cell_ids: pd.Index | None = None
 
     def __len__(self) -> int:
         return len(self._positions)
@@ -685,10 +738,25 @@ class ViewLazyObs:
 
     @property
     def index(self) -> pd.Index:
-        """The obs index (the cell names) of the view, in cell order."""
+        """The cell IDs of the view, in cell order (those of the root; see :mod:`~cellarium.ml.api._cell_ids`)."""
+        if self._cell_ids is None:
+            self._cell_ids = self._take(None, []).index
+        return self._cell_ids
+
+    @property
+    def names(self) -> pd.Index:
+        """The obs names (the cell names) of the view, in cell order. Read from the root when first asked for."""
         if self._names is None:
-            self._names = self._take(None, []).index
+            self._names = self._source._names_at(self._positions)
         return self._names
+
+    def _names_at(self, indices: np.ndarray | None) -> pd.Index:
+        """The obs names of the cells of the view at ``indices`` (all of them if ``None``)."""
+        if indices is None:
+            return self.names
+        if self._names is not None:
+            return self._names[indices]
+        return self._source._names_at(self._positions[indices])
 
     def _take(self, indices: np.ndarray | None, columns: list[str]) -> pd.DataFrame:
         positions = self._positions if indices is None else self._positions[indices]
@@ -729,7 +797,7 @@ class _ViewLazyObsLoc:
         row_labels = [row_key] if isinstance(row_key, str) else list(row_key)
         columns = lazy_obs.columns if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
 
-        names = lazy_obs.index
+        names = lazy_obs.names
         missing = pd.Index(row_labels)[~pd.Index(row_labels).isin(names)]
         if len(missing):
             raise KeyError(f"Labels not found in obs index: {sorted(missing)[:5]}")
@@ -918,6 +986,63 @@ class CellariumData:
         self._trained_modules = TrainedModulesMapping()
         self._fit_cache = FitCache()
         self._hvg: pd.Series | None = None
+        # the obsm entries that cml.tl.embed made, with the trained module and the array it made each from
+        self._embedding_sources: dict[str, tuple[TrainedModule, Any]] = {}
+        self._read_amplification_warned = False
+
+    def read_amplification(self) -> float | None:
+        """
+        How much more of the data an epoch over a view reads than the view's cells need: the fraction of the shards
+        (files, or tiles of a deltacells dataset) of the data that hold a cell of the view, divided by the fraction of
+        its cells that the view has. It is 1 for a view of whole shards and is large for a view of cells that are
+        scattered over many shards (for example the T cells of a large atlas), as every pass over such a view reads
+        nearly all of the data. ``None`` if the cells are not a view of another dataset's (data that is not a view, and
+        views that :meth:`to_deltacells` and :meth:`to_ram` made, which read a dataset of their own).
+        """
+        collection = self._datamodule.dadc
+        if not isinstance(collection, ViewCollection):
+            return None
+        shard_ends = np.asarray(collection.source.limits)
+        positions = collection.positions  # sorted
+        shard_of_cell = np.searchsorted(shard_ends, positions, side="right")
+        n_touched = 1 + int(np.count_nonzero(np.diff(shard_of_cell)))
+        return (n_touched / len(shard_ends)) / (len(positions) / len(collection.source))
+
+    def _warn_if_read_amplified(self, operation: str) -> None:
+        """Warn (once for this data) that ``operation`` reads far more than the cells of this view if they are scattered
+        over many shards, and say how to avoid it."""
+        if self._read_amplification_warned:
+            return
+        amplification = self.read_amplification()
+        if amplification is None or amplification < _READ_AMPLIFICATION_WARNING:
+            return
+        collection = self._datamodule.dadc
+        n_shards = len(collection.source.limits)
+        n_touched = int(round(amplification * self.n_obs / len(collection.source) * n_shards))
+        if n_touched < _MIN_SHARDS_FOR_READ_AMPLIFICATION_WARNING:
+            return
+        self._read_amplification_warned = True
+        warnings.warn(
+            f"{operation} reads {n_touched} of the {n_shards} shards of the data ({n_touched / n_shards:.0%}) to get "
+            f"the {self.n_obs} cells of this view ({self.n_obs / len(collection.source):.1%} of the data): about "
+            f"{amplification:.0f}x as much as the cells need, and every further pass over the view does the same. "
+            "To make later passes cost only what the view's cells need, write it as a dataset of its own first (one "
+            "pass), and use the view that this returns: view = view.to_deltacells(uri).",
+            stacklevel=3,
+        )
+
+    def _cached_embedding_state(self, module_key: str) -> Literal["current", "stale"] | None:
+        """
+        Whether ``obsm["X_<module_key>"]`` is an embedding that :func:`~cellarium.ml.api.tools.embed` made: ``None`` if
+        it is not (or there is no such entry), ``"current"`` if it was made by the module that is now in
+        ``trained_modules[module_key]``, and ``"stale"`` if by another one (for example by a module of the parent of a
+        view, which the view has since replaced).
+        """
+        name = f"X_{module_key}"
+        source = self._embedding_sources.get(name)
+        if source is None or self._obsm.get(name) is not source[1]:
+            return None
+        return "current" if self._trained_modules.get(module_key) is source[0] else "stale"
 
     @classmethod
     def from_deltacells(cls, uri: str, **kwargs: Any) -> "CellariumData":
@@ -1027,10 +1152,13 @@ class CellariumData:
         original data are the same ones, so ``obs`` names are unchanged. ``X`` must hold integer counts from 0 to
         2**31 - 1 (as deltacells requires), and if it does not nothing is written.
 
-        The returned view has the same cells (and root indices) as these, so ``update_from`` works between them, and
+        The dataset also stores the :attr:`cell_ids` of its cells, as the ``obs`` column ``cellarium_cell_id``. The
+        returned view has the same cells (and root indices) as these, so ``update_from`` works between them, and
         starts with copies of this data's ``obsm`` and ``obs_computed`` but with no trained modules, as any view does.
-        To use the dataset later, on its own, open it with :meth:`CellariumData.from_deltacells`; that is a new root,
-        unrelated to the data it was made from.
+        To use the dataset later, on its own, open it with :meth:`CellariumData.from_deltacells`: that is a new root
+        (so views of it and of the data it was made from cannot be matched with ``update_from``), but its cells have
+        the same cell IDs as in the original data, so labels computed on it can be brought back to the original data
+        with :meth:`save_labels` and :meth:`load_labels`.
 
         Args:
             uri: A local directory or a ``gs://bucket/prefix`` (each tile is uploaded as it is written, which needs
@@ -1054,6 +1182,7 @@ class CellariumData:
             overwrite=overwrite,
             staging_dir=staging_dir,
             filesystem=filesystem,
+            cell_ids=self.cell_ids.to_numpy(),
             **writer_kwargs,
         )
         collection = DistributedDeltaCellsCollection(uri, **{**self._deltacells_kwargs, **(deltacells_kwargs or {})})
@@ -1127,6 +1256,102 @@ class CellariumData:
             self, downsample_method, target_n_cells, geometric_sketch_kwargs, collect_embeddings, seed, max_gb
         )
 
+    def update_labels_from_anndata(
+        self, adata: anndata.AnnData, column: str, as_key: str | None = None, overwrite: bool = True
+    ) -> None:
+        """
+        Copy a column of ``adata.obs`` (for example the clusters that scanpy found in the AnnData of
+        :meth:`to_anndata`) to the cells it belongs to, as ``obs_computed[as_key]`` (``column`` by default), creating
+        the entry if it is not there. The cells are matched by the cell IDs in ``adata.obs["cellarium_cell_id"]``
+        (which :meth:`to_anndata` puts there), so ``adata`` can have had cells removed, or be of any subset of
+        these cells, and its obs names do not matter.
+
+        The entry is a :class:`pandas.Series` indexed by :attr:`cell_ids`, with pandas' nullable dtypes (``string``
+        or ``category`` for labels, ``Int64``, ``boolean``, floats). The cells that ``adata`` does not hold are
+        missing (NA), unless the entry already exists: then its values for them are kept, so that several AnnDatas
+        (of different subsets of the cells) can fill in one entry. The values it has for cells of ``adata`` are
+        replaced, except where ``adata``'s value is missing. New labels are added to a categorical entry's categories.
+
+        Use one key for each clustering (for example ``"leiden_1.0"``, and ``"t_cell_subtype"`` for the clusters of a
+        view of T cells): labels that are put under the same key are the labels of one entry.
+
+        Args:
+            adata: The AnnData with the labels, which must have ``obs["cellarium_cell_id"]``.
+            column: The column of ``adata.obs`` with the labels.
+            as_key: The key to store them under in ``obs_computed``, if not ``column``.
+            overwrite: If ``False``, raise an error instead of replacing a value that is already present.
+
+        Raises:
+            KeyError: If ``adata.obs`` has no ``cellarium_cell_id`` or ``column``, or has cells that are not in this
+                data.
+            ValueError: If the cell IDs of ``adata`` are not unique, if the dtypes of the new and existing values do
+                not fit together, or if ``overwrite`` is ``False`` and a value would be replaced.
+        """
+        for name in (CELL_ID_COLUMN, column):
+            if name not in adata.obs:
+                raise KeyError(
+                    f"adata.obs has no '{name}'. "
+                    + (
+                        "It comes with the AnnData of to_anndata()."
+                        if name == CELL_ID_COLUMN
+                        else f"Columns: {list(adata.obs.columns)}"
+                    )
+                )
+        cell_ids = adata.obs[CELL_ID_COLUMN].to_numpy()
+        if len(np.unique(cell_ids)) != len(cell_ids):
+            raise ValueError("The cell IDs in adata.obs['cellarium_cell_id'] are not unique.")
+        positions = self._positions_of_ids(cell_ids)
+        what = f"adata.obs['{column}']"
+        values = _per_cell_series(adata.obs[column], adata.n_obs, what)
+        self._obs_computed._put(column if as_key is None else as_key, values, positions, what, overwrite)
+
+    def save_labels(self, keys: str | Sequence[str], path: str) -> None:
+        """
+        Write the ``obs_computed`` entries ``keys`` (labels, or any per-cell values) of the cells that have a value
+        in at least one of them to the parquet file ``path``, with their :attr:`cell_ids`. Labels that were computed
+        on a dataset made by :meth:`to_deltacells` (opened on its own, in another session) can be brought back to the
+        data it was made from with :meth:`load_labels`, since the cells have the same IDs in both.
+        """
+        keys = [keys] if isinstance(keys, str) else list(keys)
+        for key in keys:
+            if key not in self._obs_computed:
+                raise KeyError(f"No '{key}' in obs_computed. Available: {list(self._obs_computed)}")
+        n = self.n_obs
+        frame = pd.DataFrame(
+            {key: _per_cell_series(self._obs_computed[key], n, f"obs_computed['{key}']") for key in keys}
+        )
+        frame.insert(0, CELL_ID_COLUMN, self.cell_ids.to_numpy())
+        frame[frame[keys].notna().any(axis=1).to_numpy()].to_parquet(path, index=False)
+
+    def load_labels(self, path: str, keys: str | Sequence[str] | None = None, overwrite: bool = True) -> None:
+        """
+        Read the values that :meth:`save_labels` wrote to ``path`` into ``obs_computed``, for the cells with those cell
+        IDs, under the keys they were saved with. The cells of the file must all be among the cells of this data (the
+        data that the labels were computed on, or one that it is a subset of: for example the original data, for
+        labels computed on a compacted dataset). Entries that exist keep their values for the other cells, as in
+        :meth:`update_labels_from_anndata`.
+
+        Args:
+            path: The parquet file written by :meth:`save_labels`.
+            keys: The entries to read (all of those in the file by default).
+            overwrite: If ``False``, raise an error instead of replacing a value that is already present.
+        """
+        frame = pd.read_parquet(path)
+        if CELL_ID_COLUMN not in frame:
+            raise ValueError(f"{path} has no '{CELL_ID_COLUMN}' column: it was not written by save_labels.")
+        cell_ids = frame[CELL_ID_COLUMN].to_numpy()
+        if len(np.unique(cell_ids)) != len(cell_ids):
+            raise ValueError(f"The cell IDs in {path} are not unique.")
+        available = [column for column in frame.columns if column != CELL_ID_COLUMN]
+        keys = available if keys is None else ([keys] if isinstance(keys, str) else list(keys))
+        for key in keys:
+            if key not in available:
+                raise KeyError(f"No '{key}' in {path}. Available: {available}")
+        positions = self._positions_of_ids(cell_ids)
+        for key in keys:
+            values = _nullable(frame[key].reset_index(drop=True))
+            self._obs_computed._put(key, values, positions, f"'{key}' of {path}", overwrite)
+
     def _positions_of(self, other: "CellariumData") -> np.ndarray:
         """The positions in these cells of the cells of ``other``, a view of the same root with a subset of them."""
         if other.root is not self.root:
@@ -1147,33 +1372,127 @@ class CellariumData:
         """
         A :class:`CellariumDataView` of the selected cells; no data is copied. The selection can be
 
-        * a boolean mask (a numpy array of length ``n_obs``, or a :class:`pandas.Series` whose index is exactly
-          ``cdata.obs.index``),
-        * integer positions (an array, a list or a single integer; negative positions count from the end), or
+        * a boolean mask: a numpy array (or list) with one entry per cell, or a boolean :class:`pandas.Series`. A
+          Series is matched to the cells by its index: one with a range index of one entry per cell, or an index equal
+          to ``cdata.cell_ids`` (as the ``obs`` columns and ``obs_computed`` entries have), has one entry per cell, in
+          the order of the cells; any other integer index (a shorter range included) holds cell IDs, and selects the
+          cells of this data whose ID is in the index with a ``True`` value (so a mask computed on a view, or on the
+          data this one was taken from, works here); and a string index holds obs names (which reads the names of all
+          the cells, so is slow for large data);
+        * integer positions (an array, a list or a single integer; negative positions count from the end), as numpy
+          and scanpy take them (use :meth:`select_cell_ids` for cell IDs, which are not the positions in a dataset
+          that was made by :meth:`to_deltacells`);
+        * obs names (an array or list of strings), or
         * a slice.
 
         The view holds its cells in the order of the data, whatever the order of the selection, without repeats.
 
         Raises:
-            ValueError: If the selection is empty or a Series mask has a different index.
+            ValueError: If the selection is empty or has missing values.
+            KeyError: If cells are selected by names that are not in the data.
         """
         return CellariumDataView(self, self._selected_positions(selection))
+
+    def select_cell_ids(self, cell_ids: Any) -> "CellariumDataView":
+        """
+        A :class:`CellariumDataView` of the cells with the given cell IDs (see :attr:`cell_ids`), which must all be
+        among the cells of this data.
+        """
+        positions = np.unique(self._positions_of_ids(cell_ids))
+        if len(positions) == 0:
+            raise ValueError("The selection is empty: a view must contain at least one cell.")
+        return CellariumDataView(self, positions)
+
+    @property
+    def cell_ids(self) -> pd.Index:
+        """
+        The integer IDs of the cells, in cell order, which identify them for all indexing (``obs`` and ``obs_computed``
+        are indexed by them, and ``adata.obs["cellarium_cell_id"]`` holds them). The ID of a cell is its position in
+        the dataset that was opened, and a view has the IDs of its cells in the data it was taken from. The one
+        exception is a deltacells dataset made by :meth:`to_deltacells`, which stores the IDs the cells had in the
+        data it was made from: opened later, on its own, it has those same IDs, so that labels computed on it can be
+        brought back to the original data.
+        """
+        return self._obs.index
+
+    @property
+    def obs_names(self) -> pd.Index:
+        """
+        The names of the cells (as in an :class:`~anndata.AnnData`), in cell order. The cells are identified by
+        :attr:`cell_ids` everywhere else, so the names are only read when asked for, which for a large dataset takes
+        time and memory.
+        """
+        return self._obs.names
+
+    def _positions_of_ids(self, cell_ids: Any) -> np.ndarray:
+        """The positions in these cells of the cells with ``cell_ids``, in that order; ``KeyError``
+        for an unknown ID."""
+        cell_ids = np.asarray(cell_ids).ravel()
+        if cell_ids.size and not np.issubdtype(cell_ids.dtype, np.integer):
+            raise TypeError(f"Cell IDs must be integers, got {cell_ids.dtype} values.")
+        positions = self.cell_ids.get_indexer(cell_ids.astype(np.int64))
+        if (positions < 0).any():
+            unknown = cell_ids[positions < 0]
+            raise KeyError(f"{len(unknown)} cell IDs are not among the cells of this data, for example {unknown[:5]}.")
+        return positions.astype(np.int64)
+
+    def _positions_of_names(self, names: Any) -> np.ndarray:
+        """The positions in these cells of the cells with the obs ``names``, in that order."""
+        names = pd.Index(names)
+        positions = self.obs_names.get_indexer_for(names)
+        if (positions < 0).any():
+            raise KeyError(f"Cells not found by name: {names[positions < 0][:5].tolist()}")
+        return positions.astype(np.int64)
+
+    def _check_names_match(self, names: pd.Index, what: str) -> None:
+        """Check, on a sample of cells, that ``names`` (one per cell) are the obs names of these cells."""
+        n = self.n_obs
+        if len(names) != n:
+            raise ValueError(f"{what} has {len(names)} entries but there are {n} cells.")
+        sample = np.unique(np.concatenate(([0, n - 1], np.random.default_rng(0).integers(0, n, size=62))))
+        expected = self._obs._names_at(sample)
+        if not np.array_equal(names[sample].astype(str).to_numpy(), expected.astype(str).to_numpy()):
+            raise ValueError(
+                f"The index of {what} is not the obs names of the cells of this data, in order. Align it first "
+                "(for example with series.reindex(cdata.obs_names)), index it by cdata.cell_ids, or pass "
+                "series.to_numpy() to use the values as they are, one per cell."
+            )
+
+    def _series_by_cell(self, series: pd.Series, what: str) -> pd.Series:
+        """
+        ``series`` indexed by :attr:`cell_ids`, as per-cell values are kept. A Series that has one value per cell
+        (a range index, the cell IDs, or the obs names, checked on a sample of the cells) is taken as it is, in cell
+        order; one indexed by other integers holds cell IDs, and is aligned to the cells, with missing values for
+        the cells it does not have.
+        """
+        ids = self.cell_ids
+        index = series.index
+        if index.equals(ids):
+            result = series.copy(deep=False)
+        elif pd.api.types.is_integer_dtype(index.dtype) and not (
+            isinstance(index, pd.RangeIndex) and index.start == 0 and index.step == 1 and len(index) == len(ids)
+        ):
+            if not index.is_unique:
+                raise ValueError(f"The cell IDs in the index of {what} are not unique.")
+            result = _nullable(series).reindex(ids)
+        elif isinstance(index, pd.RangeIndex):
+            result = series.copy(deep=False)
+        elif pd.api.types.is_string_dtype(index.dtype) or index.dtype == object:
+            self._check_names_match(index, what)
+            result = series.copy(deep=False)
+        else:
+            raise ValueError(f"The index of {what} ({index.dtype}) is neither cell IDs nor obs names.")
+        result.index = ids
+        return result
 
     def _selected_positions(self, selection: Any) -> np.ndarray:
         """The sorted, unique positions of the cells ``selection`` selects (see :meth:`__getitem__`)."""
         n = self.n_obs
         if isinstance(selection, slice):
             positions = np.arange(*selection.indices(n), dtype=np.int64)
+        elif isinstance(selection, pd.Series):
+            positions = self._positions_from_mask_series(selection)
         else:
-            if isinstance(selection, pd.Series):
-                if selection.dtype != bool:
-                    raise TypeError(
-                        f"A Series selection must be a boolean mask, got dtype {selection.dtype}; "
-                        "use .to_numpy() to select by position."
-                    )
-                if len(selection) != n or not selection.index.equals(self.obs.index):
-                    raise ValueError("The index of a Series mask must be exactly the index of cdata.obs.")
-                selection = selection.to_numpy()
             array = np.asarray(selection)
             if array.size == 0:
                 positions = np.empty(0, dtype=np.int64)
@@ -1186,14 +1505,42 @@ class CellariumData:
                 if array.min() < -n or array.max() >= n:
                     raise IndexError(f"Positions must lie in [-{n}, {n}), got {array.min()} to {array.max()}")
                 positions = np.where(array < 0, array + n, array)
+            elif array.dtype.kind in "OUS":
+                positions = self._positions_of_names(array.ravel())
             else:
                 raise TypeError(
-                    f"Select cells with a boolean mask, integer positions or a slice, not {array.dtype} values."
+                    f"Select cells with a boolean mask, integer positions, obs names or a slice, not {array.dtype} "
+                    "values."
                 )
         positions = np.unique(positions)
         if len(positions) == 0:
             raise ValueError("The selection is empty: a view must contain at least one cell.")
         return positions
+
+    def _positions_from_mask_series(self, mask: pd.Series) -> np.ndarray:
+        """The positions of the cells that a boolean Series selects, by its index (see :meth:`__getitem__`)."""
+        if not pd.api.types.is_bool_dtype(mask.dtype):
+            raise TypeError(
+                f"A Series selection must be a boolean mask, got dtype {mask.dtype}; use .to_numpy() to select by "
+                "position."
+            )
+        if mask.isna().any():
+            raise ValueError("A boolean mask cannot have missing values.")
+        values = mask.to_numpy(dtype=bool)
+        index = mask.index
+        ids = self.cell_ids
+        if isinstance(index, pd.RangeIndex) and index.start == 0 and index.step == 1 and len(index) == len(ids):
+            return np.flatnonzero(values)  # one value per cell
+        if pd.api.types.is_integer_dtype(index.dtype):
+            if index.equals(ids):
+                return np.flatnonzero(values)
+            if not index.is_unique:
+                raise ValueError("The cell IDs in the index of the mask are not unique.")
+            found = ids.get_indexer(index[values])
+            return found[found >= 0]  # the cells that this data does not have are not selected
+        if pd.api.types.is_string_dtype(index.dtype) or index.dtype == object:
+            return self._positions_of_names(index[values])
+        raise TypeError(f"The index of the mask ({index.dtype}) is neither cell IDs nor obs names.")
 
     @property
     def var(self) -> pd.DataFrame:
@@ -1292,6 +1639,7 @@ class CellariumData:
         Yields:
             The batches, as dictionaries.
         """
+        self._warn_if_read_amplified("This pass over the cells")
         datamodule = self._datamodule
         datamodule._check_num_workers()
         batch_size = datamodule.batch_size if batch_size is None else batch_size
@@ -1463,3 +1811,7 @@ class CellariumDataView(CellariumData):
                     target[key] = _subset_rows(value, positions, max_bytes)
                 except (TypeError, ValueError, IndexError) as error:
                     warnings.warn(f"'{key}' of the parent could not be restricted to the view and is left out: {error}")
+        # an embedding of the parent stays the embedding of its module, in the rows of the view
+        for key, (trained, array) in parent._embedding_sources.items():
+            if key in self._obsm and parent.obsm.get(key) is array:
+                self._embedding_sources[key] = (trained, self._obsm[key])

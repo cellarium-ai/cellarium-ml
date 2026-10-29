@@ -40,7 +40,12 @@ def test_lazy_obs_column_selection_returns_series(obs_parquet):
     obs = LazyObs(path)
     result = obs["n_counts"]
     assert isinstance(result, pd.Series)
-    pd.testing.assert_series_equal(result.sort_index(), expected["n_counts"].sort_index(), check_names=False)
+    # indexed by the cell IDs (the positions of the cells), not by their names
+    assert result.index.tolist() == list(range(len(expected)))
+    assert result.index.name == "cellarium_cell_id"
+    pd.testing.assert_series_equal(
+        result.set_axis(obs.names).sort_index(), expected["n_counts"].sort_index(), check_names=False
+    )
 
 
 def test_lazy_obs_column_selection_returns_dataframe(obs_parquet):
@@ -56,9 +61,13 @@ def test_lazy_obs_loc_row_subset_preserves_order(obs_parquet):
     path, expected = obs_parquet
     obs = LazyObs(path)
     names = [expected.index[3], expected.index[0], expected.index[1]]
-    result = obs.loc[names]
-    assert list(result.index) == names
-    pd.testing.assert_frame_equal(result.astype(object), expected.loc[names].astype(object), check_dtype=False)
+    result = obs.loc[names]  # the cells are selected by name, and the result is indexed by their cell IDs
+    assert list(result.index) == [3, 0, 1]
+    pd.testing.assert_frame_equal(
+        result.set_axis(pd.Index(names, name=expected.index.name)).astype(object),
+        expected.loc[names].astype(object),
+        check_dtype=False,
+    )
 
 
 def test_lazy_obs_loc_row_and_column_subset(obs_parquet):
@@ -67,7 +76,7 @@ def test_lazy_obs_loc_row_and_column_subset(obs_parquet):
     names = list(expected.index[:2])
     result = obs.loc[names, ["n_counts"]]
     assert list(result.columns) == ["n_counts"]
-    assert list(result.index) == names
+    assert list(result.index) == [0, 1]
 
 
 def test_lazy_obs_loc_missing_label_raises_keyerror(obs_parquet):
@@ -82,7 +91,7 @@ def test_lazy_obs_to_frame_matches_full_dataset(obs_parquet):
     obs = LazyObs(path)
     result = obs.to_frame()
     pd.testing.assert_frame_equal(
-        result.sort_index().astype(object), expected.sort_index().astype(object), check_dtype=False
+        result.set_axis(obs.names).sort_index().astype(object), expected.sort_index().astype(object), check_dtype=False
     )
 
 
@@ -92,8 +101,11 @@ def test_lazy_obs_iter_batches_covers_all_rows(obs_parquet):
     chunks = list(obs.iter_batches(batch_size=4))
     assert len(chunks) > 1
     combined = pd.concat(chunks)
+    assert combined.index.tolist() == list(range(len(expected)))
     pd.testing.assert_frame_equal(
-        combined.sort_index().astype(object), expected.sort_index().astype(object), check_dtype=False
+        combined.set_axis(obs.names).sort_index().astype(object),
+        expected.sort_index().astype(object),
+        check_dtype=False,
     )
 
 
@@ -112,7 +124,7 @@ def test_lazy_obs_auto_builds_from_h5ad_paths_on_first_query(h5ad_paths):
     result = obs.to_frame()
     assert obs._parquet_path is not None  # built lazily, on the first real query
     pd.testing.assert_frame_equal(  # type:ignore[unreachable]
-        result.sort_index().astype(object), expected.sort_index().astype(object), check_dtype=False
+        result.set_axis(obs.names).sort_index().astype(object), expected.sort_index().astype(object), check_dtype=False
     )
 
 
@@ -159,8 +171,10 @@ def test_cellarium_data_default_obs_is_queryable_and_matches_h5ad_files(h5ad_pat
     cdata = CellariumData(h5ad_paths=h5ad_paths)
     name = expected.index[0]
     result = cdata.obs.loc[[name]]
-    assert list(result.index) == [name]
-    pd.testing.assert_frame_equal(result.astype(object), expected.loc[[name]].astype(object), check_dtype=False)
+    assert list(result.index) == [0]  # indexed by the cell ID
+    pd.testing.assert_frame_equal(
+        result.set_axis(expected.index[[0]]).astype(object), expected.loc[[name]].astype(object), check_dtype=False
+    )
     assert isinstance(cdata.obs, LazyObs)
     assert cdata.obs._dataset is not None  # opened only once actually queried
 
@@ -176,8 +190,10 @@ def test_cellarium_data_obs_parquet_path_is_lazy_and_queryable(tmp_path, h5ad_pa
 
     name = expected.index[0]
     result = cdata.obs.loc[[name]]
-    assert list(result.index) == [name]
-    pd.testing.assert_frame_equal(result.astype(object), expected.loc[[name]].astype(object), check_dtype=False)
+    assert list(result.index) == [0]
+    pd.testing.assert_frame_equal(
+        result.set_axis(expected.index[[0]]).astype(object), expected.loc[[name]].astype(object), check_dtype=False
+    )
     assert cdata.obs._dataset is not None  # opened only once actually queried
 
 

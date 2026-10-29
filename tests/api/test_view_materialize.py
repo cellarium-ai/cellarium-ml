@@ -82,7 +82,7 @@ def test_an_epoch_over_a_view_in_memory_yields_each_cell_once(cdata):
     ram.datamodule.batch_size = 4
     ram.datamodule.setup("fit")
     epoch = _epoch(ram)
-    assert sorted(epoch["names"]) == sorted(cdata.obs.index[POSITIONS])
+    assert sorted(epoch["names"]) == sorted(cdata.obs_names[POSITIONS])
     whole = view.datamodule.dadc[np.arange(len(POSITIONS))]
     reference = dict(zip(whole.obs_names, whole.X.toarray()))
     assert all(np.array_equal(row, reference[name]) for name, row in zip(epoch["names"], epoch["x"]))
@@ -267,7 +267,7 @@ def test_an_epoch_over_the_new_dataset_yields_each_cell_once(written):
     new.datamodule.batch_size = 4
     new.datamodule.setup("fit")
     epoch = _epoch(new)
-    assert sorted(epoch["names"]) == sorted(view.obs.index)
+    assert sorted(epoch["names"]) == sorted(view.obs_names)
 
 
 def test_update_from_works_from_the_view_of_the_new_dataset(cdata, written):

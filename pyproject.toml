@@ -55,7 +55,7 @@ test = [
   "scvi-tools==1.3.3",
   "zarr==2.18.3",
 ]
-scanpy = ["scanpy[leiden]"]
+scanpy = ["scanpy[leiden]", "pynndescent"]
 docs = [
   "nbsphinx",
   "Pillow",

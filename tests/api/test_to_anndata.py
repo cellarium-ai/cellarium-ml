@@ -22,7 +22,7 @@ def counts_of(cdata, positions):
 
 
 def positions_of(cdata, adata):
-    return cdata.obs.index.get_indexer(adata.obs_names)
+    return cdata.obs_names.get_indexer(adata.obs_names)
 
 
 @pytest.fixture
@@ -45,7 +45,8 @@ def test_all_the_cells_come_with_everything_of_the_data(cdata):
     assert isinstance(adata, ad.AnnData) and adata.shape == (40, 30)
     assert sp.issparse(adata.X) and adata.X.dtype == np.float32
     assert np.array_equal(adata.X.toarray(), counts_of(cdata, ALL_CELLS))
-    assert adata.obs_names.tolist() == cdata.obs.index.tolist()
+    assert adata.obs_names.tolist() == cdata.obs_names.tolist()
+    assert adata.obs["cellarium_cell_id"].tolist() == cdata.cell_ids.tolist()
     assert adata.var_names.tolist() == cdata.var.index.tolist()
     assert adata.obs["cell_type"].tolist() == cdata.obs["cell_type"].tolist()
     assert np.array_equal(adata.obs["n_counts"], cdata.obs["n_counts"])
@@ -68,7 +69,7 @@ def test_a_view_gives_its_cells_in_the_order_of_the_data_with_all_the_categories
 
     adata = view.to_anndata()
 
-    assert adata.obs_names.tolist() == cdata.obs.index[keep].tolist()
+    assert adata.obs_names.tolist() == cdata.obs_names[keep].tolist()
     assert np.array_equal(adata.X.toarray(), counts_of(cdata, keep))
     categories = cdata.datamodule.dadc.obs_categories("cell_type").tolist()
     assert adata.obs["cell_type"].cat.categories.tolist() == categories
@@ -126,14 +127,15 @@ def test_random_downsampling_depends_on_the_seed_only(cdata):
 def test_a_target_of_at_least_the_number_of_cells_keeps_them_all(cdata):
     for method in ("random", "geometric_sketch"):
         adata = cdata.to_anndata(method, 40)
-        assert adata.obs_names.tolist() == cdata.obs.index.tolist()
+        assert adata.obs_names.tolist() == cdata.obs_names.tolist()
         assert cdata.to_anndata(method, 1000).n_obs == 40
 
 
 def test_downsampling_a_view(cdata):
     view = cdata[np.arange(5, 35)]
     adata = view.to_anndata("random", 10)
-    assert adata.n_obs == 10 and set(adata.obs_names) <= set(view.obs.index)
+    assert adata.n_obs == 10 and set(adata.obs_names) <= set(view.obs_names)
+    assert set(adata.obs["cellarium_cell_id"]) <= set(view.cell_ids)
 
 
 # ---- geometric sketch ----

@@ -118,16 +118,58 @@ def test_selection_forms(cdata):
         assert view.parent is cdata and view.root is cdata
 
 
-def test_series_mask_must_have_the_index_of_obs(cdata):
-    names = cdata.obs.index
-    mask = pd.Series(np.arange(40) % 4 == 0, index=names)
-    assert cdata[mask].root_indices.tolist() == list(range(0, 40, 4))
-    with pytest.raises(ValueError, match="index"):
-        cdata[pd.Series(np.arange(40) % 4 == 0, index=names[::-1])]
-    with pytest.raises(ValueError, match="index"):
-        cdata[pd.Series(np.arange(10) % 4 == 0, index=names[:10])]
+def test_series_masks_are_matched_to_the_cells_by_their_index(cdata):
+    ids, names = cdata.cell_ids, cdata.obs_names
+    by_four = np.arange(40) % 4 == 0
+    expected = list(range(0, 40, 4))
+    # one value per cell: indexed by the cell IDs (as `obs` and `obs_computed` are), or by a range
+    assert cdata[pd.Series(by_four, index=ids)].root_indices.tolist() == expected
+    assert cdata[pd.Series(by_four)].root_indices.tolist() == expected
+    assert cdata[cdata.obs["cell_type"] == "T cell"].n_obs > 0
+    # any other integer index holds cell IDs: the cells whose ID has a True value are selected, so the Series need
+    # not have a value for every cell (the others are not selected), and its order does not matter
+    assert cdata[pd.Series(by_four, index=ids[::-1])].root_indices.tolist() == [
+        i for i in range(40) if (39 - i) % 4 == 0
+    ]
+    assert cdata[pd.Series(np.arange(10) % 4 == 0, index=ids[:10])].root_indices.tolist() == [0, 4, 8]
+    # a string index holds obs names
+    assert cdata[pd.Series(by_four, index=names)].root_indices.tolist() == expected
+    assert cdata[pd.Series([True, True], index=[names[7], names[3]])].root_indices.tolist() == [3, 7]
+    with pytest.raises(KeyError, match="not found"):
+        cdata[pd.Series([True], index=["no-such-cell"])]
     with pytest.raises(TypeError, match="boolean"):
-        cdata[pd.Series(np.arange(40), index=names)]
+        cdata[pd.Series(np.arange(40), index=ids)]
+    with pytest.raises(ValueError, match="missing"):
+        cdata[pd.Series([True] * 39 + [None], index=ids, dtype="boolean")]
+
+
+def test_a_mask_computed_on_one_view_selects_within_another(cdata):
+    view = cdata[np.arange(10, 30)]
+    view.obs_computed["flag"] = np.arange(20) % 2 == 0  # an array: one per cell of the view
+    positional = view.obs_computed["flag"]
+    assert isinstance(positional, np.ndarray)
+    # indexed by cell IDs, so the mask can be applied to the data that the view is a part of ...
+    mask = pd.Series(positional, index=view.cell_ids)
+    assert cdata[mask].root_indices.tolist() == list(range(10, 30, 2))
+    # ... or to another view, where cells of the mask that it does not have are ignored
+    other = cdata[np.arange(20, 40)]
+    assert other[mask].root_indices.tolist() == [20, 22, 24, 26, 28]
+    # a Series with a range index is one value per cell of the data it is used on
+    assert view[pd.Series(positional)].root_indices.tolist() == list(range(10, 30, 2))
+
+
+def test_cell_ids_and_names_select_cells(cdata):
+    names = cdata.obs_names
+    assert cdata[[names[5], names[2]]].root_indices.tolist() == [2, 5]
+    assert cdata[np.array([names[1]])].root_indices.tolist() == [1]
+    assert cdata.select_cell_ids([9, 3]).root_indices.tolist() == [3, 9]
+    view = cdata[np.arange(10, 20)]
+    assert view.cell_ids.tolist() == list(range(10, 20))  # a view has the IDs of its cells in the root
+    assert view.select_cell_ids([12, 15]).root_indices.tolist() == [12, 15]
+    with pytest.raises(KeyError, match="not among"):
+        view.select_cell_ids([3])
+    with pytest.raises(KeyError, match="not found"):
+        cdata[["no-such-cell"]]
 
 
 def test_bad_selections_raise(cdata):
@@ -142,7 +184,7 @@ def test_bad_selections_raise(cdata):
     with pytest.raises(IndexError):
         cdata[np.ones(39, dtype=bool)]
     with pytest.raises(TypeError, match="boolean mask"):
-        cdata[["file0_cell0"]]
+        cdata[np.array([1.5])]
 
 
 def test_cdata_is_not_iterable(cdata):
@@ -159,7 +201,8 @@ def test_view_of_a_view_composes_with_the_root(cdata):
     assert second.n_obs == 3
     # the cells are the right ones
     assert np.array_equal(_expected_x(second, np.arange(3)), _expected_x(cdata, np.array([2, 10, 14])))
-    assert second.obs.index.tolist() == cdata.obs.index[[2, 10, 14]].tolist()
+    assert second.cell_ids.tolist() == [2, 10, 14]
+    assert second.obs_names.tolist() == cdata.obs_names[[2, 10, 14]].tolist()
     # the data is read from the root's collection directly
     assert unwrap_collection(second.datamodule.dadc) is unwrap_collection(cdata.datamodule.dadc)
 
@@ -187,11 +230,11 @@ def test_view_obs_is_the_obs_of_the_selected_cells(cdata):
 def test_view_obs_loc_selects_by_name_within_the_view(cdata):
     positions = np.array([2, 3, 17, 20, 38])
     view = cdata[positions]
-    names = cdata.obs.index
+    names = cdata.obs_names
     wanted = [names[20], names[2]]
     got = view.obs.loc[wanted, ["n_counts"]]
-    assert got.index.tolist() == wanted
-    assert got["n_counts"].tolist() == cdata.obs.to_frame().loc[wanted, "n_counts"].tolist()
+    assert got.index.tolist() == [20, 2]  # the cell IDs
+    assert got["n_counts"].tolist() == cdata.obs.to_frame().loc[[20, 2], "n_counts"].tolist()
     with pytest.raises(KeyError, match="not found"):
         view.obs.loc[[names[0]]]  # a cell that is not in the view
 
@@ -211,10 +254,10 @@ def test_an_epoch_over_a_view_yields_each_cell_of_the_view_once(cdata):
     view.datamodule.batch_size = 4
     view.datamodule.setup("fit")
     epoch = _epoch(view)
-    assert sorted(epoch["names"]) == sorted(cdata.obs.index[positions])
+    assert sorted(epoch["names"]) == sorted(cdata.obs_names[positions])
     assert epoch["sizes"] == [4, 4, 4, 1]
     # the counts that came with each cell are those of the cell
-    by_name = dict(zip(cdata.obs.index[positions], _expected_x(cdata, positions)))
+    by_name = dict(zip(cdata.obs_names[positions], _expected_x(cdata, positions)))
     assert all(np.array_equal(row, by_name[name]) for name, row in zip(epoch["names"], epoch["x"]))
 
 
@@ -327,15 +370,14 @@ def test_h5ad_batches_have_the_categories_of_the_schema_in_the_schema_order(h5ad
 
 
 def test_a_view_has_its_own_state_with_snapshots_of_obsm_and_obs_computed(cdata):
-    names = cdata.obs.index
     cdata.obsm["emb"] = np.arange(80, dtype=np.float32).reshape(40, 2)
-    cdata.obs_computed["flag"] = pd.Series(np.arange(40) % 2 == 0, index=names)
+    cdata.obs_computed["flag"] = pd.Series(np.arange(40) % 2 == 0, index=cdata.obs_names)  # matched by name
     cdata.obs_computed["score"] = np.arange(40) * 1.5
     cdata.hvg = np.arange(len(cdata.var)) % 2 == 0
     positions = np.array([3, 8, 21, 39])
     view = cdata[positions]
     assert np.array_equal(view.obsm["emb"], cdata.obsm["emb"][positions])
-    assert view.obs_computed["flag"].index.tolist() == names[positions].tolist()
+    assert view.obs_computed["flag"].index.tolist() == positions.tolist()  # indexed by the cell IDs
     assert view.obs_computed["flag"].tolist() == cdata.obs_computed["flag"].iloc[positions].tolist()
     assert np.array_equal(view.obs_computed["score"], np.arange(40)[positions] * 1.5)
     # everything else starts empty
@@ -498,9 +540,10 @@ def test_update_from_rejects_data_it_cannot_match(cdata, make_h5ad_files):
 
 def test_update_from_checks_what_it_is_given(cdata):
     view = cdata[[1, 2]]
-    view.obs_computed["wrong_index"] = pd.Series(["a", "b"], index=["x", "y"])
-    with pytest.raises(ValueError, match="index"):
-        cdata.obs_computed.update_from(view, "wrong_index")
+    with pytest.raises(ValueError, match="obs names"):  # an index that is not the names of the cells
+        view.obs_computed["wrong_index"] = pd.Series(["a", "b"], index=["x", "y"])
+    with pytest.raises(ValueError, match="obs names"):
+        view.obs_computed["swapped"] = pd.Series(["a", "b"], index=view.obs_names[::-1])
     view.obs_computed["two_d"] = np.zeros((2, 2))
     with pytest.raises(ValueError, match="one entry per cell"):
         cdata.obs_computed.update_from(view, "two_d")

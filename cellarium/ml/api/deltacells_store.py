@@ -14,6 +14,7 @@ from deltacells.obs import ObsSchema
 from deltacells.writer import DatasetWriter
 from tqdm import tqdm
 
+from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
 from cellarium.ml.api._view_collections import _obs_frame
 
 _GCS_PREFIX = "gs://"
@@ -144,12 +145,16 @@ def write_collection_to_deltacells(
     overwrite: bool = False,
     staging_dir: str | None = None,
     filesystem: Any = None,
+    cell_ids: np.ndarray | None = None,
     **writer_kwargs: Any,
 ) -> str:
     """
     Write all the cells of ``collection`` (a :class:`~cellarium.ml.data.DistributedCollection`), in order, as a
     deltacells dataset at ``output`` (a local directory or ``gs://bucket/prefix``), in tiles of ``tile_size`` cells with
-    their ``obs`` (every column, and the ``obs_names``) and ``var``. This is one pass over the cells, plus one over up
+    their ``obs`` (every column, and the ``obs_names``) and ``var``. If ``cell_ids`` (one integer per cell) is given, it
+    is stored as the ``obs`` column ``cellarium_cell_id`` (replacing one that the cells have), which is what
+    :attr:`~cellarium.ml.api.CellariumData.cell_ids` reads when the dataset is opened. This is one pass over the cells,
+    plus one over up
     to ``sort_genes_max_tiles`` tiles spread over them, to sort the genes by decreasing total counts (better
     compression). ``X`` must hold integer counts from 0 to 2**31 - 1. If it does not, or the writing fails otherwise,
     nothing is left at a local ``output``, and a ``gs://`` ``output`` has no manifest. A ``gs://`` ``output`` is
@@ -162,6 +167,10 @@ def write_collection_to_deltacells(
     """
     n = len(collection)
     tile_starts = list(range(0, n, tile_size))
+    if cell_ids is not None:
+        cell_ids = np.asarray(cell_ids, dtype=np.int64)
+        if cell_ids.shape != (n,):
+            raise ValueError(f"cell_ids must have one entry per cell, shape ({n},), got {cell_ids.shape}.")
 
     def read(start: int) -> tuple[sp.csr_matrix, pd.DataFrame]:
         batch = collection.read(np.arange(start, min(start + tile_size, n)))
@@ -173,6 +182,8 @@ def write_collection_to_deltacells(
             )
         obs = _obs_frame(batch)
         obs["obs_names"] = np.asarray(obs.index, dtype=str)
+        if cell_ids is not None:
+            obs[CELL_ID_COLUMN] = cell_ids[start : start + x.shape[0]]
         return x, obs.reset_index(drop=True)
 
     _, first_obs = read(0)
