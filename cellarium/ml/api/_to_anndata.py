@@ -213,16 +213,19 @@ def to_anndata(
         )
         sketch_adata = sketch["adata"]
         assert isinstance(sketch_adata, anndata.AnnData)
-        # the rows of the sketch are in the order that the cells streamed by: put them in the order of the data
+        # the rows of the sketch are already in the order of the data, so its counts are used as they are (a reordering
+        # would copy them)
         try:
-            found = cdata._positions_of_ids(sketch_adata.obs[CELL_ID_COLUMN].to_numpy())
+            positions = cdata._positions_of_ids(sketch_adata.obs[CELL_ID_COLUMN].to_numpy()).astype(np.int64)
         except KeyError as error:
             raise RuntimeError("The geometric sketch has cells that are not in the data.") from error
-        order = np.argsort(found, kind="stable")
-        positions = found[order].astype(np.int64)
-        x = sp.csr_matrix(sketch_adata.X[order], dtype=np.float32)
-        sketch_names = sketch_adata.obs_names[order]
-        # the counts are in x now: do not hold the sketch's copy of them (nor the sketch module) for the rest of this
+        if np.any(np.diff(positions) <= 0):
+            raise RuntimeError("The cells of the geometric sketch are not in the order of the data.")
+        x = sketch_adata.X
+        if not (sp.issparse(x) and x.format == "csr" and x.dtype == np.float32):
+            x = sp.csr_matrix(x, dtype=np.float32)
+        sketch_names = sketch_adata.obs_names
+        # the counts are in x now: do not hold the sketch module for the rest of this
         del sketch, sketch_adata
         # the sketch may have stored the embedding of all the cells, which goes into the AnnData with the other obsm
         embedding_keys = [key for key in embedding_keys if cdata._cached_embedding_state(key) != "current"]

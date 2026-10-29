@@ -11,7 +11,6 @@ import anndata
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
-import scipy.sparse as sp
 import torch
 from lightning.fabric.utilities.apply_func import move_data_to_device
 from torch.utils._pytree import tree_map
@@ -19,6 +18,7 @@ from torch.utils._pytree import tree_map
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
 from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
 from cellarium.ml.api._obsm_storage import ObsmWriter
+from cellarium.ml.api._sparse_rows import SparseRowCollector
 from cellarium.ml.api.cellariumdata import CellariumData, TrainedModule, _device_of
 from cellarium.ml.api.utils import resolve_device
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
@@ -197,7 +197,7 @@ def geometric_sketch(
             "adata": The new AnnData object containing only the selected geometric sketch cells
                 (if `return_new_adata` is True), with the embedding in ``obsm[f"X_{embedding_module_key}"]``
                 (``obsm["X_embedding"]`` if there is no ``embedding_module_key``), and the cell IDs of the cells in
-                ``obs["cellarium_cell_id"]``.
+                ``obs["cellarium_cell_id"]``. Its rows are in the order of the cells in the data.
             "module": The trained StreamingPlaidGeometricSketch module (if `return_new_adata` is False).
         Note: stores the same boolean mask in ``cdata.obs_computed['in_sketch']``.
     """
@@ -331,9 +331,8 @@ def _geometric_sketch(
     # mask of the sketch is one boolean per cell: nothing is kept for every cell but that (except the embedding of
     # every cell, if it is to be stored, which goes to `obsm`: to a file if it does not fit in memory).
     in_sketch = np.zeros(cdata.n_obs, dtype=bool)
-    raw_x_ng_list = []
+    raw_counts = SparseRowCollector()  # the counts of the sketch cells, which are the bulk of the memory used here
     raw_obs_names_list = []
-    raw_positions_list = []
     writer: ObsmWriter | None = None
     with ExitStack() as stack:
         embed_batch = None
@@ -357,9 +356,8 @@ def _geometric_sketch(
             if mask.any():
                 in_sketch[positions[mask]] = True
                 if return_new_adata:
-                    raw_x_ng_list.append(sparse_tensor_to_scipy_csr(batch["x_ng"])[mask])
+                    raw_counts.append(sparse_tensor_to_scipy_csr(batch["x_ng"])[mask], positions[mask])
                     raw_obs_names_list.append(batch_obs_names[mask])
-                    raw_positions_list.append(positions[mask])
     if store is not None:
         assert writer is not None, "predict_batches yielded no batches"
         cdata.obsm[store[0]] = writer.result
@@ -370,16 +368,21 @@ def _geometric_sketch(
 
     adata = None
     if return_new_adata:
-        # Rows of raw_x_ng/raw_obs_names are kept in the order they were collected, not reservoir order: obs and X
-        # just need to agree with each other, not with `sketch_obs_names`. Only the (small) embedding needs to be
-        # reindexed to match.
-        raw_obs_names = np.concatenate(raw_obs_names_list)
-        coverage = pd.Index(raw_obs_names).get_indexer(sketch_obs_names)
+        # The rows of the AnnData are in the order of the cells in the data, not reservoir order: obs and X just need
+        # to agree with each other, not with `sketch_obs_names`. Only the (small) embedding needs to be reindexed to
+        # match.
+        collected_obs_names = np.concatenate(raw_obs_names_list)
+        coverage = pd.Index(collected_obs_names).get_indexer(sketch_obs_names)
         if (coverage == -1).any():
             missing = np.asarray(sketch_obs_names)[coverage == -1]
             raise ValueError(f"Could not find raw data for sketch obs_names, e.g. {missing[:5].tolist()}")
-        raw_x_ng = sp.vstack(raw_x_ng_list, format="csr")
-        del raw_x_ng_list  # the counts are in raw_x_ng now: do not hold a second copy of them
+        del raw_obs_names_list
+        # the counts are assembled directly in the order of the data, freeing the collected pieces as they are used
+        raw_x_ng, order = raw_counts.finish()
+        raw_obs_names = collected_obs_names[order]
+        raw_positions = np.flatnonzero(in_sketch)  # the positions of the sketch cells, in the order of the data
+        if len(raw_positions) != raw_x_ng.shape[0]:
+            raise RuntimeError("The cells collected for the sketch do not match the cells that are in the sketch.")
 
         embedding_pos = sketch_index.get_indexer(raw_obs_names)
         embedding = reservoir["x_ng"].to_dense().cpu().numpy()[embedding_pos]
@@ -390,7 +393,6 @@ def _geometric_sketch(
         else:
             var["highly_variable"] = cdata.hvg.reindex(var.index).fillna(False).astype(bool)
 
-        raw_positions = np.concatenate(raw_positions_list)
         adata = anndata.AnnData(
             X=raw_x_ng,
             obs=pd.DataFrame({CELL_ID_COLUMN: cdata.cell_ids.to_numpy()[raw_positions]}, index=raw_obs_names),
