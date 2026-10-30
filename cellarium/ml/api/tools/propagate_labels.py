@@ -1,87 +1,138 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import multiprocessing
-import os
-import pickle
-import tempfile
+import contextlib
 import warnings
-from collections import deque
 from collections.abc import Iterator
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+import torch
 from tqdm.auto import tqdm
 
 from cellarium.ml.api.cellariumdata import CellariumData, _per_cell_series
 from cellarium.ml.api.tools.embed import ensure_embedding
+from cellarium.ml.api.utils import resolve_device
 
 _EPSILON = 1e-6  # added to distances before they are inverted into weights
-# fewer cells than this are queried in this process: starting worker processes (which import this package, and load the
-# index) would take longer than the queries
-_MIN_CELLS_FOR_WORKERS = 200_000
-
-_WORKER_INDEX: Any = None  # the nearest neighbor index of a worker process
-
-
-def _init_worker(path: str) -> None:
-    global _WORKER_INDEX
-    with open(path, "rb") as file:
-        _WORKER_INDEX = pickle.load(file)
+# with method="auto", the nearest neighbors are exact if (cells to query) x (labeled cells) is at most this, for the
+# device that does the work: the exact search costs one distance for each pair (about 1.5e9 pairs per second on a
+# laptop CPU, which is also about what mps does; the cuda value is an estimate), while the approximate one first
+# builds an index of the labeled cells
+_MAX_EXACT_PAIRS = {"cpu": 5e11, "mps": 5e11, "cuda": 5e12}
+_REFERENCE_TILE = 8192  # labeled cells (rows) compared with the queries at a time in the exact search
+_QUERY_TILE = 1024  # cells queried at a time in the exact search
+_MAX_DEVICE_BYTES = 4 * 2**30  # the most of the labeled cells that the exact search keeps on the accelerator
 
 
-def _query_in_worker(x: np.ndarray, k: int, epsilon: float) -> tuple[np.ndarray, np.ndarray]:
-    return _WORKER_INDEX.query(x, k=k, epsilon=epsilon)
+@contextlib.contextmanager
+def _threads(n_jobs: int | None) -> Iterator[None]:
+    """Use ``n_jobs`` threads (of numba, which pynndescent runs on, and of torch) within the block."""
+    if n_jobs is None:
+        yield
+        return
+    try:
+        import numba
+    except ImportError:  # the exact search does not need it
+        numba = None
+    torch_threads = torch.get_num_threads()
+    numba_threads = numba.get_num_threads() if numba is not None else None
+    torch.set_num_threads(n_jobs)
+    if numba is not None:
+        numba.set_num_threads(min(n_jobs, numba.config.NUMBA_NUM_THREADS))
+    try:
+        yield
+    finally:
+        torch.set_num_threads(torch_threads)
+        if numba is not None:
+            numba.set_num_threads(numba_threads)
+
+
+class _ExactIndex:
+    """
+    The exact nearest neighbors of points among some others, by brute force: the squared distances to tiles of the
+    others are made as matrix products (on the CPU or the accelerator) and the ``k`` smallest are kept. It answers
+    ``query`` as a pynndescent index does.
+    """
+
+    def __init__(self, x: np.ndarray, device: torch.device) -> None:
+        self.device = device
+        # translating all the points leaves the distances as they are, and keeps the squared norms in the products
+        # (|q|^2 - 2 q.r + |r|^2) from being large numbers that cancel
+        self.center = x.mean(axis=0, dtype=np.float64).astype(np.float32)
+        reference = torch.from_numpy(x - self.center)
+        if device.type != "cpu" and reference.numel() * reference.element_size() <= _MAX_DEVICE_BYTES:
+            reference = reference.to(device)
+        self.reference = reference
+        self.squared_norms = (reference * reference).sum(dim=1)
+
+    def _closest(self, queries: torch.Tensor, k: int) -> torch.Tensor:
+        """The positions of the ``k`` nearest points of each of the queries (on the accelerator)."""
+        best_scores = queries.new_empty((len(queries), 0))
+        best_indices = torch.empty((len(queries), 0), dtype=torch.int64, device=self.device)
+        for start in range(0, len(self.reference), _REFERENCE_TILE):
+            stop = start + _REFERENCE_TILE
+            block = self.reference[start:stop].to(self.device)
+            # |r|^2 - 2 q.r: the squared distance without the |q|^2 that is the same for all the points
+            scores = torch.addmm(self.squared_norms[start:stop].to(self.device), queries, block.T, alpha=-2)
+            scores, indices = scores.topk(min(k, scores.shape[1]), dim=1, largest=False)
+            scores = torch.cat([best_scores, scores], dim=1)
+            indices = torch.cat([best_indices, indices + start], dim=1)
+            best_scores, order = scores.topk(min(k, scores.shape[1]), dim=1, largest=False)
+            best_indices = indices.gather(1, order)
+        return best_indices
+
+    def query(self, x: np.ndarray, k: int, epsilon: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """The ``k`` nearest points of each row of ``x``: their positions and distances (``epsilon`` is not used)."""
+        k = min(k, len(self.reference))
+        queries = torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32) - self.center).to(self.device)
+        indices = np.empty((len(queries), k), dtype=np.int64)
+        distances = np.empty((len(queries), k), dtype=np.float32)
+        for start in range(0, len(queries), _QUERY_TILE):
+            tile = queries[start : start + _QUERY_TILE]
+            closest = self._closest(tile, k)
+            # the distances from the differences, which do not suffer from the cancellation of the products
+            neighbors = self.reference[closest.to(self.reference.device)].to(self.device)
+            tile_distances = (tile[:, None, :] - neighbors).norm(dim=2)
+            tile_distances, order = tile_distances.sort(dim=1)
+            indices[start : start + len(tile)] = closest.gather(1, order).cpu().numpy()
+            distances[start : start + len(tile)] = tile_distances.cpu().numpy()
+        return indices, distances
+
+
+def _approximate_index(x: np.ndarray, k: int, seed: int) -> Any:
+    """
+    A pynndescent index of the points ``x`` that answers queries with all the threads of the process: one copy of the
+    index in memory, however many threads search it.
+    """
+    from pynndescent import NNDescent
+
+    index = NNDescent(
+        x,
+        metric="euclidean",
+        n_neighbors=min(max(k + 1, 30), len(x) - 1),
+        random_state=seed,
+        n_jobs=-1,
+        low_memory=True,
+        parallel_batch_queries=True,
+        verbose=False,
+    )
+    index.prepare()
+    return index
 
 
 def _neighbors(
-    index: Any,
-    embedding: Any,
-    cells: np.ndarray,
-    k: int,
-    epsilon: float,
-    chunk_size: int,
-    n_jobs: int,
+    index: Any, embedding: Any, cells: np.ndarray, k: int, epsilon: float, chunk_size: int
 ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """
-    The ``k`` nearest labeled cells of the ``cells`` (positions, in increasing order) in chunks of ``chunk_size``: for
-    each chunk, its cells, and their neighbors and distances. pynndescent answers queries in one thread (and holds the
-    GIL), so with ``n_jobs`` > 1 the chunks are queried by that many worker processes, which load the index from a
-    file, and the chunks come back in order.
-    """
-
-    def chunk(start: int) -> tuple[np.ndarray, np.ndarray]:
+    """The ``k`` nearest labeled cells of the ``cells`` (positions, in increasing order) in chunks of ``chunk_size``:
+    for each chunk, its cells, and their neighbors and distances."""
+    for start in range(0, len(cells), chunk_size):
         positions = cells[start : start + chunk_size]
-        return positions, np.ascontiguousarray(embedding[positions], dtype=np.float32)
-
-    starts = range(0, len(cells), chunk_size)
-    if n_jobs <= 1 or len(cells) < _MIN_CELLS_FOR_WORKERS:
-        for start in starts:
-            positions, x = chunk(start)
-            indices, distances = index.query(x, k=k, epsilon=epsilon)
-            yield positions, indices, distances
-        return
-
-    with tempfile.TemporaryDirectory(prefix="cellarium_nn_index_") as directory:
-        path = os.path.join(directory, "index.pkl")
-        with open(path, "wb") as file:
-            pickle.dump(index, file, protocol=pickle.HIGHEST_PROTOCOL)
-        # "spawn": the index search is numba code, which is not safe to fork after numba has used its threads
-        context = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(n_jobs, mp_context=context, initializer=_init_worker, initargs=(path,)) as pool:
-            pending: deque = deque()
-            for start in starts:
-                positions, x = chunk(start)
-                pending.append((positions, pool.submit(_query_in_worker, x, k, epsilon)))
-                if len(pending) >= 2 * n_jobs:  # bounds the memory held by chunks in flight
-                    positions, future = pending.popleft()
-                    yield (positions, *future.result())
-            while pending:
-                positions, future = pending.popleft()
-                yield (positions, *future.result())
+        x = np.ascontiguousarray(embedding[positions], dtype=np.float32)
+        indices, distances = index.query(x, k=k, epsilon=epsilon)
+        yield positions, indices, distances
 
 
 @dataclass(frozen=True)
@@ -93,6 +144,8 @@ class PropagateLabelsResult:
         key_added: The key in ``obs_computed`` of the labels of all the cells (``f"{key_added}_confidence"`` and
             ``f"{key_added}_distance"`` hold the confidence and the distance to the nearest labeled cell).
         rep: The key in ``obsm`` of the embedding that the labels were propagated in.
+        method: How the nearest labeled cells were found, ``"exact"`` or ``"approximate"`` (see
+            :func:`propagate_labels`).
         n_reference: The number of cells that had a label.
         n_propagated: The number of cells that were given a label.
         agreement: The fraction of the ``n_checked`` held-out labeled cells whose label the others gave back: how well
@@ -106,6 +159,7 @@ class PropagateLabelsResult:
 
     key_added: str
     rep: str
+    method: str
     n_reference: int
     n_propagated: int
     agreement: float
@@ -173,7 +227,8 @@ def propagate_labels(
     key_added: str | None = None,
     k: int = 15,
     weights: Literal["distance", "uniform"] = "distance",
-    n_check: int = 100_000,
+    method: Literal["auto", "exact", "approximate"] = "auto",
+    n_check: int = 20_000,
     min_agreement: float = 0.7,
     chunk_size: int = 50_000,
     n_jobs: int | None = None,
@@ -189,10 +244,21 @@ def propagate_labels(
     all the cells of a dataset that is too large to cluster.
 
     The labeled cells (the *reference*) are those with a value in ``obs_computed[labels_key]``; they keep their
-    labels, and the others are given one. The neighbors are found by approximate nearest neighbor search
-    (`pynndescent <https://pynndescent.readthedocs.io>`_, part of ``cellarium-ml[scanpy]``) among the labeled
-    cells, so the pass over the other cells is one query per cell, in chunks, reading the embedding of ``rep`` from
-    ``obsm`` (which can be on disk). The counts are not read.
+    labels, and the others are given one. The pass over the other cells is one query per cell, in chunks, reading the
+    embedding of ``rep`` from ``obsm`` (which can be on disk). The counts are not read. The nearest labeled cells are
+    found with one of two methods (``method``):
+
+    * ``"exact"``: by brute force, as matrix products of the cells with the labeled cells, on ``accelerator`` (the CPU
+      threads, or an accelerator). Nothing is built first and nothing is approximated, so this is best when the cells
+      to label are few compared to the labeled ones (30 000 cells among 4 million, say),
+    * ``"approximate"``: with a `pynndescent <https://pynndescent.readthedocs.io>`_ index (part of
+      ``cellarium-ml[scanpy]``) of the labeled cells, which takes a while to build and some memory (a few GB for
+      millions of cells), and then answers queries very fast, with all the CPU threads. This is best when there are
+      many cells to label, as when propagating the labels of 100 000 cells to 90 million.
+
+    ``"auto"`` chooses the exact search if the number of distances it takes (the cells to label and to check, times the
+    labeled cells) is small enough for the device (about 5e11 for the CPU, about a few minutes), and the approximate
+    one otherwise.
 
     Three things are stored in ``obs_computed``, each a :class:`pandas.Series` indexed by
     :attr:`CellariumData.cell_ids`, for all the cells:
@@ -229,19 +295,20 @@ def propagate_labels(
         k: The number of nearest labeled cells that vote.
         weights: ``"distance"`` to weight each vote by the inverse of the distance (plus a small constant), or
             ``"uniform"``.
-        n_check: The number of labeled cells to hold out to check the labels against the embedding (all of them if
-            there are fewer).
+        method: ``"exact"`` or ``"approximate"`` nearest neighbors, or ``"auto"`` to choose by the size of the search
+            (see above).
+        n_check: The most labeled cells to hold out to check the labels against the embedding (all of them if there
+            are fewer). The check is a query for each of them, so it costs as much as labeling that many cells.
         min_agreement: The agreement below which a warning is raised.
         chunk_size: The number of cells to query at a time (this bounds the memory used for the votes).
-        n_jobs: The number of worker processes that query the nearest neighbors (pynndescent answers queries in a
-            single thread, so this is what makes the pass over millions of cells fast); by default one for each CPU
-            core. With 1, or for fewer than 200 000 cells to label, the queries are made in this process. The
-            workers are started with "spawn", so a script (not a notebook) must guard its entry point with
-            ``if __name__ == "__main__":``.
+        n_jobs: The number of CPU threads to use (to build the index and answer its queries, and for the exact search
+            on the CPU); by default, all of them. The threads share one copy of the index, so more of them cost no
+            more memory.
         epsilon: The accuracy of the approximate search, as in pynndescent: a larger value searches more, and is slower
-            and closer to the exact neighbors (``0.0`` is about twice as fast as the default).
-        accelerator: The accelerator to make the embedding with, if ``rep`` names a module that has not embedded the
-            cells yet, in ["cpu", "mps", "cuda", "auto"].
+            and closer to the exact neighbors (``0.0`` is about twice as fast as the default). It is not used by the
+            exact search.
+        accelerator: The accelerator for the exact search, and to make the embedding with if ``rep`` names a module
+            that has not embedded the cells yet, in ["cpu", "mps", "cuda", "auto"].
         max_gb: The most memory (in GiB) for that embedding, by default the ``max_gb`` of ``cdata``.
         seed: The seed of the nearest neighbor index and of the choice of the held-out cells.
 
@@ -251,21 +318,18 @@ def propagate_labels(
     Raises:
         KeyError: If ``cdata.obs_computed`` has no ``labels_key``, or ``rep`` is neither in ``obsm`` nor a trained
             module.
-        ValueError: If there are not more than ``k`` labeled cells, or all the cells are labeled already.
-        ImportError: If pynndescent is not installed.
+        ValueError: If there are not more than ``k`` labeled cells, or all the cells are labeled already, or
+            ``method`` or ``n_jobs`` is not valid.
+        ImportError: If the approximate search is used and pynndescent is not installed.
     """
-    try:
-        from pynndescent import NNDescent
-    except ImportError as error:
-        raise ImportError(
-            "propagate_labels needs pynndescent for the nearest neighbor search: pip install pynndescent "
-            "(or cellarium-ml[scanpy])."
-        ) from error
-
     if labels_key not in cdata.obs_computed:
         raise KeyError(f"No '{labels_key}' in obs_computed. Available: {list(cdata.obs_computed)}")
     if weights not in ("distance", "uniform"):
         raise ValueError(f"weights must be 'distance' or 'uniform', got {weights!r}.")
+    if method not in ("auto", "exact", "approximate"):
+        raise ValueError(f"method must be 'auto', 'exact' or 'approximate', got {method!r}.")
+    if n_jobs is not None and n_jobs < 1:
+        raise ValueError(f"n_jobs must be at least 1 (or None for all the threads), got {n_jobs}.")
     key_added = f"{labels_key}_propagated" if key_added is None else key_added
 
     n = cdata.n_obs
@@ -280,6 +344,20 @@ def propagate_labels(
     n_labels = len(categories)
     codes_all = labels.cat.codes.to_numpy().astype(np.int64)  # -1 for the cells without a label
 
+    device = resolve_device(accelerator)
+    targets = np.flatnonzero(~labeled)
+    if method == "auto":
+        n_queries = len(targets) + min(n_check, n_reference)
+        method = "exact" if n_queries * n_reference <= _MAX_EXACT_PAIRS[device.type] else "approximate"
+    if method == "approximate":
+        try:
+            import pynndescent  # noqa: F401
+        except ImportError as error:
+            raise ImportError(
+                "The approximate nearest neighbor search needs pynndescent: pip install pynndescent (or "
+                "cellarium-ml[scanpy]). The exact search, with method='exact', does not need it."
+            ) from error
+
     rep_key = ensure_embedding(cdata, rep, accelerator=accelerator, max_gb=max_gb)
     embedding = cdata.obsm[rep_key]
     if len(embedding) != n or np.ndim(embedding) != 2:
@@ -288,39 +366,27 @@ def propagate_labels(
     reference = np.flatnonzero(labeled)
     codes = codes_all[reference]
     x_reference = np.ascontiguousarray(embedding[reference], dtype=np.float32)
-    index = NNDescent(
-        x_reference,
-        metric="euclidean",
-        n_neighbors=min(max(k + 1, 30), n_reference - 1),
-        random_state=seed,
-        n_jobs=-1,
-        low_memory=True,
-        verbose=False,
-    )
-    index.prepare()
     weighted = weights == "distance"
-
-    agreement, n_checked, per_label = _held_out_agreement(
-        index, x_reference, codes, k, epsilon, n_labels, weighted, n_check, seed
-    )
-
-    targets = np.flatnonzero(~labeled)
     predicted = codes_all.copy()
     confidence = np.ones(n, dtype=np.float32)
     nearest = np.zeros(n, dtype=np.float32)
-    n_jobs = (os.cpu_count() or 1) if n_jobs is None else n_jobs
     n_chunks = -(-len(targets) // chunk_size)
-    for cells, indices, distances in tqdm(
-        _neighbors(index, embedding, targets, k, epsilon, chunk_size, n_jobs),
-        total=n_chunks,
-        desc="Propagating labels",
-        unit="chunk",
-    ):
-        winner, share = _vote(codes, indices, distances, n_labels, weighted)
-        predicted[cells] = winner
-        confidence[cells] = share
-        nearest[cells] = distances.min(axis=1)
 
+    with _threads(n_jobs):
+        index = _ExactIndex(x_reference, device) if method == "exact" else _approximate_index(x_reference, k, seed)
+        agreement, n_checked, per_label = _held_out_agreement(
+            index, x_reference, codes, k, epsilon, n_labels, weighted, n_check, seed
+        )
+        for cells, indices, distances in tqdm(
+            _neighbors(index, embedding, targets, k, epsilon, chunk_size),
+            total=n_chunks,
+            desc="Propagating labels",
+            unit="chunk",
+        ):
+            winner, share = _vote(codes, indices, distances, n_labels, weighted)
+            predicted[cells] = winner
+            confidence[cells] = share
+            nearest[cells] = distances.min(axis=1)
     cdata.obs_computed[key_added] = pd.Series(pd.Categorical.from_codes(predicted, categories=categories))
     cdata.obs_computed[f"{key_added}_confidence"] = pd.Series(confidence)
     cdata.obs_computed[f"{key_added}_distance"] = pd.Series(nearest)
@@ -347,6 +413,7 @@ def propagate_labels(
     return PropagateLabelsResult(
         key_added=key_added,
         rep=rep_key,
+        method=method,
         n_reference=n_reference,
         n_propagated=len(targets),
         agreement=agreement,

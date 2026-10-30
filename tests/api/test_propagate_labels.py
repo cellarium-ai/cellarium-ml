@@ -1,17 +1,22 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import importlib.util
+import inspect
 import sys
 import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-pytest.importorskip("pynndescent")
+from cellarium.ml.api.preprocessing import highly_variable_genes
+from cellarium.ml.api.tools import embed, pca, propagate_labels
 
-from cellarium.ml.api.preprocessing import highly_variable_genes  # noqa: E402
-from cellarium.ml.api.tools import embed, pca, propagate_labels  # noqa: E402
+module = sys.modules["cellarium.ml.api.tools.propagate_labels"]  # (the package's name is the function)
+
+needs_pynndescent = pytest.mark.skipif(importlib.util.find_spec("pynndescent") is None, reason="needs pynndescent")
 
 # the `cdata` fixture (tests/api/conftest.py): 40 cells in two h5ad files of 20, as h5ad files or as a deltacells
 # dataset in tiles of 15, with obs columns `cell_type` and `n_counts`
@@ -127,18 +132,93 @@ def test_a_rep_that_is_a_trained_module_is_embedded_first(cdata):
     assert cdata.obsm["X_pca"] is embedded  # not embedded again
 
 
-def test_the_worker_processes_give_the_same_labels_as_one_process(cdata, monkeypatch):
-    module = sys.modules["cellarium.ml.api.tools.propagate_labels"]  # (the package's name is the function)
+def _same_results(cdata, one, other):
+    np.testing.assert_array_equal(
+        cdata.obs_computed[one].to_numpy().astype(str), cdata.obs_computed[other].to_numpy().astype(str)
+    )
+    for suffix in ("_confidence", "_distance"):
+        np.testing.assert_allclose(
+            cdata.obs_computed[one + suffix], cdata.obs_computed[other + suffix], rtol=1e-3, atol=1e-4
+        )
+
+
+@needs_pynndescent
+def test_the_threads_give_the_same_labels_as_one_thread(cdata):
+    import numba
 
     _set_up(cdata)
-    _propagate(cdata, "cl", "emb", key_added="serial", n_jobs=1)
+    _propagate(cdata, "cl", "emb", key_added="serial", method="approximate", n_jobs=1)
+    assert numba.get_num_threads() == numba.config.NUMBA_NUM_THREADS  # restored
+    _propagate(cdata, "cl", "emb", key_added="parallel", method="approximate", n_jobs=2, chunk_size=2)
+    assert numba.get_num_threads() == numba.config.NUMBA_NUM_THREADS
+    assert cdata.obs_computed["parallel"].notna().all()
+    _same_results(cdata, "serial", "parallel")
 
-    monkeypatch.setattr(module, "_MIN_CELLS_FOR_WORKERS", 0)  # use the workers even for this handful of cells
-    _propagate(cdata, "cl", "emb", key_added="parallel", n_jobs=2, chunk_size=2)
 
-    for suffix in ("", "_confidence", "_distance"):
-        serial, parallel = cdata.obs_computed["serial" + suffix], cdata.obs_computed["parallel" + suffix]
-        np.testing.assert_array_equal(serial.to_numpy().astype(str), parallel.to_numpy().astype(str))
+@needs_pynndescent
+def test_the_exact_and_the_approximate_search_give_the_same_labels(cdata):
+    types = _set_up(cdata)
+    exact = _propagate(cdata, "cl", "emb", key_added="exact", method="exact", accelerator="cpu")
+    approximate = _propagate(cdata, "cl", "emb", key_added="approximate", method="approximate")
+    assert (exact.method, approximate.method) == ("exact", "approximate")
+    assert cdata.obs_computed["exact"].tolist() == types.tolist()
+    assert exact.agreement == approximate.agreement == 1.0
+    _same_results(cdata, "exact", "approximate")
+
+
+def test_auto_chooses_the_exact_search_for_a_small_search_and_the_approximate_one_for_a_large_one(cdata, monkeypatch):
+    _set_up(cdata)
+    assert _propagate(cdata, "cl", "emb", accelerator="cpu").method == "exact"
+
+    approximate_indexes = []
+
+    def approximate_index(x, k, seed):  # an exact index stands in, so that pynndescent is not needed
+        approximate_indexes.append(x)
+        return module._ExactIndex(x, torch.device("cpu"))
+
+    monkeypatch.setattr(module, "_approximate_index", approximate_index)
+    monkeypatch.setitem(sys.modules, "pynndescent", object())
+    pairs = (6 + 34) * 34  # the cells to label and to check, times the labeled cells
+    monkeypatch.setattr(module, "_MAX_EXACT_PAIRS", {"cpu": pairs - 1, "mps": 0, "cuda": 0})
+    assert _propagate(cdata, "cl", "emb", accelerator="cpu").method == "approximate"
+    assert len(approximate_indexes) == 1
+    monkeypatch.setattr(module, "_MAX_EXACT_PAIRS", {"cpu": pairs, "mps": 0, "cuda": 0})
+    assert _propagate(cdata, "cl", "emb", accelerator="cpu").method == "exact"
+    assert len(approximate_indexes) == 1
+
+
+def test_the_exact_search_does_not_need_pynndescent(cdata, monkeypatch):
+    types = _set_up(cdata)
+    monkeypatch.setitem(sys.modules, "pynndescent", None)  # an import of it fails
+    _propagate(cdata, "cl", "emb", method="exact", accelerator="cpu")
+    assert cdata.obs_computed["cl_propagated"].tolist() == types.tolist()
+    with pytest.raises(ImportError, match="method='exact'"):
+        propagate_labels(cdata, "cl", "emb", method="approximate")
+
+
+def test_the_exact_neighbors_are_the_nearest_ones_whatever_the_tiles_and_the_offset(monkeypatch):
+    monkeypatch.setattr(module, "_REFERENCE_TILE", 7)  # the 50 points are in 8 tiles, the last with 1 point
+    monkeypatch.setattr(module, "_QUERY_TILE", 8)
+    rng = np.random.default_rng(0)
+    points = (rng.normal(size=(50, 4)) + 1000.0).astype(np.float32)  # far from the origin: products would cancel
+    points[10] = points[3]  # a duplicate
+    queries = (rng.normal(size=(20, 4)) + 1000.0).astype(np.float32)
+    queries[0] = points[3]
+
+    indices, distances = module._ExactIndex(points, torch.device("cpu")).query(queries, k=5)
+
+    truth = np.sqrt(((queries[:, None].astype(np.float64) - points[None].astype(np.float64)) ** 2).sum(-1))
+    order = np.argsort(truth, axis=1, kind="stable")[:, :5]
+    np.testing.assert_allclose(distances, np.take_along_axis(truth, order, 1), atol=1e-4)
+    assert (np.sort(indices[1:], axis=1) == np.sort(order[1:], axis=1)).all()
+    assert set(indices[0, :2]) == {3, 10} and (distances[0, :2] == 0).all()  # the duplicates
+    assert (np.diff(distances, axis=1) >= 0).all()
+    # fewer points than k: all of them
+    assert module._ExactIndex(points[:3], torch.device("cpu")).query(queries, k=5)[0].shape == (20, 3)
+
+
+def test_the_check_holds_out_at_most_20_000_cells_by_default():
+    assert inspect.signature(propagate_labels).parameters["n_check"].default == 20_000
 
 
 def test_an_embedding_on_disk_is_read_in_chunks(cdata):
@@ -205,6 +285,10 @@ def test_propagate_labels_checks_what_it_is_given(cdata):
         propagate_labels(cdata, "cl", "nothing")
     with pytest.raises(ValueError, match="weights"):
         propagate_labels(cdata, "cl", "emb", weights="other")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="method"):
+        propagate_labels(cdata, "cl", "emb", method="other")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="n_jobs"):
+        propagate_labels(cdata, "cl", "emb", n_jobs=0)
     with pytest.raises(ValueError, match="at least k"):
         propagate_labels(cdata, "cl", "emb", k=40)
     cdata.obs_computed["full"] = cdata.obs["cell_type"].astype(str).to_numpy()
