@@ -9,6 +9,7 @@ os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
 os.environ["PYTHONWARNINGS"] = "ignore::FutureWarning"
 
 import ctypes
+import functools
 import gc
 import multiprocessing as mp
 import shutil
@@ -78,11 +79,33 @@ def release_unused_memory() -> None:
         pass  # not glibc (for example musl) or the function is missing: nothing to release this way
     try:
         if torch.cuda.is_initialized():
+            # the workspaces that cuBLAS keeps for matrix products stay reserved otherwise (private function: it is
+            # absent in some versions of torch)
+            clear_workspaces = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+            if clear_workspaces is not None:
+                clear_workspaces()
             torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
     except Exception:
         pass  # a failure to empty a cache must never affect the caller
+
+
+def release_memory_after(function: Callable) -> Callable:
+    """
+    Decorate a function that makes a pass on an accelerator outside of a Trainer (a Trainer releases its memory when
+    its fit ends): once the function has returned, or raised, and its locals (such as the last batch) are gone, call
+    :func:`release_unused_memory`, so that the memory that the pass used is not left reserved.
+    """
+
+    @functools.wraps(function)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return function(*args, **kwargs)
+        finally:
+            release_unused_memory()
+
+    return wrapper
 
 
 class SeekableHTTPFile:

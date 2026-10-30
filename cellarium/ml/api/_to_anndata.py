@@ -13,6 +13,7 @@ from torch.utils._pytree import tree_map
 from tqdm import tqdm
 
 from cellarium.ml import CellariumPipeline
+from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
 from cellarium.ml.api._view_collections import RamCollection, load_into_ram, unwrap_collection
 from cellarium.ml.api.utils import release_unused_memory
 from cellarium.ml.data import DistributedAnnDataCollection
@@ -165,6 +166,16 @@ def to_anndata(
     kept_keys = []
     for key in embedding_keys:
         if f"X_{key}" in cdata.obsm:
+            cached = cdata._cached_embedding_state(key)
+            if cached == "current":
+                continue  # the embedding of the module that cml.tl.embed made is in obsm, and so goes into the AnnData
+            if cached == "stale":
+                warnings.warn(
+                    f"obsm['X_{key}'] is the embedding of an earlier module '{key}' (for example the one of the data "
+                    "this view was taken from), so the AnnData gets the embedding of the module that is there now."
+                )
+                kept_keys.append(key)
+                continue
             message = f"obsm['X_{key}'] already exists, so the embedding of the module '{key}' cannot be added to it"
             if explicit:
                 raise ValueError(f"{message}: rename it or leave '{key}' out of collect_embeddings.")
@@ -202,16 +213,22 @@ def to_anndata(
         )
         sketch_adata = sketch["adata"]
         assert isinstance(sketch_adata, anndata.AnnData)
-        # the rows of the sketch are in the order that the cells streamed by: put them in the order of the data
-        found = cdata.obs.index.get_indexer(sketch_adata.obs_names)
-        if (found < 0).any():
-            raise RuntimeError("The geometric sketch has cells that are not in the data.")
-        order = np.argsort(found, kind="stable")
-        positions = found[order].astype(np.int64)
-        x = sp.csr_matrix(sketch_adata.X[order], dtype=np.float32)
-        sketch_names = sketch_adata.obs_names[order]
-        # the counts are in x now: do not hold the sketch's copy of them (nor the sketch module) for the rest of this
+        # the rows of the sketch are already in the order of the data, so its counts are used as they are (a reordering
+        # would copy them)
+        try:
+            positions = cdata._positions_of_ids(sketch_adata.obs[CELL_ID_COLUMN].to_numpy()).astype(np.int64)
+        except KeyError as error:
+            raise RuntimeError("The geometric sketch has cells that are not in the data.") from error
+        if np.any(np.diff(positions) <= 0):
+            raise RuntimeError("The cells of the geometric sketch are not in the order of the data.")
+        x = sketch_adata.X
+        if not (sp.issparse(x) and x.format == "csr" and x.dtype == np.float32):
+            x = sp.csr_matrix(x, dtype=np.float32)
+        sketch_names = sketch_adata.obs_names
+        # the counts are in x now: do not hold the sketch module for the rest of this
         del sketch, sketch_adata
+        # the sketch may have stored the embedding of all the cells, which goes into the AnnData with the other obsm
+        embedding_keys = [key for key in embedding_keys if cdata._cached_embedding_state(key) != "current"]
 
     selected = cdata if len(positions) == n_obs else cdata[positions]
     if x is None:
@@ -220,7 +237,8 @@ def to_anndata(
         raise RuntimeError(f"The counts have {x.shape[1]} genes but var has {len(cdata.var)}.")
 
     obs = _with_schema_categories(selected.obs[list(selected.obs.columns)], selected.datamodule.dadc)
-    obs.index = pd.Index(obs.index.astype(str), name=None)
+    obs[CELL_ID_COLUMN] = selected.cell_ids.to_numpy()
+    obs.index = pd.Index(selected.obs_names.astype(str), name=None)
     if sketch_names is not None and not obs.index.equals(sketch_names.astype(str)):
         raise RuntimeError("The cells of the geometric sketch do not match the rows of obs.")
     names = obs.index

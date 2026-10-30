@@ -1025,3 +1025,13 @@ def test_online_nmf_hals_stored_loadings_improve_the_fit():
     # the data has squared norm of about n * g * E[x^2]; the stored loadings must explain a good part of it
     assert (error_after_five_passes_r < 0.5 * x_ng.pow(2).sum()).all()
     assert (error_after_five_passes_r <= error_after_one_pass_r * 1.0001).all()
+
+
+def test_online_nmf_hals_running_errors_follow_the_model_to_another_device():
+    model = _small_online_nmf("hals")
+    assert model._err_running_sum_rk.device.type == "cpu"
+
+    model.to("meta")
+
+    assert model._err_running_sum_rk.device.type == "meta"
+    assert model._prev_err_rk is None  # not set yet: left as it is

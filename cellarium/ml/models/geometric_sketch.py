@@ -3,6 +3,7 @@
 
 import warnings
 from abc import abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 import lightning.pytorch as pl
@@ -665,6 +666,17 @@ class StreamingGeometricSketch(CellariumModel):
         self._prev_total_cells: int = 0
         self._ema_delta: float = 0.0
         self.reset_parameters()
+
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True):
+        # The voxel store holds the sketch on the device of the data but is not made of parameters or buffers, so
+        # ``module.to(...)`` would leave it on the accelerator for as long as the module lives. It follows the module
+        # here (and goes back to the device of the data by itself when it is updated, see ``store.to(device)``).
+        module = super()._apply(fn, recurse)
+        store = getattr(self, "_store", None)
+        if store is not None:
+            probe = fn(torch.empty(0, dtype=torch.int64, device=store.device))  # fn only changes its device
+            store.to(self._state_device(probe))
+        return module
 
     # ------------------------------------------------------------------
     # Abstract interface

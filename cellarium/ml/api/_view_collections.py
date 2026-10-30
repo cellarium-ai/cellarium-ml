@@ -7,6 +7,7 @@ the cells of another collection to the datamodule, which therefore needs no know
 :class:`RamCollection` holds cells in memory.
 """
 
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 import numpy as np
@@ -54,6 +55,7 @@ class ViewCollection(DistributedCollection):
         self.positions = positions
         self.var_names = source.var_names
         self.supports_prefetch = source.supports_prefetch
+        self.max_num_workers = source.max_num_workers  # a view of cells in memory cannot be read by workers either
         # cells of the view before the end of each shard of the source, without the shards that hold no view cell
         cumulative = np.searchsorted(positions, np.asarray(source.limits), side="left")
         previous = np.concatenate(([0], cumulative[:-1]))
@@ -296,6 +298,71 @@ def _gib(n_bytes: float) -> str:
     return f"{n_bytes / 2**30:.2f} GiB"
 
 
+def shard_blocks(collection: DistributedCollection, chunk_size: int) -> list[tuple[int, int]]:
+    """
+    The runs of consecutive cells of ``collection`` to read it in order, as ``(start, stop)``: each lies in one shard
+    (a file, or a tile of a deltacells dataset; for a view, the cells of the view that lie in one shard of the data it
+    is taken from), and has at most ``chunk_size`` cells. Reading a run touches one shard, whichever cells of the data
+    the collection holds, so a pass over them reads and decodes each shard once.
+    """
+    n = len(collection)
+    blocks = []
+    lower = 0
+    for upper in collection.limits:
+        upper = min(upper, n)
+        for start in range(lower, upper, chunk_size):
+            blocks.append((start, min(start + chunk_size, upper)))
+        lower = max(lower, upper)
+    if lower < n:  # a collection whose limits stop short of its cells
+        blocks.extend((start, min(start + chunk_size, n)) for start in range(lower, n, chunk_size))
+    return blocks
+
+
+def read_blocks(
+    collection: DistributedCollection,
+    blocks: Sequence[tuple[int, int]],
+    lookahead: int = 3,
+    progress: bool = True,
+    desc: str = "Reading cells",
+) -> Iterator[tuple[int, int, Any]]:
+    """
+    Read the ``blocks`` of cells of ``collection`` (see :func:`shard_blocks`) in order: for each, its ``start``,
+    ``stop`` and the batch of its cells. The next ``lookahead`` blocks are announced to the collection before a block
+    is read (see :meth:`~cellarium.ml.data.DistributedCollection.prefetch`), so that a collection that can fetch in the
+    background reads the next shards while this one is used.
+    """
+    announced = -1
+    iterator: Iterable[int] = range(len(blocks))
+    if progress:
+        iterator = tqdm(iterator, desc=desc, unit="block", total=len(blocks))
+    for i in iterator:
+        while announced < min(i + lookahead, len(blocks) - 1):
+            announced += 1
+            collection.prefetch(np.arange(*blocks[announced]))
+        start, stop = blocks[i]
+        yield start, stop, collection.read(np.arange(start, stop))
+
+
+def _estimate(
+    collection: DistributedCollection, blocks: Sequence[tuple[int, int]], n_samples: int, sample_size: int
+) -> tuple[float, float]:
+    """The mean number of nonzeros and the mean bytes of obs of a cell, from the first cells of blocks that are spread
+    over the collection: ``n_samples`` blocks, or (if they are smaller than ``sample_size``, as the cells of a view of
+    scattered cells in each shard are) as many as it takes for about ``n_samples * sample_size`` cells, up to 32."""
+    sizes = np.array([min(sample_size, stop - start) for start, stop in blocks])
+    wanted = int(np.ceil(n_samples * sample_size / sizes.mean()))
+    n_blocks = min(len(blocks), max(n_samples, wanted), max(n_samples, 32))
+    picks = np.unique(np.linspace(0, len(blocks) - 1, n_blocks).round().astype(np.int64))
+    nnz = obs_bytes = n_cells = 0
+    for i in picks:
+        start, _ = blocks[i]
+        sample = collection.read(np.arange(start, start + sizes[i]))
+        nnz += _to_csr32(sample.X).nnz
+        obs_bytes += int(_obs_frame(sample).memory_usage(deep=True).sum())
+        n_cells += int(sizes[i])
+    return nnz / n_cells, obs_bytes / n_cells
+
+
 def load_into_ram(
     collection: DistributedCollection,
     max_bytes: int,
@@ -307,11 +374,16 @@ def load_into_ram(
     """
     Read all cells of ``collection`` (one pass, in order) into a :class:`RamCollection`.
 
-    The memory needed is estimated first, from ``n_samples`` blocks of ``sample_size`` cells spread over the
-    collection, and nothing is loaded if it is more than ``max_bytes``. While loading, the memory in use is checked
-    after every chunk of ``chunk_size`` cells, so a bad estimate cannot run the machine out of memory either. (The
-    counts are written into arrays sized from the estimate, which are grown if it was too low; in that case
-    the old and new arrays coexist for a moment.)
+    The cells are read one shard at a time (see :func:`shard_blocks`; a shard with more than ``chunk_size`` cells is
+    read in pieces), so that each shard is read and decoded once, with the next few announced to the collection ahead
+    of time, even if the cells are scattered over many shards (as those of a view can be) and a read of ``chunk_size``
+    cells in a row would touch most of them.
+
+    The memory needed is estimated first, from ``n_samples`` blocks of up to ``sample_size`` cells spread over the
+    collection, and nothing is loaded if it is more than ``max_bytes`` (or if the counts have clearly more nonzeros than
+    the 32-bit indices of the matrix can hold). While loading, the memory in use is checked after every block, so a bad
+    estimate cannot run the machine out of memory either. (The counts are written into arrays sized from the estimate,
+    which are grown if it was too low; in that case the old and new arrays coexist for a moment.)
 
     Raises:
         MemoryError: If the cells do not fit in ``max_bytes``.
@@ -325,30 +397,24 @@ def load_into_ram(
             "memory). Make the view smaller, or raise the limit with max_gb."
         )
 
-    # estimate from blocks of cells spread over the collection
-    block = min(sample_size, n)
-    starts = np.unique(np.linspace(0, n - block, min(n_samples, max(n // block, 1))).astype(np.int64))
-    nnz_per_cell = obs_per_cell = 0.0
-    for start in starts:
-        sample = collection.read(np.arange(start, start + block))
-        nnz_per_cell += _to_csr32(sample.X).nnz / block / len(starts)
-        obs_per_cell += int(_obs_frame(sample).memory_usage(deep=True).sum()) / block / len(starts)
+    blocks = shard_blocks(collection, chunk_size)
+    nnz_per_cell, obs_per_cell = _estimate(collection, blocks, n_samples, sample_size)
     # a float32 value and an int32 column index per nonzero, an int32 row pointer per cell
     per_cell = nnz_per_cell * 8 + 4 + obs_per_cell
     if n * per_cell > max_bytes:
         raise too_big(n * per_cell, estimated=True)
+    if n * nnz_per_cell > 1.1 * (2**31 - 1):
+        raise MemoryError(
+            f"The {n} cells have about {n * nnz_per_cell:.2e} nonzero counts, more than the 2**31 - 1 that a matrix "
+            "with 32-bit indices can hold. Make the view smaller."
+        )
 
     capacity = int(n * nnz_per_cell * 1.1) + chunk_size
     data = np.empty(capacity, dtype=np.float32)
     indices = np.empty(capacity, dtype=np.int32)
     indptr = np.zeros(n + 1, dtype=np.int64)
     nnz, obs_bytes, parts = 0, 0, []
-    starts_of_chunks = range(0, n, chunk_size)
-    if progress:
-        starts_of_chunks = tqdm(starts_of_chunks, desc="Loading cells into memory", unit="chunk")  # type: ignore[assignment]
-    for start in starts_of_chunks:
-        stop = min(start + chunk_size, n)
-        batch = collection.read(np.arange(start, stop))
+    for start, stop, batch in read_blocks(collection, blocks, progress=progress, desc="Loading cells into memory"):
         x = _to_csr32(batch.X)
         obs = _obs_frame(batch)
         if nnz + x.nnz > capacity:

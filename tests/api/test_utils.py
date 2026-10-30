@@ -5,8 +5,16 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-from cellarium.ml.api.utils import get_h5ad_file_var_names_g, get_h5ad_files_limits, write_obs_parquet
+from cellarium.ml.api import utils
+from cellarium.ml.api.utils import (
+    get_h5ad_file_var_names_g,
+    get_h5ad_files_limits,
+    release_memory_after,
+    release_unused_memory,
+    write_obs_parquet,
+)
 
 
 def _write_h5ad(tmp_path, name: str, obs: pd.DataFrame, n_genes: int = 2) -> str:
@@ -90,3 +98,38 @@ def test_get_h5ad_file_var_names_g(tmp_path):
     path = _write_h5ad(tmp_path, "data.h5ad", pd.DataFrame(index=["c0", "c1"]), n_genes=3)
     var_names_g = get_h5ad_file_var_names_g(path)
     np.testing.assert_array_equal(var_names_g, np.array(["gene0", "gene1", "gene2"]))
+
+
+def test_release_memory_after_releases_when_the_function_returns_and_when_it_raises(monkeypatch):
+    calls = []
+    monkeypatch.setattr(utils, "release_unused_memory", lambda: calls.append(1))
+
+    @release_memory_after
+    def double(x: int) -> int:
+        """Doubles."""
+        return 2 * x
+
+    @release_memory_after
+    def fail() -> None:
+        raise RuntimeError("no")
+
+    assert double(3) == 6 and calls == [1]
+    assert double.__name__ == "double" and double.__doc__ == "Doubles."
+    with pytest.raises(RuntimeError):
+        fail()
+    assert calls == [1, 1]
+
+
+def test_release_unused_memory_clears_the_cublas_workspaces_before_emptying_the_cache(monkeypatch):
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch._C, "_cuda_clearCublasWorkspaces", lambda: calls.append("workspaces"), raising=False)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("cache"))
+    release_unused_memory()
+    assert calls == ["workspaces", "cache"]
+
+    # a version of torch without the private function is fine too
+    calls.clear()
+    monkeypatch.delattr(torch._C, "_cuda_clearCublasWorkspaces")
+    release_unused_memory()
+    assert calls == ["cache"]

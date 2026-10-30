@@ -4,7 +4,7 @@
 import math
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 import lightning.pytorch as pl
@@ -878,6 +878,15 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
             self._init_err_rk: torch.Tensor | None = None
             self._err_running_sum_rk = torch.zeros((self.r, len(self.k_values)), device=self._dummy_param.device)
             self._cells_seen_in_epoch = 0  # Track cells seen in current epoch
+
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True):
+        # the running errors of the HALS solver are plain tensors, not buffers: they follow the module when it is moved
+        module = super()._apply(fn, recurse)
+        for name in ("_prev_err_rk", "_init_err_rk", "_err_running_sum_rk"):
+            tensor = getattr(self, name, None)
+            if tensor is not None:
+                setattr(self, name, fn(tensor))
+        return module
 
     @property
     def stores_loadings(self) -> bool:

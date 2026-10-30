@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 import lightning.pytorch as pl
@@ -190,6 +190,24 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self._k_in_final_epoch: dict[int, bool] = {k: False for k in self.k_values}
         self._k_final_epoch_start: dict[int, int | None] = {k: None for k in self.k_values}
         self._k_done: dict[int, bool] = {k: False for k in self.k_values}
+
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True):
+        # The snapshots of the factors and the loss averages are plain tensors, not buffers: without this they would
+        # stay on the accelerator when the module is moved to the cpu at the end of a fit.
+        module = super()._apply(fn, recurse)
+        snapshots = getattr(self, "_D_prev_snapshots", {})
+        for k, snapshot in snapshots.items():
+            if snapshot is not None:
+                snapshots[k] = fn(snapshot)
+        for name in ("_train_nmf_loss_ema", "_val_nmf_loss_ema"):
+            tensor = getattr(self, name, None)
+            if tensor is not None:
+                setattr(self, name, fn(tensor))
+        return module
+
+    def on_train_end(self, trainer: pl.Trainer) -> None:
+        # the snapshots only serve to log the drift of the factors while training: each is a copy of the factors
+        self._D_prev_snapshots = {k: None for k in self.k_values}
 
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
