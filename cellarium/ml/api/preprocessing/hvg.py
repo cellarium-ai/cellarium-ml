@@ -19,7 +19,7 @@ def highly_variable_genes(
     batch_key: str | None = None,
     log1p: bool = False,
     normalize_total: bool = True,
-    target_count: float = 1e4,
+    target_count: int = 10_000,
     key_added: str | None = None,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
 ) -> pd.DataFrame:
@@ -83,9 +83,9 @@ def highly_variable_genes(
         hvg_df = model._compute_hvg_df(n_top_genes=n_top_genes)
     else:
         onepass = OnePassRecipe(
-            batch_key=batch_key, 
-            log1p=log1p, 
-            normalize_total=normalize_total, 
+            batch_key=batch_key,
+            log1p=log1p,
+            normalize_total=normalize_total,
             target_count=target_count,
         )
         trained = fit_or_reuse(

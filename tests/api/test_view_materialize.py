@@ -350,3 +350,96 @@ def test_a_collection_is_written_to_gcs_with_the_manifest_last(cdata, tmp_path, 
     assert uri == "gs://bucket/prefix"
     assert fake_gcs.puts[-1] == "bucket/prefix/manifest.json"
     assert not [d for d in os.listdir(tmp_path) if d.startswith("deltacells_stage_")]  # staging cleaned up
+
+
+# ---- reading by shard ----
+
+
+def _record_reads(monkeypatch, collection):
+    """Record the cells (positions in ``collection``) of every read of it."""
+    reads = []
+    real = collection.read
+    monkeypatch.setattr(collection, "read", lambda index: reads.append(np.asarray(index)) or real(index))
+    return reads
+
+
+def test_shard_blocks_lie_in_one_shard_and_cover_every_cell_in_order(cdata):
+    collection = cdata[POSITIONS].datamodule.dadc
+    for chunk_size in (1, 2, 100):
+        blocks = _view_collections.shard_blocks(collection, chunk_size)
+        assert blocks[0][0] == 0 and blocks[-1][1] == len(POSITIONS)
+        assert all(stop == next_start for (_, stop), (next_start, _) in zip(blocks[:-1], blocks[1:]))
+        assert all(0 < stop - start <= chunk_size for start, stop in blocks)
+        shard_of_cell = np.searchsorted(collection.source.limits, collection.positions, side="right")
+        for start, stop in blocks:
+            assert len(set(shard_of_cell[start:stop])) == 1
+
+
+@pytest.mark.parametrize("chunk_size", [1, 3, 10_000])
+def test_a_view_is_loaded_one_shard_at_a_time_and_is_the_same_as_reading_it_all(cdata, monkeypatch, chunk_size):
+    view = cdata[POSITIONS]
+    collection = view.datamodule.dadc
+    reads = _record_reads(monkeypatch, collection.source)
+
+    copy = load_into_ram(collection, max_bytes=2**30, chunk_size=chunk_size, progress=False)
+
+    shard_of_cell = np.searchsorted(collection.source.limits, np.concatenate(reads), side="right")
+    for read in reads:
+        assert len(set(np.searchsorted(collection.source.limits, read, side="right"))) == 1
+    assert shard_of_cell.size >= len(POSITIONS)
+    expected = collection.source[collection.positions]
+    assert np.array_equal(copy.x.toarray(), expected.X.toarray())
+    assert copy.obs.index.tolist() == list(expected.obs_names)
+    assert copy.obs["cell_type"].astype(str).tolist() == expected.obs["cell_type"].astype(str).tolist()
+
+
+def test_the_cells_of_the_next_shards_are_announced_before_they_are_read(cdata, monkeypatch):
+    collection = cdata[POSITIONS].datamodule.dadc
+    events = []
+    real_prefetch, real_read = collection.prefetch, collection.read
+    monkeypatch.setattr(collection, "prefetch", lambda index: events.append(("prefetch", int(index[0]))))
+    monkeypatch.setattr(collection, "read", lambda index: events.append(("read", int(index[0]))) or real_read(index))
+
+    blocks = _view_collections.shard_blocks(collection, 100)
+    list(_view_collections.read_blocks(collection, blocks, lookahead=1, progress=False))
+
+    assert real_prefetch is not None and len(blocks) > 1
+    assert events[:3] == [("prefetch", blocks[0][0]), ("prefetch", blocks[1][0]), ("read", blocks[0][0])]
+    announced = [start for kind, start in events if kind == "prefetch"]
+    assert announced == [start for start, _ in blocks]  # each once, in order
+
+
+def test_loading_refuses_counts_that_a_32_bit_matrix_cannot_hold_before_reading_them(cdata, monkeypatch):
+    collection = cdata[POSITIONS].datamodule.dadc
+    monkeypatch.setattr(_view_collections, "_estimate", lambda *args: (1e9, 10.0))
+    reads = _record_reads(monkeypatch, collection.source)
+    with pytest.raises(MemoryError, match="32-bit indices"):
+        load_into_ram(collection, max_bytes=2**62, progress=False)
+    assert not reads
+
+
+@pytest.mark.parametrize("tile_size", [1, 3, 5, 13, 100])
+def test_to_deltacells_writes_tiles_of_the_requested_size_from_scattered_cells(
+    cdata, tmp_path, deltacells_kwargs, tile_size
+):
+    pytest.importorskip("deltacells._core")
+    view = cdata[POSITIONS]
+    new = view.to_deltacells(
+        str(tmp_path / f"tiles{tile_size}"), tile_size=tile_size, level=3, deltacells_kwargs=deltacells_kwargs
+    )
+    written = unwrap_collection(new.datamodule.dadc)
+    n = len(POSITIONS)
+    assert written.limits == [min(start + tile_size, n) for start in range(0, n, tile_size)]
+    cells = np.arange(n)
+    genes = list(view.datamodule.dadc[cells].var_names)
+    assert np.array_equal(_dense_by_gene(written, cells, genes), _dense_by_gene(view.datamodule.dadc, cells, genes))
+    assert list(written[cells].obs_names) == list(view.datamodule.dadc[cells].obs_names)
+
+
+def test_to_deltacells_reads_each_shard_of_a_scattered_view_in_its_own_reads(cdata, tmp_path, monkeypatch):
+    pytest.importorskip("deltacells._core")
+    collection = cdata[POSITIONS].datamodule.dadc
+    reads = _record_reads(monkeypatch, collection.source)
+    write_collection_to_deltacells(collection, str(tmp_path / "scattered"), tile_size=5, level=3)
+    for read in reads:
+        assert len(set(np.searchsorted(collection.source.limits, read, side="right"))) == 1

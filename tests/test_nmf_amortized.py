@@ -203,7 +203,7 @@ def test_the_plain_tensors_of_the_model_follow_it_to_another_device():
     model._train_nmf_loss_ema = torch.ones(())
 
     model.to("meta")
-
+    assert isinstance(model._D_prev_snapshots[2], torch.Tensor)
     assert model._D_prev_snapshots[2].device.type == "meta" and model._D_prev_snapshots[3] is None
     assert model._train_nmf_loss_ema.device.type == "meta" and model._val_nmf_loss_ema is None
 
