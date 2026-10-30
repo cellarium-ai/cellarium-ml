@@ -26,7 +26,9 @@ from tqdm.auto import tqdm
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
+from cellarium.ml.api._fork_safety import reset_deltacells_after_fork
 from cellarium.ml.api._obsm_storage import RowSubset, subset_rows
+from cellarium.ml.api._rebatch import ShardChunkDataModule, ShardChunkDataset, make_loader
 from cellarium.ml.api._view_collections import (
     RamCollection,
     ViewCollection,
@@ -71,6 +73,7 @@ def _build_datamodule(
     var_names_make_unique: bool = False,
 ) -> CellariumAnnDataDataModule:
     convert_fn = _make_names_unique if var_names_make_unique else None
+    reset_deltacells_after_fork(dadc)
     datamodule = CellariumAnnDataDataModule(
         dadc=dadc,
         batch_keys={
@@ -813,7 +816,8 @@ def _clone_datamodule(
 ) -> CellariumAnnDataDataModule:
     """A datamodule over ``dadc`` with the settings of ``datamodule`` (and the data fields it currently reads)."""
     sizes = {name: datamodule.hparams[name] for name in ("train_size", "val_size", "pred_size")}
-    clone = CellariumAnnDataDataModule(
+    reset_deltacells_after_fork(dadc)
+    clone = ShardChunkDataModule(
         dadc=dadc,
         batch_keys=dict(datamodule.batch_keys),
         batch_size=datamodule.batch_size,
@@ -837,20 +841,29 @@ def _clone_datamodule(
     return clone
 
 
-class _PositionedDataset(IterableDistributedAnnDataCollectionDataset):
+class _PositionedMixin:
     """
-    The dataset of :meth:`CellariumData.predict_batches`: it adds the positions of the cells of each batch (in the
-    collection that it reads, which is the order of the cells of the data) to the batch, as ``"row_indices_n"``.
+    Adds the positions of the cells of each item to it, as ``"row_indices_n"``: the datasets of
+    :meth:`CellariumData.predict_batches` (the positions are in the collection that they read, which is the order of
+    the cells of the data).
     """
 
     def __getitem__(self, idx: Any) -> Any:
-        data = super().__getitem__(idx)
+        data = super().__getitem__(idx)  # type: ignore[misc]
         if isinstance(idx, slice):
-            positions = np.arange(*idx.indices(len(self.dadc)), dtype=np.int64)
+            positions = np.arange(*idx.indices(len(self.dadc)), dtype=np.int64)  # type: ignore[attr-defined]
         else:
             positions = np.atleast_1d(np.asarray(idx, dtype=np.int64))
         data["row_indices_n"] = positions
         return data
+
+
+class _PositionedDataset(_PositionedMixin, IterableDistributedAnnDataCollectionDataset):
+    """The dataset of :meth:`CellariumData.predict_batches` for cells that are read in batches."""
+
+
+class _PositionedChunkDataset(_PositionedMixin, ShardChunkDataset):
+    """The dataset of :meth:`CellariumData.predict_batches` for cells that are read a shard at a time."""
 
 
 def _device_of(module: torch.nn.Module) -> torch.device | None:
@@ -1738,7 +1751,9 @@ class CellariumData:
         # the settings that matter for completeness are fixed here, not taken from the datamodule (which is set up for
         # training, e.g. shuffled). `cache_efficient` reads each worker's contiguous stretch of cells, which is much
         # faster than `same_order` but yields batches out of order: hence the positions
-        dataset = _PositionedDataset(
+        by_shard = isinstance(datamodule, ShardChunkDataModule) and datamodule.reads_by_shard()
+        dataset_class = _PositionedChunkDataset if by_shard else _PositionedDataset
+        dataset = dataset_class(
             dadc=datamodule.dadc,
             batch_keys=dict(datamodule.batch_keys),
             batch_size=batch_size,
@@ -1749,13 +1764,17 @@ class CellariumData:
             worker_seed=datamodule.worker_seed,
             prefetch_lookahead=datamodule.prefetch_lookahead,
         )
-        loader = torch.utils.data.DataLoader(
-            dataset,
+        loader_arguments: dict[str, Any] = dict(
             num_workers=datamodule.num_workers,
             collate_fn=collate_fn,
             prefetch_factor=datamodule.prefetch_factor,
             persistent_workers=False,
             pin_memory=datamodule.pin_memory,
+        )
+        loader = (
+            make_loader(dataset, **loader_arguments)
+            if isinstance(dataset, ShardChunkDataset)
+            else torch.utils.data.DataLoader(dataset, **loader_arguments)
         )
 
         target = None if device is None else torch.device(device)
