@@ -73,7 +73,7 @@ def test_scipy_sparse_lists_and_coo_fields_are_put_together_too():
     part = slice_batch(whole, 1, 4)
     assert part["x_ng"].shape == (3, 2) and part["tags_n"] == ["b", "c", "d"]
 
-    coo = torch.sparse_coo_tensor([[0, 2, 3], [1, 0, 1]], [1.0, 2.0, 3.0], size=(4, 2))
+    coo = torch.sparse_coo_tensor(torch.tensor([[0, 2, 3], [1, 0, 1]]), torch.tensor([1.0, 2.0, 3.0]), size=(4, 2))
     sliced = slice_batch({"x_ng": coo}, 2, 4)["x_ng"]
     np.testing.assert_array_equal(sliced.to_dense().numpy(), [[2.0, 0.0], [0.0, 3.0]])
 

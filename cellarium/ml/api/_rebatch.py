@@ -19,7 +19,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, IterableDataset
 
-from cellarium.ml.api._view_collections import ViewCollection
+from cellarium.ml.api._view_collections import RamCollection, ViewCollection, unwrap_collection
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.data import DistributedCollection, IterableDistributedAnnDataCollectionDataset
 from cellarium.ml.utilities.distributed import get_rank_and_num_replicas, get_worker_info
@@ -292,15 +292,15 @@ def make_loader(
 
 class ShardChunkDataModule(CellariumAnnDataDataModule):
     """
-    A datamodule that reads the cells of a :class:`ViewCollection` a shard at a time (with
-    :class:`ShardChunkDataset`, whose items :class:`RebatchedDataset` puts together into batches), in a single
-    process. It reads other collections, and in a distributed run, as a
+    A datamodule that reads the cells of a :class:`ViewCollection` of cells that are not in memory a shard at a time
+    (with :class:`ShardChunkDataset`, whose items :class:`RebatchedDataset` puts together into batches), in a single
+    process. It reads other collections (cells in memory have no shards to read), and in a distributed run, as a
     :class:`~cellarium.ml.core.CellariumAnnDataDataModule` does.
     """
 
     def reads_by_shard(self) -> bool:
         """Whether the cells are read one shard at a time."""
-        if not isinstance(self.dadc, ViewCollection):
+        if not isinstance(self.dadc, ViewCollection) or isinstance(unwrap_collection(self.dadc), RamCollection):
             return False
         return not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1)
 

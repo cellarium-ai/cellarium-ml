@@ -55,6 +55,7 @@ class ViewCollection(DistributedCollection):
         self.positions = positions
         self.var_names = source.var_names
         self.supports_prefetch = source.supports_prefetch
+        self.max_num_workers = source.max_num_workers  # a view of cells in memory cannot be read by workers either
         # cells of the view before the end of each shard of the source, without the shards that hold no view cell
         cumulative = np.searchsorted(positions, np.asarray(source.limits), side="left")
         previous = np.concatenate(([0], cumulative[:-1]))

@@ -357,9 +357,14 @@ def test_a_collection_is_written_to_gcs_with_the_manifest_last(cdata, tmp_path, 
 
 def _record_reads(monkeypatch, collection):
     """Record the cells (positions in ``collection``) of every read of it."""
-    reads = []
+    reads: list[np.ndarray] = []
     real = collection.read
-    monkeypatch.setattr(collection, "read", lambda index: reads.append(np.asarray(index)) or real(index))
+
+    def read(index):
+        reads.append(np.asarray(index))
+        return real(index)
+
+    monkeypatch.setattr(collection, "read", read)
     return reads
 
 
@@ -395,10 +400,18 @@ def test_a_view_is_loaded_one_shard_at_a_time_and_is_the_same_as_reading_it_all(
 
 def test_the_cells_of_the_next_shards_are_announced_before_they_are_read(cdata, monkeypatch):
     collection = cdata[POSITIONS].datamodule.dadc
-    events = []
+    events: list[tuple[str, int]] = []
     real_prefetch, real_read = collection.prefetch, collection.read
-    monkeypatch.setattr(collection, "prefetch", lambda index: events.append(("prefetch", int(index[0]))))
-    monkeypatch.setattr(collection, "read", lambda index: events.append(("read", int(index[0]))) or real_read(index))
+
+    def prefetch(index):
+        events.append(("prefetch", int(index[0])))
+
+    def read(index):
+        events.append(("read", int(index[0])))
+        return real_read(index)
+
+    monkeypatch.setattr(collection, "prefetch", prefetch)
+    monkeypatch.setattr(collection, "read", read)
 
     blocks = _view_collections.shard_blocks(collection, 100)
     list(_view_collections.read_blocks(collection, blocks, lookahead=1, progress=False))

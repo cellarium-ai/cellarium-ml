@@ -817,6 +817,10 @@ def _clone_datamodule(
     """A datamodule over ``dadc`` with the settings of ``datamodule`` (and the data fields it currently reads)."""
     sizes = {name: datamodule.hparams[name] for name in ("train_size", "val_size", "pred_size")}
     reset_deltacells_after_fork(dadc)
+    n_workers = datamodule.num_workers if num_workers is None else num_workers
+    limit = getattr(dadc, "max_num_workers", None)  # cells in memory cannot be read by workers
+    if limit is not None:
+        n_workers = min(n_workers, limit)
     clone = ShardChunkDataModule(
         dadc=dadc,
         batch_keys=dict(datamodule.batch_keys),
@@ -829,9 +833,10 @@ def _clone_datamodule(
         worker_seed=datamodule.worker_seed,
         test_mode=datamodule.test_mode,
         prefetch_lookahead=datamodule.prefetch_lookahead,
-        num_workers=datamodule.num_workers if num_workers is None else num_workers,
-        prefetch_factor=datamodule.prefetch_factor,
-        persistent_workers=datamodule.persistent_workers,
+        num_workers=n_workers,
+        # these are only allowed (by the DataLoader) with workers
+        prefetch_factor=datamodule.prefetch_factor if n_workers > 0 else None,
+        persistent_workers=datamodule.persistent_workers and n_workers > 0,
         pin_memory=datamodule.pin_memory,
         **sizes,
     )
