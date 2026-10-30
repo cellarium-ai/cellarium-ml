@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
 import json
 import math
 import os
@@ -922,6 +923,8 @@ class CellariumData:
     ):
         if (h5ad_paths is None) == (deltacells_uri is None):
             raise ValueError("Provide exactly one of h5ad_paths and deltacells_uri.")
+        # the arguments as they were given, for `save`
+        self._init_kwargs = copy.deepcopy({name: value for name, value in locals().items() if name != "self"})
         obs_columns = dict(obs_columns)
         if total_mrna_umis_column is not None:
             obs_columns["total_mrna_umis_n"] = (total_mrna_umis_column, to_float_tensor)
@@ -1351,6 +1354,88 @@ class CellariumData:
         for key in keys:
             values = _nullable(frame[key].reset_index(drop=True))
             self._obs_computed._put(key, values, positions, f"'{key}' of {path}", overwrite)
+
+    def save(self, path: str, overwrite: bool = False) -> None:
+        """
+        Save this data and what has been computed from it to the directory ``path``, to be opened again with
+        :meth:`load`, possibly in another session.
+
+        The cell counts are not copied: the directory holds the arguments that this data was made with (the paths of
+        the files, or the deltacells dataset), what identifies its cells, ``obs_computed``, ``obsm``, ``hvg`` and
+        ``trained_modules`` (each module as a Lightning checkpoint, with its training history). A view is saved with
+        the data it was taken from (its :attr:`root`) and the positions of its cells in it; the ``obsm``,
+        ``obs_computed``, ``hvg`` and ``trained_modules`` of the root are not saved. The fitted statistics that api
+        functions reuse are not saved either, so the first call that needs them computes them again.
+
+        The functions in ``obs_columns`` must be importable by name (defined at the top level of a module) to be saved.
+
+        Args:
+            path: A local directory, which must not exist, unless ``overwrite`` is ``True``.
+            overwrite: Replace the directory if it holds a saved session. Entries of ``obsm`` that were read from it
+                by :meth:`load` stay on disk, so save somewhere else for those (an error says so); this also applies
+                to other objects that read from it.
+
+        Raises:
+            ValueError: If something cannot be saved: ``obs_columns`` functions or the configuration of a trained
+                module that cannot be pickled, or ``obsm`` entries that are not numeric arrays.
+        """
+        from cellarium.ml.api._session import save_session
+
+        save_session(self, path, overwrite)
+
+    @classmethod
+    def load(
+        cls,
+        path: str,
+        *,
+        h5ad_paths: list[str] | None = None,
+        deltacells_uri: str | None = None,
+        deltacells_kwargs: dict[str, Any] | None = None,
+        obs_parquet_path: str | None = None,
+        obs_columns: dict[str, tuple[str, Callable]] | None = None,
+        batch_size: int | None = None,
+        datamodule_num_workers: int | None = None,
+        max_gb: float | None = None,
+    ) -> "CellariumData":
+        """
+        Open the data that :meth:`save` saved to ``path``, with its ``obs_computed``, ``obsm`` (read from the files,
+        not into memory), ``hvg`` and ``trained_modules`` (on the CPU). A saved view is loaded as a view of the data it
+        was taken from, which is :attr:`root`; views that were saved separately do not share a root.
+
+        The data is opened from where it was before. If it is not there, or is not the same data (a different number
+        of cells, or other cells at the start and end of its files), a ``ValueError`` says what is wrong. The
+        arguments below override what was saved, to load onto the same cells from somewhere else (for example the
+        files of the data in another bucket, or a deltacells dataset that :meth:`to_deltacells` made from it).
+        ``None`` keeps what was saved.
+
+        .. warning::
+            The directory holds pickled objects, so load only directories that you trust.
+
+        Args:
+            path: The directory that :meth:`save` wrote.
+            h5ad_paths: The paths of the h5ad files to read the cells from, instead of those that were saved.
+            deltacells_uri: The deltacells dataset to read the cells from, instead of the saved data.
+            deltacells_kwargs: Arguments for the deltacells dataset (for example ``cache_dir``), instead of those that
+                were saved.
+            obs_parquet_path: The obs parquet database of h5ad files (see the constructor).
+            obs_columns: The ``obs_columns`` of the constructor, instead of the saved ones.
+            batch_size: The batch size of the datamodule.
+            datamodule_num_workers: The number of dataloader workers.
+            max_gb: The memory budget (see :attr:`max_gb`).
+        """
+        from cellarium.ml.api._session import load_session
+
+        return load_session(
+            path,
+            h5ad_paths,
+            deltacells_uri,
+            deltacells_kwargs,
+            obs_parquet_path,
+            obs_columns,
+            batch_size,
+            datamodule_num_workers,
+            max_gb,
+        )
 
     def _positions_of(self, other: "CellariumData") -> np.ndarray:
         """The positions in these cells of the cells of ``other``, a view of the same root with a subset of them."""
