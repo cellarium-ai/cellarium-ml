@@ -9,11 +9,12 @@ import torch
 
 from cellarium.ml.api._obsm_storage import ObsmWriter
 from cellarium.ml.api.cellariumdata import CellariumData, _device_of
-from cellarium.ml.api.utils import resolve_device
+from cellarium.ml.api.utils import release_memory_after, resolve_device
 from cellarium.ml.models.model import PredictMixin
 from cellarium.ml.utilities.core import call_func_with_batch
 
 
+@release_memory_after
 @torch.no_grad()
 def embed(
     cdata: CellariumData,

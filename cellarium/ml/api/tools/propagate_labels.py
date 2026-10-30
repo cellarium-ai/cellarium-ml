@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 
 from cellarium.ml.api.cellariumdata import CellariumData, _per_cell_series
 from cellarium.ml.api.tools.embed import ensure_embedding
-from cellarium.ml.api.utils import resolve_device
+from cellarium.ml.api.utils import release_memory_after, resolve_device
 
 _EPSILON = 1e-6  # added to distances before they are inverted into weights
 # with method="auto", the nearest neighbors are exact if (cells to query) x (labeled cells) is at most this, for the
@@ -220,6 +220,7 @@ def _held_out_agreement(
     return float((truth == predicted).mean()), len(checked), table
 
 
+@release_memory_after
 def propagate_labels(
     cdata: CellariumData,
     labels_key: str,

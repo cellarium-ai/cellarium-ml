@@ -20,7 +20,7 @@ from cellarium.ml.api import _cnmf_plots as plots
 from cellarium.ml.api._data_transforms import OnePassRecipe, fit_or_reuse
 from cellarium.ml.api._obsm_storage import ObsmWriter
 from cellarium.ml.api.cellariumdata import CellariumData, _device_of, fit_and_register
-from cellarium.ml.api.utils import LossHistory, PreciseProgressBar, resolve_device
+from cellarium.ml.api.utils import LossHistory, PreciseProgressBar, release_memory_after, resolve_device
 from cellarium.ml.models import AmortizedOnlineNonNegativeMatrixFactorization, OnlineNonNegativeMatrixFactorization
 from cellarium.ml.models.ols import StreamingOrdinaryLeastSquares
 from cellarium.ml.transforms import Densify, DivideByScale, Filter, NormalizeTotal, ZScore
@@ -370,6 +370,7 @@ class NMFOutput:
     def _cells(self, cdata: CellariumData | None) -> CellariumData:
         return self.cdata if cdata is None else cdata
 
+    @release_memory_after
     def calculate_reconstruction_error(
         self, cdata: CellariumData | None = None, accelerator: Accelerator = "auto"
     ) -> dict[int, float]:
@@ -399,6 +400,7 @@ class NMFOutput:
         self._rec_error = rec_error
         return rec_error
 
+    @release_memory_after
     @torch.no_grad()
     def compute_loadings(
         self,
@@ -450,6 +452,7 @@ class NMFOutput:
                     writer.array[positions] = values
         cdata.obsm[key_added.format(k=k)] = writer.result
 
+    @release_memory_after
     @torch.no_grad()
     def refit_consensus_factors_zscored_tpm_all_genes(
         self,
