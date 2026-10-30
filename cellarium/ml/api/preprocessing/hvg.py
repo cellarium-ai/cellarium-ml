@@ -17,6 +17,9 @@ def highly_variable_genes(
     n_top_genes: int = 4000,
     flavor: Literal["seurat_v3", "seurat", "kotliar"] = "seurat",
     batch_key: str | None = None,
+    log1p: bool = False,
+    normalize_total: bool = True,
+    target_count: float = 1e4,
     key_added: str | None = None,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
 ) -> pd.DataFrame:
@@ -35,6 +38,9 @@ def highly_variable_genes(
             module already there under that key. Defaults to the kind of model trained: ``"hvg_seurat_v3"`` for
             ``flavor="seurat_v3"`` and ``"onepass"`` (a :class:`OnePassMeanVarStd`) for ``"seurat"`` and
             ``"kotliar"``.
+        log1p: Whether to apply log1p transformation before computing HVGs.
+        normalize_total: Whether to normalize total counts before computing HVGs.
+        target_count: The target count for normalization.
         accelerator: The accelerator to use for training the module, in ["cpu", "mps", "cuda", "auto"].
 
     NOTE: sets the :attr:`hvg` property of the datamodule with the boolean mask of highly variable genes.
@@ -76,9 +82,15 @@ def highly_variable_genes(
         assert isinstance(model, HVGSeuratV3)
         hvg_df = model._compute_hvg_df(n_top_genes=n_top_genes)
     else:
+        onepass = OnePassRecipe(
+            batch_key=batch_key, 
+            log1p=log1p, 
+            normalize_total=normalize_total, 
+            target_count=target_count,
+        )
         trained = fit_or_reuse(
             cdata,
-            OnePassRecipe(batch_key=batch_key),
+            onepass,
             accelerator,
             key_added="onepass" if key_added is None else key_added,
         )
