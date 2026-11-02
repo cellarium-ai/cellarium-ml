@@ -96,6 +96,8 @@ def _build_datamodule(
         train_size=train_size,
         num_workers=num_workers,
         prefetch_factor=2 if num_workers > 0 else None,
+        iteration_strategy="cache_efficient",
+        val_iteration_strategy="cache_efficient",
     )
 
     # makes metadata local for collections that need it (a no-op for h5ad files); Lightning does this itself when
