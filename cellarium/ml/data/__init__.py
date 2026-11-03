@@ -8,7 +8,11 @@ from cellarium.ml.data.distributed_anndata import (
     LazyAnnData,
 )
 from cellarium.ml.data.distributed_collection import DistributedCollection
-from cellarium.ml.data.distributed_deltacells import DeltaCellsBatch, DistributedDeltaCellsCollection
+from cellarium.ml.data.distributed_deltacells import (
+    DeltaCellsBatch,
+    DeltaCellsBatchCollection,
+    DistributedDeltaCellsCollection,
+)
 from cellarium.ml.data.fileio import read_h5ad_file, read_h5ad_gcs, read_h5ad_local, read_h5ad_url
 from cellarium.ml.data.pytree_dataset import PyTreeDataset
 from cellarium.ml.data.schema import AnnDataSchema
@@ -16,6 +20,7 @@ from cellarium.ml.data.schema import AnnDataSchema
 __all__ = [
     "AnnDataSchema",
     "DeltaCellsBatch",
+    "DeltaCellsBatchCollection",
     "DistributedAnnDataCollection",
     "DistributedAnnDataCollectionView",
     "DistributedCollection",

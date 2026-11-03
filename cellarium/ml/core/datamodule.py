@@ -253,15 +253,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 prefetch_lookahead=self.prefetch_lookahead,
             )
 
-    def _check_num_workers(self) -> None:
-        """Raise an error if more workers are requested than the collection can serve (see ``max_num_workers``)."""
-        max_num_workers = getattr(self.dadc, "max_num_workers", None)
-        if max_num_workers is not None and self.num_workers > max_num_workers:
-            raise ValueError(
-                f"num_workers={self.num_workers}, but {type(self.dadc).__name__} supports at most "
-                f"{max_num_workers} dataloader workers (for example, it holds the cells in the memory of this process)."
-            )
-
     def _effective_collate_fn(self) -> Callable:
         """
         The ``collate_fn`` to use for a dataloader constructed right now.
@@ -289,7 +280,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
         """Training dataloader."""
-        self._check_num_workers()
         return torch.utils.data.DataLoader(
             self.train_dataset,
             num_workers=self.num_workers,
@@ -301,7 +291,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
         """Validation dataloader."""
-        self._check_num_workers()
         return torch.utils.data.DataLoader(
             self.val_dataset,
             num_workers=self.num_workers,
@@ -313,7 +302,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def predict_dataloader(self) -> torch.utils.data.DataLoader:
         """Prediction dataloader."""
-        self._check_num_workers()
         return torch.utils.data.DataLoader(
             self.predict_dataset,
             num_workers=self.num_workers,
@@ -325,7 +313,6 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
 
     def test_dataloader(self) -> torch.utils.data.DataLoader:
         """Test dataloader."""
-        self._check_num_workers()
         return torch.utils.data.DataLoader(
             self.test_dataset,
             num_workers=self.num_workers,

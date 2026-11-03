@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from cellarium.ml import CellariumPipeline
 from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
-from cellarium.ml.api._view_collections import RamCollection, load_into_ram, unwrap_collection
+from cellarium.ml.api._view_collections import load_counts, unwrap_collection
 from cellarium.ml.api.utils import release_unused_memory
 from cellarium.ml.data import DistributedAnnDataCollection
 from cellarium.ml.models import IncrementalPCA, SingleCellVariationalInference
@@ -112,7 +112,32 @@ def _with_schema_categories(obs: pd.DataFrame, collection: Any) -> pd.DataFrame:
     return obs
 
 
-def _embed(cdata: "CellariumData", key: str, ram: RamCollection, chunk_size: int = 10_000) -> np.ndarray:
+class _CellsInMemory:
+    """
+    The counts and obs of the cells of the AnnData that is being made, as a batch of cells that the fields of the batch
+    keys read: ``X``, ``obs`` (indexed by the cell names), ``obs_names``, ``var`` and ``var_names``. Indexing with a
+    slice gives the batch of those cells.
+    """
+
+    def __init__(self, x: sp.csr_matrix, obs: pd.DataFrame, var: pd.DataFrame, var_names: Any) -> None:
+        self.X = x
+        self.obs = obs
+        self.var = var
+        self.var_names = var_names
+
+    @property
+    def n_obs(self) -> int:
+        return self.X.shape[0]
+
+    @property
+    def obs_names(self) -> pd.Index:
+        return self.obs.index
+
+    def __getitem__(self, index: slice) -> "_CellsInMemory":
+        return _CellsInMemory(self.X[index], self.obs.iloc[index], self.var, self.var_names)
+
+
+def _embed(cdata: "CellariumData", key: str, ram: _CellsInMemory, chunk_size: int = 10_000) -> np.ndarray:
     """The embedding of the cells in ``ram`` by the trained module ``key``, run over them in chunks on the CPU."""
     # `using` makes the data fields that the module needs (such as scVI's batch column) part of the batch keys
     with cdata.using(key) as trained:
@@ -232,7 +257,7 @@ def to_anndata(
 
     selected = cdata if len(positions) == n_obs else cdata[positions]
     if x is None:
-        x = load_into_ram(selected.datamodule.dadc, max_bytes).x
+        x = load_counts(selected.datamodule.dadc, max_bytes)
     if x.shape[1] != len(cdata.var):
         raise RuntimeError(f"The counts have {x.shape[1]} genes but var has {len(cdata.var)}.")
 
@@ -254,7 +279,7 @@ def to_anndata(
     obsm = {key: _obsm_value(value, positions, names) for key, value in cdata.obsm.items()}
     if embedding_keys:
         dadc = selected.datamodule.dadc
-        ram = RamCollection(x, obs, dadc.var, dadc.var_names)
+        ram = _CellsInMemory(x, obs, dadc.var, dadc.var_names)
         for key in embedding_keys:
             try:
                 obsm[f"X_{key}"] = _embed(cdata, key, ram)

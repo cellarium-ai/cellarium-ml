@@ -332,7 +332,6 @@ class ShardChunkDataModule(CellariumAnnDataDataModule):
             )
 
     def _chunk_loader(self, dataset: ShardChunkDataset) -> DataLoader:
-        self._check_num_workers()
         return make_loader(
             dataset,
             collate_fn=self._effective_collate_fn(),

@@ -33,6 +33,7 @@ from cellarium.ml.api._view_collections import (
     RamCollection,
     ViewCollection,
     available_memory_bytes,
+    dropped_obs_warning,
     load_into_ram,
     unwrap_collection,
 )
@@ -815,14 +816,13 @@ def _clone_datamodule(
     dadc: DistributedCollection,
     stage: Literal["fit", "validate", "predict", "test"],
     num_workers: int | None = None,
+    persistent_workers: bool | None = None,
 ) -> CellariumAnnDataDataModule:
     """A datamodule over ``dadc`` with the settings of ``datamodule`` (and the data fields it currently reads)."""
     sizes = {name: datamodule.hparams[name] for name in ("train_size", "val_size", "pred_size")}
     reset_deltacells_after_fork(dadc)
     n_workers = datamodule.num_workers if num_workers is None else num_workers
-    limit = getattr(dadc, "max_num_workers", None)  # cells in memory cannot be read by workers
-    if limit is not None:
-        n_workers = min(n_workers, limit)
+    keep_workers = datamodule.persistent_workers if persistent_workers is None else persistent_workers
     clone = ShardChunkDataModule(
         dadc=dadc,
         batch_keys=dict(datamodule.batch_keys),
@@ -838,7 +838,7 @@ def _clone_datamodule(
         num_workers=n_workers,
         # these are only allowed (by the DataLoader) with workers
         prefetch_factor=datamodule.prefetch_factor if n_workers > 0 else None,
-        persistent_workers=datamodule.persistent_workers and n_workers > 0,
+        persistent_workers=keep_workers and n_workers > 0,
         pin_memory=datamodule.pin_memory,
         **sizes,
     )
@@ -1124,7 +1124,7 @@ class CellariumData:
             return np.arange(self.n_obs, dtype=np.int64)
         return self._root_indices.copy()
 
-    def to_ram(self, max_gb: float | None = None) -> "CellariumDataView":
+    def to_ram(self, max_gb: float | None = None, cache_dir: str | None = None) -> "CellariumDataView":
         """
         Read these cells into memory, and return a :class:`CellariumDataView` of them that reads from there. This is
         **memory-heavy**: the counts take about 8 bytes per nonzero (several GB for a few hundred thousand cells), plus
@@ -1135,22 +1135,40 @@ class CellariumData:
         data that is a pass over all of it). The memory needed is estimated from a sample first; nothing is loaded if
         it would exceed ``max_gb``, and the memory in use is checked while loading.
 
+        The cells are written to files in a directory of their own in the deltacells cache directory, and read from
+        there through the memory of the operating system, which keeps the files in memory (so they need as much free
+        disk space as they take memory, and are not held by this process: the dataloader workers all read the same
+        memory). The directory is deleted when the view is garbage collected or the program ends. The obs columns are
+        stored as in a deltacells dataset (see :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`): the
+        categories of categorical columns are strings. A column that is not categorical, numeric, bool or string cannot
+        be stored, and is left out with a warning (it stays in :attr:`obs`).
+
         The returned view has the same cells (and root indices) as these, so ``update_from`` works between them, and
         starts with copies of this data's ``obsm`` and ``obs_computed`` but with no trained modules, as any view does.
-        Its datamodule uses no dataloader workers (``num_workers=0``), and cannot: the cells live in this process.
-        Views of it read from the same memory. Calling this on data that is already in memory returns it as it is.
+        Its datamodule has the dataloader settings of this one, with ``persistent_workers`` on (a worker process is
+        started once and not at every epoch, which is slow where processes are spawned, as on macOS). Views of it read
+        from the same memory. Calling this on data that is already in memory returns it as it is.
 
         Args:
             max_gb: The most memory (in GiB) to use. By default the :attr:`max_gb` of this data, which by default is
                 half of the memory that is available, taking any container limit into account.
+            cache_dir: The deltacells cache directory to make the directory of the cells in (``$DELTACELLS_CACHE`` or
+                ``~/.cache/deltacells`` by default, or the ``cache_dir`` of this data's ``deltacells_kwargs``).
 
         Raises:
             MemoryError: If the cells do not fit.
+            OSError: If there is not enough free disk space in the cache directory.
         """
         if isinstance(unwrap_collection(self._datamodule.dadc), RamCollection):
             return self  # type: ignore[return-value]
-        ram = load_into_ram(self._datamodule.dadc, self._max_bytes(max_gb))
-        return CellariumDataView(self, np.arange(self.n_obs, dtype=np.int64), collection=ram, num_workers=0)
+        ram = load_into_ram(
+            self._datamodule.dadc,
+            self._max_bytes(max_gb),
+            cache_dir=cache_dir or self._deltacells_kwargs.get("cache_dir"),
+        )
+        if ram.dropped_obs:
+            warnings.warn(dropped_obs_warning(ram.dropped_obs), stacklevel=2)
+        return CellariumDataView(self, np.arange(self.n_obs, dtype=np.int64), collection=ram, persistent_workers=True)
 
     def to_deltacells(
         self,
@@ -1746,7 +1764,6 @@ class CellariumData:
         """
         self._warn_if_read_amplified("This pass over the cells")
         datamodule = self._datamodule
-        datamodule._check_num_workers()
         batch_size = datamodule.batch_size if batch_size is None else batch_size
         n_obs = self.n_obs
 
@@ -1881,6 +1898,7 @@ class CellariumDataView(CellariumData):
         collection: The collection that the view's datamodule reads, if not a view of the parent's. It must hold the
             cells ``positions`` of ``parent``, in order (used when the cells have been copied somewhere faster).
         num_workers: Number of dataloader workers, if not the parent's.
+        persistent_workers: Whether the dataloader workers stay alive between epochs, if not as the parent's.
     """
 
     def __init__(
@@ -1890,6 +1908,7 @@ class CellariumDataView(CellariumData):
         *,
         collection: DistributedCollection | None = None,
         num_workers: int | None = None,
+        persistent_workers: bool | None = None,
     ):
         positions = np.asarray(positions, dtype=np.int64)
         if len(positions) == 0:
@@ -1908,7 +1927,9 @@ class CellariumDataView(CellariumData):
         self._stage = parent._stage
         self._deltacells_uri = parent._deltacells_uri
         self._deltacells_kwargs = dict(parent._deltacells_kwargs)
-        self._datamodule = _clone_datamodule(parent.datamodule, collection, self._stage, num_workers)
+        self._datamodule = _clone_datamodule(
+            parent.datamodule, collection, self._stage, num_workers, persistent_workers
+        )
         self._obs = ViewLazyObs(self._root.obs, self._root_indices)  # type: ignore[arg-type]
         self._var = parent.var.copy()
         self.max_gb = parent.max_gb

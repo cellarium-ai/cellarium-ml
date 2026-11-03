@@ -113,6 +113,12 @@ def deltacells_kwargs(tmp_path) -> dict:
     return {"cache_dir": str(tmp_path / "deltacells_cache")}
 
 
+@pytest.fixture(autouse=True)
+def default_deltacells_cache(tmp_path, monkeypatch) -> None:
+    """Keeps what is cached by default (the cells that ``to_ram`` keeps in memory) out of the home directory."""
+    monkeypatch.setenv("DELTACELLS_CACHE", str(tmp_path / "default_cache"))
+
+
 @pytest.fixture
 def h5ad_cdata(make_h5ad_files) -> CellariumData:
     """Like `cdata`, for the tests of what is specific to h5ad files."""
