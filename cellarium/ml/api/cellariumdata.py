@@ -97,6 +97,7 @@ def _build_datamodule(
         train_size=train_size,
         num_workers=num_workers,
         prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
         iteration_strategy="cache_efficient",
         val_iteration_strategy="cache_efficient",
     )
