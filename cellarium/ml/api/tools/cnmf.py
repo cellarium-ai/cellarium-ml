@@ -24,10 +24,15 @@ from cellarium.ml.api.utils import LossHistory, PreciseProgressBar, release_memo
 from cellarium.ml.models import AmortizedOnlineNonNegativeMatrixFactorization, OnlineNonNegativeMatrixFactorization
 from cellarium.ml.models.ols import StreamingOrdinaryLeastSquares
 from cellarium.ml.transforms import Densify, DivideByScale, Filter, NormalizeTotal, ZScore
+from cellarium.ml.utilities.data import sparse_tensor_to_scipy_csr, to_torch_sparse_coo, to_torch_sparse_csr
 
 _FORMAT_VERSION = 1
 _KOTLIAR_DENSITY_THRESHOLD = 0.5
 _KOTLIAR_LOCAL_NEIGHBORHOOD_SIZE = 0.3
+_BYTES_PER_VALUE = 4  # float32
+# the dense Z-scored counts of a chunk of cells are alive in about this many copies at once: as densified, centered,
+# scaled, and the previous chunk until it is replaced
+_DENSE_COPIES = 4
 
 Accelerator = Literal["cpu", "mps", "cuda", "auto"]
 
@@ -297,7 +302,8 @@ class NMFOutput:
             ValueError: If a parameter is out of range, or the parameters leave too few replicate factors to cluster
                 (see :meth:`plot_density_histograms`).
         """
-        for k in self._k_list(k_values):
+        ks = self._k_list(k_values)
+        for k in tqdm(ks, desc="Computing consensus", unit="k", disable=len(ks) < 2):
             try:
                 self._consensus[k] = cc.consensus_factors(
                     self.model.factors_dict[k], density_threshold, local_neighborhood_size
@@ -463,13 +469,15 @@ class NMFOutput:
         var_names_g: np.ndarray | None = None,
         cdata: CellariumData | None = None,
         accelerator: Accelerator = "auto",
+        max_device_gb: float = 2.0,
     ) -> dict[str, torch.Tensor | np.ndarray]:
         """
         Refit the consensus factors using all genes, after TPM normalization, and Z-scoring, in a pass over the cells.
 
         For each cell, the loadings of the consensus programs are inferred as in :meth:`compute_loadings` (from the
         genes and the preprocessing of the model), and then the TPM-normalized, Z-scored expression of all genes is
-        regressed on them by streaming ordinary least squares.
+        regressed on them by streaming ordinary least squares. The expression of all genes is dense, so it is
+        processed a chunk of cells at a time, as many as fit in ``max_device_gb``, whatever the batch size.
 
         Args:
             k: The run identifier, i.e. the number of factors to use from self.consensus to refit.
@@ -481,10 +489,16 @@ class NMFOutput:
             var_names_g: The names of the genes for Z-scoring.
             cdata: The cells to read, by default :attr:`cdata`.
             accelerator: The accelerator for the pass, in ["cpu", "mps", "cuda", "auto"].
+            max_device_gb: The most memory (in GiB) on the accelerator for the dense TPM-normalized, Z-scored counts of
+                all genes. The pass holds about four copies of a chunk of cells at a time (as read, centered, scaled,
+                and the previous chunk until it is replaced), so this sets the chunk size, which is at least one
+                cell. The result does not depend on it.
 
         Returns:
             A dictionary with the refitted factors ``"factors_kg"`` and the gene names ``"var_names_g"``.
         """
+        if max_device_gb <= 0:
+            raise ValueError(f"max_device_gb must be positive, got {max_device_gb}.")
         self._require_consensus(k)
         cdata = self._cells(cdata)
         device = resolve_device(accelerator)
@@ -522,19 +536,32 @@ class NMFOutput:
                     normalize=normalize_loadings,
                 )
 
-                # the batch used for refitting (all genes, TPM normalized, Z-scored globally - different from training)
-                target_batch = zscore_pipeline(move_data_to_device(tpm_pipeline(dict(raw_batch)), device))
+                # the batch used for refitting (all genes, TPM normalized, Z-scored globally - different from training).
+                # It is dense, so only a chunk of the cells at a time: the sums of the fit are additive over cells
+                tpm_batch = tpm_pipeline(dict(raw_batch))
+                tpm_ng = tpm_batch["x_ng"]
+                n_cells, n_genes = tpm_ng.shape
+                chunk_size = max(1, int(max_device_gb * 2**30) // (_DENSE_COPIES * _BYTES_PER_VALUE * n_genes))
+                as_sparse = to_torch_sparse_coo if tpm_ng.layout == torch.sparse_coo else to_torch_sparse_csr
+                tpm_csr = sparse_tensor_to_scipy_csr(tpm_ng)
+                for start in range(0, n_cells, chunk_size):
+                    chunk = {
+                        "x_ng": as_sparse(tpm_csr[start : start + chunk_size]),
+                        "var_names_g": tpm_batch["var_names_g"],
+                    }
+                    target_batch = zscore_pipeline(move_data_to_device(chunk, device))
 
-                # incremental OLS fit update
-                if ols_solver is None:
-                    ols_solver = StreamingOrdinaryLeastSquares(
-                        var_names_g=np.arange(k).astype(str),
-                        n_targets=len(target_batch["var_names_g"]),
-                        univariate=False,
-                        ridge_penalty=0.0,
-                    ).to(device)
-                ols_solver.update(x_ng=loadings_nk, y_nk=target_batch["x_ng"])
-                target_var_names_g = target_batch["var_names_g"]
+                    # incremental OLS fit update
+                    if ols_solver is None:
+                        ols_solver = StreamingOrdinaryLeastSquares(
+                            var_names_g=np.arange(k).astype(str),
+                            n_targets=len(target_batch["var_names_g"]),
+                            univariate=False,
+                            ridge_penalty=0.0,
+                        ).to(device)
+                    ols_solver.update(x_ng=loadings_nk[start : start + chunk_size], y_nk=target_batch["x_ng"])
+                    target_var_names_g = target_batch["var_names_g"]
+                    del chunk, target_batch  # before the next chunk is made, not after it
 
         assert ols_solver is not None and target_var_names_g is not None, "predict_batches yielded no batches"
         factors_kg = ols_solver.solve()
@@ -725,6 +752,10 @@ def cnmf(
         A :class:`CellariumModule` instance containing the trained model is stored, along with the training history,
         as ``cdata.trained_modules[key_added]``. If training is interrupted (e.g. ``KeyboardInterrupt``), the partially
         trained module is stored the same way, marked ``complete=False``. Training uses a single device.
+
+        When training completes, the sufficient statistics that only training uses (``A_{k}_rkk`` and ``B_{k}_rkg``,
+        the latter as large as the factors) are released from the stored module, which then cannot be trained further.
+        An interrupted module keeps them.
     """
     ks = [k_values] if isinstance(k_values, int) else list(k_values)
     if not ks or any(not isinstance(k, (int, np.integer)) or k < 1 for k in ks) or len(set(ks)) != len(ks):
@@ -784,5 +815,7 @@ def cnmf(
         enable_checkpointing=False,
     )
     trained = fit_and_register(cdata, trainer, module, key_added, config=config, loss_history=loss_history)
+    # only the factors are needed from here on; the sufficient statistics of training are as large as the factors
+    trained.module.model.free_training_state()
 
     return NMFOutput(trained.module, cdata)

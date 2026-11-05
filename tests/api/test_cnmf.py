@@ -98,6 +98,28 @@ def test_cnmf_trains_registers_and_returns_an_output_bound_to_the_data(trained):
     assert list(output.model.var_names_g) == hvg_names(cdata)
 
 
+def test_cnmf_releases_the_training_state_of_a_complete_run(trained):
+    cdata, output = trained
+    for k in K_VALUES:
+        assert getattr(output.model, f"A_{k}_rkk") is None
+        assert getattr(output.model, f"B_{k}_rkg") is None
+        assert output.model.factors_dict[k].shape == (N_REPLICATES, k, N_HVG)
+
+
+def test_a_saved_session_holds_the_factors_but_not_the_training_state(trained, tmp_path):
+    cdata, output = trained
+    cdata.save(str(tmp_path / "session"))
+    loaded = CellariumData.load(str(tmp_path / "session"))
+
+    model = loaded.trained_modules["cnmf"].module.model
+    for k in K_VALUES:
+        assert getattr(model, f"A_{k}_rkk") is None and getattr(model, f"B_{k}_rkg") is None
+        assert torch.equal(model.factors_dict[k], output.model.factors_dict[k].cpu())
+    state_dict_keys = loaded.trained_modules["cnmf"].module.state_dict().keys()
+    assert not any(".A_" in key or ".B_" in key for key in state_dict_keys)
+    NMFOutput.from_cdata(loaded).compute_consensus_factors(k_values=2, density_threshold=1.0)  # usable as it is
+
+
 def test_cnmf_preprocesses_the_counts_like_cnmf(trained):
     """The HVGs on the cpu, then dense counts divided by the gene standard deviations: no normalization."""
     cdata, output = trained
@@ -201,6 +223,14 @@ def test_compute_consensus_factors_does_not_touch_the_global_random_state(output
     torch.manual_seed(123)
     output.compute_consensus_factors(density_threshold=1.0)
     assert torch.equal(torch.rand(1), expected)
+
+
+def test_consensus_shows_progress_over_k_only_for_several_k(output, capsys):
+    output.compute_consensus_factors(k_values=2, density_threshold=1.0)
+    assert "Computing consensus" not in capsys.readouterr().err
+
+    output.compute_consensus_factors(density_threshold=1.0)
+    assert "Computing consensus" in capsys.readouterr().err
 
 
 def test_computing_a_consensus_forgets_the_reconstruction_error(output):
@@ -365,6 +395,23 @@ def test_refit_matches_one_big_batch(output, cdata):
     assert result["factors_kg"].shape == (2, N_GENES)
     assert list(result["var_names_g"]) == list(cdata.var.index)  # all genes, not only the HVGs
     assert torch.allclose(result["factors_kg"], expected, atol=1e-5, rtol=1e-4)
+
+
+def test_refit_does_not_depend_on_the_chunks_it_works_in(output, cdata):
+    output.compute_consensus_factors(k_values=2, density_threshold=1.0)
+    mean_g, std_g, var_names_g = _all_gene_tpm_stats(cdata)
+    kwargs = dict(mean_g=mean_g, std_g=std_g, var_names_g=var_names_g, accelerator="cpu")
+
+    whole = output.refit_consensus_factors_zscored_tpm_all_genes(2, **kwargs)
+    one_cell_at_a_time = output.refit_consensus_factors_zscored_tpm_all_genes(2, max_device_gb=1e-12, **kwargs)
+
+    assert torch.allclose(one_cell_at_a_time["factors_kg"], whole["factors_kg"], atol=1e-5, rtol=1e-4)
+
+
+def test_refit_needs_a_positive_memory_budget(output):
+    output.compute_consensus_factors(k_values=2, density_threshold=1.0)
+    with pytest.raises(ValueError, match="max_device_gb"):
+        output.refit_consensus_factors_zscored_tpm_all_genes(2, max_device_gb=0, accelerator="cpu")
 
 
 def test_refit_computes_the_tpm_statistics_by_default(output, cdata):

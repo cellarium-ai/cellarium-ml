@@ -5,7 +5,9 @@ import copy
 import json
 import math
 import os
+import signal
 import tempfile
+import traceback
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -38,7 +40,7 @@ from cellarium.ml.api._view_collections import (
     unwrap_collection,
 )
 from cellarium.ml.api.deltacells_store import write_collection_to_deltacells
-from cellarium.ml.api.utils import LossHistory, get_h5ad_files_limits, write_obs_parquet
+from cellarium.ml.api.utils import LossHistory, get_h5ad_files_limits, release_unused_memory, write_obs_parquet
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     DistributedCollection,
@@ -417,6 +419,9 @@ def fit_and_register(
     run. If training is interrupted, the partially trained module is stored the same way, marked ``complete=False``,
     before the interruption propagates. With ``key=None`` nothing is stored in ``cdata.trained_modules``.
 
+    The memory that the fit used on the accelerator is released when it ends, whether it completed or was interrupted
+    (see :func:`_clean_up_after_interrupt`).
+
     Returns:
         The :class:`TrainedModule` of the completed fit.
     """
@@ -439,15 +444,50 @@ def fit_and_register(
         return trained
 
     cdata._warn_if_read_amplified("Training the model")
+    sigint_handler = signal.getsignal(signal.SIGINT)
     try:
         trainer.fit(module, cdata.datamodule)
-    except (KeyboardInterrupt, SystemExit, NameError):
+    except (KeyboardInterrupt, SystemExit, NameError) as error:
         # Lightning turns a KeyboardInterrupt into a SystemExit after shutting down gracefully
         # and sometimes throws a NameError if something goes wrong during shutdown
         if trainer.global_step > 0:
             register(complete=False)
+        _clean_up_after_interrupt(error, module, sigint_handler)
         raise
-    return register(complete=True)
+    trained = register(complete=True)
+    release_unused_memory()
+    return trained
+
+
+def _clean_up_after_interrupt(error: BaseException, module: CellariumModule, sigint_handler: Any) -> None:
+    """
+    Undo what an interrupted fit leaves behind, before the interruption propagates:
+
+    * The frames of the traceback (the fit loop's, with the batch and the solver's intermediates on the accelerator)
+      stay alive for as long as the exception does, which in a notebook is until the next exception. Their locals are
+      cleared so that the memory can be released now. The exception chain is followed because Lightning raises its
+      ``SystemExit`` from inside the handler of the ``KeyboardInterrupt``, whose traceback is the fit loop's.
+    * The module is moved to the cpu (Lightning does that in its teardown, which does not always get that far).
+    * Lightning leaves SIGINT ignored after a ``KeyboardInterrupt``, so a later interrupt of the kernel would do
+      nothing: the handler that was there before the fit is put back.
+    """
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__traceback__ is not None:
+            traceback.clear_frames(current.__traceback__)
+        pending.extend(e for e in (current.__context__, current.__cause__) if e is not None)
+    module.cpu()
+    if sigint_handler is not None:
+        try:
+            signal.signal(signal.SIGINT, sigint_handler)
+        except ValueError:  # not the main thread: signal handlers can only be set there
+            pass
+    release_unused_memory()
 
 
 class FitCache(dict[Hashable, TrainedModule]):

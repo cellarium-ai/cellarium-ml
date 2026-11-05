@@ -5,7 +5,7 @@ import math
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
-from typing import Literal
+from typing import Any, Literal
 
 import lightning.pytorch as pl
 import numpy as np
@@ -701,6 +701,40 @@ class NonNegativeMatrixFactorization(ABC, CellariumModel):
         """
         pass
 
+    def _training_buffer_names(self) -> list[str]:
+        """
+        The names of the buffers that only training uses (the sufficient statistics of the online algorithm, say), as
+        opposed to the factors. By default there are none; an implementation that has some returns them, for
+        :meth:`free_training_state`.
+        """
+        return []
+
+    def free_training_state(self) -> None:
+        """
+        Release the buffers that only training uses (see :meth:`_training_buffer_names`), keeping the factors, which
+        are all that :meth:`infer_loadings` and :meth:`reconstruction_error` and the consensus need. For the online
+        algorithms this about halves what the model holds in memory and writes to a checkpoint. The model cannot be
+        trained further afterwards: it raises when training starts. Does nothing for an implementation with no such
+        buffers.
+        """
+        for name in self._training_buffer_names():
+            setattr(self, name, None)  # None keeps the name of a buffer but leaves it out of the state dict
+
+    def _check_training_state_present(self) -> None:
+        """For ``on_train_start`` of an implementation: refuse to train a model whose training state was freed."""
+        if any(getattr(self, name) is None for name in self._training_buffer_names()):
+            raise RuntimeError(
+                "The training state of this model was released by free_training_state(): train a new model."
+            )
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        # the checkpoint of a model whose training state was freed has no such buffers, so those of the model that was
+        # just built are dropped as well, for the state dicts to match
+        state_dict = checkpoint["state_dict"]
+        for name in self._training_buffer_names():
+            if not any(key == name or key.endswith(f".{name}") for key in state_dict):
+                setattr(self, name, None)
+
     @torch.no_grad()
     def infer_loadings(
         self,
@@ -902,6 +936,10 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         """Return the learned factors for each k value."""
         return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
 
+    def _training_buffer_names(self) -> list[str]:
+        # the stored loadings of the "hals" solver are left out: they are a result of the run, not scratch
+        return [name for k in self.k_values for name in (f"A_{k}_rkk", f"B_{k}_rkg")]
+
     def online_dictionary_update(self, x_ng: torch.Tensor, k: int, minibatch_indices_n: torch.Tensor | None) -> None:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
@@ -1031,6 +1069,7 @@ class OnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorization):
         self._cells_seen_in_epoch += x_ng.shape[0]
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
+        self._check_training_state_present()
         if trainer.world_size > 1:
             assert isinstance(trainer.strategy, DDPStrategy), (
                 "OnlineNonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."

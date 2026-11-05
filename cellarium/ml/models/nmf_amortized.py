@@ -214,6 +214,9 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         """Return the learned factors for each k value."""
         return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
 
+    def _training_buffer_names(self) -> list[str]:
+        return [name for k in self.k_values for name in (f"A_{k}_rkk", f"B_{k}_rkg")]
+
     def online_dictionary_update(self, x_ng: torch.Tensor, k: int, n_iterations: int = 100) -> dict[str, torch.Tensor]:
         """
         Algorithm 1 from Mairal et al. [1] for online dictionary learning.
@@ -345,6 +348,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         return {"loss": loss}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
+        self._check_training_state_present()
         if trainer.world_size > 1:
             assert isinstance(trainer.strategy, DDPStrategy), (
                 "OnlineNonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
