@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import copy
+import inspect
 import json
 import math
 import os
@@ -23,6 +24,7 @@ import pyarrow.dataset as ds
 import scipy.sparse
 import torch
 from lightning.fabric.utilities.apply_func import move_data_to_device
+from lightning.fabric.utilities.cloud_io import _load as load_checkpoint_file
 from tqdm.auto import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
@@ -47,6 +49,7 @@ from cellarium.ml.data import (
     DistributedDeltaCellsCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
+from cellarium.ml.models.model import PredictMixin
 from cellarium.ml.utilities.core import FunctionComposer
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
 
@@ -402,6 +405,53 @@ class TrainedModulesMapping(dict[str, TrainedModule]):
         if not isinstance(value, TrainedModule):
             raise TypeError(f"trained_modules['{key}'] must be a TrainedModule, got {type(value).__name__}")
         super().__setitem__(key, value)
+
+
+def _data_fields_used(module: CellariumModule) -> tuple[set[str], set[str]]:
+    """
+    The names of the data fields that the transforms and the model of ``module`` take from the batch, and the names
+    among them that are required (have no default). These are the annotated arguments of the ``forward`` of the
+    transforms and the ``predict`` of the model (the arguments that
+    :func:`~cellarium.ml.utilities.core.call_func_with_batch` passes), or of the ``forward`` of a model that cannot
+    predict, which is left out of the required names since it is not what runs to make predictions. A ``**kwargs``
+    takes no field in particular (transforms have it to ignore the fields they do not use), so it adds none; and a
+    transform that is itself a :class:`~cellarium.ml.core.CellariumModule` adds the fields that it takes, none of
+    them required.
+    """
+    hparams = module.hparams
+    model = hparams["model"]
+    transforms = [*(hparams["cpu_transforms"] or []), *(hparams["transforms"] or [])]
+    funcs = [transform.forward for transform in transforms]
+    funcs.append(model.predict if isinstance(model, PredictMixin) else model.forward)
+
+    names: set[str] = set()
+    required: set[str] = set()
+    for i, func in enumerate(funcs):
+        inner = getattr(func, "__self__", None)
+        if isinstance(inner, CellariumModule):
+            names |= _data_fields_used(inner)[0]
+            continue
+        names |= {name for name in func.__annotations__ if name not in ("return", "kwargs")}
+        if i < len(funcs) - 1 or isinstance(model, PredictMixin):
+            required |= {
+                name
+                for name, parameter in inspect.signature(func).parameters.items()
+                if parameter.default is parameter.empty
+                and parameter.kind in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+            }
+    return names, required
+
+
+def _epochs_completed(checkpoint: dict[str, Any]) -> int:
+    """
+    The number of epochs of training that a Lightning ``checkpoint`` has completed (0 if it does not say). This is
+    the epochs processed, not the ``"epoch"`` of the checkpoint (the epoch in progress, counted from 0), nor the epochs
+    completed, which Lightning has not yet counted in the checkpoint that it saves when training ends.
+    """
+    try:
+        return int(checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["processed"])
+    except (KeyError, TypeError):
+        return 0
 
 
 def fit_and_register(
@@ -1731,6 +1781,83 @@ class CellariumData:
         """The latest module trained by each api function (e.g. ``"scvi"``), with its training history."""
         return self._trained_modules
 
+    def load_module_from_ckpt(
+        self,
+        path: str,
+        key: str,
+        batch_keys: dict[str, AnnDataField] | None = None,
+    ) -> None:
+        """
+        Load a module that was trained elsewhere, for example with the ``cellarium-ml`` command line (Lightning CLI),
+        from its checkpoint, and store it as ``cdata.trained_modules[key]``, replacing the module that is there. It can
+        then be used as if it had been trained with the api functions, for example ``cml.tl.embed(cdata, key)``. The
+        module is loaded onto the cpu. Its genes must be those of the data, which the model checks when it runs.
+
+        The record of the module has no training history (checkpoints do not have it), ``config={"source": path}``,
+        the epochs of training that the checkpoint has completed as ``n_epochs``, and ``complete=True``.
+
+        If the module needs data fields beyond those of ``cdata.datamodule`` (for example the ``"batch_index_n"`` of
+        scVI), they are taken from the checkpoint, which records the fields that the module was trained with. Only
+        the fields that the transforms and the model of the module take are kept. Use ``batch_keys`` to say where to
+        find them in this data instead, for example if the obs column has another name.
+
+        .. warning::
+            Checkpoints hold pickled objects, so load only checkpoints that you trust.
+
+        Example:
+            >>> cdata.load_module_from_ckpt("gs://bucket/scvi/checkpoints/epoch=9-step=500.ckpt", "scvi")
+            >>> cml.tl.embed(cdata, "scvi")
+
+        Args:
+            path: The checkpoint file, local or remote (any path that Lightning can read, such as ``gs://...``).
+            key: The key in ``trained_modules`` to store the module under, such as ``"pca"`` or ``"scvi"`` (the
+                keys that api functions use, which other api functions look for).
+            batch_keys: The data fields that the module needs beyond those of ``cdata.datamodule``, replacing those
+                that the checkpoint records. ``{}`` for none.
+
+        Raises:
+            ValueError: If a field that the checkpoint records needs an obs column that this data does not have.
+        """
+        module = CellariumModule.load_from_checkpoint(path, map_location="cpu")
+        checkpoint = load_checkpoint_file(path, map_location="cpu", weights_only=False)
+
+        if batch_keys is None:
+            used, _ = _data_fields_used(module)
+            trained_with = (checkpoint.get("datamodule_hyper_parameters") or {}).get("batch_keys") or {}
+            batch_keys = {
+                name: field
+                for name, field in trained_with.items()
+                if isinstance(field, AnnDataField) and name not in self._datamodule.batch_keys and name in used
+            }
+            self._check_obs_columns_of(batch_keys, path)
+
+        self._trained_modules[key] = TrainedModule(
+            module=module,
+            config={"source": path},
+            n_epochs=_epochs_completed(checkpoint),
+            complete=True,
+            batch_keys=dict(batch_keys),
+        )
+
+    def _check_obs_columns_of(self, batch_keys: dict[str, AnnDataField], path: str) -> None:
+        """Raise a ``ValueError`` if a field in ``batch_keys`` reads an obs column that this data does not have."""
+        columns: set[str] | None = None
+        for name, adfield in batch_keys.items():
+            if adfield.attr != "obs" or adfield.key is None:
+                continue
+            if columns is None:
+                columns = set(self.obs.columns)
+            wanted = adfield.key if isinstance(adfield.key, list) else [adfield.key]
+            absent = [column for column in wanted if column not in columns]
+            if absent:
+                raise ValueError(
+                    f"The module in {path} was trained with the data field '{name}', which is read from the obs "
+                    f"column(s) {absent} that this data does not have. Pass batch_keys to say where to find it in this "
+                    f"data, for example batch_keys={{'{name}': AnnDataField(attr='obs', key=..., convert_fn=...)}} "
+                    "(with AnnDataField from cellarium.ml.utilities.data), or batch_keys={} to run the module without "
+                    "it (which is only right if the module can do without it)."
+                )
+
     @contextmanager
     def using(self, key: str) -> Iterator[TrainedModule]:
         """
@@ -1744,7 +1871,9 @@ class CellariumData:
             ...     ...  # code that runs trained.module over cdata.datamodule
 
         Raises:
-            ValueError: If there is no trained module under ``key``.
+            ValueError: If there is no trained module under ``key``, or if the module needs data fields that neither
+                ``cdata.datamodule`` nor the ``batch_keys`` of the module provide (this happens for a module loaded
+                with :meth:`load_module_from_ckpt` that was trained with fields that are not in its checkpoint).
         """
         if key not in self._trained_modules:
             available = list(self._trained_modules)
@@ -1755,6 +1884,18 @@ class CellariumData:
                 "which store them here."
             )
         trained = self._trained_modules[key]
+        _, required = _data_fields_used(trained.module)
+        missing = sorted(required - set(self._datamodule.batch_keys) - set(trained.batch_keys))
+        if missing:
+            source = trained.config.get("source")
+            raise ValueError(
+                f"The module '{key}' needs the data fields {missing}, which cdata.datamodule does not provide "
+                f"(it provides {sorted(self._datamodule.batch_keys)}) and the batch_keys of the module do not include. "
+                "Load the module again, saying where to find them in the data, for example "
+                f"cdata.load_module_from_ckpt({'path' if source is None else repr(source)}, '{key}', "
+                f"batch_keys={{{', '.join(f'{name!r}: AnnDataField(attr=..., key=...)' for name in missing)}}}), "
+                "with AnnDataField from cellarium.ml.utilities.data."
+            )
         if not trained.batch_keys:
             yield trained  # nothing extra needed (e.g. PCA), so leave the datamodule untouched
             return

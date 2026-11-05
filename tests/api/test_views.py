@@ -7,11 +7,13 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
+from cellarium.ml import CellariumModule
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
 from cellarium.ml.api._view_collections import ViewCollection, unwrap_collection
 from cellarium.ml.api.cellariumdata import CellariumData, CellariumDataView, TrainedModule
 from cellarium.ml.api.tools import pca
 from cellarium.ml.data import DistributedAnnDataCollection
+from cellarium.ml.models import OnePassMeanVarStd
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
 
 # the `cdata` fixture (tests/api/conftest.py): 40 cells in two h5ad files of 20, as h5ad files or as a deltacells
@@ -399,7 +401,8 @@ def test_the_repr_of_a_view_says_what_it_is(cdata):
 
 
 def test_parent_modules_are_only_available_through_explicit_assignment(cdata):
-    cdata.trained_modules["mod"] = TrainedModule(module=None)  # type: ignore[arg-type]
+    module = CellariumModule(model=OnePassMeanVarStd(var_names_g=np.array(["gene0"]), output_path=None))
+    cdata.trained_modules["mod"] = TrainedModule(module=module)
     view = cdata[:10]
     with pytest.raises(ValueError, match="No trained module 'mod'"):
         with view.using("mod"):
