@@ -29,6 +29,17 @@ from cellarium.ml.utilities.data import collate_fn, sparse_tensor_to_scipy_csr
 from cellarium.ml.utilities.testing import assert_arrays_equal, assert_columns_and_array_lengths_equal
 
 
+class _PredictMode(torch.nn.Module):
+    """
+    Puts the batch in predict mode (``_predict_mode``, as :meth:`CellariumPipeline.predict` does), so that the
+    transforms after it that drop cells (:class:`~cellarium.ml.transforms.CellFilter`) are no-ops. It is the first of
+    the ``cpu_transforms`` of the sketch module, which the dataloader runs outside of any pipeline's predict.
+    """
+
+    def forward(self, **kwargs: Any) -> dict[str, bool]:
+        return {"_predict_mode": True}
+
+
 class RandomMatrixProjection(CellariumModel, PredictMixin):
     """
     Embeds ``x_ng`` via a fixed, untrained random matrix projection (i.e. a linear layer that is
@@ -123,6 +134,8 @@ def _batch_embedder(module: CellariumModule, device: torch.device) -> Iterator[C
     @torch.no_grad()
     def embed_batch(batch: dict[str, Any]) -> np.ndarray:
         batch = dict(batch)  # the transforms put their results in the dictionary: not in the caller's
+        # this is inference: every cell gets an embedding, so transforms that drop cells (CellFilter) are no-ops
+        batch["_predict_mode"] = True
         if len(module.cpu_transforms) > 0:
             batch = module.cpu_transforms(batch)
         batch = module.transforms(move_data_to_device(batch, device))
@@ -287,8 +300,13 @@ def _geometric_sketch(
     # two cells: a coarsening event leaves between target_voxels / 2 and target_voxels voxels (more than
     # target_n_cells), and the model brings the sketch to exactly target_n_cells at the end by coarsening
     # a copy of the grid a little further, as in the geometric sketching paper.
+    # Every cell is in play for the sketch, as every cell gets an embedding: this is inference, so the transforms that
+    # drop cells are off. (`embedding_on_accelerator` is a module, whose forward is its pipeline's predict.)
+    cpu_transforms = list(embedding_module.cpu_transforms)
+    if len(cpu_transforms) > 0:
+        cpu_transforms.insert(0, _PredictMode())
     module = CellariumModule(
-        cpu_transforms=list(embedding_module.cpu_transforms),
+        cpu_transforms=cpu_transforms,
         transforms=[embedding_on_accelerator],
         model=StreamingPlaidGeometricSketch(
             var_names_g=var_names_g,
@@ -347,10 +365,7 @@ def _geometric_sketch(
                     writer = stack.enter_context(
                         ObsmWriter(cdata.n_obs, values.shape[1], cdata._max_bytes(), dtype=np.float32)
                     )
-                if len(positions) > 1 and np.all(np.diff(positions) == 1):  # a contiguous run of cells
-                    writer.array[positions[0] : positions[-1] + 1] = values
-                else:
-                    writer.array[positions] = values
+                writer.write(positions, values)
             batch_obs_names = np.asarray(batch["obs_names_n"])
             mask = sketch_index.get_indexer(batch_obs_names) >= 0
             if mask.any():

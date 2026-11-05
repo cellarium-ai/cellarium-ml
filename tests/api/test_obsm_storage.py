@@ -297,3 +297,18 @@ def test_the_obsm_mapping_accepts_an_entry_that_stays_on_disk(h5ad_cdata, loadin
     view.obsm["again"] = view.obsm["X_test"]  # the length check works with len()
     with pytest.raises(ValueError, match="expected 3"):
         view.obsm["wrong"] = h5ad_cdata.obsm["X_test"]
+
+
+def test_write_puts_the_rows_at_their_positions(values):
+    with make_writer(values, max_bytes=None) as writer:
+        writer.write(np.arange(0, 5), values[:5])  # a contiguous run
+        writer.write(torch.tensor([9, 7, 5, 6]), values[[9, 7, 5, 6]])  # not contiguous, in any order
+        writer.write(np.array([8]), values[[8]])  # a single cell
+        writer.write(np.arange(10, 20), values[10:])
+    np.testing.assert_array_equal(writer.result, values)
+
+
+def test_write_rejects_values_that_do_not_have_a_row_for_each_cell(values):
+    with make_writer(values, max_bytes=None) as writer:
+        with pytest.raises(RuntimeError, match="Got 4 rows of values for 5 cells.*CellFilter"):
+            writer.write(np.arange(5), values[:4])

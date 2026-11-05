@@ -160,6 +160,28 @@ class ObsmWriter:
             raise RuntimeError("The array is only available inside the `with` block.")
         return self._array
 
+    def write(self, positions: Any, values: Any) -> None:
+        """
+        Put the rows ``values`` (one per cell) in the rows of :attr:`array` at ``positions``, a batch at a time.
+
+        Raises:
+            RuntimeError: If ``values`` does not have one row per position. This happens when a transform in the
+                pipeline that made ``values`` drops cells (such as :class:`~cellarium.ml.transforms.CellFilter`
+                run outside of predict mode), in which case the rows cannot be matched to the cells.
+        """
+        positions = np.asarray(positions)
+        values = np.asarray(values)
+        if len(values) != len(positions):
+            raise RuntimeError(
+                f"Got {len(values)} rows of values for {len(positions)} cells. A transform or model that drops cells "
+                "(such as a CellFilter, which is a no-op only in predict mode) makes fewer rows than there are "
+                "cells, and the rows cannot then be matched to the cells."
+            )
+        if len(positions) > 1 and np.all(np.diff(positions) == 1):  # a contiguous run of cells
+            self.array[positions[0] : positions[-1] + 1] = values
+        else:
+            self.array[positions] = values
+
     @property
     def result(self) -> np.ndarray:
         """The finished array, available after the ``with`` block."""

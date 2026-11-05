@@ -122,6 +122,7 @@ def pca_checkpoint(h5ad_paths, tmp_path) -> str:
 
 def test_load_module_from_ckpt_stores_the_module_with_what_the_checkpoint_says(h5ad_paths, scvi_checkpoint):
     cdata = CellariumData(h5ad_paths=h5ad_paths)
+    cdata.load_module_from_ckpt(scvi_checkpoint, "scvi")
     trained = cdata.trained_modules["scvi"]
     assert trained.n_epochs == 3 and trained.complete
     assert trained.config == {"source": scvi_checkpoint} and trained.history.empty

@@ -68,19 +68,11 @@ def embed(
             ):
                 prediction = call_func_with_batch(model.predict, batch)
                 values = torch.as_tensor(prediction["x_ng"]).detach().cpu().numpy()
-                positions = batch["row_indices_n"].numpy()
-                if len(values) != len(positions):
-                    raise RuntimeError(
-                        f"The module '{module_key}' made {len(values)} embeddings for {len(positions)} cells."
-                    )
                 if writer is None:
                     writer = stack.enter_context(
                         ObsmWriter(cdata.n_obs, values.shape[1], cdata._max_bytes(max_gb), dtype=np.float32)
                     )
-                if len(positions) > 1 and np.all(np.diff(positions) == 1):  # a contiguous run of cells
-                    writer.array[positions[0] : positions[-1] + 1] = values
-                else:
-                    writer.array[positions] = values
+                writer.write(batch["row_indices_n"].numpy(), values)
         finally:
             if original_device is not None:
                 model.to(original_device)

@@ -450,12 +450,7 @@ class NMFOutput:
                     k=k,
                     normalize=normalize,
                 )
-                positions = batch["row_indices_n"].numpy()
-                values = alpha_nk.cpu().numpy()
-                if len(positions) > 1 and np.all(np.diff(positions) == 1):  # a contiguous run of cells
-                    writer.array[positions[0] : positions[-1] + 1] = values
-                else:
-                    writer.array[positions] = values
+                writer.write(batch["row_indices_n"].numpy(), alpha_nk.cpu().numpy())
         cdata.obsm[key_added.format(k=k)] = writer.result
 
     @release_memory_after

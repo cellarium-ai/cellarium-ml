@@ -964,6 +964,12 @@ class _PositionedChunkDataset(_PositionedMixin, ShardChunkDataset):
     """The dataset of :meth:`CellariumData.predict_batches` for cells that are read a shard at a time."""
 
 
+def _mark_predict_mode(batch: dict[str, Any]) -> dict[str, Any]:
+    """Put the batch in predict mode, as :meth:`CellariumPipeline.predict` does (picklable, for the dataloader)."""
+    batch["_predict_mode"] = True
+    return batch
+
+
 def _device_of(module: torch.nn.Module) -> torch.device | None:
     """The device of the first parameter or buffer of ``module``, or ``None`` if it has none."""
     for tensor in (*module.parameters(), *module.buffers()):
@@ -1953,6 +1959,8 @@ class CellariumData:
         if module is not None:
             module.configure_model()  # idempotent; makes the transforms accessible
             if len(module.cpu_transforms) > 0:
+                # inference: every cell is kept, so the transforms that drop cells (CellFilter) are no-ops
+                collate_fn = FunctionComposer(first_applied=collate_fn, second_applied=_mark_predict_mode)
                 collate_fn = FunctionComposer(first_applied=collate_fn, second_applied=module.cpu_transforms)
         # the settings that matter for completeness are fixed here, not taken from the datamodule (which is set up for
         # training, e.g. shuffled). `cache_efficient` reads each worker's contiguous stretch of cells, which is much
@@ -1997,6 +2005,7 @@ class CellariumData:
                 if target is not None:
                     batch = move_data_to_device(batch, target)
                 if module is not None:
+                    batch["_predict_mode"] = True  # as in `CellariumPipeline.predict`: no cell is dropped
                     with torch.no_grad():
                         batch = module.transforms(batch)
                 batch["row_indices_n"] = positions
