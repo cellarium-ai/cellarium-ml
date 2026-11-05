@@ -9,6 +9,7 @@ import torch
 from typing_extensions import Self
 
 from cellarium.ml.models import PredictMixin, TestMixin, ValidateMixin
+from cellarium.ml.transforms.base import CellariumTransform, Stage
 from cellarium.ml.utilities.core import call_func_with_batch
 
 
@@ -19,6 +20,11 @@ class CellariumPipeline(torch.nn.ModuleList):
 
     When used within :class:`cellarium.ml.core.CellariumModule`, the last module in the pipeline is expected to be
     a model (:class:`cellarium.ml.models.CellariumModel`) and any preceding modules are expected to be data transforms.
+
+    Each method runs the transforms for one stage: ``forward`` for ``"train"``, and ``validate``, ``test`` and
+    ``predict`` for their own. A :class:`~cellarium.ml.transforms.base.CellariumTransform` is skipped in the stages
+    it is not active in (e.g. data augmentations are by default active only in ``"train"``), and any other module
+    is run in every stage.
 
     Example:
 
@@ -41,20 +47,38 @@ class CellariumPipeline(torch.nn.ModuleList):
     def __add__(self, other: Iterable[torch.nn.Module]) -> Self:
         return self.__class__(chain(self, other))
 
-    def forward(
-        self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
-    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | torch.Tensor | np.ndarray]:
+    def transform(
+        self,
+        batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor],
+        stage: Stage,
+    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
+        """
+        Pass the batch through every module of the pipeline that is active in ``stage``,
+        treating all of them as transforms (a model is not treated specially).
+
+        Args:
+            batch: The batch dictionary.
+            stage: The stage whose transforms to run.
+
+        Returns:
+            The batch dictionary, updated with the output of each transform.
+        """
         for module in self:
+            if isinstance(module, CellariumTransform) and not module.is_active(stage):
+                continue
             batch |= call_func_with_batch(module.forward, batch)
 
         return batch
 
+    def forward(
+        self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
+    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | torch.Tensor | np.ndarray]:
+        return self.transform(batch, "train")
+
     def predict(
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
     ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
-        batch["_predict_mode"] = True  # type: ignore[assignment]
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+        batch = self[:-1].transform(batch, "predict")
 
         model = self[-1]
         if not isinstance(model, PredictMixin):
@@ -64,8 +88,7 @@ class CellariumPipeline(torch.nn.ModuleList):
         return batch
 
     def validate(self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]) -> None:
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+        batch = self[:-1].transform(batch, "validate")
 
         model = self[-1]
         if not isinstance(model, ValidateMixin):
@@ -73,8 +96,7 @@ class CellariumPipeline(torch.nn.ModuleList):
         call_func_with_batch(model.validate, batch)
 
     def test(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+        batch = self[:-1].transform(batch, "test")  # type: ignore[arg-type, assignment]
 
         model = self[-1]
         if not isinstance(model, TestMixin):

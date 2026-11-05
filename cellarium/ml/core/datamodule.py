@@ -4,6 +4,7 @@
 
 import warnings
 from collections.abc import Callable
+from functools import partial
 from typing import Any, Literal
 
 import lightning.pytorch as pl
@@ -11,6 +12,7 @@ import torch
 from anndata import AnnData
 
 from cellarium.ml.data import DistributedCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.transforms.base import Stage
 from cellarium.ml.utilities.core import FunctionComposer, train_val_split
 from cellarium.ml.utilities.data import AnnDataField, collate_fn
 
@@ -262,13 +264,16 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 f"{max_num_workers} dataloader workers (for example, it holds the cells in the memory of this process)."
             )
 
-    def _effective_collate_fn(self) -> Callable:
+    def _effective_collate_fn(self, stage: Stage) -> Callable:
         """
-        The ``collate_fn`` to use for a dataloader constructed right now.
+        The ``collate_fn`` to use for a dataloader of the given ``stage`` constructed right now.
 
         If a :class:`~cellarium.ml.core.CellariumModule` with ``cpu_transforms`` is attached to this
         datamodule's trainer *and* a trainer stage (fit/validate/test/predict/sanity-check) is actively
-        running, the CPU transforms are composed onto :attr:`collate_fn` for this dataloader only.
+        running, the CPU transforms that are active in ``stage`` are composed onto :attr:`collate_fn`
+        for this dataloader only. The ``stage`` is the one of the dataloader being built (not of the
+        trainer), so that e.g. the validation dataloader of a ``fit`` skips the transforms that are
+        not active in ``"validate"``.
 
         This is computed fresh on every call rather than mutating :attr:`collate_fn` in place, so that:
 
@@ -284,7 +289,10 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
                 if getattr(module, "pipeline", None) is not None:
                     cpu_transforms = module.cpu_transforms
                     if len(cpu_transforms) > 0:
-                        return FunctionComposer(first_applied=self.collate_fn, second_applied=cpu_transforms)
+                        return FunctionComposer(
+                            first_applied=self.collate_fn,
+                            second_applied=partial(cpu_transforms.transform, stage=stage),
+                        )
         return self.collate_fn
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
@@ -293,7 +301,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.train_dataset,
             num_workers=self.num_workers,
-            collate_fn=self._effective_collate_fn(),
+            collate_fn=self._effective_collate_fn("train"),
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
             pin_memory=self.pin_memory,
@@ -305,7 +313,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.val_dataset,
             num_workers=self.num_workers,
-            collate_fn=self._effective_collate_fn(),
+            collate_fn=self._effective_collate_fn("validate"),
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
             pin_memory=self.pin_memory,
@@ -317,7 +325,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.predict_dataset,
             num_workers=self.num_workers,
-            collate_fn=self._effective_collate_fn(),
+            collate_fn=self._effective_collate_fn("predict"),
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
             pin_memory=self.pin_memory,
@@ -329,7 +337,7 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         return torch.utils.data.DataLoader(
             self.test_dataset,
             num_workers=self.num_workers,
-            collate_fn=self._effective_collate_fn(),
+            collate_fn=self._effective_collate_fn("test"),
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
             pin_memory=self.pin_memory,

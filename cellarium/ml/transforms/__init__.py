@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from cellarium.ml.transforms.base import STAGES, CellariumTransform, Stage
 from cellarium.ml.transforms.binomial_resample import BinomialResample
 from cellarium.ml.transforms.cell_filter import CellFilter
 from cellarium.ml.transforms.cellarium_gpt_tokenizer import CellariumGPTPredictTokenizer, CellariumGPTTrainTokenizer
@@ -17,8 +18,10 @@ from cellarium.ml.transforms.pflogpf import PFlogPF
 from cellarium.ml.transforms.z_score import ZScore
 
 __all__ = [
+    "STAGES",
     "BinomialResample",
     "CellFilter",
+    "CellariumTransform",
     "CellariumGPTTrainTokenizer",
     "CellariumGPTPredictTokenizer",
     "CenterPerCell",
@@ -31,5 +34,6 @@ __all__ = [
     "Log1p",
     "NormalizeTotal",
     "PFlogPF",
+    "Stage",
     "ZScore",
 ]
