@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable
 from itertools import chain
+from typing import Any
 
 import numpy as np
 import torch
@@ -63,12 +64,16 @@ class CellariumPipeline(torch.nn.ModuleList):
         Returns:
             The batch dictionary, updated with the output of each transform.
         """
-        for module in self:
+        self._apply_transforms(self, batch, stage)
+        return batch
+
+    @staticmethod
+    def _apply_transforms(modules: Iterable[torch.nn.Module], batch: dict[str, Any], stage: Stage) -> None:
+        """Update ``batch`` in place with the output of each of the ``modules`` that is active in ``stage``."""
+        for module in modules:
             if isinstance(module, CellariumTransform) and not module.is_active(stage):
                 continue
             batch |= call_func_with_batch(module.forward, batch)
-
-        return batch
 
     def forward(
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
@@ -78,7 +83,7 @@ class CellariumPipeline(torch.nn.ModuleList):
     def predict(
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
     ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
-        batch = self[:-1].transform(batch, "predict")
+        self._apply_transforms(list(self)[:-1], batch, "predict")
 
         model = self[-1]
         if not isinstance(model, PredictMixin):
@@ -88,7 +93,7 @@ class CellariumPipeline(torch.nn.ModuleList):
         return batch
 
     def validate(self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]) -> None:
-        batch = self[:-1].transform(batch, "validate")
+        self._apply_transforms(list(self)[:-1], batch, "validate")
 
         model = self[-1]
         if not isinstance(model, ValidateMixin):
@@ -96,7 +101,7 @@ class CellariumPipeline(torch.nn.ModuleList):
         call_func_with_batch(model.validate, batch)
 
     def test(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
-        batch = self[:-1].transform(batch, "test")  # type: ignore[arg-type, assignment]
+        self._apply_transforms(list(self)[:-1], batch, "test")
 
         model = self[-1]
         if not isinstance(model, TestMixin):

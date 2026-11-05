@@ -22,6 +22,7 @@ from cellarium.ml.transforms import (
     Log1p,
     NormalizeTotal,
     PFlogPF,
+    Stage,
     ZScore,
 )
 from cellarium.ml.utilities.data import to_torch_sparse_coo, to_torch_sparse_csr
@@ -814,8 +815,8 @@ def test_cell_filter_nonzero_genes_predict_stage_noop():
     x_ng = torch.zeros(5, 4)  # all cells have 0 nonzero genes — would all be dropped
     batch_index_n = torch.zeros(5)
     pipeline = CellariumPipeline([CellFilter(min_nonzero_genes_per_cell=1)])
-    assert pipeline.transform({"x_ng": x_ng, "batch_index_n": batch_index_n}, "predict")["x_ng"].shape[0] == 5
-    assert pipeline.transform({"x_ng": x_ng, "batch_index_n": batch_index_n}, "validate")["x_ng"].shape[0] == 0
+    assert _x_ng(pipeline.transform({"x_ng": x_ng, "batch_index_n": batch_index_n}, "predict")).shape[0] == 5
+    assert _x_ng(pipeline.transform({"x_ng": x_ng, "batch_index_n": batch_index_n}, "validate")).shape[0] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +865,12 @@ def test_transform_stages_missing_attribute_falls_back_to_default():
     assert transform.stages == Duplicate.default_stages
 
 
+def _x_ng(batch: dict) -> torch.Tensor:
+    x_ng = batch["x_ng"]
+    assert isinstance(x_ng, torch.Tensor)
+    return x_ng
+
+
 class _AddOne(torch.nn.Module):
     """A plain nn.Module transform: active in every stage."""
 
@@ -872,12 +879,12 @@ class _AddOne(torch.nn.Module):
 
 
 @pytest.mark.parametrize("stage", STAGES)
-def test_pipeline_transform_skips_inactive_transforms(stage: str):
+def test_pipeline_transform_skips_inactive_transforms(stage: Stage):
     pipeline = CellariumPipeline([Duplicate(), _AddOne()])
-    out = pipeline.transform({"x_ng": torch.zeros(3, 2)}, stage)  # type: ignore[arg-type]
+    x_ng = _x_ng(pipeline.transform({"x_ng": torch.zeros(3, 2)}, stage))
     # Duplicate is active in all but predict; the plain nn.Module is active in every stage
-    assert out["x_ng"].shape[0] == (3 if stage == "predict" else 6)
-    assert torch.all(out["x_ng"] == 1)
+    assert x_ng.shape[0] == (3 if stage == "predict" else 6)
+    assert torch.all(x_ng == 1)
 
 
 def test_pipeline_forward_validate_test_use_their_stages():
@@ -897,10 +904,10 @@ def test_pipeline_forward_validate_test_use_their_stages():
             seen["predict"] = x_ng.shape[0]
             return {}
 
-        def validate(self, x_ng: torch.Tensor, **kwargs) -> None:
+        def validate(self, x_ng: torch.Tensor, **kwargs) -> None:  # type: ignore[override]
             seen["validate"] = x_ng.shape[0]
 
-        def test(self, x_ng: torch.Tensor, **kwargs) -> None:
+        def test(self, x_ng: torch.Tensor, **kwargs) -> None:  # type: ignore[override]
             seen["test"] = x_ng.shape[0]
 
     def run(method: str, **transform_kwargs):
@@ -1007,14 +1014,14 @@ def test_augmentation_pipeline_normalize_total_uses_updated_total(make):
 
 @pytest.mark.parametrize("transform", _augmentations(1.0) + [GaussianNoise(0.1, 0.2, 1.0)])
 @pytest.mark.parametrize("stage, active", [("train", True), ("validate", False), ("test", False), ("predict", False)])
-def test_augmentations_are_train_only_in_pipeline(transform: CellariumTransform, stage: str, active: bool):
+def test_augmentations_are_train_only_in_pipeline(transform: CellariumTransform, stage: Stage, active: bool):
     x_ng = _counts()
-    out = CellariumPipeline([transform]).transform({"x_ng": x_ng.clone()}, stage)  # type: ignore[arg-type]
-    assert torch.equal(out["x_ng"], x_ng) == (not active)
+    out = _x_ng(CellariumPipeline([transform]).transform({"x_ng": x_ng.clone()}, stage))
+    assert torch.equal(out, x_ng) == (not active)
 
 
 def test_augmentation_stages_override_enables_validation():
     x_ng = _counts()
     pipeline = CellariumPipeline([BinomialResample(0.3, 0.8, 1.0, stages=["train", "validate"])])
-    assert not torch.equal(pipeline.transform({"x_ng": x_ng.clone()}, "validate")["x_ng"], x_ng)
-    assert torch.equal(pipeline.transform({"x_ng": x_ng.clone()}, "test")["x_ng"], x_ng)
+    assert not torch.equal(_x_ng(pipeline.transform({"x_ng": x_ng.clone()}, "validate")), x_ng)
+    assert torch.equal(_x_ng(pipeline.transform({"x_ng": x_ng.clone()}, "test")), x_ng)

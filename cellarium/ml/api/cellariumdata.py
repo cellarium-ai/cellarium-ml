@@ -1275,8 +1275,9 @@ class CellariumData:
         ``module.transforms``) are applied here, on ``device``, under ``torch.no_grad()``. The model itself is not
         applied. The transforms are those of the ``"predict"`` stage: ones that are not active in it, such as data
         augmentations or a cell filter, are skipped, so that every cell is covered. The module is put in ``eval`` mode,
-        and its transforms are moved to ``device`` for the iteration, and restored when it ends. Without a ``module`` the batches are as the datamodule reads them, with no transforms
-        at all (so for example no gene filter), for the caller to transform.
+        and its transforms are moved to ``device`` for the iteration, and restored when it ends. Without a ``module``
+        the batches are as the datamodule reads them, with no transforms at all (so for example no gene filter), for
+        the caller to transform.
 
         Example:
             >>> for batch in cdata.predict_batches(trained.module, device="cuda"):

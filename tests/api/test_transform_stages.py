@@ -11,7 +11,7 @@ import torch
 from cellarium.ml import CellariumModule
 from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.models import IncrementalPCA
-from cellarium.ml.transforms import STAGES, CellFilter, Densify, Dropout, Duplicate, Filter
+from cellarium.ml.transforms import STAGES, CellFilter, Densify, Dropout, Duplicate, Filter, Stage
 from tests.common import BoringModel
 
 # the `cdata` fixture (tests/api/conftest.py): 40 cells in two h5ad files of 20, as h5ad files or as a deltacells
@@ -93,9 +93,9 @@ def test_predict_batches_with_workers_skip_the_cpu_transforms_that_are_not_activ
 
 
 @pytest.mark.parametrize("stage", STAGES)
-def test_module_pipeline_without_trainer_applies_the_cpu_transforms_by_stage(stage):
-    # outside of a trainer the module's pipeline has the cpu transforms too, and they follow the same stages
+def test_cpu_transforms_of_a_module_follow_the_stages(stage: Stage):
     module = CellariumModule(cpu_transforms=[Duplicate(stages=["validate"])], model=BoringModel())
     module.configure_model()
-    out = module.pipeline[:-1].transform({"x_ng": torch.ones(3, 2)}, stage)  # type: ignore[arg-type]
-    assert out["x_ng"].shape[0] == (6 if stage == "validate" else 3)
+    x_ng = module.cpu_transforms.transform({"x_ng": torch.ones(3, 2)}, stage)["x_ng"]
+    assert isinstance(x_ng, torch.Tensor)
+    assert x_ng.shape[0] == (6 if stage == "validate" else 3)
