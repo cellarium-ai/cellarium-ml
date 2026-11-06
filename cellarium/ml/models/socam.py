@@ -1,8 +1,8 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import warnings
-from typing import TypedDict
+import math
+from typing import Any, TypedDict
 
 import lightning.pytorch as pl
 import numpy as np
@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 import torch.nn.functional
 
+from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
 from cellarium.ml.models.model import CellariumModel, ClassifierPrediction, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -216,7 +217,11 @@ def compute_class_weights(
 
 class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
     """
-    Logistic regression model for cell type ontology classification. [1]
+    Ontology-aware cell type classifier. [1]
+
+    With the default ``hidden_layers=[]`` the model is a multinomial logistic regression
+    (``logits = x @ W + b``). Specifying ``hidden_layers`` turns the logit computation into an MLP
+    whose last layer is always a plain linear layer with one output per active category.
 
     References:
         [1] Magre et al., "A supervised ontology-aware cell annotation method for single-cell
@@ -237,11 +242,12 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             When ``None``, all categories are used.
         probability_propagation_flag: If True, applies hierarchical probability propagation
             before predicting the output distribution.
-        W_prior_scale: Scale (b) parameter of the Laplace prior on the weight matrix `W_gc`.
-        W_init_scale: Standard deviation for initializing `W_gc`.
+        W_prior_scale: Scale (b) parameter of the Laplace prior on the first-layer weight matrix
+            (``W_gc`` when there are no hidden layers).
+        W_init_scale: Standard deviation for initializing the weights when ``hidden_layers`` is empty.
+            Ignored otherwise (hidden layers use the standard ``torch.nn.Linear`` initialization).
         seed: Random seed used to initialize parameters.
-        log_metrics: If True, logs weight histograms (TensorBoard) during training.
-            If True, logs weight histograms (TensorBoard) during training.
+        log_metrics: Deprecated no-op, kept so that old configs and checkpoints still load.
         class_counts: Optional pandas Series mapping class names to cell counts in the
             training data. Classes absent from the Series (typically pure-ancestor nodes
             with no direct cell labels) and classes with a count of zero are both treated
@@ -258,6 +264,17 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             descendant counts will receive a real inverse-frequency weight rather than the
             neutral 1.0 it would otherwise get. Has no effect when ``class_counts`` is
             ``None``.
+        hidden_layers: Widths of the hidden layers of the MLP that computes the logits. Defaults to
+            no hidden layers, i.e. logistic regression. For a layer using ``SwiGLUActivation`` the
+            width is the post-gating width.
+        dressing_init_kwargs: Keyword arguments for :class:`~cellarium.ml.layers.DressedLayer`
+            (``activation_fn``, ``use_batch_norm``, ``use_layer_norm``, ``dropout_rate``,
+            ``use_residual``, ...) for the hidden layers. Either a single dictionary applied to every
+            hidden layer, or a list with one dictionary per hidden layer. ``activation_fn`` may be a
+            class-path string, e.g. ``"cellarium.ml.layers.SwiGLUActivation"``.
+        l1_on_first_layer: If True (default), apply the Laplace (L1) prior with scale
+            ``W_prior_scale`` to the weight matrix of the first layer. If False, no weight penalty
+            is applied.
     """
 
     def __init__(
@@ -275,6 +292,9 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         include_ancestors_of_cl_name_subset: bool = True,
         class_counts: pd.Series | None = None,
         propagate_class_counts: bool = False,
+        hidden_layers: list[int] | None = None,
+        dressing_init_kwargs: dict[str, Any] | list[dict[str, Any]] | None = None,
+        l1_on_first_layer: bool = True,
     ) -> None:
         super().__init__()
         self.n_obs = n_obs
@@ -300,7 +320,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.probability_propagation_flag = probability_propagation_flag
         self.propagate_class_counts = propagate_class_counts
         self.seed = seed
-        self.log_metrics = log_metrics
+        self.hidden_layers: list[int] = list(hidden_layers) if hidden_layers is not None else []
+        self.l1_on_first_layer = l1_on_first_layer
 
         # Build active category set (subset if given, else full list)
         active_cl_names: list[str] = cl_name_subset if cl_name_subset is not None else list(cl_names)
@@ -334,8 +355,15 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.W_init_scale = W_init_scale
         self.W_prior_scale: torch.Tensor
         self.register_buffer("W_prior_scale", torch.empty(()))
-        self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_active_cats, dtype=torch.float))
-        self.b_c = torch.nn.Parameter(torch.empty(self.n_active_cats, dtype=torch.float))
+        self.classifier = FullyConnectedLinear(
+            in_features=self.n_vars,
+            out_features=self.n_active_cats,
+            n_hidden=self.hidden_layers,
+            dressing_init_kwargs=dressing_init_kwargs,
+            bias=True,
+        )
+        # In-place compile (rather than torch.compile(module)) so state_dict keys get no ``_orig_mod.`` prefix.
+        self.classifier.compile()
 
         # Class weights for cross-entropy loss
         weights = compute_class_weights(
@@ -350,8 +378,51 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
 
         self.reset_parameters()
 
+    def _first_linear(self) -> torch.nn.Linear:
+        first = self.classifier.module_list[0]
+        linear = first.layer if isinstance(first, DressedLayer) else first
+        assert isinstance(linear, torch.nn.Linear)
+        return linear
+
+    @property
+    def W_gc(self) -> torch.Tensor:
+        """First-layer weight matrix with shape ``(n_vars, n_first_layer_outputs)``; the logistic regression
+        weights when there are no hidden layers."""
+        return self._first_linear().weight.T
+
+    @property
+    def b_c(self) -> torch.Tensor:
+        """Logistic regression bias; only defined when there are no hidden layers."""
+        if self.hidden_layers:
+            raise AttributeError("`b_c` is only defined for a model without hidden layers.")
+        bias = self._first_linear().bias
+        assert bias is not None
+        return bias
+
+    def _load_from_state_dict(
+        self,
+        state_dict: dict[str, Any],
+        prefix: str,
+        local_metadata: dict[str, Any],
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        # Checkpoints from before ``classifier`` existed store the logistic regression as ``W_gc`` (g, c)
+        # and ``b_c`` (c,); map them onto the equivalent torch.nn.Linear weight (c, g) and bias.
+        if not self.hidden_layers:
+            if prefix + "W_gc" in state_dict:
+                state_dict[prefix + "classifier.module_list.0.weight"] = state_dict.pop(prefix + "W_gc").T.contiguous()
+            if prefix + "b_c" in state_dict:
+                state_dict[prefix + "classifier.module_list.0.bias"] = state_dict.pop(prefix + "b_c")
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
     def reset_parameters(self) -> None:
-        rng_device = self.W_gc.device.type if self.W_gc.device.type != "meta" else "cpu"
+        weight_device = self._first_linear().weight.device
+        rng_device = weight_device.type if weight_device.type != "meta" else "cpu"
         rng = torch.Generator(device=rng_device)
         rng.manual_seed(self.seed)
         self.W_prior_scale.fill_(self._W_prior_scale)
@@ -362,8 +433,25 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.inv_perm.copy_(self._inv_perm)
         if self._class_weights is not None:
             self.class_weights.copy_(self._class_weights)
-        self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
-        self.b_c.data.zero_()
+        if not self.hidden_layers:
+            # Draw as (g, c) so that a given seed reproduces the legacy ``W_gc`` initialization.
+            linear = self._first_linear()
+            W_gc = torch.empty(self.n_vars, self.n_active_cats, dtype=torch.float, device=linear.weight.device)
+            W_gc.normal_(0, self.W_init_scale, generator=rng)
+            with torch.no_grad():
+                linear.weight.copy_(W_gc.T)
+                assert linear.bias is not None
+                linear.bias.zero_()
+        else:
+            # Standard torch.nn.Linear initialization, drawn from the seeded generator.
+            for module in self.classifier.modules():
+                if isinstance(module, torch.nn.Linear):
+                    torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5), generator=rng)
+                    if module.bias is not None:
+                        bound = 1 / math.sqrt(module.in_features)
+                        torch.nn.init.uniform_(module.bias, -bound, bound, generator=rng)
+                elif isinstance(module, (torch.nn.BatchNorm1d, torch.nn.LayerNorm)):
+                    module.reset_parameters()
 
     def _cl_names_to_indices(self, cl_names_n: np.ndarray) -> torch.Tensor:
         """
@@ -409,17 +497,13 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
         y_n = self._cl_names_to_indices(cl_names_n).to(x_ng.device)
-        logits_nc = self._compute_regression(x_ng, self.W_gc, self.b_c)
+        logits_nc = self.classifier(x_ng)
         if self.probability_propagation_flag:
             logits_nc = propagate_logits(logits_nc, self.nonleaf_desc_cc, self.perm, self.inv_perm)
-        ce_loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="mean", weight=self.class_weights)
-        laplace_loss = (self.W_gc.abs().sum() / self.W_prior_scale) / self.n_obs
-        loss = ce_loss + laplace_loss
+        loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="mean", weight=self.class_weights)
+        if self.l1_on_first_layer:
+            loss = loss + (self._first_linear().weight.abs().sum() / self.W_prior_scale) / self.n_obs
         return {"loss": loss}
-
-    @torch.compile()
-    def _compute_regression(self, x_ng: torch.Tensor, W_gc: torch.Tensor, b_c: torch.Tensor) -> torch.Tensor:
-        return x_ng @ W_gc + b_c
 
     def validate(
         self,
@@ -465,7 +549,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
-        logits_nc = self._compute_regression(x_ng, self.W_gc, self.b_c)
+        logits_nc = self.classifier(x_ng)
         probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
         if self.probability_propagation_flag:
             probs_nc = propagate_probs(probs_nc, self.active_descendant_tensor_cc)
@@ -474,21 +558,3 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             "y_probs_nc": probs_nc,
             "category_labels_c": self.cl_name_subset if self.cl_name_subset is not None else self.cl_names,
         }
-
-    def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
-        if trainer.global_rank != 0:
-            return
-
-        if not self.log_metrics:
-            return
-
-        for logger in trainer.loggers:
-            if isinstance(logger, pl.loggers.TensorBoardLogger):
-                try:
-                    logger.experiment.add_histogram(
-                        "W_gc",
-                        self.W_gc,
-                        global_step=trainer.global_step,
-                    )
-                except ValueError as e:
-                    warnings.warn(f"Failed to log histogram for W_gc step={trainer.global_step} due to {e}")
