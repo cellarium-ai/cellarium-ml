@@ -253,7 +253,7 @@ def embedding(
         categories = values if isinstance(values.dtype, pd.CategoricalDtype) else values.astype("category")
         is_bool = pd.api.types.is_bool_dtype(values)  # also a categorical whose categories are booleans
         if is_bool and palette is None:
-            palette = {False: _FALSE_COLOR, True: _TRUE_COLOR}
+            palette = {False: _FALSE_COLOR, True: _TRUE_COLOR}  # type: ignore[dict-item]
         colors = _categorical_colors(adata, color, categories, palette)  # type: ignore[arg-type]
         if is_bool:
             # drawn missing first, then False, then True, so that the (usually rare) True cells are on top

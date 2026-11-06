@@ -147,6 +147,39 @@ def test_worker_processes_read_each_cell_once(cdata, iteration_strategy):
     np.testing.assert_array_equal(x, expected[order])
 
 
+def _chunks_of_every_shard(dataset):
+    """The cells of each shard in the order of the epoch, for all the workers together: lists of every cell."""
+    limits = [idx for idx in dataset.dadc.limits if dataset.start_idx < idx < dataset.end_idx]
+    iter_limits = list(zip([dataset.start_idx] + limits, limits + [dataset.end_idx]))
+    if not dataset.shuffle:
+        return [list(range(lower, upper)) for lower, upper in iter_limits]
+    rng = torch.Generator()
+    rng.manual_seed(dataset.shuffle_seed + dataset.epoch)
+    chunks = []
+    for shard in torch.randperm(len(iter_limits), generator=rng).tolist():
+        lower, upper = iter_limits[shard]
+        chunks.append((torch.randperm(upper - lower, generator=rng) + lower).tolist())
+    return chunks
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+@pytest.mark.parametrize("iteration_strategy", ["same_order", "cache_efficient"])
+@pytest.mark.parametrize("num_workers", [1, 2, 4])
+def test_a_worker_makes_the_chunks_of_its_own_shards_only(cdata, shuffle, iteration_strategy, num_workers):
+    _, chunked = _datamodule(
+        cdata, ShardChunkDataModule, shuffle=shuffle, iteration_strategy=iteration_strategy, shuffle_seed=5
+    )
+    dataset = chunked.train_dataset
+    every = _chunks_of_every_shard(dataset)
+    for worker_id in range(num_workers):
+        if iteration_strategy == "same_order":
+            expected = every[worker_id::num_workers]
+        else:
+            per_worker = -(-len(every) // num_workers)
+            expected = every[worker_id * per_worker : (worker_id + 1) * per_worker]
+        assert dataset._chunks(worker_id, num_workers) == expected
+
+
 def test_only_views_are_read_by_shard(cdata):
     _, root = _datamodule(cdata, ShardChunkDataModule, positions=np.arange(40))
     assert root.reads_by_shard()  # a view, even of every cell

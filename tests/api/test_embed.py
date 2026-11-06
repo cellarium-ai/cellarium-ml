@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import tempfile
 import warnings
 
 import numpy as np
@@ -35,8 +36,7 @@ def test_embed_stores_under_the_key_it_is_given(cdata, trained_pca):
     np.testing.assert_allclose(cdata.obsm["pca_all"], cdata.to_anndata().obsm["X_pca"], rtol=1e-4, atol=1e-4)
 
 
-def test_embed_goes_to_a_file_when_it_does_not_fit_and_a_view_reads_its_rows_from_there(cdata, trained_pca):
-    cdata.max_gb = 1e-9  # nothing fits in memory
+def test_embed_always_goes_to_a_file_and_a_view_reads_its_rows_from_there(cdata, trained_pca):
     embed(cdata, "pca", accelerator="cpu")
     assert isinstance(cdata.obsm["X_pca"], np.memmap)
 
@@ -214,8 +214,7 @@ def test_the_embedding_is_the_whole_embedding_of_the_module_when_the_sketch_uses
     assert result["adata"].n_obs == 10
 
 
-def test_the_stored_embedding_goes_to_a_file_when_it_does_not_fit(cdata, trained_pca):
-    cdata.max_gb = 1e-9
+def test_the_stored_embedding_always_goes_to_a_file(cdata, trained_pca):
     _sketch(cdata)
     assert isinstance(cdata.obsm["X_pca"], np.memmap)
     assert cdata.obsm["X_pca"].shape == (40, 3)
@@ -239,14 +238,32 @@ def test_the_sketch_provides_the_batch_column_of_scvi_when_it_embeds(cdata):
     assert "batch_index_n" not in cdata.datamodule.batch_keys  # the datamodule is put back
 
 
-def test_to_anndata_of_a_sketch_puts_the_stored_embedding_in_the_anndata(cdata, trained_pca):
+def test_to_anndata_of_a_sketch_puts_the_embedding_of_all_the_cells_in_the_anndata_and_does_not_keep_it(
+    cdata, trained_pca, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    expected = cdata.to_anndata().obsm["X_pca"]  # computed for the cells in memory
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
         adata = cdata.to_anndata("geometric_sketch", 10, geometric_sketch_kwargs={"accelerator": "cpu"})
     assert [str(w.message) for w in record if "obsm['X_pca']" in str(w.message)] == []  # nothing to warn about
+    positions = adata.obs["cellarium_cell_id"].to_numpy()
+    assert type(adata.obsm["X_pca"]) is np.ndarray  # a copy of the rows of the sketch cells
+    np.testing.assert_allclose(adata.obsm["X_pca"], expected[positions], rtol=1e-4, atol=1e-4)
+    # the embedding of all the cells (a file) was for the AnnData: it is gone from the data, and from the disk
+    assert "X_pca" not in cdata.obsm
+    assert cdata._cached_embedding_state("pca") is None
+    assert list(tmp_path.glob("cellarium_obsm_*")) == [] and list(tmp_path.glob("cellarium_rows_*")) == []
+
+
+def test_to_anndata_of_a_sketch_leaves_an_embedding_that_was_there(cdata, trained_pca):
+    embed(cdata, "pca", accelerator="cpu")
+    stored = cdata.obsm["X_pca"]
+    adata = cdata.to_anndata("geometric_sketch", 10, geometric_sketch_kwargs={"accelerator": "cpu"})
+    assert cdata.obsm["X_pca"] is stored
     assert cdata._cached_embedding_state("pca") == "current"
     positions = adata.obs["cellarium_cell_id"].to_numpy()
-    np.testing.assert_array_equal(adata.obsm["X_pca"], np.asarray(cdata.obsm["X_pca"])[positions])
+    np.testing.assert_array_equal(adata.obsm["X_pca"], np.asarray(stored)[positions])
 
 
 def test_to_anndata_of_a_sketch_without_the_stored_embedding_computes_it_for_the_sketch_cells(cdata, trained_pca):

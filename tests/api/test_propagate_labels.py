@@ -223,7 +223,6 @@ def test_the_check_holds_out_at_most_20_000_cells_by_default():
 
 def test_an_embedding_on_disk_is_read_in_chunks(cdata):
     types = _set_up(cdata)
-    cdata.max_gb = 1e-9
     highly_variable_genes(cdata, n_top_genes=10, flavor="seurat", accelerator="cpu")
     pca(cdata, n_components=3, zscore=True, accelerator="cpu")
     embed(cdata, "pca", key_added="on_disk", accelerator="cpu")

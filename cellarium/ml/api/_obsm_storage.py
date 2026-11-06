@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Per-cell arrays (entries of ``cdata.obsm``) that are too big for memory.
+Per-cell arrays (entries of ``cdata.obsm``) that are kept in files.
 
 An api function that computes a value for every cell (for example the loadings of the programs of
-:class:`~cellarium.ml.api.NMFOutput`) allocates its result with an :class:`ObsmWriter`: in memory if it fits in the
-budget (``max_gb`` of :class:`~cellarium.ml.api.CellariumData`), and otherwise in a memory-mapped ``.npy`` file in the
-temporary directory, which is deleted when the array is no longer referenced (or when the interpreter exits). The
-finished on-disk array is a read-only :class:`numpy.memmap`, so it works wherever an ndarray does, without being read
-into memory.
+:class:`~cellarium.ml.api.NMFOutput`) allocates its result with an :class:`ObsmWriter`: in a memory-mapped ``.npy``
+file in the temporary directory, which is deleted when the array is no longer referenced (or when the interpreter
+exits). The finished on-disk array is a read-only :class:`numpy.memmap`, so it works wherever an ndarray does, without
+being read into memory.
 
 A view of the cells (see :class:`~cellarium.ml.api.CellariumDataView`) takes the rows of its cells from such an
 array with :func:`subset_rows`: into memory if they fit in the budget, and otherwise as a :class:`RowSubset`, a lazy
@@ -120,37 +119,32 @@ def subset_rows(value: "np.memmap | RowSubset", positions: np.ndarray, max_bytes
 
 class ObsmWriter:
     """
-    A context manager that allocates a per-cell array to be filled in (by assigning to :attr:`array`), in memory if it
-    takes at most ``max_bytes`` and otherwise in a memory-mapped file in the temporary directory.
+    A context manager that allocates a per-cell array to be filled in (by assigning to :attr:`array`), in a
+    memory-mapped file in the temporary directory. The array is always in a file, however small: what is written to it
+    stays in the operating system's cache, which gives the memory back when it is needed, and so it does not compete
+    with the other things that an api function holds in memory (such as the counts of the cells that are collected).
 
-    On leaving the ``with`` block normally, :attr:`result` is the finished array: the ndarray itself, or for a file a
-    read-only :class:`numpy.memmap` of it, which deletes the file when it is no longer referenced. If the block raises,
-    the file is deleted straight away.
+    On leaving the ``with`` block normally, :attr:`result` is the finished array, a read-only :class:`numpy.memmap` of
+    the file, which deletes the file when it is no longer referenced. If the block raises, the file is deleted straight
+    away.
 
     Args:
         n_rows: The number of cells.
         n_cols: The number of columns.
-        max_bytes: The most memory to use for the array. ``None`` for no limit.
         dtype: The dtype of the array.
     """
 
-    def __init__(self, n_rows: int, n_cols: int, max_bytes: int | None, dtype: Any = np.float32):
+    def __init__(self, n_rows: int, n_cols: int, dtype: Any = np.float32):
         self.shape = (n_rows, n_cols)
         self.dtype = np.dtype(dtype)
-        nbytes = n_rows * n_cols * self.dtype.itemsize
-        #: whether the array is allocated in a file (because it does not fit in ``max_bytes``)
-        self.on_disk = max_bytes is not None and nbytes > max_bytes
         self._directory: str | None = None
         self._array: np.ndarray | None = None
         self._result: np.ndarray | None = None
 
     def __enter__(self) -> "ObsmWriter":
-        if self.on_disk:
-            self._directory = tempfile.mkdtemp(prefix="cellarium_obsm_")
-            path = f"{self._directory}/obsm.npy"
-            self._array = np.lib.format.open_memmap(path, mode="w+", dtype=self.dtype, shape=self.shape)
-        else:
-            self._array = np.zeros(self.shape, dtype=self.dtype)
+        self._directory = tempfile.mkdtemp(prefix="cellarium_obsm_")
+        path = f"{self._directory}/obsm.npy"
+        self._array = np.lib.format.open_memmap(path, mode="w+", dtype=self.dtype, shape=self.shape)
         return self
 
     @property
@@ -191,9 +185,6 @@ class ObsmWriter:
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         array, self._array = self._array, None
-        if not self.on_disk:
-            self._result = array
-            return
         assert isinstance(array, np.memmap) and self._directory is not None
         if exc_type is not None:
             del array

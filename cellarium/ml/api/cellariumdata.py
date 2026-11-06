@@ -42,7 +42,13 @@ from cellarium.ml.api._view_collections import (
     unwrap_collection,
 )
 from cellarium.ml.api.deltacells_store import write_collection_to_deltacells
-from cellarium.ml.api.utils import LossHistory, get_h5ad_files_limits, release_unused_memory, write_obs_parquet
+from cellarium.ml.api.utils import (
+    LossHistory,
+    get_h5ad_files_limits,
+    release_unused_memory,
+    shutdown_trainer_workers,
+    write_obs_parquet,
+)
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     DistributedCollection,
@@ -503,6 +509,9 @@ def fit_and_register(
             register(complete=False)
         _clean_up_after_interrupt(error, module, sigint_handler)
         raise
+    finally:
+        # the workers of the dataloaders are of no use any more, and stay (with what they hold) as long as the trainer
+        shutdown_trainer_workers(trainer)
     trained = register(complete=True)
     release_unused_memory()
     return trained
@@ -1012,10 +1021,10 @@ class CellariumData:
     they were stay in ``var`` as the column ``"<var_key>_original"`` (``"var_names_original"`` without a ``var_key``).
 
     ``max_gb`` is the memory budget (in GiB) for what api functions hold in memory: the cells read by :meth:`to_ram` and
-    :meth:`to_anndata`, and per-cell results stored in ``obsm`` (which go to a temporary file when they do not fit,
-    and which a view reads into memory only if its rows fit). Views inherit it. By default it is half of the memory that
-    is available, taking any container limit into account. It can be changed at any time with the :attr:`max_gb`
-    attribute.
+    :meth:`to_anndata`, and the rows of the per-cell results in ``obsm`` that a view copies into memory (those results
+    are always in temporary files, and a view reads its rows into memory only if they fit). Views inherit it. By default
+    it is half of the memory that is available, taking any container limit into account. It can be changed at any time
+    with the :attr:`max_gb` attribute.
     """
 
     def __init__(

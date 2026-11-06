@@ -47,18 +47,35 @@ class ShardChunkDataset(IterableDistributedAnnDataCollectionDataset):
     The arguments are those of :class:`IterableDistributedAnnDataCollectionDataset`.
     """
 
-    def _chunks(self) -> list[list[int]]:
-        """The cells of each shard in the order of the epoch, shard by shard."""
+    def _chunks(self, worker_id: int, num_workers: int) -> list[list[int]]:
+        """
+        The cells of each of the shards that the worker ``worker_id`` reads, shard by shard in the order of the epoch.
+
+        Only the cells of this worker's own shards are kept: for a view of tens of millions of cells, a list with every
+        cell of the epoch is gigabytes in every worker.
+        """
         limits = [idx for idx in self.dadc.limits if idx > self.start_idx and idx < self.end_idx]
         iter_limits = list(zip([self.start_idx] + limits, limits + [self.end_idx]))
+        n_shards = len(iter_limits)
+        # the places in the order of the epoch of the shards of this worker
+        if self.iteration_strategy == "same_order":
+            mine = set(range(worker_id, n_shards, num_workers))
+        else:
+            per_worker = math.ceil(n_shards / num_workers)
+            mine = set(range(worker_id * per_worker, min((worker_id + 1) * per_worker, n_shards)))
         if not self.shuffle:
-            return [list(range(lower, upper)) for lower, upper in iter_limits]
+            return [list(range(lower, upper)) for place, (lower, upper) in enumerate(iter_limits) if place in mine]
         rng = torch.Generator()
         rng.manual_seed(self.shuffle_seed + self.epoch)
         chunks = []
-        for shard in torch.randperm(len(iter_limits), generator=rng).tolist():
+        for place, shard in enumerate(torch.randperm(n_shards, generator=rng).tolist()):
+            if place > max(mine, default=-1):
+                break
             lower, upper = iter_limits[shard]
-            chunks.append((torch.randperm(upper - lower, generator=rng) + lower).tolist())
+            # drawn also for the shards of other workers, since the generator is shared by all the shards, in order
+            permutation = torch.randperm(upper - lower, generator=rng)
+            if place in mine:
+                chunks.append((permutation + lower).tolist())
         return chunks
 
     def __iter__(self):
@@ -75,14 +92,7 @@ class ShardChunkDataset(IterableDistributedAnnDataCollectionDataset):
             np.random.seed(current_worker_seed)
             torch.manual_seed(current_worker_seed)
 
-        chunks = self._chunks()
-        if self.iteration_strategy == "same_order":
-            mine = chunks[worker_id::num_workers]
-        else:
-            per_worker = math.ceil(len(chunks) / num_workers)
-            mine = chunks[worker_id * per_worker : (worker_id + 1) * per_worker]
-
-        yield from self._read_batches(mine)
+        yield from self._read_batches(self._chunks(worker_id, num_workers))
 
         self.set_epoch(self.epoch + 1)
         self.set_resume_step(None)

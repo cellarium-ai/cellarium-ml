@@ -235,7 +235,6 @@ def propagate_labels(
     n_jobs: int | None = None,
     epsilon: float = 0.1,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
-    max_gb: float | None = None,
     seed: int = 0,
 ) -> PropagateLabelsResult:
     """
@@ -310,7 +309,6 @@ def propagate_labels(
             exact search.
         accelerator: The accelerator for the exact search, and to make the embedding with if ``rep`` names a module
             that has not embedded the cells yet, in ["cpu", "mps", "cuda", "auto"].
-        max_gb: The most memory (in GiB) for that embedding, by default the ``max_gb`` of ``cdata``.
         seed: The seed of the nearest neighbor index and of the choice of the held-out cells.
 
     Returns:
@@ -359,7 +357,7 @@ def propagate_labels(
                 "cellarium-ml[scanpy]). The exact search, with method='exact', does not need it."
             ) from error
 
-    rep_key = ensure_embedding(cdata, rep, accelerator=accelerator, max_gb=max_gb)
+    rep_key = ensure_embedding(cdata, rep, accelerator=accelerator)
     embedding = cdata.obsm[rep_key]
     if len(embedding) != n or np.ndim(embedding) != 2:
         raise ValueError(f"obsm['{rep_key}'] must have one row for each of the {n} cells, got shape {embedding.shape}.")

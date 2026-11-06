@@ -21,7 +21,6 @@ def embed(
     module_key: str,
     key_added: str | None = None,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
-    max_gb: float | None = None,
     batch_size: int | None = None,
 ) -> None:
     """
@@ -29,11 +28,10 @@ def embed(
     the embedding as ``cdata.obsm[key_added]``, an array of shape ``(n_obs, n_dimensions)`` in the order of the cells.
 
     This is for keeping the embedding of all the cells, so that later steps (such as
-    :func:`~cellarium.ml.api.tools.propagate_labels`) can use it without reading the counts again. The array is in
-    memory if it fits in ``max_gb`` (by default the ``max_gb`` of ``cdata``) and otherwise in a read-only
-    memory-mapped file in the temporary directory, which is deleted when the array is no longer used. A view of
-    ``cdata`` copies the rows of its cells into memory if they fit, and otherwise reads them from the file as needed.
-    If the pass is interrupted, nothing is stored.
+    :func:`~cellarium.ml.api.tools.propagate_labels`) can use it without reading the counts again. The array is a
+    read-only memory-mapped file in the temporary directory, which is deleted when the array is no longer used. A view
+    of ``cdata`` copies the rows of its cells into memory if they fit in ``cdata.max_gb``, and otherwise reads them from
+    the file as needed. If the pass is interrupted, nothing is stored.
 
     Any data the module needs to run (such as scVI's batch column) is provided for you, see
     :meth:`CellariumData.using`. The module is the one in ``cdata.trained_modules[module_key]``, so for a view of cells
@@ -47,7 +45,6 @@ def embed(
             ``"X_<module_key>"`` (for example ``"X_pca"``), the name that :meth:`CellariumData.to_anndata` gives the
             embedding in the AnnData.
         accelerator: The accelerator for the pass, in ["cpu", "mps", "cuda", "auto"].
-        max_gb: The most memory (in GiB) for the embedding, by default the ``max_gb`` of ``cdata``.
         batch_size: The number of cells per batch, by default that of the datamodule.
     """
     key_added = f"X_{module_key}" if key_added is None else key_added
@@ -69,9 +66,7 @@ def embed(
                 prediction = call_func_with_batch(model.predict, batch)
                 values = torch.as_tensor(prediction["x_ng"]).detach().cpu().numpy()
                 if writer is None:
-                    writer = stack.enter_context(
-                        ObsmWriter(cdata.n_obs, values.shape[1], cdata._max_bytes(max_gb), dtype=np.float32)
-                    )
+                    writer = stack.enter_context(ObsmWriter(cdata.n_obs, values.shape[1], dtype=np.float32))
                 writer.write(batch["row_indices_n"].numpy(), values)
         finally:
             if original_device is not None:
@@ -85,7 +80,6 @@ def ensure_embedding(
     cdata: CellariumData,
     rep: str,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
-    max_gb: float | None = None,
 ) -> str:
     """
     The key in ``cdata.obsm`` of the embedding of all the cells that ``rep`` names, making it if need be:
@@ -110,5 +104,5 @@ def ensure_embedding(
             f"the embedding of that module. Pass rep='{key}' to use it, or embed with another key_added."
         )
     if state != "current":
-        embed(cdata, rep, key_added=key, accelerator=accelerator, max_gb=max_gb)
+        embed(cdata, rep, key_added=key, accelerator=accelerator)
     return key

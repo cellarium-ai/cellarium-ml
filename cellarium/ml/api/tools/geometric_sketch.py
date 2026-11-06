@@ -19,8 +19,9 @@ from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumP
 from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
 from cellarium.ml.api._obsm_storage import ObsmWriter
 from cellarium.ml.api._sparse_rows import SparseRowCollector
+from cellarium.ml.api._view_collections import ViewCollection, _estimate, available_memory_bytes, shard_blocks
 from cellarium.ml.api.cellariumdata import CellariumData, TrainedModule, _device_of
-from cellarium.ml.api.utils import resolve_device
+from cellarium.ml.api.utils import resolve_device, shutdown_trainer_workers
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
@@ -152,6 +153,48 @@ def _batch_embedder(module: CellariumModule, device: torch.device) -> Iterator[C
             module.model.to(model_device)
 
 
+# the sketch warns if the memory that it is expected to use is more than this fraction of the available memory
+_MEMORY_WARNING_FRACTION = 0.8
+
+
+def _warn_if_counts_may_not_fit(cdata: CellariumData, target_n_cells: int) -> None:
+    """
+    Warn if the memory that the collection of the counts of the sketch cells is expected to need is close to (or more
+    than) the memory that is available: the counts of the cells of the sketch (about ``target_n_cells`` of them, in the
+    AnnData that is made) are the bulk of it, and the cells that the dataloader workers have read and not yet handed on
+    (up to ``prefetch_factor`` items of one shard, or batch, each) come on top. The number of nonzero counts of a cell
+    is estimated from the cells of a few shards. Nothing is checked if the available memory cannot be determined.
+    """
+    try:
+        available = available_memory_bytes()
+    except ValueError:
+        return
+    datamodule = cdata.datamodule
+    collection = datamodule.dadc
+    nnz_per_cell, _ = _estimate(collection, shard_blocks(collection, 10_000), n_samples=5, sample_size=1_000)
+    n_cells = min(target_n_cells, cdata.n_obs)
+    counts = n_cells * (nnz_per_cell * 8 + 4)  # float32 value and int32 column index per count, an int32 row pointer
+    in_flight = 0.0
+    if datamodule.num_workers > 0:
+        # a view is read a shard at a time (the cells of the view in it), other data a batch at a time
+        if isinstance(collection, ViewCollection):
+            per_item = int(np.diff([0, *collection.limits]).max())
+        else:
+            per_item = datamodule.batch_size
+        in_flight = datamodule.num_workers * (datamodule.prefetch_factor or 2) * per_item * nnz_per_cell * 8
+    needed = counts + in_flight
+    if needed > _MEMORY_WARNING_FRACTION * available:
+        warnings.warn(
+            f"Collecting the counts of the {n_cells} cells of the sketch is expected to need about "
+            f"{needed / 2**30:.0f} GiB of memory ({counts / 2**30:.0f} GiB for the counts, and about "
+            f"{in_flight / 2**30:.0f} GiB for the cells that the {datamodule.num_workers} dataloader workers have read "
+            f"and not yet handed on), and {available / 2**30:.0f} GiB is available. The machine may run out of memory: "
+            "ask for fewer cells (target_n_cells), or use fewer dataloader workers, or return no AnnData "
+            "(return_new_adata=False).",
+            stacklevel=3,
+        )
+
+
 def geometric_sketch(
     cdata: CellariumData,
     target_n_cells: int = 1_000_000,
@@ -195,8 +238,8 @@ def geometric_sketch(
             as ``cdata.obsm[f"X_{embedding_module_key}"]``, as :func:`~cellarium.ml.api.tools.embed` does, so that
             later steps (such as :func:`~cellarium.ml.api.tools.propagate_labels`) need no further pass over the counts
             to have the embedding of all the cells. It costs one embedding of each cell on the accelerator, and
-            disk (or memory) for the embedding: about ``4 * n_dimensions`` bytes per cell, in a memory-mapped file in
-            the temporary directory if it does not fit in ``cdata.max_gb`` (see :func:`~cellarium.ml.api.tools.embed`).
+            disk for the embedding: about ``4 * n_dimensions`` bytes per cell, in a memory-mapped file in the
+            temporary directory (see :func:`~cellarium.ml.api.tools.embed`).
             It is the whole embedding of the module, also if ``n_pcs`` limits the dimensions that the sketch is made in.
             Nothing is stored (and nothing is embedded) if there is no ``embedding_module_key`` (a random
             projection is not an embedding to keep), if ``obsm`` already has the embedding of this module from
@@ -327,6 +370,8 @@ def _geometric_sketch(
         logger=False,
         enable_checkpointing=False,
     )
+    if return_new_adata:
+        _warn_if_counts_may_not_fit(cdata, target_n_cells)
     cdata._warn_if_read_amplified("The geometric sketch")
     # the retained cells are drawn as the cells stream by, so the order of the stream is part of the seed
     datamodule_shuffle_seed = datamodule.shuffle_seed
@@ -338,6 +383,8 @@ def _geometric_sketch(
         # the trainer and the module refer to each other, which would keep the module (and the sketch it holds, on
         # the accelerator) alive until the cyclic garbage collector ran; the module no longer needs the trainer
         module.trainer = None
+        # the workers of the training pass would otherwise stay (with what they hold) next to those of the next pass
+        shutdown_trainer_workers(trainer)
 
     reservoir = module.model.get_reservoir(return_cell_data=return_new_adata, max_cells=target_n_cells)
     sketch_obs_names = reservoir["obs_names"]
@@ -347,7 +394,7 @@ def _geometric_sketch(
     # One more pass, to find the sketch cells in the data (by their position, which `predict_batches` gives for every
     # cell) and to collect their counts. Only the names of one batch at a time are looked up in the sketch, and the
     # mask of the sketch is one boolean per cell: nothing is kept for every cell but that (except the embedding of
-    # every cell, if it is to be stored, which goes to `obsm`: to a file if it does not fit in memory).
+    # every cell, if it is to be stored, which goes to `obsm`: to a file).
     in_sketch = np.zeros(cdata.n_obs, dtype=bool)
     raw_counts = SparseRowCollector()  # the counts of the sketch cells, which are the bulk of the memory used here
     raw_obs_names_list = []
@@ -362,9 +409,7 @@ def _geometric_sketch(
             if embed_batch is not None:
                 values = embed_batch(batch)
                 if writer is None:
-                    writer = stack.enter_context(
-                        ObsmWriter(cdata.n_obs, values.shape[1], cdata._max_bytes(), dtype=np.float32)
-                    )
+                    writer = stack.enter_context(ObsmWriter(cdata.n_obs, values.shape[1], dtype=np.float32))
                 writer.write(positions, values)
             batch_obs_names = np.asarray(batch["obs_names_n"])
             mask = sketch_index.get_indexer(batch_obs_names) >= 0

@@ -308,21 +308,13 @@ def test_loadings_can_be_unnormalized_and_stored_under_another_key(output, cdata
     assert np.allclose(cdata.obsm["loadings_3"], expected, atol=2e-3)
 
 
-def test_loadings_go_to_disk_if_they_do_not_fit_and_are_the_same(output, cdata):
+def test_loadings_always_go_to_a_read_only_file(output, cdata):
     output.compute_consensus_factors(k_values=2, density_threshold=1.0)
-    output.compute_loadings(2, key_added="in_memory", accelerator="cpu")
-    output.compute_loadings(2, key_added="on_disk", accelerator="cpu", max_gb=1e-9)
-
-    assert type(cdata.obsm["in_memory"]) is np.ndarray
-    assert isinstance(cdata.obsm["on_disk"], np.memmap) and not cdata.obsm["on_disk"].flags.writeable
-    assert np.array_equal(cdata.obsm["in_memory"], cdata.obsm["on_disk"])
-
-
-def test_loadings_use_the_max_gb_of_the_data(output, cdata):
-    output.compute_consensus_factors(k_values=2, density_threshold=1.0)
-    cdata.max_gb = 1e-9
     output.compute_loadings(2, accelerator="cpu")
-    assert isinstance(cdata.obsm["X_cnmf_k2"], np.memmap)
+
+    loadings = cdata.obsm["X_cnmf_k2"]
+    assert isinstance(loadings, np.memmap) and not loadings.flags.writeable
+    assert loadings.shape == (cdata.n_obs, 2)
 
 
 def test_loadings_of_a_view_are_stored_in_the_view(output, cdata):
@@ -351,7 +343,7 @@ def test_an_interrupted_pass_stores_nothing(output, cdata, monkeypatch):
 
     monkeypatch.setattr(output.model, "infer_loadings", interrupt_after_one_batch)
     with pytest.raises(KeyboardInterrupt):
-        output.compute_loadings(2, accelerator="cpu", max_gb=1e-9)
+        output.compute_loadings(2, accelerator="cpu")
     assert "X_cnmf_k2" not in cdata.obsm
 
 

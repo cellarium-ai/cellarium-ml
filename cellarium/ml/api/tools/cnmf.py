@@ -415,16 +415,14 @@ class NMFOutput:
         cdata: CellariumData | None = None,
         normalize: bool = True,
         accelerator: Accelerator = "auto",
-        max_gb: float | None = None,
     ) -> None:
         """
         Compute the per-cell loadings of the consensus programs of ``k``, in a pass over the cells, and store them as
         ``cdata.obsm[key_added]``, an array of shape ``(n_obs, k)`` in the order of the cells.
 
-        The array is in memory if it fits in ``max_gb`` (by default the ``max_gb`` of ``cdata``) and otherwise in a
-        read-only memory-mapped file in the temporary directory, which is deleted when the array is no longer used.
-        A view of ``cdata`` copies the rows of its cells into memory if they fit, and otherwise reads them from the
-        file as needed. If the pass is interrupted, nothing is stored.
+        The array is a read-only memory-mapped file in the temporary directory, which is deleted when the array is no
+        longer used. A view of ``cdata`` copies the rows of its cells into memory if they fit in ``cdata.max_gb``, and
+        otherwise reads them from the file as needed. If the pass is interrupted, nothing is stored.
 
         Args:
             k: The number of consensus NMF factors. Its consensus must have been computed.
@@ -433,12 +431,11 @@ class NMFOutput:
             cdata: The cells to compute loadings for, by default :attr:`cdata`. It is where they are stored.
             normalize: Whether to normalize the loadings of each cell to sum to 1.
             accelerator: The accelerator for the pass, in ["cpu", "mps", "cuda", "auto"].
-            max_gb: The most memory (in GiB) for the loadings, by default the ``max_gb`` of ``cdata``.
         """
         self._require_consensus(k)
         cdata = self._cells(cdata)
         consensus = self.consensus
-        with ObsmWriter(cdata.n_obs, k, cdata._max_bytes(max_gb)) as writer:
+        with ObsmWriter(cdata.n_obs, k) as writer:
             for batch in cdata.predict_batches(
                 self.nmf_module, device=resolve_device(accelerator), desc=f"Loadings for k={k}"
             ):
