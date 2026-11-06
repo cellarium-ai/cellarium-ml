@@ -72,6 +72,16 @@ model:
       cl_name_subset: null
       probability_propagation_flag: true
       seed: 0
+      # Default is logistic regression (no hidden layers). To compute logits with an MLP instead, e.g.:
+      # hidden_layers: [512, 512]
+      # dressing_init_kwargs:  # a single dict (applied to every layer) or one dict per hidden layer
+      # - activation_fn: cellarium.ml.layers.SwiGLUActivation
+      #   use_layer_norm: true
+      #   dropout_rate: 0.1
+      # - activation_fn: cellarium.ml.layers.SwiGLUActivation
+      #   use_layer_norm: true
+      #   use_residual: true
+      # l1_on_first_layer: true  # Laplace prior (W_prior_scale) on the first layer's weights
   is_initialized: false
 data:
   dadc:
