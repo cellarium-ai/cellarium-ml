@@ -866,11 +866,7 @@ class SCANVI(SingleCellVariationalInference):
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
-        if self.use_size_factor_key:
-            assert total_mrna_umis_n is not None, "total_mrna_umis_n required when use_size_factor_key=True"
-            library_size_n1 = torch.log(total_mrna_umis_n).unsqueeze(-1)
-        else:
-            library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
+        library_size_n1 = self._log_library_size_n1(x_ng, total_mrna_umis_n)
 
         inference_input_x_ng = self._augment_encoder_input(x_ng)
 

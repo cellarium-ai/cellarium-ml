@@ -2730,3 +2730,61 @@ def test_forward_with_encoder_input_augmentation():
     assert torch.isfinite(out["loss"])
     out["loss"].backward()
     assert seen_inputs[0].sum() < x_ng.sum(), "the encoder sees augmented counts"
+
+
+@pytest.mark.parametrize("normalizetotal_variational", [False, True], ids=["no_normalize", "normalize"])
+def test_zero_count_cells_are_finite(normalizetotal_variational: bool):
+    """All-zero cells give finite embeddings, losses and reconstructions, and do not affect other cells."""
+    n, g = 8, len(var_names_g)
+    torch.manual_seed(0)
+    x_ng = torch.poisson(torch.full((n, g), 20.0))
+    x_zero_ng = x_ng.clone()
+    x_zero_ng[[1, 5]] = 0.0
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    model = _augmentation_model(normalizetotal_variational=normalizetotal_variational)
+    model.eval()
+    with torch.no_grad():
+        z_nk = model.predict(x_zero_ng, var_names_n, batch_index_n)["x_ng"]
+        z_ref_nk = model.predict(x_ng, var_names_n, batch_index_n)["x_ng"]
+        assert torch.isfinite(z_nk).all()
+        keep = [i for i in range(n) if i not in (1, 5)]
+        torch.testing.assert_close(z_nk[keep], z_ref_nk[keep])
+
+        out = model(x_zero_ng, var_names_n, batch_index_n)
+        assert isinstance(out["loss"], torch.Tensor)
+        assert isinstance(out["reconstruction_loss"], torch.Tensor)
+        assert torch.isfinite(out["loss"])
+        assert torch.isfinite(out["reconstruction_loss"]).all()
+
+        reconstruction_np = model.reconstruct(x_zero_ng, var_names_n, gene_inds=[0, 1, 2], batch_index_n=batch_index_n)
+        assert torch.isfinite(reconstruction_np["x_ng"]).all()
+
+
+def test_gene_dropout_that_empties_cells_is_finite_with_normalization():
+    n, g = 32, len(var_names_g)
+    torch.manual_seed(0)
+    x_ng = torch.poisson(torch.full((n, g), 0.5))
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+    model = _augmentation_model(normalizetotal_variational=True, input_gene_dropout_rate=0.9)
+    model.train()
+    out = model(x_ng, var_names_n, batch_index_n)
+    assert isinstance(out["loss"], torch.Tensor)
+    assert torch.isfinite(out["loss"])
+    out["loss"].backward()
+
+
+def test_predict_single_cell():
+    """A batch with exactly one cell keeps its batch dimension."""
+    g = len(var_names_g)
+    x_ng = torch.poisson(torch.full((1, g), 20.0))
+    var_names_n = np.array(var_names_g)
+    model = _augmentation_model()
+    model.eval()
+    for batch_index_n in (torch.zeros(1, dtype=torch.long), torch.zeros(1, 1, dtype=torch.long)):
+        with torch.no_grad():
+            z_nk = model.predict(x_ng, var_names_n, batch_index_n)["x_ng"]
+        assert z_nk.shape == (1, standard_kwargs["n_latent"])
+        assert model.batch_representation_from_batch_index(batch_index_n).shape == (1, standard_kwargs["n_batch"])

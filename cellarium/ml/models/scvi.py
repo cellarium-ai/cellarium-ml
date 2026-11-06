@@ -919,7 +919,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         """
         if not self.batch_embedded:
-            batch_nb = torch.nn.functional.one_hot(batch_index_n.squeeze().long(), num_classes=self.n_batch).float()
+            # reshape (not squeeze) so that a single cell keeps its batch dimension
+            batch_nb = torch.nn.functional.one_hot(batch_index_n.reshape(-1).long(), num_classes=self.n_batch).float()
         else:
             if self.batch_representation_sampled:
                 if use_mean_though_sampling:
@@ -968,7 +969,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         encoder_input_ng = x_ng
         if self.normalizetotal_variational:
-            encoder_input_ng = encoder_input_ng / encoder_input_ng.sum(dim=-1, keepdim=True) * 10000
+            # clamp so that an all-zero cell stays all zeros instead of becoming NaN (counts are integers, so the
+            # clamp does not change any cell with at least one count)
+            encoder_input_ng = encoder_input_ng / encoder_input_ng.sum(dim=-1, keepdim=True).clamp(min=1.0) * 10000
         if self.log_variational:
             encoder_input_ng = torch.log1p(encoder_input_ng)
 
@@ -1020,6 +1023,20 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         pz = Normal(torch.zeros_like(z_nk), torch.ones_like(z_nk))
 
         return dict(px=count_distribution, pz=pz)
+
+    def _log_library_size_n1(self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None) -> torch.Tensor:
+        """
+        Log library size of each cell, from ``total_mrna_umis_n`` if :attr:`use_size_factor_key` else from ``x_ng``.
+
+        The total is clamped to be at least one count, so an all-zero cell gets a log library size of 0 instead
+        of ``-inf``.
+        """
+        if self.use_size_factor_key:
+            assert total_mrna_umis_n is not None, "total_mrna_umis_n must be provided when use_size_factor_key=True"
+            total_n1 = total_mrna_umis_n.unsqueeze(-1)
+        else:
+            total_n1 = x_ng.sum(dim=-1, keepdim=True)
+        return torch.log(total_n1.clamp(min=1.0))
 
     def _augment_encoder_input(self, x_ng: torch.Tensor) -> torch.Tensor:
         """
@@ -1106,11 +1123,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
-        if self.use_size_factor_key:
-            assert total_mrna_umis_n is not None, "total_mrna_umis_n must be provided when use_size_factor_key=True"
-            library_size_n1 = torch.log(total_mrna_umis_n).unsqueeze(-1)
-        else:
-            library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
+        library_size_n1 = self._log_library_size_n1(x_ng, total_mrna_umis_n)
 
         inference_input_x_ng = self._augment_encoder_input(x_ng)
 
@@ -1358,7 +1371,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
-        library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
+        library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True).clamp(min=1.0))
 
         # generate the latent distribution
         inference_outputs = self.inference(
@@ -1386,7 +1399,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             counts_ng = generative_outputs["px"].mean
 
             # normalize and re-scale
-            normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True)
+            normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True).clamp(
+                min=torch.finfo(counts_ng.dtype).tiny
+            )
             scaled_counts_ng = reconstructed_library_size * normalized_counts_ng
 
             # subset to genes of interest

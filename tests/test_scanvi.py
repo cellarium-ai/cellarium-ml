@@ -75,7 +75,7 @@ _DECODER_CFG = {
 }
 
 
-def _make_flat(var_names_g, *, n_batch=2, n_latent=8, cell_type_categories=("T", "B", "NK", "Mono", "DC")):
+def _make_flat(var_names_g, *, n_batch=2, n_latent=8, cell_type_categories=("T", "B", "NK", "Mono", "DC"), **kwargs):
     return SCANVI(
         classifier_type="flat",
         cell_type_categories=list(cell_type_categories),
@@ -87,6 +87,7 @@ def _make_flat(var_names_g, *, n_batch=2, n_latent=8, cell_type_categories=("T",
         n_latent=n_latent,
         encoder=_ENCODER_CFG,
         decoder=_DECODER_CFG,
+        **kwargs,
     )
 
 
@@ -483,3 +484,17 @@ def test_forward_uses_shared_encoder_input_augmentation():
     with torch.no_grad():
         model(x_ng=x_ng, var_names_g=var_names_g, batch_index_n=batch_index_n)
     assert torch.equal(seen_inputs[-1], x_ng)
+
+
+def test_forward_zero_count_cell_is_finite():
+    n, g = 8, 50
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    torch.manual_seed(0)
+    model = _make_flat(var_names_g, cell_type_categories=["T", "B"], normalizetotal_variational=True)
+    model.eval()
+    x_ng = torch.poisson(torch.full((n, g), 20.0))
+    x_ng[2] = 0.0
+    batch_index_n = torch.zeros(n, dtype=torch.long)
+    with torch.no_grad():
+        out = model(x_ng=x_ng, var_names_g=var_names_g, batch_index_n=batch_index_n)
+    assert out["loss"].isfinite()
