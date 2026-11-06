@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-import torch
-from torch import nn
+from collections.abc import Sequence
+from typing import ClassVar
 
+import torch
+
+from .base import CellariumTransform, Stage
 from .randomize import Randomize
 
 
-class GaussianNoise(nn.Module):
+class GaussianNoise(CellariumTransform):
     """
     Adds Gaussian noise to gene counts.
 
@@ -20,6 +23,9 @@ class GaussianNoise(nn.Module):
 
         y_{ng} = x_{ng} + N(0, \\sigma_{ng})
 
+    By default the transform is active only in the ``"train"`` stage of a
+    :class:`~cellarium.ml.core.CellariumPipeline`.
+
     Args:
         sigma_min:
             Lower bound on Gaussian sigma parameter.
@@ -27,10 +33,21 @@ class GaussianNoise(nn.Module):
             Upper bound on Gaussian sigma parameter.
         p_apply:
             Probability of applying transform to each sample.
+        stages:
+            The stages in which the transform is active. If ``None`` (default), it is active only in
+            ``"train"``. Otherwise this replaces that default.
     """
 
-    def __init__(self, sigma_min, sigma_max, p_apply):
-        super().__init__()
+    default_stages: ClassVar[frozenset[Stage]] = frozenset({"train"})
+
+    def __init__(
+        self,
+        sigma_min,
+        sigma_max,
+        p_apply,
+        stages: Sequence[Stage] | None = None,
+    ):
+        super().__init__(stages)
 
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max

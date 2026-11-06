@@ -8,14 +8,21 @@ import torch
 
 from cellarium.ml import CellariumPipeline
 from cellarium.ml.transforms import (
+    STAGES,
+    BinomialResample,
+    CellariumTransform,
     CellFilter,
     CenterPerCell,
     Densify,
     DivideByScale,
+    Dropout,
+    Duplicate,
     Filter,
+    GaussianNoise,
     Log1p,
     NormalizeTotal,
     PFlogPF,
+    Stage,
     ZScore,
 )
 from cellarium.ml.utilities.data import to_torch_sparse_coo, to_torch_sparse_csr
@@ -735,17 +742,9 @@ def test_cell_filter_negative_threshold_raises():
         CellFilter(min_count_per_cell=-1)
 
 
-def test_cell_filter_predict_mode_is_noop():
-    # _predict_mode sentinel injected by CellariumPipeline.predict() must disable filtering
-    x_ng = torch.ones(5, 3)  # all rows below threshold of 100
-    batch_index_n = torch.zeros(5)
-    result = CellFilter(min_count_per_cell=100)(x_ng=x_ng, batch_index_n=batch_index_n, _predict_mode=True)
-    assert result == {}
-
-
-def test_cell_filter_predict_mode_via_pipeline():
-    # End-to-end: pipeline.predict() injects _predict_mode; CellFilter becomes a no-op
-    # so all 5 cells survive despite being below the threshold.
+def test_cell_filter_predict_stage_via_pipeline():
+    # End-to-end: CellFilter is not active in the predict stage, so all 5 cells survive
+    # despite being below the threshold.
     from cellarium.ml.models.model import CellariumModel, PredictMixin
 
     class _PassthroughModel(CellariumModel, PredictMixin):
@@ -772,6 +771,7 @@ def test_cell_filter_predict_mode_via_pipeline():
     x_ng_out = out["x_ng"]
     assert isinstance(x_ng_out, torch.Tensor)
     assert x_ng_out.shape[0] == 5
+    assert "_predict_mode" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -811,8 +811,217 @@ def test_cell_filter_both_modes_raises():
         CellFilter(min_count_per_cell=10, min_nonzero_genes_per_cell=5)
 
 
-def test_cell_filter_nonzero_genes_predict_mode_noop():
+def test_cell_filter_nonzero_genes_predict_stage_noop():
     x_ng = torch.zeros(5, 4)  # all cells have 0 nonzero genes — would all be dropped
     batch_index_n = torch.zeros(5)
-    result = CellFilter(min_nonzero_genes_per_cell=1)(x_ng=x_ng, batch_index_n=batch_index_n, _predict_mode=True)
-    assert result == {}
+    pipeline = CellariumPipeline([CellFilter(min_nonzero_genes_per_cell=1)])
+    assert _x_ng(pipeline.transform({"x_ng": x_ng, "batch_index_n": batch_index_n}, "predict")).shape[0] == 5
+    assert _x_ng(pipeline.transform({"x_ng": x_ng, "batch_index_n": batch_index_n}, "validate")).shape[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Stages: CellariumTransform defaults, overrides, and pipeline enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "transform, expected",
+    [
+        (Dropout(0.1, 0.2, 1.0), {"train"}),
+        (GaussianNoise(0.1, 0.2, 1.0), {"train"}),
+        (BinomialResample(0.5, 0.9, 1.0), {"train"}),
+        (Duplicate(), {"train", "validate", "test"}),
+        (CellFilter(min_count_per_cell=1), {"train", "validate", "test"}),
+    ],
+)
+def test_transform_default_stages(transform: CellariumTransform, expected: set[str]):
+    assert transform.stages == expected
+    for stage in STAGES:
+        assert transform.is_active(stage) == (stage in expected)
+
+
+def test_transform_stages_override_replaces_default():
+    transform = Dropout(0.1, 0.2, 1.0, stages=["validate", "predict"])
+    assert transform.stages == {"validate", "predict"}
+    assert not transform.is_active("train")
+    assert Duplicate(stages=["predict"]).stages == {"predict"}
+    assert CellFilter(min_count_per_cell=1, stages=[]).stages == frozenset()
+
+
+def test_transform_stages_unknown_stage_raises():
+    with pytest.raises(ValueError, match="Unknown stages"):
+        Dropout(0.1, 0.2, 1.0, stages=["training"])  # type: ignore[list-item]
+
+
+def test_transform_stages_string_raises():
+    with pytest.raises(TypeError, match="not a string"):
+        Duplicate(stages="train")  # type: ignore[arg-type]
+
+
+def test_transform_stages_missing_attribute_falls_back_to_default():
+    # instances that predate the per-instance override (e.g. unpickled ones) have no `_stages` in their __dict__
+    transform = Duplicate()
+    assert "_stages" not in transform.__dict__
+    assert transform.stages == Duplicate.default_stages
+
+
+def _x_ng(batch: dict) -> torch.Tensor:
+    x_ng = batch["x_ng"]
+    assert isinstance(x_ng, torch.Tensor)
+    return x_ng
+
+
+class _AddOne(torch.nn.Module):
+    """A plain nn.Module transform: active in every stage."""
+
+    def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {"x_ng": x_ng + 1}
+
+
+@pytest.mark.parametrize("stage", STAGES)
+def test_pipeline_transform_skips_inactive_transforms(stage: Stage):
+    pipeline = CellariumPipeline([Duplicate(), _AddOne()])
+    x_ng = _x_ng(pipeline.transform({"x_ng": torch.zeros(3, 2)}, stage))
+    # Duplicate is active in all but predict; the plain nn.Module is active in every stage
+    assert x_ng.shape[0] == (3 if stage == "predict" else 6)
+    assert torch.all(x_ng == 1)
+
+
+def test_pipeline_forward_validate_test_use_their_stages():
+    from cellarium.ml.models.model import CellariumModel, PredictMixin, TestMixin, ValidateMixin
+
+    seen: dict[str, int] = {}
+
+    class _RecordingModel(CellariumModel, PredictMixin, ValidateMixin, TestMixin):
+        def reset_parameters(self):
+            pass
+
+        def forward(self, x_ng: torch.Tensor, **kwargs) -> dict:
+            seen["forward"] = x_ng.shape[0]
+            return {}
+
+        def predict(self, x_ng: torch.Tensor, **kwargs) -> dict:
+            seen["predict"] = x_ng.shape[0]
+            return {}
+
+        def validate(self, x_ng: torch.Tensor, **kwargs) -> None:  # type: ignore[override]
+            seen["validate"] = x_ng.shape[0]
+
+        def test(self, x_ng: torch.Tensor, **kwargs) -> None:  # type: ignore[override]
+            seen["test"] = x_ng.shape[0]
+
+    def run(method: str, **transform_kwargs):
+        # a transform active in exactly the given stages, with a plain tensor input of 3 rows
+        pipeline = CellariumPipeline([Duplicate(**transform_kwargs), _RecordingModel()])
+        getattr(pipeline, method)({"x_ng": torch.zeros(3, 2)})
+
+    # Duplicate's default: active in train/validate/test, skipped in predict
+    run("forward")
+    run("validate")
+    run("test")
+    run("predict")
+    assert seen == {"forward": 6, "validate": 6, "test": 6, "predict": 3}
+
+    # the override replaces the default
+    seen.clear()
+    run("forward", stages=["predict"])
+    run("validate", stages=["predict"])
+    run("test", stages=["predict"])
+    run("predict", stages=["predict"])
+    assert seen == {"forward": 3, "validate": 3, "test": 3, "predict": 6}
+
+
+# ---------------------------------------------------------------------------
+# Augmentations: Dropout and BinomialResample update total_mrna_umis_n
+# ---------------------------------------------------------------------------
+
+
+def _counts(n_cells: int = 50, n_genes: int = 20) -> torch.Tensor:
+    rng = torch.Generator()
+    rng.manual_seed(3)
+    return torch.poisson(torch.rand((n_cells, n_genes), generator=rng) * 20 + 1, generator=rng)
+
+
+def _augmentations(p_apply: float) -> list[CellariumTransform]:
+    return [Dropout(0.3, 0.5, p_apply), BinomialResample(0.3, 0.8, p_apply)]
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_total_mrna_umis_n_reduced_by_removed_counts(make):
+    x_ng = _counts()
+    # the total includes counts of genes that are not in x_ng
+    unseen_n = torch.full((x_ng.shape[0],), 7.0)
+    total_mrna_umis_n = x_ng.sum(dim=-1) + unseen_n
+
+    out = make(1.0)(x_ng=x_ng, total_mrna_umis_n=total_mrna_umis_n)
+
+    assert out["x_ng"].sum() < x_ng.sum()
+    torch.testing.assert_close(out["total_mrna_umis_n"], out["x_ng"].sum(dim=-1) + unseen_n)
+    assert out["total_mrna_umis_n"].dtype == total_mrna_umis_n.dtype
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_total_mrna_umis_n_unchanged_when_not_applied(make):
+    x_ng = _counts()
+    total_mrna_umis_n = x_ng.sum(dim=-1) + 7.0
+
+    out = make(0.0)(x_ng=x_ng, total_mrna_umis_n=total_mrna_umis_n)
+
+    torch.testing.assert_close(out["x_ng"], x_ng)
+    torch.testing.assert_close(out["total_mrna_umis_n"], total_mrna_umis_n)
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_total_mrna_umis_n_only_reduced_for_applied_cells(make):
+    x_ng = _counts(n_cells=500)
+    total_mrna_umis_n = x_ng.sum(dim=-1)
+
+    out = make(0.5)(x_ng=x_ng, total_mrna_umis_n=total_mrna_umis_n)
+
+    changed_n = (out["x_ng"] != x_ng).any(dim=-1)
+    assert 0 < changed_n.sum() < x_ng.shape[0]  # only some cells were augmented
+    torch.testing.assert_close(out["total_mrna_umis_n"], out["x_ng"].sum(dim=-1))
+    torch.testing.assert_close(out["total_mrna_umis_n"][~changed_n], total_mrna_umis_n[~changed_n])
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_without_total_mrna_umis_n_returns_only_x_ng(make):
+    out = make(1.0)(x_ng=_counts())
+    assert set(out) == {"x_ng"}
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_total_mrna_umis_n_keeps_integer_dtype(make):
+    x_ng = _counts()
+    total_mrna_umis_n = x_ng.sum(dim=-1).long()
+
+    out = make(1.0)(x_ng=x_ng, total_mrna_umis_n=total_mrna_umis_n)
+
+    assert out["total_mrna_umis_n"].dtype == torch.long
+    torch.testing.assert_close(out["total_mrna_umis_n"], out["x_ng"].sum(dim=-1).long())
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_pipeline_normalize_total_uses_updated_total(make):
+    x_ng = _counts()
+    batch = {"x_ng": x_ng, "total_mrna_umis_n": x_ng.sum(dim=-1)}
+
+    out = CellariumPipeline([make(1.0), NormalizeTotal(target_count=100)])(batch)
+
+    # every cell is renormalized to its own (resampled) depth
+    torch.testing.assert_close(out["x_ng"].sum(dim=-1), torch.full((x_ng.shape[0],), 100.0), atol=1e-2, rtol=1e-4)
+
+
+@pytest.mark.parametrize("transform", _augmentations(1.0) + [GaussianNoise(0.1, 0.2, 1.0)])
+@pytest.mark.parametrize("stage, active", [("train", True), ("validate", False), ("test", False), ("predict", False)])
+def test_augmentations_are_train_only_in_pipeline(transform: CellariumTransform, stage: Stage, active: bool):
+    x_ng = _counts()
+    out = _x_ng(CellariumPipeline([transform]).transform({"x_ng": x_ng.clone()}, stage))
+    assert torch.equal(out, x_ng) == (not active)
+
+
+def test_augmentation_stages_override_enables_validation():
+    x_ng = _counts()
+    pipeline = CellariumPipeline([BinomialResample(0.3, 0.8, 1.0, stages=["train", "validate"])])
+    assert not torch.equal(_x_ng(pipeline.transform({"x_ng": x_ng.clone()}, "validate")), x_ng)
+    assert torch.equal(_x_ng(pipeline.transform({"x_ng": x_ng.clone()}, "test")), x_ng)
