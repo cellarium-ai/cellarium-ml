@@ -375,6 +375,7 @@ def _counts_with_large_means(n_batch: int = 3, n_cells: int = 6000, n_genes: int
 def test_hvg_seurat_v3_float32_accumulators_match_float64(tmp_path):
     x, batch_idx = _counts_with_large_means()
     var_names = np.array([f"gene_{i}" for i in range(x.shape[1])])
+    dtypes: tuple[Literal["float32", "float64"], ...] = ("float32", "float64")
     models = {
         dtype: _run_model(
             x=x,
@@ -387,7 +388,7 @@ def test_hvg_seurat_v3_float32_accumulators_match_float64(tmp_path):
             batch_size=64,
             accumulator_dtype=dtype,
         )
-        for dtype in ("float32", "float64")
+        for dtype in dtypes
     }
     model32, model64 = models["float32"], models["float64"]
     assert model32.x_sums_bg.dtype == torch.float32

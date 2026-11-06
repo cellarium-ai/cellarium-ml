@@ -696,7 +696,7 @@ class _LazyObsLoc:
         # find the rows of the cells in arrow, without turning the names of all the cells into python strings
         index_col = lazy_obs._index_column_name
         names = lazy_obs._get_dataset().to_table(columns=[index_col]).column(index_col)
-        matches = pc.is_in(names, value_set=pa.array(row_labels).cast(names.type))
+        matches = pc.is_in(names, value_set=pa.array(row_labels).cast(names.type))  # type: ignore[attr-defined]  # pyarrow makes its compute functions at import
         found = np.flatnonzero(matches.to_pandas().to_numpy())
         found_names = pd.Index(names.take(pa.array(found, type=pa.int64())).to_pandas())
         order = found_names.get_indexer(row_labels)

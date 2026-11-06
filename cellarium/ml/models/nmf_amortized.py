@@ -275,13 +275,15 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         setattr(self, f"B_{k}_rkg", updated_values["B_rkg"])
         setattr(self, f"D_{k}_rkg", D_rkg)
 
-        return {
+        result = {
             "loss": self.encoder_loss_fn(encoder_loadings_rnk.contiguous(), solver_loadings_rnk.detach().contiguous()),
             "solver_loadings_rnk": solver_loadings_rnk.detach(),
             "encoder_loadings_rnk": encoder_loadings_rnk.detach(),
-            "loadings_history": updated_values.get("loadings_history", None),
-            "factors_history": updated_values.get("factors_history", None),
         }
+        for history in ("loadings_history", "factors_history"):
+            if history in updated_values:  # only some solvers keep a history
+                result[history] = updated_values[history]
+        return result
 
     def forward(
         self,
@@ -426,6 +428,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                     )
 
                 euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+                # for more than 25 factors cdist uses a matrix product, whose roundoff makes the matrix asymmetric
+                euclidean_dist_mm = (euclidean_dist_mm + euclidean_dist_mm.T) / 2
                 euclidean_dist_mm.fill_diagonal_(0)
                 n_nearest_dist_including_self_mL, _ = torch.topk(euclidean_dist_mm, n_neighbors + 1, largest=False)
                 n_nearest_dist_ml = n_nearest_dist_including_self_mL[:, 1:]
