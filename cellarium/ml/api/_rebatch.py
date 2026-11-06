@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from cellarium.ml.api._view_collections import RamCollection, ViewCollection, unwrap_collection
 from cellarium.ml.core.datamodule import CellariumAnnDataDataModule
 from cellarium.ml.data import DistributedCollection, IterableDistributedAnnDataCollectionDataset
+from cellarium.ml.transforms.base import Stage
 from cellarium.ml.utilities.distributed import get_rank_and_num_replicas, get_worker_info
 
 Batch = dict[str, Any]
@@ -331,10 +332,10 @@ class ShardChunkDataModule(CellariumAnnDataDataModule):
                 ),
             )
 
-    def _chunk_loader(self, dataset: ShardChunkDataset) -> DataLoader:
+    def _chunk_loader(self, dataset: ShardChunkDataset, stage: Stage) -> DataLoader:
         return make_loader(
             dataset,
-            collate_fn=self._effective_collate_fn(),
+            collate_fn=self._effective_collate_fn(stage),
             num_workers=self.num_workers,
             prefetch_factor=self.prefetch_factor,
             persistent_workers=self.persistent_workers,
@@ -343,20 +344,20 @@ class ShardChunkDataModule(CellariumAnnDataDataModule):
 
     def train_dataloader(self) -> DataLoader:
         if isinstance(self.train_dataset, ShardChunkDataset):
-            return self._chunk_loader(self.train_dataset)
+            return self._chunk_loader(self.train_dataset, "train")
         return super().train_dataloader()
 
     def val_dataloader(self) -> DataLoader:
         if isinstance(self.val_dataset, ShardChunkDataset):
-            return self._chunk_loader(self.val_dataset)
+            return self._chunk_loader(self.val_dataset, "validate")
         return super().val_dataloader()
 
     def predict_dataloader(self) -> DataLoader:
         if isinstance(self.predict_dataset, ShardChunkDataset):
-            return self._chunk_loader(self.predict_dataset)
+            return self._chunk_loader(self.predict_dataset, "predict")
         return super().predict_dataloader()
 
     def test_dataloader(self) -> DataLoader:
         if isinstance(self.test_dataset, ShardChunkDataset):
-            return self._chunk_loader(self.test_dataset)
+            return self._chunk_loader(self.test_dataset, "test")
         return super().test_dataloader()
