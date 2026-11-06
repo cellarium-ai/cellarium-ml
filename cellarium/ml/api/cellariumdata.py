@@ -30,7 +30,6 @@ from tqdm.auto import tqdm
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
-from cellarium.ml.api._fork_safety import reset_deltacells_after_fork
 from cellarium.ml.api._obsm_storage import RowSubset, subset_rows
 from cellarium.ml.api._rebatch import ShardChunkDataModule, ShardChunkDataset, make_loader
 from cellarium.ml.api._view_collections import (
@@ -79,7 +78,6 @@ def _build_datamodule(
     var_names_make_unique: bool = False,
 ) -> CellariumAnnDataDataModule:
     convert_fn = _make_names_unique if var_names_make_unique else None
-    reset_deltacells_after_fork(dadc)
     datamodule = CellariumAnnDataDataModule(
         dadc=dadc,
         batch_keys={
@@ -911,7 +909,6 @@ def _clone_datamodule(
 ) -> CellariumAnnDataDataModule:
     """A datamodule over ``dadc`` with the settings of ``datamodule`` (and the data fields it currently reads)."""
     sizes = {name: datamodule.hparams[name] for name in ("train_size", "val_size", "pred_size")}
-    reset_deltacells_after_fork(dadc)
     n_workers = datamodule.num_workers if num_workers is None else num_workers
     keep_workers = datamodule.persistent_workers if persistent_workers is None else persistent_workers
     clone = ShardChunkDataModule(
