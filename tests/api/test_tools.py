@@ -1,7 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import signal
 import warnings
+import weakref
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,7 +15,7 @@ import scanpy as sc
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.api import CellariumData
+from cellarium.ml.api import CellariumData, cellariumdata
 from cellarium.ml.api.preprocessing import highly_variable_genes
 from cellarium.ml.api.tools import geometric_sketch, pca, scvi
 from cellarium.ml.api.utils import PreciseProgressBar
@@ -465,6 +467,50 @@ def test_precise_progress_bar_formats_floats_with_more_significant_digits():
 
     # tqdm would show "1.52e+3"
     assert metrics == {"val_loss": "1523.457", "tiny": "0.0001234568", "n": 3}
+
+
+class _Sentinel:
+    """Something to hold in a local variable, and to see whether it is still alive."""
+
+
+@pytest.fixture
+def releases(monkeypatch) -> list[int]:
+    """One entry for each call of ``release_unused_memory`` made by ``fit_and_register``."""
+    calls: list[int] = []
+    monkeypatch.setattr(cellariumdata, "release_unused_memory", lambda: calls.append(1))
+    return calls
+
+
+def test_a_completed_fit_releases_memory(cdata, releases):
+    scvi(cdata, batch_key="cell_type", n_latent=3, max_epochs=1, accelerator="cpu")
+    assert len(releases) == 1
+
+
+def test_an_interrupted_fit_frees_what_the_fit_loop_held_and_restores_sigint(cdata, releases, monkeypatch):
+    held = []
+
+    def interrupt_after_first_epoch(self, trainer):
+        if trainer.current_epoch == 1:
+            sentinel = _Sentinel()  # a local of a frame in the traceback, like the batch of the fit loop
+            held.append(weakref.ref(sentinel))
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        SingleCellVariationalInference, "on_train_epoch_end", interrupt_after_first_epoch, raising=False
+    )
+    handler_before = signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(SystemExit) as raised:
+            scvi(cdata, batch_key="cell_type", n_latent=3, max_epochs=5, log_every_n_steps=1, accelerator="cpu")
+
+        # Lightning ignores SIGINT while it shuts down, and leaves it so
+        assert signal.getsignal(signal.SIGINT) == handler_before
+        assert len(releases) == 1
+        assert len(held) == 1 and held[0]() is None  # the traceback is still there, but its frames are empty
+        assert raised.value.__traceback__ is not None
+        assert cdata.trained_modules["scvi"].module.device.type == "cpu"
+    finally:
+        signal.signal(signal.SIGINT, handler_before)
 
 
 def test_scvi_registers_partial_module_on_interrupt(cdata, monkeypatch):

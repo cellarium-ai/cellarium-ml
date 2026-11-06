@@ -193,3 +193,27 @@ def test_mean_across_ranks():
 
     for result in results:
         assert result == [1.5, None, 5.0]
+
+
+def test_the_plain_tensors_of_the_model_follow_it_to_another_device():
+    model = AmortizedOnlineNonNegativeMatrixFactorization(
+        var_names_g=["a", "b", "c"], k_values=[2, 3], r=2, latent_dim=4, total_n_cells=10, batch_size=5
+    )
+    model._D_prev_snapshots[2] = torch.ones(2, 2, 3)
+    model._train_nmf_loss_ema = torch.ones(())
+
+    model.to("meta")
+    assert isinstance(model._D_prev_snapshots[2], torch.Tensor)
+    assert model._D_prev_snapshots[2].device.type == "meta" and model._D_prev_snapshots[3] is None
+    assert model._train_nmf_loss_ema.device.type == "meta" and model._val_nmf_loss_ema is None
+
+
+def test_the_snapshots_of_the_factors_are_dropped_when_training_ends():
+    model = AmortizedOnlineNonNegativeMatrixFactorization(
+        var_names_g=["a", "b", "c"], k_values=[2, 3], r=2, latent_dim=4, total_n_cells=10, batch_size=5
+    )
+    model._D_prev_snapshots[2] = model.D_2_rkg.detach().clone()
+
+    model.on_train_end(None)  # type: ignore[arg-type]
+
+    assert model._D_prev_snapshots == {2: None, 3: None}

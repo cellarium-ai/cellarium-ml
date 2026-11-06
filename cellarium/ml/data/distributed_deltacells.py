@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import logging
+from abc import abstractmethod
 from collections.abc import Sequence
 from typing import Any
 
@@ -47,7 +48,7 @@ class DeltaCellsObs:
     (or a list of names) reads just those columns.
     """
 
-    def __init__(self, collection: "DistributedDeltaCellsCollection", indices: np.ndarray) -> None:
+    def __init__(self, collection: "DeltaCellsBatchCollection", indices: np.ndarray) -> None:
         self._collection = collection
         self._indices = indices
 
@@ -69,14 +70,15 @@ class DeltaCellsObs:
 
 class DeltaCellsBatch:
     """
-    A batch of cells that behaves like an :class:`~anndata.AnnData` for the attributes
-    :class:`~cellarium.ml.utilities.data.AnnDataField` reads: ``X`` (float32 CSR), ``obs`` (pandas, with categorical
-    columns carrying the dataset's global categories), ``obs_names``, ``var``, ``var_names``.
+    A batch of cells of a :class:`DeltaCellsBatchCollection` (a deltacells dataset, or cells held in memory) that
+    behaves like an :class:`~anndata.AnnData` for the attributes :class:`~cellarium.ml.utilities.data.AnnDataField`
+    reads: ``X`` (float32 CSR), ``obs`` (pandas, with categorical columns carrying the dataset's global categories),
+    ``obs_names``, ``var``, ``var_names``.
 
     Everything is read lazily, only when the attribute is accessed, and ``X`` once.
     """
 
-    def __init__(self, collection: "DistributedDeltaCellsCollection", indices: np.ndarray) -> None:
+    def __init__(self, collection: "DeltaCellsBatchCollection", indices: np.ndarray) -> None:
         self._collection = collection
         self._indices = indices
         self._X: scipy.sparse.csr_matrix | None = None
@@ -99,8 +101,7 @@ class DeltaCellsBatch:
     @property
     def X(self) -> scipy.sparse.csr_matrix:
         if self._X is None:
-            batch = self._collection.dataset.get_batch(self._indices)
-            self._X = scipy.sparse.csr_matrix((batch.values, batch.indices, batch.indptr), shape=self.shape)
+            self._X = self._collection.read_x(self._indices)
         return self._X
 
     @property
@@ -127,7 +128,74 @@ class DeltaCellsBatch:
         )
 
 
-class DistributedDeltaCellsCollection(DistributedCollection):
+class DeltaCellsBatchCollection(DistributedCollection):
+    """
+    A collection whose indexing gives a :class:`DeltaCellsBatch`: a batch that reads the counts from the collection
+    with :meth:`read_x` and the obs from a deltacells :class:`~deltacells.obs.ObsStore`, one column at a time. This is
+    the one implementation of that indexing, of the obs lookups and of the categories of obs columns, for a deltacells
+    dataset (:class:`DistributedDeltaCellsCollection`) and for cells held in memory.
+
+    Subclasses provide :attr:`obs_store` and :meth:`read_x`, besides the members that every
+    :class:`DistributedCollection` has.
+    """
+
+    @property
+    @abstractmethod
+    def obs_store(self) -> Any:
+        """The :class:`~deltacells.obs.ObsStore` of the cells' obs, or ``None`` if they have none."""
+
+    @abstractmethod
+    def read_x(self, indices: np.ndarray) -> scipy.sparse.csr_matrix:
+        """The counts of the cells ``indices`` (int64 positions in this collection), as a float32 CSR matrix."""
+
+    def __getitem__(self, index: Any) -> DeltaCellsBatch:
+        if isinstance(index, slice):
+            indices = np.arange(*index.indices(self.n_obs), dtype=np.int64)
+        elif isinstance(index, (int, np.integer)):
+            indices = np.array([index if index >= 0 else index + self.n_obs], dtype=np.int64)
+        else:
+            indices = np.asarray(index)
+            if indices.dtype == np.bool_:
+                indices = np.flatnonzero(indices)
+            indices = indices.astype(np.int64, copy=False).ravel()
+        return DeltaCellsBatch(self, indices)
+
+    @property
+    def obs_columns_available(self) -> list[str]:
+        """Names of the obs columns that batches can read."""
+        return [] if self.obs_store is None else self.obs_store.columns
+
+    def _obs_store(self, key: str) -> Any:
+        obs = self.obs_store
+        if obs is None:
+            raise ValueError(f"{type(self).__name__} has no obs.")
+        if key not in obs.columns:
+            raise ValueError(f"Key '{key}' not found in obs columns: {obs.columns}")
+        return obs
+
+    def obs_categories(self, key: str) -> np.ndarray:
+        """The global categories of the categorical ``obs`` column ``key``."""
+        return np.asarray(self._obs_store(key).categories(key))
+
+    def obs_key_nunique(self, key: str) -> int:
+        """
+        Number of distinct values of the ``obs`` column ``key``:
+        the number of categories for a categorical column.
+        """
+        obs = self._obs_store(key)
+        if obs.kind(key) == "category":
+            return len(obs.categories(key))
+        return int(obs.to_pandas(key)[key].nunique())
+
+    def take_obs(self, indices: np.ndarray, columns: Sequence[str]) -> pd.DataFrame:
+        """Obs columns for the given cells (a deltacells dataset fetches them on first use if they are not local)."""
+        obs = self.obs_store
+        if obs is None:
+            raise ValueError(f"{type(self).__name__} has no obs.")
+        return obs.take_pandas(indices, columns, warn=False)
+
+
+class DistributedDeltaCellsCollection(DeltaCellsBatchCollection):
     r"""
     A collection of cells stored as a `deltacells <https://github.com/cellarium-ai/cellarium-ml/tree/main/deltacells>`_
     dataset: one object per *tile* of consecutive cells (the shards of this collection), compressed so that a tile is
@@ -231,50 +299,12 @@ class DistributedDeltaCellsCollection(DistributedCollection):
         return var if var is not None else pd.DataFrame(index=pd.Index(self.var_names))
 
     @property
-    def obs_columns_available(self) -> list[str]:
-        """Names of the obs columns stored with the dataset."""
-        return [] if self.dataset.obs is None else self.dataset.obs.columns
+    def obs_store(self) -> Any:
+        return self.dataset.obs
 
-    def __getitem__(self, index: Any) -> DeltaCellsBatch:
-        if isinstance(index, slice):
-            indices = np.arange(*index.indices(self.n_obs), dtype=np.int64)
-        elif isinstance(index, (int, np.integer)):
-            indices = np.array([index if index >= 0 else index + self.n_obs], dtype=np.int64)
-        else:
-            indices = np.asarray(index)
-            if indices.dtype == np.bool_:
-                indices = np.flatnonzero(indices)
-            indices = indices.astype(np.int64, copy=False).ravel()
-        return DeltaCellsBatch(self, indices)
-
-    def _obs_store(self, key: str) -> Any:
-        obs = self.dataset.obs
-        if obs is None:
-            raise ValueError(f"The deltacells dataset at {self.uri!r} has no obs.")
-        if key not in obs.columns:
-            raise ValueError(f"Key '{key}' not found in obs columns: {obs.columns}")
-        return obs
-
-    def obs_categories(self, key: str) -> np.ndarray:
-        """The global categories of the categorical ``obs`` column ``key``."""
-        return np.asarray(self._obs_store(key).categories(key))
-
-    def obs_key_nunique(self, key: str) -> int:
-        """
-        Number of distinct values of the ``obs`` column ``key``:
-        the number of categories for a categorical column.
-        """
-        obs = self._obs_store(key)
-        if obs.kind(key) == "category":
-            return len(obs.categories(key))
-        return int(obs.to_pandas(key)[key].nunique())
-
-    def take_obs(self, indices: np.ndarray, columns: Sequence[str]) -> pd.DataFrame:
-        """Obs columns for the given cells (fetched on first use if they were not made local in :meth:`prepare`)."""
-        obs = self.dataset.obs
-        if obs is None:
-            raise ValueError(f"The deltacells dataset at {self.uri!r} has no obs.")
-        return obs.take_pandas(indices, columns, warn=False)
+    def read_x(self, indices: np.ndarray) -> scipy.sparse.csr_matrix:
+        batch = self.dataset.get_batch(indices)
+        return scipy.sparse.csr_matrix((batch.values, batch.indices, batch.indptr), shape=(len(indices), self.n_vars))
 
     def prefetch(self, indices: np.ndarray) -> None:
         self.dataset.prefetch_cells(indices)

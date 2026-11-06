@@ -9,6 +9,7 @@ os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
 os.environ["PYTHONWARNINGS"] = "ignore::FutureWarning"
 
 import ctypes
+import functools
 import gc
 import multiprocessing as mp
 import shutil
@@ -29,6 +30,8 @@ import torch
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 from lightning.pytorch.callbacks import TQDMProgressBar
 from lightning.pytorch.loggers import Logger
+from torch.utils._pytree import tree_leaves
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # Create a global placeholder for the process workers so they only authenticate once.
@@ -78,11 +81,74 @@ def release_unused_memory() -> None:
         pass  # not glibc (for example musl) or the function is missing: nothing to release this way
     try:
         if torch.cuda.is_initialized():
+            # the workspaces that cuBLAS keeps for matrix products stay reserved otherwise (private function: it is
+            # absent in some versions of torch)
+            clear_workspaces = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+            if clear_workspaces is not None:
+                clear_workspaces()
             torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
     except Exception:
         pass  # a failure to empty a cache must never affect the caller
+
+
+def _shutdown_loader_workers(loader: DataLoader) -> None:
+    """
+    Stop the worker processes that ``loader`` keeps alive between epochs (``persistent_workers``), and forget them, so
+    that the loader starts new ones if it is iterated again. A loader whose dataset wraps another loader (the loaders
+    of :class:`~cellarium.ml.api._rebatch.RebatchedDataset`) is followed to the one that has the workers.
+    """
+    inner = getattr(loader.dataset, "loader", None)
+    if isinstance(inner, DataLoader):
+        _shutdown_loader_workers(inner)
+    iterator = getattr(loader, "_iterator", None)  # a private attribute of the DataLoader, set with persistent workers
+    if iterator is not None:
+        shutdown = getattr(iterator, "_shutdown_workers", None)
+        if shutdown is not None:
+            shutdown()
+        loader._iterator = None  # type: ignore[attr-defined]
+
+
+def shutdown_trainer_workers(trainer: pl.Trainer) -> None:
+    """
+    Stop the dataloader worker processes that ``trainer`` has left alive, as a fit that is over has no use for them.
+
+    With ``persistent_workers`` the workers of a dataloader stay alive after its epochs, for as long as something refers
+    to the dataloader, and the trainer does until it is garbage collected (which can be long after the fit, for
+    example when the function that made it goes on to make another pass): each worker holds the tiles it read and
+    what it allocated, and a later pass starts workers of its own. This is best effort, and never raises: the
+    dataloaders are those that the trainer exposes, and stopping a persistent worker uses a private function of torch,
+    so it does nothing where either is not available.
+    """
+    for name in ("train_dataloader", "val_dataloaders", "test_dataloaders", "predict_dataloaders"):
+        try:
+            loaders = tree_leaves(getattr(trainer, name))
+        except Exception:
+            continue
+        for loader in loaders:
+            if isinstance(loader, DataLoader):
+                try:
+                    _shutdown_loader_workers(loader)
+                except Exception:
+                    pass
+
+
+def release_memory_after(function: Callable) -> Callable:
+    """
+    Decorate a function that makes a pass on an accelerator outside of a Trainer (a Trainer releases its memory when
+    its fit ends): once the function has returned, or raised, and its locals (such as the last batch) are gone, call
+    :func:`release_unused_memory`, so that the memory that the pass used is not left reserved.
+    """
+
+    @functools.wraps(function)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return function(*args, **kwargs)
+        finally:
+            release_unused_memory()
+
+    return wrapper
 
 
 class SeekableHTTPFile:

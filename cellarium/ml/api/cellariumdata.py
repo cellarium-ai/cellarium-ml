@@ -1,10 +1,14 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
+import inspect
 import json
 import math
 import os
+import signal
 import tempfile
+import traceback
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -16,32 +20,49 @@ import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import scipy.sparse
 import torch
 from lightning.fabric.utilities.apply_func import move_data_to_device
+from lightning.fabric.utilities.cloud_io import _load as load_checkpoint_file
 from tqdm.auto import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
+from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
 from cellarium.ml.api._obsm_storage import RowSubset, subset_rows
+from cellarium.ml.api._rebatch import ShardChunkDataModule, ShardChunkDataset, make_loader
 from cellarium.ml.api._view_collections import (
     RamCollection,
     ViewCollection,
     available_memory_bytes,
+    dropped_obs_warning,
     load_into_ram,
     unwrap_collection,
 )
 from cellarium.ml.api.deltacells_store import write_collection_to_deltacells
-from cellarium.ml.api.utils import LossHistory, get_h5ad_files_limits, write_obs_parquet
+from cellarium.ml.api.utils import (
+    LossHistory,
+    get_h5ad_files_limits,
+    release_unused_memory,
+    shutdown_trainer_workers,
+    write_obs_parquet,
+)
 from cellarium.ml.data import (
     DistributedAnnDataCollection,
     DistributedCollection,
     DistributedDeltaCellsCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
+from cellarium.ml.models.model import PredictMixin
 from cellarium.ml.utilities.core import FunctionComposer
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
+
+# a pass over a view reads this many times as much of the data as the view's cells need (or more) ...
+_READ_AMPLIFICATION_WARNING = 5.0
+# ... and it is only worth a warning if the view's cells are in at least this many shards
+_MIN_SHARDS_FOR_READ_AMPLIFICATION_WARNING = 10
 
 
 def _make_names_unique(names: Any) -> np.ndarray:
@@ -86,6 +107,9 @@ def _build_datamodule(
         train_size=train_size,
         num_workers=num_workers,
         prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
+        iteration_strategy="cache_efficient",
+        val_iteration_strategy="cache_efficient",
     )
 
     # makes metadata local for collections that need it (a no-op for h5ad files); Lightning does this itself when
@@ -249,13 +273,18 @@ class ObsComputedMapping(ObsmMapping):
         super().__init__(n_obs, *args, **kwargs)
         self._owner = owner
 
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if isinstance(value, pd.Series):
+            value = self._owner._series_by_cell(value, f"obs_computed['{key}']")
+        super().__setitem__(key, value)
+
     def update_from(self, view: "CellariumData", key: str, as_key: str | None = None, overwrite: bool = True) -> None:
         """
         Copy the values ``view.obs_computed[key]`` (for example the subtypes found by clustering a subset of the
         cells) to the cells they belong to in this data, as ``obs_computed[as_key]`` (``key`` by default).
 
         ``view`` must descend from the same root as this data, and its cells must be among this data's. The entry is
-        a :class:`pandas.Series` indexed by the obs names, with pandas' nullable dtypes (``string`` or ``category``
+        a :class:`pandas.Series` indexed by the cell IDs, with pandas' nullable dtypes (``string`` or ``category``
         for labels, ``Int64``, ``boolean``, floats). Cells that the view does not hold are missing (NA). If the entry
         already exists, its values for those cells are kept, so that several views can each fill in their cells of one
         entry; the values it already has for cells of the view are replaced, except where the view's value is missing.
@@ -263,8 +292,7 @@ class ObsComputedMapping(ObsmMapping):
 
         Args:
             view: The view (or the data itself, or any other data from the same root) that computed the values.
-            key: The key of the values in ``view.obs_computed``. If it is a Series, its index must be exactly
-                ``view.obs.index``.
+            key: The key of the values in ``view.obs_computed``.
             as_key: The key to store them under here, if not ``key``.
             overwrite: If ``False``, raise an error instead of replacing a value that is already present.
 
@@ -278,19 +306,23 @@ class ObsComputedMapping(ObsmMapping):
         positions = owner._positions_of(view)
         if key not in view.obs_computed:
             raise KeyError(f"No '{key}' in the obs_computed of the view. Available: {list(view.obs_computed)}")
-        n = owner.n_obs
-        raw = view.obs_computed[key]
-        if isinstance(raw, pd.Series) and not raw.index.equals(view.obs.index):
-            raise ValueError(f"The index of obs_computed['{key}'] of the view must be exactly the index of view.obs.")
-        values = _per_cell_series(raw, view.n_obs, f"obs_computed['{key}'] of the view")
-        target = key if as_key is None else as_key
+        values = _per_cell_series(view.obs_computed[key], view.n_obs, f"obs_computed['{key}'] of the view")
+        self._put(key if as_key is None else as_key, values, positions, key, overwrite)
 
+    def _put(self, target: str, values: pd.Series, positions: np.ndarray, source: str, overwrite: bool) -> None:
+        """
+        Write ``values`` (nullable, one per position) into ``obs_computed[target]`` for the cells at ``positions`` of
+        the owner, keeping what the entry has for its other cells (they are missing if it did not exist). ``source`` is
+        what the values are called in error messages.
+        """
+        owner = self._owner
+        n = owner.n_obs
         if target not in self:
             merged = values.set_axis(positions).reindex(np.arange(n))
         else:
             existing = _per_cell_series(self[target], n, f"obs_computed['{target}']")
-            merged = self._merge(existing, values, positions, key, target, overwrite)
-        merged.index = owner.obs.index
+            merged = self._merge(existing, values, positions, source, target, overwrite)
+        merged.index = owner.cell_ids
         self[target] = merged
 
     @staticmethod
@@ -380,6 +412,53 @@ class TrainedModulesMapping(dict[str, TrainedModule]):
         super().__setitem__(key, value)
 
 
+def _data_fields_used(module: CellariumModule) -> tuple[set[str], set[str]]:
+    """
+    The names of the data fields that the transforms and the model of ``module`` take from the batch, and the names
+    among them that are required (have no default). These are the annotated arguments of the ``forward`` of the
+    transforms and the ``predict`` of the model (the arguments that
+    :func:`~cellarium.ml.utilities.core.call_func_with_batch` passes), or of the ``forward`` of a model that cannot
+    predict, which is left out of the required names since it is not what runs to make predictions. A ``**kwargs``
+    takes no field in particular (transforms have it to ignore the fields they do not use), so it adds none; and a
+    transform that is itself a :class:`~cellarium.ml.core.CellariumModule` adds the fields that it takes, none of
+    them required.
+    """
+    hparams = module.hparams
+    model = hparams["model"]
+    transforms = [*(hparams["cpu_transforms"] or []), *(hparams["transforms"] or [])]
+    funcs = [transform.forward for transform in transforms]
+    funcs.append(model.predict if isinstance(model, PredictMixin) else model.forward)
+
+    names: set[str] = set()
+    required: set[str] = set()
+    for i, func in enumerate(funcs):
+        inner = getattr(func, "__self__", None)
+        if isinstance(inner, CellariumModule):
+            names |= _data_fields_used(inner)[0]
+            continue
+        names |= {name for name in func.__annotations__ if name not in ("return", "kwargs")}
+        if i < len(funcs) - 1 or isinstance(model, PredictMixin):
+            required |= {
+                name
+                for name, parameter in inspect.signature(func).parameters.items()
+                if parameter.default is parameter.empty
+                and parameter.kind in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+            }
+    return names, required
+
+
+def _epochs_completed(checkpoint: dict[str, Any]) -> int:
+    """
+    The number of epochs of training that a Lightning ``checkpoint`` has completed (0 if it does not say). This is
+    the epochs processed, not the ``"epoch"`` of the checkpoint (the epoch in progress, counted from 0), nor the epochs
+    completed, which Lightning has not yet counted in the checkpoint that it saves when training ends.
+    """
+    try:
+        return int(checkpoint["loops"]["fit_loop"]["epoch_progress"]["total"]["processed"])
+    except (KeyError, TypeError):
+        return 0
+
+
 def fit_and_register(
     cdata: "CellariumData",
     trainer: pl.Trainer,
@@ -394,6 +473,9 @@ def fit_and_register(
     recorded by ``loss_history`` (if the trainer's logger is one) and the extra ``batch_keys`` the module needs to
     run. If training is interrupted, the partially trained module is stored the same way, marked ``complete=False``,
     before the interruption propagates. With ``key=None`` nothing is stored in ``cdata.trained_modules``.
+
+    The memory that the fit used on the accelerator is released when it ends, whether it completed or was interrupted
+    (see :func:`_clean_up_after_interrupt`).
 
     Returns:
         The :class:`TrainedModule` of the completed fit.
@@ -416,15 +498,54 @@ def fit_and_register(
         module.trainer = None
         return trained
 
+    cdata._warn_if_read_amplified("Training the model")
+    sigint_handler = signal.getsignal(signal.SIGINT)
     try:
         trainer.fit(module, cdata.datamodule)
-    except (KeyboardInterrupt, SystemExit, NameError):
+    except (KeyboardInterrupt, SystemExit, NameError) as error:
         # Lightning turns a KeyboardInterrupt into a SystemExit after shutting down gracefully
         # and sometimes throws a NameError if something goes wrong during shutdown
         if trainer.global_step > 0:
             register(complete=False)
+        _clean_up_after_interrupt(error, module, sigint_handler)
         raise
-    return register(complete=True)
+    finally:
+        # the workers of the dataloaders are of no use any more, and stay (with what they hold) as long as the trainer
+        shutdown_trainer_workers(trainer)
+    trained = register(complete=True)
+    release_unused_memory()
+    return trained
+
+
+def _clean_up_after_interrupt(error: BaseException, module: CellariumModule, sigint_handler: Any) -> None:
+    """
+    Undo what an interrupted fit leaves behind, before the interruption propagates:
+
+    * The frames of the traceback (the fit loop's, with the batch and the solver's intermediates on the accelerator)
+      stay alive for as long as the exception does, which in a notebook is until the next exception. Their locals are
+      cleared so that the memory can be released now. The exception chain is followed because Lightning raises its
+      ``SystemExit`` from inside the handler of the ``KeyboardInterrupt``, whose traceback is the fit loop's.
+    * The module is moved to the cpu (Lightning does that in its teardown, which does not always get that far).
+    * Lightning leaves SIGINT ignored after a ``KeyboardInterrupt``, so a later interrupt of the kernel would do
+      nothing: the handler that was there before the fit is put back.
+    """
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__traceback__ is not None:
+            traceback.clear_frames(current.__traceback__)
+        pending.extend(e for e in (current.__context__, current.__cause__) if e is not None)
+    module.cpu()
+    if sigint_handler is not None:
+        try:
+            signal.signal(signal.SIGINT, sigint_handler)
+        except ValueError:  # not the main thread: signal handlers can only be set there
+            pass
+    release_unused_memory()
 
 
 class FitCache(dict[Hashable, TrainedModule]):
@@ -500,32 +621,47 @@ class LazyObs:
         index_col = self._index_column_name
         return [name for name in self._get_dataset().schema.names if name != index_col]
 
-    def _read(self, columns: list[str] | None, filter: ds.Expression | None = None) -> pd.DataFrame:
-        index_col = self._index_column_name
-        arrow_columns = None if columns is None else [index_col, *columns]
-        table = self._get_dataset().to_table(columns=arrow_columns, filter=filter)
-        return table.to_pandas()
-
     @property
     def index(self) -> pd.Index:
-        """The obs index (the cell names), in cell order."""
-        return self._read(columns=[]).index
+        """The cell IDs, in cell order: the positions ``0, 1, ...`` of the cells
+        (see :mod:`~cellarium.ml.api._cell_ids`).
+        The frames and Series that are read from here are indexed by them, so no cell name is read along."""
+        return pd.RangeIndex(len(self), name=CELL_ID_COLUMN)
+
+    @property
+    def names(self) -> pd.Index:
+        """The obs names (the cell names), in cell order. These are read from the database when asked for."""
+        return self._names_at(None)
+
+    def _names_at(self, positions: np.ndarray | None) -> pd.Index:
+        """The obs names of the cells at ``positions`` (all cells if ``None``)."""
+        dataset, index_col = self._get_dataset(), self._index_column_name
+        if positions is None:
+            table = dataset.to_table(columns=[index_col])
+        else:  # only these rows are kept in memory, not the names of all the cells
+            table = dataset.take(pa.array(positions, type=pa.int64()), columns=[index_col])
+        return table.to_pandas().index
 
     def _take(self, positions: np.ndarray | None, columns: list[str]) -> pd.DataFrame:
-        """The ``columns`` of the cells at ``positions`` (all cells if ``None``), in the order of ``positions``.
+        """The ``columns`` of the cells at ``positions`` (all cells if ``None``), in the order of ``positions``, indexed
+        by the cell IDs.
 
         Assumes that row ``i`` of the parquet database is cell ``i`` of the data, as it is when the database is built
         from the h5ad files.
         """
-        index_col = self._index_column_name
-        table = self._get_dataset().to_table(columns=[index_col, *columns])
+        ids = self.index if positions is None else pd.Index(positions, dtype=np.int64, name=CELL_ID_COLUMN)
+        if not columns:
+            return pd.DataFrame(index=ids)
+        table = self._get_dataset().to_table(columns=list(columns))
         if positions is not None:
             table = table.take(pa.array(positions, type=pa.int64()))
-        return table.to_pandas()
+        df = table.to_pandas()
+        df.index = ids
+        return df
 
     def __getitem__(self, key: str | list[str]) -> pd.DataFrame | pd.Series:
         columns = [key] if isinstance(key, str) else list(key)
-        df = self._read(columns=columns)
+        df = self._take(None, columns)
         return df[key] if isinstance(key, str) else df
 
     @property
@@ -534,14 +670,17 @@ class LazyObs:
 
     def iter_batches(self, batch_size: int = 100_000, columns: list[str] | None = None) -> Iterator[pd.DataFrame]:
         """Stream `obs` in chunks of `pd.DataFrame`, for full-corpus processing without loading it all at once."""
-        index_col = self._index_column_name
-        arrow_columns = None if columns is None else [index_col, *columns]
-        for batch in self._get_dataset().to_batches(batch_size=batch_size, columns=arrow_columns):
-            yield batch.to_pandas()
+        columns = self.columns if columns is None else list(columns)
+        start = 0
+        for batch in self._get_dataset().to_batches(batch_size=batch_size, columns=columns):
+            df = batch.to_pandas()
+            df.index = pd.RangeIndex(start, start + len(df), name=CELL_ID_COLUMN)
+            start += len(df)
+            yield df
 
     def to_frame(self) -> pd.DataFrame:
         """Materialize the entire `obs` dataframe into memory."""
-        return self._read(columns=None)
+        return self._take(None, self.columns)
 
     def __repr__(self) -> str:
         # build the database first if need be, so that `parquet_path` is set by the time it is formatted
@@ -552,39 +691,45 @@ class LazyObs:
 
 
 class _LazyObsLoc:
-    """Implements `LazyObs.loc[row_labels]` / `LazyObs.loc[row_labels, columns]`."""
+    """Implements `LazyObs.loc[row_labels]` / `LazyObs.loc[row_labels, columns]`: the cells are selected by their obs
+    names, and the frame that is returned is indexed by their cell IDs."""
 
     def __init__(self, lazy_obs: LazyObs):
         self._lazy_obs = lazy_obs
 
     def __getitem__(self, key) -> pd.DataFrame:
+        lazy_obs = self._lazy_obs
         row_key, col_key = key if isinstance(key, tuple) else (key, None)
         row_labels = [row_key] if isinstance(row_key, str) else list(row_key)
-        columns = None if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
+        columns = lazy_obs.columns if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
 
-        index_col = self._lazy_obs._index_column_name
-        filter_expr = ds.field(index_col).isin(row_labels)
-        df = self._lazy_obs._read(columns=columns, filter=filter_expr)
-
-        missing = set(row_labels) - set(df.index)
-        if missing:
+        # find the rows of the cells in arrow, without turning the names of all the cells into python strings
+        index_col = lazy_obs._index_column_name
+        names = lazy_obs._get_dataset().to_table(columns=[index_col]).column(index_col)
+        matches = pc.is_in(names, value_set=pa.array(row_labels).cast(names.type))  # type: ignore[attr-defined]  # pyarrow makes its compute functions at import
+        found = np.flatnonzero(matches.to_pandas().to_numpy())
+        found_names = pd.Index(names.take(pa.array(found, type=pa.int64())).to_pandas())
+        order = found_names.get_indexer(row_labels)
+        if (order < 0).any():
+            missing = [label for label, o in zip(row_labels, order) if o < 0]
             raise KeyError(f"Labels not found in obs index: {sorted(missing)[:5]}")
-
-        return df.loc[row_labels]
+        return lazy_obs._take(found[order].astype(np.int64), columns)
 
 
 class DeltaCellsLazyObs:
     """
     A queryable view over the ``obs`` of a :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`, with the same
     interface as :class:`LazyObs`. Only the columns (and cells) a query asks for are read; categorical columns are
-    pandas categoricals with the dataset's global categories. The ``obs_names`` of the dataset are the index of the
-    returned frames, and ``.loc`` selects by them.
+    pandas categoricals with the dataset's global categories. The returned frames are indexed by the cell IDs: those
+    in the dataset's ``cellarium_cell_id`` column if it has one (see :mod:`~cellarium.ml.api._cell_ids`), and the
+    positions of the cells if not. The ``obs_names`` of the dataset are :attr:`names`, and ``.loc`` selects by them.
     """
 
     _NAMES = "obs_names"
 
     def __init__(self, dadc: DistributedDeltaCellsCollection):
         self._dadc = dadc
+        self._cell_ids: pd.Index | None = None
 
     @property
     def _store(self) -> Any:
@@ -600,7 +745,8 @@ class DeltaCellsLazyObs:
     def columns(self) -> list[str]:
         return [c for c in self._store.columns if c != self._NAMES]
 
-    def _index(self, indices: np.ndarray | None = None) -> pd.Index:
+    def _names_at(self, indices: np.ndarray | None = None) -> pd.Index:
+        """The obs names of the cells at ``indices`` (all cells if ``None``)."""
         if indices is None:
             names = self._store.to_pandas(self._NAMES)[self._NAMES]
         else:
@@ -608,9 +754,20 @@ class DeltaCellsLazyObs:
         return pd.Index(np.asarray(names, dtype=object), name=self._NAMES)
 
     @property
+    def names(self) -> pd.Index:
+        """The obs names (the cell names), in cell order."""
+        return self._names_at()
+
+    @property
     def index(self) -> pd.Index:
-        """The obs index (the cell names), in cell order."""
-        return self._index()
+        """The cell IDs, in cell order (see :mod:`~cellarium.ml.api._cell_ids`)."""
+        if self._cell_ids is None:
+            if CELL_ID_COLUMN in self._store.columns:
+                ids = np.asarray(self._store.to_pandas([CELL_ID_COLUMN])[CELL_ID_COLUMN], dtype=np.int64)
+                self._cell_ids = pd.Index(ids, name=CELL_ID_COLUMN)
+            else:
+                self._cell_ids = pd.RangeIndex(len(self), name=CELL_ID_COLUMN)
+        return self._cell_ids
 
     def _take(self, indices: np.ndarray | None, columns: list[str]) -> pd.DataFrame:
         if not columns:
@@ -619,7 +776,7 @@ class DeltaCellsLazyObs:
             df = self._store.to_pandas(columns)
         else:
             df = self._store.take_pandas(indices, columns, warn=False)
-        df.index = self._index(indices)
+        df.index = self.index if indices is None else self.index[indices]
         return df
 
     def __getitem__(self, key: str | list[str]) -> pd.DataFrame | pd.Series:
@@ -657,7 +814,7 @@ class _DeltaCellsLazyObsLoc:
         row_labels = [row_key] if isinstance(row_key, str) else list(row_key)
         columns = lazy_obs.columns if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
 
-        names = pd.Index(np.asarray(lazy_obs._store.to_pandas(lazy_obs._NAMES)[lazy_obs._NAMES], dtype=object))
+        names = lazy_obs.names
         missing = pd.Index(row_labels)[~pd.Index(row_labels).isin(names)]
         if len(missing):
             raise KeyError(f"Labels not found in obs index: {sorted(missing)[:5]}")
@@ -676,6 +833,7 @@ class ViewLazyObs:
         self._source = source
         self._positions = positions
         self._names: pd.Index | None = None
+        self._cell_ids: pd.Index | None = None
 
     def __len__(self) -> int:
         return len(self._positions)
@@ -686,10 +844,25 @@ class ViewLazyObs:
 
     @property
     def index(self) -> pd.Index:
-        """The obs index (the cell names) of the view, in cell order."""
+        """The cell IDs of the view, in cell order (those of the root; see :mod:`~cellarium.ml.api._cell_ids`)."""
+        if self._cell_ids is None:
+            self._cell_ids = self._take(None, []).index
+        return self._cell_ids
+
+    @property
+    def names(self) -> pd.Index:
+        """The obs names (the cell names) of the view, in cell order. Read from the root when first asked for."""
         if self._names is None:
-            self._names = self._take(None, []).index
+            self._names = self._source._names_at(self._positions)
         return self._names
+
+    def _names_at(self, indices: np.ndarray | None) -> pd.Index:
+        """The obs names of the cells of the view at ``indices`` (all of them if ``None``)."""
+        if indices is None:
+            return self.names
+        if self._names is not None:
+            return self._names[indices]
+        return self._source._names_at(self._positions[indices])
 
     def _take(self, indices: np.ndarray | None, columns: list[str]) -> pd.DataFrame:
         positions = self._positions if indices is None else self._positions[indices]
@@ -730,7 +903,7 @@ class _ViewLazyObsLoc:
         row_labels = [row_key] if isinstance(row_key, str) else list(row_key)
         columns = lazy_obs.columns if col_key is None else ([col_key] if isinstance(col_key, str) else list(col_key))
 
-        names = lazy_obs.index
+        names = lazy_obs.names
         missing = pd.Index(row_labels)[~pd.Index(row_labels).isin(names)]
         if len(missing):
             raise KeyError(f"Labels not found in obs index: {sorted(missing)[:5]}")
@@ -742,10 +915,13 @@ def _clone_datamodule(
     dadc: DistributedCollection,
     stage: Literal["fit", "validate", "predict", "test"],
     num_workers: int | None = None,
+    persistent_workers: bool | None = None,
 ) -> CellariumAnnDataDataModule:
     """A datamodule over ``dadc`` with the settings of ``datamodule`` (and the data fields it currently reads)."""
     sizes = {name: datamodule.hparams[name] for name in ("train_size", "val_size", "pred_size")}
-    clone = CellariumAnnDataDataModule(
+    n_workers = datamodule.num_workers if num_workers is None else num_workers
+    keep_workers = datamodule.persistent_workers if persistent_workers is None else persistent_workers
+    clone = ShardChunkDataModule(
         dadc=dadc,
         batch_keys=dict(datamodule.batch_keys),
         batch_size=datamodule.batch_size,
@@ -757,9 +933,10 @@ def _clone_datamodule(
         worker_seed=datamodule.worker_seed,
         test_mode=datamodule.test_mode,
         prefetch_lookahead=datamodule.prefetch_lookahead,
-        num_workers=datamodule.num_workers if num_workers is None else num_workers,
-        prefetch_factor=datamodule.prefetch_factor,
-        persistent_workers=datamodule.persistent_workers,
+        num_workers=n_workers,
+        # these are only allowed (by the DataLoader) with workers
+        prefetch_factor=datamodule.prefetch_factor if n_workers > 0 else None,
+        persistent_workers=keep_workers and n_workers > 0,
         pin_memory=datamodule.pin_memory,
         **sizes,
     )
@@ -769,20 +946,29 @@ def _clone_datamodule(
     return clone
 
 
-class _PositionedDataset(IterableDistributedAnnDataCollectionDataset):
+class _PositionedMixin:
     """
-    The dataset of :meth:`CellariumData.predict_batches`: it adds the positions of the cells of each batch (in the
-    collection that it reads, which is the order of the cells of the data) to the batch, as ``"row_indices_n"``.
+    Adds the positions of the cells of each item to it, as ``"row_indices_n"``: the datasets of
+    :meth:`CellariumData.predict_batches` (the positions are in the collection that they read, which is the order of
+    the cells of the data).
     """
 
     def __getitem__(self, idx: Any) -> Any:
-        data = super().__getitem__(idx)
+        data = super().__getitem__(idx)  # type: ignore[misc]
         if isinstance(idx, slice):
-            positions = np.arange(*idx.indices(len(self.dadc)), dtype=np.int64)
+            positions = np.arange(*idx.indices(len(self.dadc)), dtype=np.int64)  # type: ignore[attr-defined]
         else:
             positions = np.atleast_1d(np.asarray(idx, dtype=np.int64))
         data["row_indices_n"] = positions
         return data
+
+
+class _PositionedDataset(_PositionedMixin, IterableDistributedAnnDataCollectionDataset):
+    """The dataset of :meth:`CellariumData.predict_batches` for cells that are read in batches."""
+
+
+class _PositionedChunkDataset(_PositionedMixin, ShardChunkDataset):
+    """The dataset of :meth:`CellariumData.predict_batches` for cells that are read a shard at a time."""
 
 
 def _device_of(module: torch.nn.Module) -> torch.device | None:
@@ -829,10 +1015,10 @@ class CellariumData:
     they were stay in ``var`` as the column ``"<var_key>_original"`` (``"var_names_original"`` without a ``var_key``).
 
     ``max_gb`` is the memory budget (in GiB) for what api functions hold in memory: the cells read by :meth:`to_ram` and
-    :meth:`to_anndata`, and per-cell results stored in ``obsm`` (which go to a temporary file when they do not fit,
-    and which a view reads into memory only if its rows fit). Views inherit it. By default it is half of the memory that
-    is available, taking any container limit into account. It can be changed at any time with the :attr:`max_gb`
-    attribute.
+    :meth:`to_anndata`, and the rows of the per-cell results in ``obsm`` that a view copies into memory (those results
+    are always in temporary files, and a view reads its rows into memory only if they fit). Views inherit it. By default
+    it is half of the memory that is available, taking any container limit into account. It can be changed at any time
+    with the :attr:`max_gb` attribute.
     """
 
     def __init__(
@@ -855,6 +1041,8 @@ class CellariumData:
     ):
         if (h5ad_paths is None) == (deltacells_uri is None):
             raise ValueError("Provide exactly one of h5ad_paths and deltacells_uri.")
+        # the arguments as they were given, for `save`
+        self._init_kwargs = copy.deepcopy({name: value for name, value in locals().items() if name != "self"})
         obs_columns = dict(obs_columns)
         if total_mrna_umis_column is not None:
             obs_columns["total_mrna_umis_n"] = (total_mrna_umis_column, to_float_tensor)
@@ -919,6 +1107,63 @@ class CellariumData:
         self._trained_modules = TrainedModulesMapping()
         self._fit_cache = FitCache()
         self._hvg: pd.Series | None = None
+        # the obsm entries that cml.tl.embed made, with the trained module and the array it made each from
+        self._embedding_sources: dict[str, tuple[TrainedModule, Any]] = {}
+        self._read_amplification_warned = False
+
+    def read_amplification(self) -> float | None:
+        """
+        How much more of the data an epoch over a view reads than the view's cells need: the fraction of the shards
+        (files, or tiles of a deltacells dataset) of the data that hold a cell of the view, divided by the fraction of
+        its cells that the view has. It is 1 for a view of whole shards and is large for a view of cells that are
+        scattered over many shards (for example the T cells of a large atlas), as every pass over such a view reads
+        nearly all of the data. ``None`` if the cells are not a view of another dataset's (data that is not a view, and
+        views that :meth:`to_deltacells` and :meth:`to_ram` made, which read a dataset of their own).
+        """
+        collection = self._datamodule.dadc
+        if not isinstance(collection, ViewCollection):
+            return None
+        shard_ends = np.asarray(collection.source.limits)
+        positions = collection.positions  # sorted
+        shard_of_cell = np.searchsorted(shard_ends, positions, side="right")
+        n_touched = 1 + int(np.count_nonzero(np.diff(shard_of_cell)))
+        return (n_touched / len(shard_ends)) / (len(positions) / len(collection.source))
+
+    def _warn_if_read_amplified(self, operation: str) -> None:
+        """Warn (once for this data) that ``operation`` reads far more than the cells of this view if they are scattered
+        over many shards, and say how to avoid it."""
+        if self._read_amplification_warned:
+            return
+        amplification = self.read_amplification()
+        if amplification is None or amplification < _READ_AMPLIFICATION_WARNING:
+            return
+        collection = self._datamodule.dadc
+        n_shards = len(collection.source.limits)
+        n_touched = int(round(amplification * self.n_obs / len(collection.source) * n_shards))
+        if n_touched < _MIN_SHARDS_FOR_READ_AMPLIFICATION_WARNING:
+            return
+        self._read_amplification_warned = True
+        warnings.warn(
+            f"{operation} reads {n_touched} of the {n_shards} shards of the data ({n_touched / n_shards:.0%}) to get "
+            f"the {self.n_obs} cells of this view ({self.n_obs / len(collection.source):.1%} of the data): about "
+            f"{amplification:.0f}x as much as the cells need, and every further pass over the view does the same. "
+            "To make later passes cost only what the view's cells need, write it as a dataset of its own first (one "
+            "pass), and use the view that this returns: view = view.to_deltacells(uri).",
+            stacklevel=3,
+        )
+
+    def _cached_embedding_state(self, module_key: str) -> Literal["current", "stale"] | None:
+        """
+        Whether ``obsm["X_<module_key>"]`` is an embedding that :func:`~cellarium.ml.api.tools.embed` made: ``None`` if
+        it is not (or there is no such entry), ``"current"`` if it was made by the module that is now in
+        ``trained_modules[module_key]``, and ``"stale"`` if by another one (for example by a module of the parent of a
+        view, which the view has since replaced).
+        """
+        name = f"X_{module_key}"
+        source = self._embedding_sources.get(name)
+        if source is None or self._obsm.get(name) is not source[1]:
+            return None
+        return "current" if self._trained_modules.get(module_key) is source[0] else "stale"
 
     @classmethod
     def from_deltacells(cls, uri: str, **kwargs: Any) -> "CellariumData":
@@ -977,7 +1222,7 @@ class CellariumData:
             return np.arange(self.n_obs, dtype=np.int64)
         return self._root_indices.copy()
 
-    def to_ram(self, max_gb: float | None = None) -> "CellariumDataView":
+    def to_ram(self, max_gb: float | None = None, cache_dir: str | None = None) -> "CellariumDataView":
         """
         Read these cells into memory, and return a :class:`CellariumDataView` of them that reads from there. This is
         **memory-heavy**: the counts take about 8 bytes per nonzero (several GB for a few hundred thousand cells), plus
@@ -988,22 +1233,40 @@ class CellariumData:
         data that is a pass over all of it). The memory needed is estimated from a sample first; nothing is loaded if
         it would exceed ``max_gb``, and the memory in use is checked while loading.
 
+        The cells are written to files in a directory of their own in the deltacells cache directory, and read from
+        there through the memory of the operating system, which keeps the files in memory (so they need as much free
+        disk space as they take memory, and are not held by this process: the dataloader workers all read the same
+        memory). The directory is deleted when the view is garbage collected or the program ends. The obs columns are
+        stored as in a deltacells dataset (see :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`): the
+        categories of categorical columns are strings. A column that is not categorical, numeric, bool or string cannot
+        be stored, and is left out with a warning (it stays in :attr:`obs`).
+
         The returned view has the same cells (and root indices) as these, so ``update_from`` works between them, and
         starts with copies of this data's ``obsm`` and ``obs_computed`` but with no trained modules, as any view does.
-        Its datamodule uses no dataloader workers (``num_workers=0``), and cannot: the cells live in this process.
-        Views of it read from the same memory. Calling this on data that is already in memory returns it as it is.
+        Its datamodule has the dataloader settings of this one, with ``persistent_workers`` on (a worker process is
+        started once and not at every epoch, which is slow where processes are spawned, as on macOS). Views of it read
+        from the same memory. Calling this on data that is already in memory returns it as it is.
 
         Args:
             max_gb: The most memory (in GiB) to use. By default the :attr:`max_gb` of this data, which by default is
                 half of the memory that is available, taking any container limit into account.
+            cache_dir: The deltacells cache directory to make the directory of the cells in (``$DELTACELLS_CACHE`` or
+                ``~/.cache/deltacells`` by default, or the ``cache_dir`` of this data's ``deltacells_kwargs``).
 
         Raises:
             MemoryError: If the cells do not fit.
+            OSError: If there is not enough free disk space in the cache directory.
         """
         if isinstance(unwrap_collection(self._datamodule.dadc), RamCollection):
             return self  # type: ignore[return-value]
-        ram = load_into_ram(self._datamodule.dadc, self._max_bytes(max_gb))
-        return CellariumDataView(self, np.arange(self.n_obs, dtype=np.int64), collection=ram, num_workers=0)
+        ram = load_into_ram(
+            self._datamodule.dadc,
+            self._max_bytes(max_gb),
+            cache_dir=cache_dir or self._deltacells_kwargs.get("cache_dir"),
+        )
+        if ram.dropped_obs:
+            warnings.warn(dropped_obs_warning(ram.dropped_obs), stacklevel=2)
+        return CellariumDataView(self, np.arange(self.n_obs, dtype=np.int64), collection=ram, persistent_workers=True)
 
     def to_deltacells(
         self,
@@ -1028,10 +1291,13 @@ class CellariumData:
         original data are the same ones, so ``obs`` names are unchanged. ``X`` must hold integer counts from 0 to
         2**31 - 1 (as deltacells requires), and if it does not nothing is written.
 
-        The returned view has the same cells (and root indices) as these, so ``update_from`` works between them, and
+        The dataset also stores the :attr:`cell_ids` of its cells, as the ``obs`` column ``cellarium_cell_id``. The
+        returned view has the same cells (and root indices) as these, so ``update_from`` works between them, and
         starts with copies of this data's ``obsm`` and ``obs_computed`` but with no trained modules, as any view does.
-        To use the dataset later, on its own, open it with :meth:`CellariumData.from_deltacells`; that is a new root,
-        unrelated to the data it was made from.
+        To use the dataset later, on its own, open it with :meth:`CellariumData.from_deltacells`: that is a new root
+        (so views of it and of the data it was made from cannot be matched with ``update_from``), but its cells have
+        the same cell IDs as in the original data, so labels computed on it can be brought back to the original data
+        with :meth:`save_labels` and :meth:`load_labels`.
 
         Args:
             uri: A local directory or a ``gs://bucket/prefix`` (each tile is uploaded as it is written, which needs
@@ -1055,6 +1321,7 @@ class CellariumData:
             overwrite=overwrite,
             staging_dir=staging_dir,
             filesystem=filesystem,
+            cell_ids=self.cell_ids.to_numpy(),
             **writer_kwargs,
         )
         collection = DistributedDeltaCellsCollection(uri, **{**self._deltacells_kwargs, **(deltacells_kwargs or {})})
@@ -1128,6 +1395,184 @@ class CellariumData:
             self, downsample_method, target_n_cells, geometric_sketch_kwargs, collect_embeddings, seed, max_gb
         )
 
+    def update_labels_from_anndata(
+        self, adata: anndata.AnnData, column: str, as_key: str | None = None, overwrite: bool = True
+    ) -> None:
+        """
+        Copy a column of ``adata.obs`` (for example the clusters that scanpy found in the AnnData of
+        :meth:`to_anndata`) to the cells it belongs to, as ``obs_computed[as_key]`` (``column`` by default), creating
+        the entry if it is not there. The cells are matched by the cell IDs in ``adata.obs["cellarium_cell_id"]``
+        (which :meth:`to_anndata` puts there), so ``adata`` can have had cells removed, or be of any subset of
+        these cells, and its obs names do not matter.
+
+        The entry is a :class:`pandas.Series` indexed by :attr:`cell_ids`, with pandas' nullable dtypes (``string``
+        or ``category`` for labels, ``Int64``, ``boolean``, floats). The cells that ``adata`` does not hold are
+        missing (NA), unless the entry already exists: then its values for them are kept, so that several AnnDatas
+        (of different subsets of the cells) can fill in one entry. The values it has for cells of ``adata`` are
+        replaced, except where ``adata``'s value is missing. New labels are added to a categorical entry's categories.
+
+        Use one key for each clustering (for example ``"leiden_1.0"``, and ``"t_cell_subtype"`` for the clusters of a
+        view of T cells): labels that are put under the same key are the labels of one entry.
+
+        Args:
+            adata: The AnnData with the labels, which must have ``obs["cellarium_cell_id"]``.
+            column: The column of ``adata.obs`` with the labels.
+            as_key: The key to store them under in ``obs_computed``, if not ``column``.
+            overwrite: If ``False``, raise an error instead of replacing a value that is already present.
+
+        Raises:
+            KeyError: If ``adata.obs`` has no ``cellarium_cell_id`` or ``column``, or has cells that are not in this
+                data.
+            ValueError: If the cell IDs of ``adata`` are not unique, if the dtypes of the new and existing values do
+                not fit together, or if ``overwrite`` is ``False`` and a value would be replaced.
+        """
+        for name in (CELL_ID_COLUMN, column):
+            if name not in adata.obs:
+                raise KeyError(
+                    f"adata.obs has no '{name}'. "
+                    + (
+                        "It comes with the AnnData of to_anndata()."
+                        if name == CELL_ID_COLUMN
+                        else f"Columns: {list(adata.obs.columns)}"
+                    )
+                )
+        cell_ids = adata.obs[CELL_ID_COLUMN].to_numpy()
+        if len(np.unique(cell_ids)) != len(cell_ids):
+            raise ValueError("The cell IDs in adata.obs['cellarium_cell_id'] are not unique.")
+        positions = self._positions_of_ids(cell_ids)
+        what = f"adata.obs['{column}']"
+        values = _per_cell_series(adata.obs[column], adata.n_obs, what)
+        self._obs_computed._put(column if as_key is None else as_key, values, positions, what, overwrite)
+
+    def save_labels(self, keys: str | Sequence[str], path: str) -> None:
+        """
+        Write the ``obs_computed`` entries ``keys`` (labels, or any per-cell values) of the cells that have a value
+        in at least one of them to the parquet file ``path``, with their :attr:`cell_ids`. Labels that were computed
+        on a dataset made by :meth:`to_deltacells` (opened on its own, in another session) can be brought back to the
+        data it was made from with :meth:`load_labels`, since the cells have the same IDs in both.
+        """
+        keys = [keys] if isinstance(keys, str) else list(keys)
+        for key in keys:
+            if key not in self._obs_computed:
+                raise KeyError(f"No '{key}' in obs_computed. Available: {list(self._obs_computed)}")
+        n = self.n_obs
+        frame = pd.DataFrame(
+            {key: _per_cell_series(self._obs_computed[key], n, f"obs_computed['{key}']") for key in keys}
+        )
+        frame.insert(0, CELL_ID_COLUMN, self.cell_ids.to_numpy())
+        frame[frame[keys].notna().any(axis=1).to_numpy()].to_parquet(path, index=False)
+
+    def load_labels(self, path: str, keys: str | Sequence[str] | None = None, overwrite: bool = True) -> None:
+        """
+        Read the values that :meth:`save_labels` wrote to ``path`` into ``obs_computed``, for the cells with those cell
+        IDs, under the keys they were saved with. The cells of the file must all be among the cells of this data (the
+        data that the labels were computed on, or one that it is a subset of: for example the original data, for
+        labels computed on a compacted dataset). Entries that exist keep their values for the other cells, as in
+        :meth:`update_labels_from_anndata`.
+
+        Args:
+            path: The parquet file written by :meth:`save_labels`.
+            keys: The entries to read (all of those in the file by default).
+            overwrite: If ``False``, raise an error instead of replacing a value that is already present.
+        """
+        frame = pd.read_parquet(path)
+        if CELL_ID_COLUMN not in frame:
+            raise ValueError(f"{path} has no '{CELL_ID_COLUMN}' column: it was not written by save_labels.")
+        cell_ids = frame[CELL_ID_COLUMN].to_numpy()
+        if len(np.unique(cell_ids)) != len(cell_ids):
+            raise ValueError(f"The cell IDs in {path} are not unique.")
+        available = [column for column in frame.columns if column != CELL_ID_COLUMN]
+        keys = available if keys is None else ([keys] if isinstance(keys, str) else list(keys))
+        for key in keys:
+            if key not in available:
+                raise KeyError(f"No '{key}' in {path}. Available: {available}")
+        positions = self._positions_of_ids(cell_ids)
+        for key in keys:
+            values = _nullable(frame[key].reset_index(drop=True))
+            self._obs_computed._put(key, values, positions, f"'{key}' of {path}", overwrite)
+
+    def save(self, path: str, overwrite: bool = False) -> None:
+        """
+        Save this data and what has been computed from it to the directory ``path``, to be opened again with
+        :meth:`load`, possibly in another session.
+
+        The cell counts are not copied: the directory holds the arguments that this data was made with (the paths of
+        the files, or the deltacells dataset), what identifies its cells, ``obs_computed``, ``obsm``, ``hvg`` and
+        ``trained_modules`` (each module as a Lightning checkpoint, with its training history). A view is saved with
+        the data it was taken from (its :attr:`root`) and the positions of its cells in it; the ``obsm``,
+        ``obs_computed``, ``hvg`` and ``trained_modules`` of the root are not saved. The fitted statistics that api
+        functions reuse are not saved either, so the first call that needs them computes them again.
+
+        The functions in ``obs_columns`` must be importable by name (defined at the top level of a module) to be saved.
+
+        Args:
+            path: A local directory, which must not exist, unless ``overwrite`` is ``True``.
+            overwrite: Replace the directory if it holds a saved session. Entries of ``obsm`` that were read from it
+                by :meth:`load` stay on disk, so save somewhere else for those (an error says so); this also applies
+                to other objects that read from it.
+
+        Raises:
+            ValueError: If something cannot be saved: ``obs_columns`` functions or the configuration of a trained
+                module that cannot be pickled, or ``obsm`` entries that are not numeric arrays.
+        """
+        from cellarium.ml.api._session import save_session
+
+        save_session(self, path, overwrite)
+
+    @classmethod
+    def load(
+        cls,
+        path: str,
+        *,
+        h5ad_paths: list[str] | None = None,
+        deltacells_uri: str | None = None,
+        deltacells_kwargs: dict[str, Any] | None = None,
+        obs_parquet_path: str | None = None,
+        obs_columns: dict[str, tuple[str, Callable]] | None = None,
+        batch_size: int | None = None,
+        datamodule_num_workers: int | None = None,
+        max_gb: float | None = None,
+    ) -> "CellariumData":
+        """
+        Open the data that :meth:`save` saved to ``path``, with its ``obs_computed``, ``obsm`` (read from the files,
+        not into memory), ``hvg`` and ``trained_modules`` (on the CPU). A saved view is loaded as a view of the data it
+        was taken from, which is :attr:`root`; views that were saved separately do not share a root.
+
+        The data is opened from where it was before. If it is not there, or is not the same data (a different number
+        of cells, or other cells at the start and end of its files), a ``ValueError`` says what is wrong. The
+        arguments below override what was saved, to load onto the same cells from somewhere else (for example the
+        files of the data in another bucket, or a deltacells dataset that :meth:`to_deltacells` made from it).
+        ``None`` keeps what was saved.
+
+        .. warning::
+            The directory holds pickled objects, so load only directories that you trust.
+
+        Args:
+            path: The directory that :meth:`save` wrote.
+            h5ad_paths: The paths of the h5ad files to read the cells from, instead of those that were saved.
+            deltacells_uri: The deltacells dataset to read the cells from, instead of the saved data.
+            deltacells_kwargs: Arguments for the deltacells dataset (for example ``cache_dir``), instead of those that
+                were saved.
+            obs_parquet_path: The obs parquet database of h5ad files (see the constructor).
+            obs_columns: The ``obs_columns`` of the constructor, instead of the saved ones.
+            batch_size: The batch size of the datamodule.
+            datamodule_num_workers: The number of dataloader workers.
+            max_gb: The memory budget (see :attr:`max_gb`).
+        """
+        from cellarium.ml.api._session import load_session
+
+        return load_session(
+            path,
+            h5ad_paths,
+            deltacells_uri,
+            deltacells_kwargs,
+            obs_parquet_path,
+            obs_columns,
+            batch_size,
+            datamodule_num_workers,
+            max_gb,
+        )
+
     def _positions_of(self, other: "CellariumData") -> np.ndarray:
         """The positions in these cells of the cells of ``other``, a view of the same root with a subset of them."""
         if other.root is not self.root:
@@ -1148,33 +1593,127 @@ class CellariumData:
         """
         A :class:`CellariumDataView` of the selected cells; no data is copied. The selection can be
 
-        * a boolean mask (a numpy array of length ``n_obs``, or a :class:`pandas.Series` whose index is exactly
-          ``cdata.obs.index``),
-        * integer positions (an array, a list or a single integer; negative positions count from the end), or
+        * a boolean mask: a numpy array (or list) with one entry per cell, or a boolean :class:`pandas.Series`. A
+          Series is matched to the cells by its index: one with a range index of one entry per cell, or an index equal
+          to ``cdata.cell_ids`` (as the ``obs`` columns and ``obs_computed`` entries have), has one entry per cell, in
+          the order of the cells; any other integer index (a shorter range included) holds cell IDs, and selects the
+          cells of this data whose ID is in the index with a ``True`` value (so a mask computed on a view, or on the
+          data this one was taken from, works here); and a string index holds obs names (which reads the names of all
+          the cells, so is slow for large data);
+        * integer positions (an array, a list or a single integer; negative positions count from the end), as numpy
+          and scanpy take them (use :meth:`select_cell_ids` for cell IDs, which are not the positions in a dataset
+          that was made by :meth:`to_deltacells`);
+        * obs names (an array or list of strings), or
         * a slice.
 
         The view holds its cells in the order of the data, whatever the order of the selection, without repeats.
 
         Raises:
-            ValueError: If the selection is empty or a Series mask has a different index.
+            ValueError: If the selection is empty or has missing values.
+            KeyError: If cells are selected by names that are not in the data.
         """
         return CellariumDataView(self, self._selected_positions(selection))
+
+    def select_cell_ids(self, cell_ids: Any) -> "CellariumDataView":
+        """
+        A :class:`CellariumDataView` of the cells with the given cell IDs (see :attr:`cell_ids`), which must all be
+        among the cells of this data.
+        """
+        positions = np.unique(self._positions_of_ids(cell_ids))
+        if len(positions) == 0:
+            raise ValueError("The selection is empty: a view must contain at least one cell.")
+        return CellariumDataView(self, positions)
+
+    @property
+    def cell_ids(self) -> pd.Index:
+        """
+        The integer IDs of the cells, in cell order, which identify them for all indexing (``obs`` and ``obs_computed``
+        are indexed by them, and ``adata.obs["cellarium_cell_id"]`` holds them). The ID of a cell is its position in
+        the dataset that was opened, and a view has the IDs of its cells in the data it was taken from. The one
+        exception is a deltacells dataset made by :meth:`to_deltacells`, which stores the IDs the cells had in the
+        data it was made from: opened later, on its own, it has those same IDs, so that labels computed on it can be
+        brought back to the original data.
+        """
+        return self._obs.index
+
+    @property
+    def obs_names(self) -> pd.Index:
+        """
+        The names of the cells (as in an :class:`~anndata.AnnData`), in cell order. The cells are identified by
+        :attr:`cell_ids` everywhere else, so the names are only read when asked for, which for a large dataset takes
+        time and memory.
+        """
+        return self._obs.names
+
+    def _positions_of_ids(self, cell_ids: Any) -> np.ndarray:
+        """The positions in these cells of the cells with ``cell_ids``, in that order; ``KeyError``
+        for an unknown ID."""
+        cell_ids = np.asarray(cell_ids).ravel()
+        if cell_ids.size and not np.issubdtype(cell_ids.dtype, np.integer):
+            raise TypeError(f"Cell IDs must be integers, got {cell_ids.dtype} values.")
+        positions = self.cell_ids.get_indexer(cell_ids.astype(np.int64))
+        if (positions < 0).any():
+            unknown = cell_ids[positions < 0]
+            raise KeyError(f"{len(unknown)} cell IDs are not among the cells of this data, for example {unknown[:5]}.")
+        return positions.astype(np.int64)
+
+    def _positions_of_names(self, names: Any) -> np.ndarray:
+        """The positions in these cells of the cells with the obs ``names``, in that order."""
+        names = pd.Index(names)
+        positions = self.obs_names.get_indexer_for(names)
+        if (positions < 0).any():
+            raise KeyError(f"Cells not found by name: {names[positions < 0][:5].tolist()}")
+        return positions.astype(np.int64)
+
+    def _check_names_match(self, names: pd.Index, what: str) -> None:
+        """Check, on a sample of cells, that ``names`` (one per cell) are the obs names of these cells."""
+        n = self.n_obs
+        if len(names) != n:
+            raise ValueError(f"{what} has {len(names)} entries but there are {n} cells.")
+        sample = np.unique(np.concatenate(([0, n - 1], np.random.default_rng(0).integers(0, n, size=62))))
+        expected = self._obs._names_at(sample)
+        if not np.array_equal(names[sample].astype(str).to_numpy(), expected.astype(str).to_numpy()):
+            raise ValueError(
+                f"The index of {what} is not the obs names of the cells of this data, in order. Align it first "
+                "(for example with series.reindex(cdata.obs_names)), index it by cdata.cell_ids, or pass "
+                "series.to_numpy() to use the values as they are, one per cell."
+            )
+
+    def _series_by_cell(self, series: pd.Series, what: str) -> pd.Series:
+        """
+        ``series`` indexed by :attr:`cell_ids`, as per-cell values are kept. A Series that has one value per cell
+        (a range index, the cell IDs, or the obs names, checked on a sample of the cells) is taken as it is, in cell
+        order; one indexed by other integers holds cell IDs, and is aligned to the cells, with missing values for
+        the cells it does not have.
+        """
+        ids = self.cell_ids
+        index = series.index
+        if index.equals(ids):
+            result = series.copy(deep=False)
+        elif pd.api.types.is_integer_dtype(index.dtype) and not (
+            isinstance(index, pd.RangeIndex) and index.start == 0 and index.step == 1 and len(index) == len(ids)
+        ):
+            if not index.is_unique:
+                raise ValueError(f"The cell IDs in the index of {what} are not unique.")
+            result = _nullable(series).reindex(ids)
+        elif isinstance(index, pd.RangeIndex):
+            result = series.copy(deep=False)
+        elif pd.api.types.is_string_dtype(index.dtype) or index.dtype == object:
+            self._check_names_match(index, what)
+            result = series.copy(deep=False)
+        else:
+            raise ValueError(f"The index of {what} ({index.dtype}) is neither cell IDs nor obs names.")
+        result.index = ids
+        return result
 
     def _selected_positions(self, selection: Any) -> np.ndarray:
         """The sorted, unique positions of the cells ``selection`` selects (see :meth:`__getitem__`)."""
         n = self.n_obs
         if isinstance(selection, slice):
             positions = np.arange(*selection.indices(n), dtype=np.int64)
+        elif isinstance(selection, pd.Series):
+            positions = self._positions_from_mask_series(selection)
         else:
-            if isinstance(selection, pd.Series):
-                if selection.dtype != bool:
-                    raise TypeError(
-                        f"A Series selection must be a boolean mask, got dtype {selection.dtype}; "
-                        "use .to_numpy() to select by position."
-                    )
-                if len(selection) != n or not selection.index.equals(self.obs.index):
-                    raise ValueError("The index of a Series mask must be exactly the index of cdata.obs.")
-                selection = selection.to_numpy()
             array = np.asarray(selection)
             if array.size == 0:
                 positions = np.empty(0, dtype=np.int64)
@@ -1187,14 +1726,42 @@ class CellariumData:
                 if array.min() < -n or array.max() >= n:
                     raise IndexError(f"Positions must lie in [-{n}, {n}), got {array.min()} to {array.max()}")
                 positions = np.where(array < 0, array + n, array)
+            elif array.dtype.kind in "OUS":
+                positions = self._positions_of_names(array.ravel())
             else:
                 raise TypeError(
-                    f"Select cells with a boolean mask, integer positions or a slice, not {array.dtype} values."
+                    f"Select cells with a boolean mask, integer positions, obs names or a slice, not {array.dtype} "
+                    "values."
                 )
         positions = np.unique(positions)
         if len(positions) == 0:
             raise ValueError("The selection is empty: a view must contain at least one cell.")
         return positions
+
+    def _positions_from_mask_series(self, mask: pd.Series) -> np.ndarray:
+        """The positions of the cells that a boolean Series selects, by its index (see :meth:`__getitem__`)."""
+        if not pd.api.types.is_bool_dtype(mask.dtype):
+            raise TypeError(
+                f"A Series selection must be a boolean mask, got dtype {mask.dtype}; use .to_numpy() to select by "
+                "position."
+            )
+        if mask.isna().any():
+            raise ValueError("A boolean mask cannot have missing values.")
+        values = mask.to_numpy(dtype=bool)
+        index = mask.index
+        ids = self.cell_ids
+        if isinstance(index, pd.RangeIndex) and index.start == 0 and index.step == 1 and len(index) == len(ids):
+            return np.flatnonzero(values)  # one value per cell
+        if pd.api.types.is_integer_dtype(index.dtype):
+            if index.equals(ids):
+                return np.flatnonzero(values)
+            if not index.is_unique:
+                raise ValueError("The cell IDs in the index of the mask are not unique.")
+            found = ids.get_indexer(index[values])
+            return found[found >= 0]  # the cells that this data does not have are not selected
+        if pd.api.types.is_string_dtype(index.dtype) or index.dtype == object:
+            return self._positions_of_names(index[values])
+        raise TypeError(f"The index of the mask ({index.dtype}) is neither cell IDs nor obs names.")
 
     @property
     def var(self) -> pd.DataFrame:
@@ -1221,6 +1788,83 @@ class CellariumData:
         """The latest module trained by each api function (e.g. ``"scvi"``), with its training history."""
         return self._trained_modules
 
+    def load_module_from_ckpt(
+        self,
+        path: str,
+        key: str,
+        batch_keys: dict[str, AnnDataField] | None = None,
+    ) -> None:
+        """
+        Load a module that was trained elsewhere, for example with the ``cellarium-ml`` command line (Lightning CLI),
+        from its checkpoint, and store it as ``cdata.trained_modules[key]``, replacing the module that is there. It can
+        then be used as if it had been trained with the api functions, for example ``cml.tl.embed(cdata, key)``. The
+        module is loaded onto the cpu. Its genes must be those of the data, which the model checks when it runs.
+
+        The record of the module has no training history (checkpoints do not have it), ``config={"source": path}``,
+        the epochs of training that the checkpoint has completed as ``n_epochs``, and ``complete=True``.
+
+        If the module needs data fields beyond those of ``cdata.datamodule`` (for example the ``"batch_index_n"`` of
+        scVI), they are taken from the checkpoint, which records the fields that the module was trained with. Only
+        the fields that the transforms and the model of the module take are kept. Use ``batch_keys`` to say where to
+        find them in this data instead, for example if the obs column has another name.
+
+        .. warning::
+            Checkpoints hold pickled objects, so load only checkpoints that you trust.
+
+        Example:
+            >>> cdata.load_module_from_ckpt("gs://bucket/scvi/checkpoints/epoch=9-step=500.ckpt", "scvi")
+            >>> cml.tl.embed(cdata, "scvi")
+
+        Args:
+            path: The checkpoint file, local or remote (any path that Lightning can read, such as ``gs://...``).
+            key: The key in ``trained_modules`` to store the module under, such as ``"pca"`` or ``"scvi"`` (the
+                keys that api functions use, which other api functions look for).
+            batch_keys: The data fields that the module needs beyond those of ``cdata.datamodule``, replacing those
+                that the checkpoint records. ``{}`` for none.
+
+        Raises:
+            ValueError: If a field that the checkpoint records needs an obs column that this data does not have.
+        """
+        module = CellariumModule.load_from_checkpoint(path, map_location="cpu")
+        checkpoint = load_checkpoint_file(path, map_location="cpu", weights_only=False)
+
+        if batch_keys is None:
+            used, _ = _data_fields_used(module)
+            trained_with = (checkpoint.get("datamodule_hyper_parameters") or {}).get("batch_keys") or {}
+            batch_keys = {
+                name: field
+                for name, field in trained_with.items()
+                if isinstance(field, AnnDataField) and name not in self._datamodule.batch_keys and name in used
+            }
+            self._check_obs_columns_of(batch_keys, path)
+
+        self._trained_modules[key] = TrainedModule(
+            module=module,
+            config={"source": path},
+            n_epochs=_epochs_completed(checkpoint),
+            complete=True,
+            batch_keys=dict(batch_keys),
+        )
+
+    def _check_obs_columns_of(self, batch_keys: dict[str, AnnDataField], path: str) -> None:
+        """Raise a ``ValueError`` if a field in ``batch_keys`` reads an obs column that this data does not have."""
+        columns: set[str] | None = None
+        for name, adfield in batch_keys.items():
+            if adfield.attr != "obs" or adfield.key is None:
+                continue
+            if columns is None:
+                columns = set(self.obs.columns)
+            wanted = adfield.key if isinstance(adfield.key, list) else [adfield.key]
+            absent = [column for column in wanted if column not in columns]
+            if absent:
+                raise ValueError(
+                    f"The module in {path} was trained with the data field '{name}', which is read from the obs "
+                    f"column(s) {absent} that this data does not have. Pass batch_keys to say where to find it in this "
+                    f"data, for example batch_keys={{'{name}': AnnDataField(attr='obs', key=..., convert_fn=...)}} "
+                    "(with AnnDataField from cellarium.ml.utilities.data), or batch_keys={} to run the module without "
+                    "it (which is only right if the module can do without it)."
+                )
+
     @contextmanager
     def using(self, key: str) -> Iterator[TrainedModule]:
         """
@@ -1234,7 +1878,9 @@ class CellariumData:
             ...     ...  # code that runs trained.module over cdata.datamodule
 
         Raises:
-            ValueError: If there is no trained module under ``key``.
+            ValueError: If there is no trained module under ``key``, or if the module needs data fields that neither
+                ``cdata.datamodule`` nor the ``batch_keys`` of the module provide (this happens for a module loaded
+                with :meth:`load_module_from_ckpt` that was trained with fields that are not in its checkpoint).
         """
         if key not in self._trained_modules:
             available = list(self._trained_modules)
@@ -1245,6 +1891,18 @@ class CellariumData:
                 "which store them here."
             )
         trained = self._trained_modules[key]
+        _, required = _data_fields_used(trained.module)
+        missing = sorted(required - set(self._datamodule.batch_keys) - set(trained.batch_keys))
+        if missing:
+            source = trained.config.get("source")
+            raise ValueError(
+                f"The module '{key}' needs the data fields {missing}, which cdata.datamodule does not provide "
+                f"(it provides {sorted(self._datamodule.batch_keys)}) and the batch_keys of the module do not include. "
+                "Load the module again, saying where to find them in the data, for example "
+                f"cdata.load_module_from_ckpt({'path' if source is None else repr(source)}, '{key}', "
+                f"batch_keys={{{', '.join(f'{name!r}: AnnDataField(attr=..., key=...)' for name in missing)}}}), "
+                "with AnnDataField from cellarium.ml.utilities.data."
+            )
         if not trained.batch_keys:
             yield trained  # nothing extra needed (e.g. PCA), so leave the datamodule untouched
             return
@@ -1295,8 +1953,8 @@ class CellariumData:
         Yields:
             The batches, as dictionaries.
         """
+        self._warn_if_read_amplified("This pass over the cells")
         datamodule = self._datamodule
-        datamodule._check_num_workers()
         batch_size = datamodule.batch_size if batch_size is None else batch_size
         n_obs = self.n_obs
 
@@ -1311,7 +1969,9 @@ class CellariumData:
         # the settings that matter for completeness are fixed here, not taken from the datamodule (which is set up for
         # training, e.g. shuffled). `cache_efficient` reads each worker's contiguous stretch of cells, which is much
         # faster than `same_order` but yields batches out of order: hence the positions
-        dataset = _PositionedDataset(
+        by_shard = isinstance(datamodule, ShardChunkDataModule) and datamodule.reads_by_shard()
+        dataset_class = _PositionedChunkDataset if by_shard else _PositionedDataset
+        dataset = dataset_class(
             dadc=datamodule.dadc,
             batch_keys=dict(datamodule.batch_keys),
             batch_size=batch_size,
@@ -1322,13 +1982,17 @@ class CellariumData:
             worker_seed=datamodule.worker_seed,
             prefetch_lookahead=datamodule.prefetch_lookahead,
         )
-        loader = torch.utils.data.DataLoader(
-            dataset,
+        loader_arguments: dict[str, Any] = dict(
             num_workers=datamodule.num_workers,
             collate_fn=collate_fn,
             prefetch_factor=datamodule.prefetch_factor,
             persistent_workers=False,
             pin_memory=datamodule.pin_memory,
+        )
+        loader = (
+            make_loader(dataset, **loader_arguments)
+            if isinstance(dataset, ShardChunkDataset)
+            else torch.utils.data.DataLoader(dataset, **loader_arguments)
         )
 
         target = None if device is None else torch.device(device)
@@ -1428,6 +2092,7 @@ class CellariumDataView(CellariumData):
         collection: The collection that the view's datamodule reads, if not a view of the parent's. It must hold the
             cells ``positions`` of ``parent``, in order (used when the cells have been copied somewhere faster).
         num_workers: Number of dataloader workers, if not the parent's.
+        persistent_workers: Whether the dataloader workers stay alive between epochs, if not as the parent's.
     """
 
     def __init__(
@@ -1437,6 +2102,7 @@ class CellariumDataView(CellariumData):
         *,
         collection: DistributedCollection | None = None,
         num_workers: int | None = None,
+        persistent_workers: bool | None = None,
     ):
         positions = np.asarray(positions, dtype=np.int64)
         if len(positions) == 0:
@@ -1455,7 +2121,9 @@ class CellariumDataView(CellariumData):
         self._stage = parent._stage
         self._deltacells_uri = parent._deltacells_uri
         self._deltacells_kwargs = dict(parent._deltacells_kwargs)
-        self._datamodule = _clone_datamodule(parent.datamodule, collection, self._stage, num_workers)
+        self._datamodule = _clone_datamodule(
+            parent.datamodule, collection, self._stage, num_workers, persistent_workers
+        )
         self._obs = ViewLazyObs(self._root.obs, self._root_indices)  # type: ignore[arg-type]
         self._var = parent.var.copy()
         self.max_gb = parent.max_gb
@@ -1469,3 +2137,7 @@ class CellariumDataView(CellariumData):
                     target[key] = _subset_rows(value, positions, max_bytes)
                 except (TypeError, ValueError, IndexError) as error:
                     warnings.warn(f"'{key}' of the parent could not be restricted to the view and is left out: {error}")
+        # an embedding of the parent stays the embedding of its module, in the rows of the view
+        for key, (trained, array) in parent._embedding_sources.items():
+            if key in self._obsm and parent.obsm.get(key) is array:
+                self._embedding_sources[key] = (trained, self._obsm[key])

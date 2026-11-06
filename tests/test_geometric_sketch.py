@@ -973,3 +973,15 @@ def test_plaid_checkpoint_resumes_training_identically():
         restored.get_reservoir(return_cell_data=True)["x_ng"].to_dense(),  # type: ignore[union-attr]
         original.get_reservoir(return_cell_data=True)["x_ng"].to_dense(),  # type: ignore[union-attr]
     )
+
+
+def test_plaid_sketch_store_follows_the_model_to_another_device():
+    data, var_names, obs_names, _ = _make_plaid_data()
+    model = StreamingPlaidGeometricSketch(var_names, max_cells_per_bucket=3, store_cell_data=True)
+    _pin_voxel_grid(model, dim=len(var_names))
+    model.update(torch.from_numpy(data), obs_names)
+    assert model._store is not None and model._store.device.type == "cpu"
+
+    model.to("meta")
+
+    assert model._store.device.type == "meta"

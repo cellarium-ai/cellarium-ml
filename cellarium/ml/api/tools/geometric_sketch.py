@@ -2,24 +2,50 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-from typing import Literal
+import copy
+import warnings
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
+from typing import Any, Literal
 
 import anndata
 import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
-import scipy.sparse as sp
 import torch
+from lightning.fabric.utilities.apply_func import move_data_to_device
 from torch.utils._pytree import tree_map
-from tqdm import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule, CellariumPipeline
-from cellarium.ml.api.cellariumdata import CellariumData
+from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
+from cellarium.ml.api._obsm_storage import ObsmWriter
+from cellarium.ml.api._sparse_rows import SparseRowCollector
+from cellarium.ml.api._view_collections import ViewCollection, _estimate, available_memory_bytes, shard_blocks
+from cellarium.ml.api.cellariumdata import CellariumData, TrainedModule, _device_of
+from cellarium.ml.api.utils import resolve_device, shutdown_trainer_workers
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
+from cellarium.ml.transforms.base import STAGES, CellariumTransform
+from cellarium.ml.utilities.core import call_func_with_batch
 from cellarium.ml.utilities.data import collate_fn, sparse_tensor_to_scipy_csr
 from cellarium.ml.utilities.testing import assert_arrays_equal, assert_columns_and_array_lengths_equal
+
+
+def _as_in_predict(transform: torch.nn.Module) -> torch.nn.Module:
+    """
+    A copy of ``transform`` that does in every stage what ``transform`` does in the ``"predict"`` stage: it is active
+    in every stage if ``transform`` is active in ``"predict"``, and in none if it is not (as a
+    :class:`~cellarium.ml.transforms.CellFilter` is not). The dataloader of the training pass of the sketch runs the
+    ``cpu_transforms`` of the sketch module as in training, but this is inference: every cell is in play. A module
+    that is not a :class:`~cellarium.ml.transforms.base.CellariumTransform` is active in every stage already, and is
+    returned as it is.
+    """
+    if not isinstance(transform, CellariumTransform):
+        return transform
+    clone = copy.copy(transform)  # a new object (with its own settings) that shares the tensors of the original
+    clone._stages = frozenset(STAGES) if transform.is_active("predict") else frozenset()
+    return clone
 
 
 class RandomMatrixProjection(CellariumModel, PredictMixin):
@@ -98,6 +124,84 @@ def compute_output_var_names_g(module: CellariumModule, datamodule: CellariumAnn
     return var_names_g
 
 
+@contextmanager
+def _batch_embedder(module: CellariumModule, device: torch.device) -> Iterator[Callable[[dict[str, Any]], np.ndarray]]:
+    """
+    A function that embeds a batch that :meth:`CellariumData.predict_batches` yields without a module (so, with the raw
+    counts) with ``module``, a trained embedding model, on ``device``: the module's ``cpu_transforms``, then the rest of
+    its transforms and its model's ``predict``. The batch is left as it was. The module is in ``eval`` mode, and on
+    ``device``, for the duration of the ``with`` block.
+    """
+    module.configure_model()  # idempotent; makes its transforms and model accessible
+    was_training = module.training
+    transforms_device, model_device = _device_of(module.transforms), _device_of(module.model)
+    module.eval()
+    module.transforms.to(device)
+    module.model.to(device)
+
+    @torch.no_grad()
+    def embed_batch(batch: dict[str, Any]) -> np.ndarray:
+        batch = dict(batch)  # the transforms put their results in the dictionary: not in the caller's
+        # this is inference: every cell gets an embedding, so the transforms are those of the "predict" stage (which
+        # leave out the ones that drop cells, such as a CellFilter)
+        if len(module.cpu_transforms) > 0:
+            batch = module.cpu_transforms.transform(batch, "predict")
+        batch = module.transforms.transform(move_data_to_device(batch, device), "predict")
+        prediction = call_func_with_batch(module.model.predict, batch)
+        return torch.as_tensor(prediction["x_ng"]).detach().cpu().numpy()
+
+    try:
+        yield embed_batch
+    finally:
+        module.train(was_training)
+        if transforms_device is not None:
+            module.transforms.to(transforms_device)
+        if model_device is not None:
+            module.model.to(model_device)
+
+
+# the sketch warns if the memory that it is expected to use is more than this fraction of the available memory
+_MEMORY_WARNING_FRACTION = 0.8
+
+
+def _warn_if_counts_may_not_fit(cdata: CellariumData, target_n_cells: int) -> None:
+    """
+    Warn if the memory that the collection of the counts of the sketch cells is expected to need is close to (or more
+    than) the memory that is available: the counts of the cells of the sketch (about ``target_n_cells`` of them, in the
+    AnnData that is made) are the bulk of it, and the cells that the dataloader workers have read and not yet handed on
+    (up to ``prefetch_factor`` items of one shard, or batch, each) come on top. The number of nonzero counts of a cell
+    is estimated from the cells of a few shards. Nothing is checked if the available memory cannot be determined.
+    """
+    try:
+        available = available_memory_bytes()
+    except ValueError:
+        return
+    datamodule = cdata.datamodule
+    collection = datamodule.dadc
+    nnz_per_cell, _ = _estimate(collection, shard_blocks(collection, 10_000), n_samples=5, sample_size=1_000)
+    n_cells = min(target_n_cells, cdata.n_obs)
+    counts = n_cells * (nnz_per_cell * 8 + 4)  # float32 value and int32 column index per count, an int32 row pointer
+    in_flight = 0.0
+    if datamodule.num_workers > 0:
+        # a view is read a shard at a time (the cells of the view in it), other data a batch at a time
+        if isinstance(collection, ViewCollection):
+            per_item = int(np.diff([0, *collection.limits]).max())
+        else:
+            per_item = datamodule.batch_size
+        in_flight = datamodule.num_workers * (datamodule.prefetch_factor or 2) * per_item * nnz_per_cell * 8
+    needed = counts + in_flight
+    if needed > _MEMORY_WARNING_FRACTION * available:
+        warnings.warn(
+            f"Collecting the counts of the {n_cells} cells of the sketch is expected to need about "
+            f"{needed / 2**30:.0f} GiB of memory ({counts / 2**30:.0f} GiB for the counts, and about "
+            f"{in_flight / 2**30:.0f} GiB for the cells that the {datamodule.num_workers} dataloader workers have read "
+            f"and not yet handed on), and {available / 2**30:.0f} GiB is available. The machine may run out of memory: "
+            "ask for fewer cells (target_n_cells), or use fewer dataloader workers, or return no AnnData "
+            "(return_new_adata=False).",
+            stacklevel=3,
+        )
+
+
 def geometric_sketch(
     cdata: CellariumData,
     target_n_cells: int = 1_000_000,
@@ -106,6 +210,7 @@ def geometric_sketch(
     return_new_adata: bool = True,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
     seed: int = 0,
+    store_embedding: bool = True,
 ) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
     """
     Train a plaid geometric sketching model on the data in the datamodule,
@@ -135,21 +240,46 @@ def geometric_sketch(
             (``datamodule.shuffle_seed`` is set to it for the pass). The same seed on the same data gives the same
             sketch, up to floating point differences between devices. The cells are shuffled, not read in order,
             because the grid is set up from the first minibatch, which should be representative of the data.
+        store_embedding: Whether to also embed every cell of ``cdata`` with the ``embedding_module_key`` module, in the
+            second pass over the data (the one that collects the counts of the sketch cells), and store the embedding
+            as ``cdata.obsm[f"X_{embedding_module_key}"]``, as :func:`~cellarium.ml.api.tools.embed` does, so that
+            later steps (such as :func:`~cellarium.ml.api.tools.propagate_labels`) need no further pass over the counts
+            to have the embedding of all the cells. It costs one embedding of each cell on the accelerator, and
+            disk for the embedding: about ``4 * n_dimensions`` bytes per cell, in a memory-mapped file in the
+            temporary directory (see :func:`~cellarium.ml.api.tools.embed`).
+            It is the whole embedding of the module, also if ``n_pcs`` limits the dimensions that the sketch is made in.
+            Nothing is stored (and nothing is embedded) if there is no ``embedding_module_key`` (a random
+            projection is not an embedding to keep), if ``obsm`` already has the embedding of this module from
+            :func:`~cellarium.ml.api.tools.embed`, or, with a warning, if it has an entry of that name that was not
+            made by it. Pass ``False`` to leave this out.
 
     Returns:
         Dict with keys:
-            "obs_names_in_sketch": Pandas series boolean mask with index as all obs_names.
+            "obs_names_in_sketch": Pandas series boolean mask over all the cells, indexed by
+                :attr:`~cellarium.ml.api.CellariumData.cell_ids` (the key's name is historical).
             "adata": The new AnnData object containing only the selected geometric sketch cells
                 (if `return_new_adata` is True), with the embedding in ``obsm[f"X_{embedding_module_key}"]``
-                (``obsm["X_embedding"]`` if there is no ``embedding_module_key``).
+                (``obsm["X_embedding"]`` if there is no ``embedding_module_key``), and the cell IDs of the cells in
+                ``obs["cellarium_cell_id"]``. Its rows are in the order of the cells in the data.
             "module": The trained StreamingPlaidGeometricSketch module (if `return_new_adata` is False).
-        Note: stores the same boolean mask (a pandas series indexed by obs_names) in
-        ``cdata.obs_computed['in_sketch']``.
+        Note: stores the same boolean mask in ``cdata.obs_computed['in_sketch']``.
     """
     if embedding_module_key is None:
         return _geometric_sketch(cdata, target_n_cells, None, n_pcs, return_new_adata, accelerator, seed)
 
     with cdata.using(embedding_module_key) as trained:
+        stored_key = f"X_{embedding_module_key}"
+        store: tuple[str, TrainedModule] | None = None
+        if store_embedding:
+            state = cdata._cached_embedding_state(embedding_module_key)
+            if stored_key in cdata.obsm and state is None:
+                warnings.warn(
+                    f"obsm['{stored_key}'] exists and was not made by cml.tl.embed from the module "
+                    f"'{embedding_module_key}', so it is not replaced by the embedding of all the cells.",
+                    stacklevel=3,
+                )
+            elif state != "current":  # (if it is current, the embedding of all the cells is there already)
+                store = (stored_key, trained)
         return _geometric_sketch(
             cdata,
             target_n_cells,
@@ -158,7 +288,8 @@ def geometric_sketch(
             return_new_adata,
             accelerator,
             seed,
-            embedding_key=f"X_{embedding_module_key}",
+            embedding_key=stored_key,
+            store=store,
         )
 
 
@@ -171,6 +302,7 @@ def _geometric_sketch(
     accelerator: Literal["cpu", "mps", "cuda", "auto"],
     seed: int,
     embedding_key: str = "X_embedding",
+    store: tuple[str, TrainedModule] | None = None,
 ) -> dict[str, anndata.AnnData | CellariumModule | pd.Series]:
     datamodule: CellariumAnnDataDataModule = cdata.datamodule
     if "obs_names_n" not in datamodule.batch_keys:
@@ -218,8 +350,11 @@ def _geometric_sketch(
     # two cells: a coarsening event leaves between target_voxels / 2 and target_voxels voxels (more than
     # target_n_cells), and the model brings the sketch to exactly target_n_cells at the end by coarsening
     # a copy of the grid a little further, as in the geometric sketching paper.
+    # Every cell is in play for the sketch, as every cell gets an embedding: this is inference, so the transforms that
+    # drop cells are off. (`embedding_on_accelerator` is a module, whose forward is its pipeline's predict, and the
+    # cpu transforms are made to do what they do in predict whatever the stage of the dataloader that runs them.)
     module = CellariumModule(
-        cpu_transforms=list(embedding_module.cpu_transforms),
+        cpu_transforms=[_as_in_predict(transform) for transform in embedding_module.cpu_transforms],
         transforms=[embedding_on_accelerator],
         model=StreamingPlaidGeometricSketch(
             var_names_g=var_names_g,
@@ -240,6 +375,9 @@ def _geometric_sketch(
         logger=False,
         enable_checkpointing=False,
     )
+    if return_new_adata:
+        _warn_if_counts_may_not_fit(cdata, target_n_cells)
+    cdata._warn_if_read_amplified("The geometric sketch")
     # the retained cells are drawn as the cells stream by, so the order of the stream is part of the seed
     datamodule_shuffle_seed = datamodule.shuffle_seed
     datamodule.shuffle_seed = seed
@@ -250,47 +388,68 @@ def _geometric_sketch(
         # the trainer and the module refer to each other, which would keep the module (and the sketch it holds, on
         # the accelerator) alive until the cyclic garbage collector ran; the module no longer needs the trainer
         module.trainer = None
+        # the workers of the training pass would otherwise stay (with what they hold) next to those of the next pass
+        shutdown_trainer_workers(trainer)
 
     reservoir = module.model.get_reservoir(return_cell_data=return_new_adata, max_cells=target_n_cells)
     sketch_obs_names = reservoir["obs_names"]
 
     sketch_index = pd.Index(sketch_obs_names)
 
-    datamodule_shuffle = datamodule.shuffle
-    datamodule.shuffle = False
-    predict_loader = datamodule.train_dataloader()
-    obs_names_list = []
-    raw_x_ng_list = []
+    # One more pass, to find the sketch cells in the data (by their position, which `predict_batches` gives for every
+    # cell) and to collect their counts. Only the names of one batch at a time are looked up in the sketch, and the
+    # mask of the sketch is one boolean per cell: nothing is kept for every cell but that (except the embedding of
+    # every cell, if it is to be stored, which goes to `obsm`: to a file).
+    in_sketch = np.zeros(cdata.n_obs, dtype=bool)
+    raw_counts = SparseRowCollector()  # the counts of the sketch cells, which are the bulk of the memory used here
     raw_obs_names_list = []
-    for batch in tqdm(predict_loader, desc="Collecting raw data for sketch cells"):
-        if "obs_names_n" not in batch:
-            raise ValueError("batch_keys in the datamodule needs to contain 'obs_names_n' for geometric_sketch.")
-        batch_obs_names = batch["obs_names_n"]
-        obs_names_list.append(batch_obs_names)
-        if return_new_adata:
+    writer: ObsmWriter | None = None
+    with ExitStack() as stack:
+        # if the pass fails, the files of the counts collected so far are deleted at once
+        stack.push(lambda exc_type, exc, traceback: raw_counts.close() if exc_type is not None else None)
+        embed_batch = None
+        if store is not None:
+            assert embedding_module is not None
+            embed_batch = stack.enter_context(_batch_embedder(embedding_module, resolve_device(accelerator)))
+        for batch in cdata.predict_batches(desc="Collecting raw data for sketch cells"):
+            positions = np.asarray(batch["row_indices_n"])
+            if embed_batch is not None:
+                values = embed_batch(batch)
+                if writer is None:
+                    writer = stack.enter_context(ObsmWriter(cdata.n_obs, values.shape[1], dtype=np.float32))
+                writer.write(positions, values)
+            batch_obs_names = np.asarray(batch["obs_names_n"])
             mask = sketch_index.get_indexer(batch_obs_names) >= 0
             if mask.any():
-                raw_x_ng_list.append(sparse_tensor_to_scipy_csr(batch["x_ng"])[mask])
-                raw_obs_names_list.append(batch_obs_names[mask])
-    obs_names = np.concatenate(obs_names_list)
-    datamodule.shuffle = datamodule_shuffle
+                in_sketch[positions[mask]] = True
+                if return_new_adata:
+                    raw_counts.append(sparse_tensor_to_scipy_csr(batch["x_ng"])[mask], positions[mask])
+                    raw_obs_names_list.append(batch_obs_names[mask])
+    if store is not None:
+        assert writer is not None, "predict_batches yielded no batches"
+        cdata.obsm[store[0]] = writer.result
+        cdata._embedding_sources[store[0]] = (store[1], writer.result)
 
-    ordered_sketch_mask = sketch_index.get_indexer(obs_names) >= 0
-    sketch_series = pd.Series(ordered_sketch_mask, index=obs_names)
+    sketch_series = pd.Series(in_sketch, index=cdata.cell_ids)
     cdata.obs_computed["in_sketch"] = sketch_series
 
     adata = None
     if return_new_adata:
-        # Rows of raw_x_ng/raw_obs_names are kept in the order they were collected (dataset
-        # streaming order), not reservoir order: obs and X just need to agree with each other,
-        # not with `sketch_obs_names`. Only the (small) embedding needs to be reindexed to match.
-        raw_obs_names = np.concatenate(raw_obs_names_list)
-        coverage = pd.Index(raw_obs_names).get_indexer(sketch_obs_names)
+        # The rows of the AnnData are in the order of the cells in the data, not reservoir order: obs and X just need
+        # to agree with each other, not with `sketch_obs_names`. Only the (small) embedding needs to be reindexed to
+        # match.
+        collected_obs_names = np.concatenate(raw_obs_names_list)
+        coverage = pd.Index(collected_obs_names).get_indexer(sketch_obs_names)
         if (coverage == -1).any():
             missing = np.asarray(sketch_obs_names)[coverage == -1]
             raise ValueError(f"Could not find raw data for sketch obs_names, e.g. {missing[:5].tolist()}")
-        raw_x_ng = sp.vstack(raw_x_ng_list, format="csr")
-        del raw_x_ng_list  # the counts are in raw_x_ng now: do not hold a second copy of them
+        del raw_obs_names_list
+        # the counts are assembled directly in the order of the data, freeing the collected pieces as they are used
+        raw_x_ng, order = raw_counts.finish()
+        raw_obs_names = collected_obs_names[order]
+        raw_positions = np.flatnonzero(in_sketch)  # the positions of the sketch cells, in the order of the data
+        if len(raw_positions) != raw_x_ng.shape[0]:
+            raise RuntimeError("The cells collected for the sketch do not match the cells that are in the sketch.")
 
         embedding_pos = sketch_index.get_indexer(raw_obs_names)
         embedding = reservoir["x_ng"].to_dense().cpu().numpy()[embedding_pos]
@@ -303,7 +462,7 @@ def _geometric_sketch(
 
         adata = anndata.AnnData(
             X=raw_x_ng,
-            obs=pd.DataFrame(index=raw_obs_names),
+            obs=pd.DataFrame({CELL_ID_COLUMN: cdata.cell_ids.to_numpy()[raw_positions]}, index=raw_obs_names),
             var=var,
             obsm={embedding_key: embedding},
         )

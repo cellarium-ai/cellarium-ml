@@ -3,7 +3,7 @@
 
 import glob
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import numpy as np
@@ -14,7 +14,8 @@ from deltacells.obs import ObsSchema
 from deltacells.writer import DatasetWriter
 from tqdm import tqdm
 
-from cellarium.ml.api._view_collections import _obs_frame
+from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
+from cellarium.ml.api._view_collections import _obs_frame, read_blocks, shard_blocks
 
 _GCS_PREFIX = "gs://"
 _MAX_COUNT = 2**31 - 1  # the largest count that deltacells can store
@@ -144,12 +145,16 @@ def write_collection_to_deltacells(
     overwrite: bool = False,
     staging_dir: str | None = None,
     filesystem: Any = None,
+    cell_ids: np.ndarray | None = None,
     **writer_kwargs: Any,
 ) -> str:
     """
     Write all the cells of ``collection`` (a :class:`~cellarium.ml.data.DistributedCollection`), in order, as a
     deltacells dataset at ``output`` (a local directory or ``gs://bucket/prefix``), in tiles of ``tile_size`` cells with
-    their ``obs`` (every column, and the ``obs_names``) and ``var``. This is one pass over the cells, plus one over up
+    their ``obs`` (every column, and the ``obs_names``) and ``var``. If ``cell_ids`` (one integer per cell) is given, it
+    is stored as the ``obs`` column ``cellarium_cell_id`` (replacing one that the cells have), which is what
+    :attr:`~cellarium.ml.api.CellariumData.cell_ids` reads when the dataset is opened. This is one pass over the cells,
+    plus one over up
     to ``sort_genes_max_tiles`` tiles spread over them, to sort the genes by decreasing total counts (better
     compression). ``X`` must hold integer counts from 0 to 2**31 - 1. If it does not, or the writing fails otherwise,
     nothing is left at a local ``output``, and a ``gs://`` ``output`` has no manifest. A ``gs://`` ``output`` is
@@ -161,27 +166,68 @@ def write_collection_to_deltacells(
         ``output``.
     """
     n = len(collection)
-    tile_starts = list(range(0, n, tile_size))
+    n_tiles = -(-n // tile_size)
+    if cell_ids is not None:
+        cell_ids = np.asarray(cell_ids, dtype=np.int64)
+        if cell_ids.shape != (n,):
+            raise ValueError(f"cell_ids must have one entry per cell, shape ({n},), got {cell_ids.shape}.")
 
-    def read(start: int) -> tuple[sp.csr_matrix, pd.DataFrame]:
-        batch = collection.read(np.arange(start, min(start + tile_size, n)))
+    def convert(start: int, batch: Any) -> tuple[sp.csr_matrix, pd.DataFrame]:
         x = sp.csr_matrix(batch.X)
         if x.nnz and (x.data.min() < 0 or x.data.max() > _MAX_COUNT or np.any(x.data != np.round(x.data))):
             raise ValueError(
-                f"The tile of cells {start} to {start + x.shape[0]} does not hold integer counts from 0 to "
+                f"The cells {start} to {start + x.shape[0]} do not hold integer counts from 0 to "
                 f"{_MAX_COUNT}, which deltacells requires."
             )
         obs = _obs_frame(batch)
         obs["obs_names"] = np.asarray(obs.index, dtype=str)
+        if cell_ids is not None:
+            obs[CELL_ID_COLUMN] = cell_ids[start : start + x.shape[0]]
         return x, obs.reset_index(drop=True)
 
-    _, first_obs = read(0)
+    # The cells are read one shard at a time (a file, or a tile of the dataset that a view is taken from: for a view
+    # of scattered cells a read of ``tile_size`` cells in a row would touch nearly every shard), and put together into
+    # the tiles that are written
+    blocks = shard_blocks(collection, tile_size)
+
+    def tiles() -> Iterator[tuple[sp.csr_matrix, pd.DataFrame]]:
+        pending_x: list[sp.csr_matrix] = []
+        pending_obs: list[pd.DataFrame] = []
+        n_pending = 0
+        for start, stop, batch in read_blocks(collection, blocks, progress=False):
+            x, obs = convert(start, batch)
+            pending_x.append(x)
+            pending_obs.append(obs)
+            n_pending += x.shape[0]
+            last = stop == n
+            if n_pending < tile_size and not last:
+                continue
+            all_x = sp.vstack(pending_x, format="csr") if len(pending_x) > 1 else pending_x[0]
+            all_obs = pd.concat(pending_obs, ignore_index=True) if len(pending_obs) > 1 else pending_obs[0]
+            lower = 0
+            while len(all_obs) - lower >= tile_size:
+                yield all_x[lower : lower + tile_size], all_obs.iloc[lower : lower + tile_size].reset_index(drop=True)
+                lower += tile_size
+            if last:
+                if lower < len(all_obs):
+                    yield all_x[lower:], all_obs.iloc[lower:].reset_index(drop=True)
+                return
+            pending_x, pending_obs = [all_x[lower:]], [all_obs.iloc[lower:]]
+            n_pending = len(all_obs) - lower
+
+    _, first_obs = convert(blocks[0][0], collection.read(np.arange(*blocks[0])))
     schema = ObsSchema.infer([first_obs])
     gene_order = None
     if sort_genes:
+        # the total counts of the genes in about ``sort_genes_max_tiles`` tiles of cells, from shards spread over them
+        mean_block = n / len(blocks)
+        n_picks = min(
+            len(blocks), int(np.ceil(sort_genes_max_tiles * tile_size / mean_block)), max(sort_genes_max_tiles, 32)
+        )
         totals = np.zeros(collection.n_vars)
-        for start in tile_starts[:: max(1, len(tile_starts) // sort_genes_max_tiles)][:sort_genes_max_tiles]:
-            totals += np.asarray(read(start)[0].sum(axis=0)).ravel()
+        for i in np.unique(np.linspace(0, len(blocks) - 1, n_picks).round().astype(np.int64)):
+            start, stop = blocks[i]
+            totals += np.asarray(convert(start, collection.read(np.arange(start, stop)))[0].sum(axis=0)).ravel()
         gene_order = np.argsort(-totals, kind="stable")
 
     # refuses (FileExistsError) to write into an output that has something in it unless `overwrite`, and deletes only
@@ -199,6 +245,6 @@ def write_collection_to_deltacells(
         filesystem=filesystem,
         **writer_kwargs,
     ) as writer:  # on an error this leaves nothing at a local output (and no manifest at a remote one)
-        for start in tqdm(tile_starts, desc="Writing tiles", unit="tile"):
-            writer.add_tile(*read(start))
+        for x, obs in tqdm(tiles(), total=n_tiles, desc="Writing tiles", unit="tile"):
+            writer.add_tile(x, obs)
     return output
