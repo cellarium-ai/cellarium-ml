@@ -100,7 +100,7 @@ class ShardChunkDataset(IterableDistributedAnnDataCollectionDataset):
 
 def _is_shared(key: str) -> bool:
     """Whether the value of ``key`` is the same for every cell (as in :func:`~cellarium.ml.utilities.data.collate_fn`)
-    and so is not concatenated. The flags that transforms leave in the batch (such as ``_predict_mode``) are."""
+    and so is not concatenated. The flags that transforms leave in the batch (names starting with ``_``) are."""
     return key.endswith("_g") or key.endswith("_categories") or key.startswith("_")
 
 

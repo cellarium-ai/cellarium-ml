@@ -238,22 +238,21 @@ def test_the_sketch_provides_the_batch_column_of_scvi_when_it_embeds(cdata):
     assert "batch_index_n" not in cdata.datamodule.batch_keys  # the datamodule is put back
 
 
-def test_to_anndata_of_a_sketch_puts_the_embedding_of_all_the_cells_in_the_anndata_and_does_not_keep_it(
-    cdata, trained_pca, tmp_path, monkeypatch
-):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    expected = cdata.to_anndata().obsm["X_pca"]  # computed for the cells in memory
+def test_to_anndata_of_a_sketch_puts_the_stored_embedding_in_the_anndata(cdata, trained_pca):
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
         adata = cdata.to_anndata("geometric_sketch", 10, geometric_sketch_kwargs={"accelerator": "cpu"})
     assert [str(w.message) for w in record if "obsm['X_pca']" in str(w.message)] == []  # nothing to warn about
+    assert cdata._cached_embedding_state("pca") == "current"  # the embedding of all the cells stays in the data
     positions = adata.obs["cellarium_cell_id"].to_numpy()
     assert type(adata.obsm["X_pca"]) is np.ndarray  # a copy of the rows of the sketch cells
-    np.testing.assert_allclose(adata.obsm["X_pca"], expected[positions], rtol=1e-4, atol=1e-4)
-    # the embedding of all the cells (a file) was for the AnnData: it is gone from the data, and from the disk
-    assert "X_pca" not in cdata.obsm
-    assert cdata._cached_embedding_state("pca") is None
-    assert list(tmp_path.glob("cellarium_obsm_*")) == [] and list(tmp_path.glob("cellarium_rows_*")) == []
+    np.testing.assert_array_equal(adata.obsm["X_pca"], np.asarray(cdata.obsm["X_pca"])[positions])
+
+
+def test_to_anndata_of_a_sketch_leaves_no_temporary_counts_files(cdata, trained_pca, tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    cdata.to_anndata("geometric_sketch", 10, geometric_sketch_kwargs={"accelerator": "cpu"})
+    assert list(tmp_path.glob("cellarium_rows_*")) == []  # (the stored embedding, a file, is kept with the data)
 
 
 def test_to_anndata_of_a_sketch_leaves_an_embedding_that_was_there(cdata, trained_pca):

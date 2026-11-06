@@ -5,12 +5,15 @@ import lightning.pytorch as pl
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.api.cellariumdata import CellariumData, fit_and_register
 from cellarium.ml.api.tools import embed, geometric_sketch
+from cellarium.ml.api.tools.geometric_sketch import _as_in_predict
 from cellarium.ml.models import IncrementalPCA
-from cellarium.ml.transforms import CellFilter, Densify, Log1p, NormalizeTotal
+from cellarium.ml.transforms import CellFilter, Densify, Dropout, Log1p, NormalizeTotal
+from cellarium.ml.transforms.base import STAGES, CellariumTransform
 
 # A module trained with a `CellFilter`, which drops cells in training, is used for inference: every cell of the data
 # is embedded (and is in play for the sketch), whether the `CellFilter` is in the `transforms` or in the
@@ -92,3 +95,22 @@ def test_the_sketch_stores_the_embedding_of_every_cell_and_has_every_cell_in_pla
     assert isinstance(in_sketch, pd.Series)
     assert in_sketch.sum() == cdata.n_obs
     np.testing.assert_allclose(cdata.obsm["X_pca"], expected, rtol=1e-4, atol=1e-4)
+
+
+def test_a_transform_made_to_act_as_in_predict_does_so_in_every_stage():
+    cell_filter = CellFilter(min_count_per_cell=3)  # active in train, validate and test, not in predict
+    only_in_predict = Dropout(p_dropout_min=0.1, p_dropout_max=0.2, p_apply=0.5, stages=["predict"])
+    assert not cell_filter.is_active("predict") and cell_filter.is_active("train")
+
+    inactive = _as_in_predict(cell_filter)
+    assert isinstance(inactive, CellariumTransform) and inactive is not cell_filter
+    assert not any(inactive.is_active(stage) for stage in STAGES)  # inactive in every stage, as it is in predict
+    assert cell_filter.is_active("train")  # the original is as it was
+
+    active = _as_in_predict(only_in_predict)
+    assert isinstance(active, CellariumTransform) and active is not only_in_predict
+    assert all(active.is_active(stage) for stage in STAGES)
+    assert [stage for stage in STAGES if only_in_predict.is_active(stage)] == ["predict"]
+
+    for not_a_transform_with_stages in (Densify(), torch.nn.Identity()):  # active in every stage already
+        assert _as_in_predict(not_a_transform_with_stages) is not_a_transform_with_stages

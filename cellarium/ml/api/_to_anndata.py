@@ -183,30 +183,6 @@ def to_anndata(
     max_gb: float | None,
 ) -> anndata.AnnData:
     """The implementation of :meth:`CellariumData.to_anndata`, which documents the arguments."""
-    obsm_before = set(cdata.obsm)
-    try:
-        return _to_anndata(
-            cdata, downsample_method, target_n_cells, geometric_sketch_kwargs, collect_embeddings, seed, max_gb
-        )
-    finally:
-        # A geometric sketch stores the embedding of every cell in ``cdata.obsm`` (in a file in the temporary
-        # directory), and what goes into the AnnData is a copy of the rows of the sketch cells: the file is of no use
-        # once the AnnData is made, so it is not kept (the file is deleted when nothing refers to the array any more).
-        for key in set(cdata.obsm) - obsm_before:
-            del cdata.obsm[key]
-            cdata._embedding_sources.pop(key, None)
-        release_unused_memory()
-
-
-def _to_anndata(
-    cdata: "CellariumData",
-    downsample_method: Literal["random", "geometric_sketch"] | None,
-    target_n_cells: int | None,
-    geometric_sketch_kwargs: dict[str, Any] | None,
-    collect_embeddings: bool | str | Sequence[str],
-    seed: int,
-    max_gb: float | None,
-) -> anndata.AnnData:
     from cellarium.ml.api.cellariumdata import _per_cell_series
     from cellarium.ml.api.tools.geometric_sketch import geometric_sketch
 

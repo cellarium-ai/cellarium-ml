@@ -971,12 +971,6 @@ class _PositionedChunkDataset(_PositionedMixin, ShardChunkDataset):
     """The dataset of :meth:`CellariumData.predict_batches` for cells that are read a shard at a time."""
 
 
-def _mark_predict_mode(batch: dict[str, Any]) -> dict[str, Any]:
-    """Put the batch in predict mode, as :meth:`CellariumPipeline.predict` does (picklable, for the dataloader)."""
-    batch["_predict_mode"] = True
-    return batch
-
-
 def _device_of(module: torch.nn.Module) -> torch.device | None:
     """The device of the first parameter or buffer of ``module``, or ``None`` if it has none."""
     for tensor in (*module.parameters(), *module.buffers()):
@@ -2015,7 +2009,6 @@ class CellariumData:
                 if target is not None:
                     batch = move_data_to_device(batch, target)
                 if module is not None:
-                    batch["_predict_mode"] = True  # as in `CellariumPipeline.predict`: no cell is dropped
                     with torch.no_grad():
                         batch = module.transforms.transform(batch, "predict")
                 batch["row_indices_n"] = positions

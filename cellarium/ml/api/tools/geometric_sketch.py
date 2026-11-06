@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
+import copy
 import warnings
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -25,20 +26,26 @@ from cellarium.ml.api.utils import resolve_device, shutdown_trainer_workers
 from cellarium.ml.models import IncrementalPCA, StreamingPlaidGeometricSketch
 from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.transforms import Densify, Filter, Log1p, NormalizeTotal
+from cellarium.ml.transforms.base import STAGES, CellariumTransform
 from cellarium.ml.utilities.core import call_func_with_batch
 from cellarium.ml.utilities.data import collate_fn, sparse_tensor_to_scipy_csr
 from cellarium.ml.utilities.testing import assert_arrays_equal, assert_columns_and_array_lengths_equal
 
 
-class _PredictMode(torch.nn.Module):
+def _as_in_predict(transform: torch.nn.Module) -> torch.nn.Module:
     """
-    Puts the batch in predict mode (``_predict_mode``, as :meth:`CellariumPipeline.predict` does), so that the
-    transforms after it that drop cells (:class:`~cellarium.ml.transforms.CellFilter`) are no-ops. It is the first of
-    the ``cpu_transforms`` of the sketch module, which the dataloader runs outside of any pipeline's predict.
+    A copy of ``transform`` that does in every stage what ``transform`` does in the ``"predict"`` stage: it is active
+    in every stage if ``transform`` is active in ``"predict"``, and in none if it is not (as a
+    :class:`~cellarium.ml.transforms.CellFilter` is not). The dataloader of the training pass of the sketch runs the
+    ``cpu_transforms`` of the sketch module as in training, but this is inference: every cell is in play. A module
+    that is not a :class:`~cellarium.ml.transforms.base.CellariumTransform` is active in every stage already, and is
+    returned as it is.
     """
-
-    def forward(self, **kwargs: Any) -> dict[str, bool]:
-        return {"_predict_mode": True}
+    if not isinstance(transform, CellariumTransform):
+        return transform
+    clone = copy.copy(transform)  # a new object (with its own settings) that shares the tensors of the original
+    clone._stages = frozenset(STAGES) if transform.is_active("predict") else frozenset()
+    return clone
 
 
 class RandomMatrixProjection(CellariumModel, PredictMixin):
@@ -135,11 +142,11 @@ def _batch_embedder(module: CellariumModule, device: torch.device) -> Iterator[C
     @torch.no_grad()
     def embed_batch(batch: dict[str, Any]) -> np.ndarray:
         batch = dict(batch)  # the transforms put their results in the dictionary: not in the caller's
-        # this is inference: every cell gets an embedding, so transforms that drop cells (CellFilter) are no-ops
-        batch["_predict_mode"] = True
+        # this is inference: every cell gets an embedding, so the transforms are those of the "predict" stage (which
+        # leave out the ones that drop cells, such as a CellFilter)
         if len(module.cpu_transforms) > 0:
-            batch = module.cpu_transforms(batch)
-        batch = module.transforms(move_data_to_device(batch, device))
+            batch = module.cpu_transforms.transform(batch, "predict")
+        batch = module.transforms.transform(move_data_to_device(batch, device), "predict")
         prediction = call_func_with_batch(module.model.predict, batch)
         return torch.as_tensor(prediction["x_ng"]).detach().cpu().numpy()
 
@@ -344,12 +351,10 @@ def _geometric_sketch(
     # target_n_cells), and the model brings the sketch to exactly target_n_cells at the end by coarsening
     # a copy of the grid a little further, as in the geometric sketching paper.
     # Every cell is in play for the sketch, as every cell gets an embedding: this is inference, so the transforms that
-    # drop cells are off. (`embedding_on_accelerator` is a module, whose forward is its pipeline's predict.)
-    cpu_transforms = list(embedding_module.cpu_transforms)
-    if len(cpu_transforms) > 0:
-        cpu_transforms.insert(0, _PredictMode())
+    # drop cells are off. (`embedding_on_accelerator` is a module, whose forward is its pipeline's predict, and the
+    # cpu transforms are made to do what they do in predict whatever the stage of the dataloader that runs them.)
     module = CellariumModule(
-        cpu_transforms=cpu_transforms,
+        cpu_transforms=[_as_in_predict(transform) for transform in embedding_module.cpu_transforms],
         transforms=[embedding_on_accelerator],
         model=StreamingPlaidGeometricSketch(
             var_names_g=var_names_g,
@@ -400,6 +405,8 @@ def _geometric_sketch(
     raw_obs_names_list = []
     writer: ObsmWriter | None = None
     with ExitStack() as stack:
+        # if the pass fails, the files of the counts collected so far are deleted at once
+        stack.push(lambda exc_type, exc, traceback: raw_counts.close() if exc_type is not None else None)
         embed_batch = None
         if store is not None:
             assert embedding_module is not None
