@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 _NA_COLOR = "#D3D3D3"  # light gray, for cells with a missing value
 _NO_COLOR = "#4C78A8"  # for the cells when there is nothing to color by
+_FALSE_COLOR = "#D3D3D3"  # light gray, for False in a boolean column
+_TRUE_COLOR = "#D62728"  # tab:red, for True in a boolean column
 _CONTINUOUS_SCALE = "Oranges"
 _CONTINUOUS_SCALE_START = 0.15  # Oranges starts almost white, which vanishes on a white background
 
@@ -144,13 +146,15 @@ def embedding(
             there is no such key, ``basis`` itself.
         color: The column of ``adata.obs`` to color the cells by, or ``None`` for one color. A categorical (or text or
             boolean) column gives each category a color, and a numeric column a continuous color scale (``Oranges``).
-            Cells with a missing value are light gray.
+            Cells with a missing value are light gray. A boolean column (or a categorical with boolean categories)
+            is red for True and light gray for False, and the True cells are drawn on top of the others.
         hover_data: The columns of ``adata.obs`` to show in the tooltip, a name or a list of names.
         components: The two dimensions of the embedding to plot, as indices (starting at 0).
         palette: The colors of the categories, a list of colors (given to the categories in order, repeating if there
             are fewer colors than categories) or a dictionary from category to color. By default the colors in
             ``adata.uns["<color>_colors"]``, which scanpy stores, if there are any, and otherwise a long list of
-            distinguishable colors that repeats if there are more categories than colors.
+            distinguishable colors that repeats if there are more categories than colors. For a boolean ``color`` the
+            default is red for True and light gray for False; a list is then in the order ``[False, True]``.
         size: The diameter of the markers, in pixels. By default it decreases with the number of cells.
         title: The title of the figure.
         width: The width of the figure in pixels, by default (``None``) as wide as the space it is displayed in.
@@ -247,9 +251,25 @@ def embedding(
         add_trace(everything, {"color": _NO_COLOR})
     elif categorical:
         categories = values if isinstance(values.dtype, pd.CategoricalDtype) else values.astype("category")
+        is_bool = pd.api.types.is_bool_dtype(values)  # also a categorical whose categories are booleans
+        if is_bool and palette is None:
+            palette = {False: _FALSE_COLOR, True: _TRUE_COLOR}
         colors = _categorical_colors(adata, color, categories, palette)  # type: ignore[arg-type]
-        # a tooltip with the color of the cell as its background
-        add_trace(everything, {"color": list(colors)}, hoverlabel={"bgcolor": list(colors)})
+        if is_bool:
+            # drawn missing first, then False, then True, so that the (usually rare) True cells are on top
+            codes = categories.cat.codes.to_numpy()
+            levels = list(categories.cat.categories)
+            is_missing = codes < 0
+            is_true = (codes == levels.index(True)) if True in levels else np.zeros(n_obs, dtype=bool)
+            for selection in (is_missing, ~is_missing & ~is_true, is_true):
+                if selection.any():
+                    # a tooltip with the color of the cell as its background
+                    add_trace(
+                        selection, {"color": list(colors[selection])}, hoverlabel={"bgcolor": list(colors[selection])}
+                    )
+        else:
+            # a tooltip with the color of the cell as its background
+            add_trace(everything, {"color": list(colors)}, hoverlabel={"bgcolor": list(colors)})
     else:
         numbers = values.to_numpy(dtype=float, na_value=np.nan)
         missing = np.isnan(numbers)
