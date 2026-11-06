@@ -8,6 +8,7 @@ import tempfile
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable, Hashable, Iterator, Literal, Sequence
 
 import anndata
@@ -1272,9 +1273,11 @@ class CellariumData:
         With a ``module``, each batch is what the model of the module would see: the module's ``cpu_transforms`` are
         applied by the dataloader workers (as in training), and the rest of its ``transforms`` (those of
         ``module.transforms``) are applied here, on ``device``, under ``torch.no_grad()``. The model itself is not
-        applied. The module is put in ``eval`` mode, and its transforms are moved to ``device`` for the iteration, and
-        restored when it ends. Without a ``module`` the batches are as the datamodule reads them, with no transforms
-        at all (so for example no gene filter), for the caller to transform.
+        applied. The transforms are those of the ``"predict"`` stage: ones that are not active in it, such as data
+        augmentations or a cell filter, are skipped, so that every cell is covered. The module is put in ``eval`` mode,
+        and its transforms are moved to ``device`` for the iteration, and restored when it ends. Without a ``module``
+        the batches are as the datamodule reads them, with no transforms at all (so for example no gene filter), for
+        the caller to transform.
 
         Example:
             >>> for batch in cdata.predict_batches(trained.module, device="cuda"):
@@ -1301,7 +1304,10 @@ class CellariumData:
         if module is not None:
             module.configure_model()  # idempotent; makes the transforms accessible
             if len(module.cpu_transforms) > 0:
-                collate_fn = FunctionComposer(first_applied=collate_fn, second_applied=module.cpu_transforms)
+                collate_fn = FunctionComposer(
+                    first_applied=collate_fn,
+                    second_applied=partial(module.cpu_transforms.transform, stage="predict"),
+                )
         # the settings that matter for completeness are fixed here, not taken from the datamodule (which is set up for
         # training, e.g. shuffled). `cache_efficient` reads each worker's contiguous stretch of cells, which is much
         # faster than `same_order` but yields batches out of order: hence the positions
@@ -1340,7 +1346,7 @@ class CellariumData:
                     batch = move_data_to_device(batch, target)
                 if module is not None:
                     with torch.no_grad():
-                        batch = module.transforms(batch)
+                        batch = module.transforms.transform(batch, "predict")
                 batch["row_indices_n"] = positions
                 seen += len(positions)
                 yield batch

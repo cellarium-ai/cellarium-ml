@@ -1,11 +1,15 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from collections.abc import Sequence
+from typing import ClassVar
+
 import torch
-from torch import nn
+
+from .base import CellariumTransform, Stage
 
 
-class CellFilter(nn.Module):
+class CellFilter(CellariumTransform):
     """
     Filter cells from the batch by a minimum quality threshold.
 
@@ -18,9 +22,10 @@ class CellFilter(nn.Module):
     from ``n`` (e.g. gene-indexed arrays) are left unchanged.
 
     When both thresholds are ``0`` (default) the transform is a no-op: an empty dict
-    is returned and the pipeline merge leaves the batch unmodified.  The transform is
-    also a no-op during predict mode (``_predict_mode=True`` in the batch dict, set
-    automatically by :meth:`~cellarium.ml.core.CellariumPipeline.predict`).
+    is returned and the pipeline merge leaves the batch unmodified.  By default the
+    transform is active in the ``"train"``, ``"validate"`` and ``"test"`` stages of a
+    :class:`~cellarium.ml.core.CellariumPipeline` and skipped in ``"predict"``, so that
+    predictions are returned for every cell.
 
     .. warning::
 
@@ -36,10 +41,20 @@ class CellFilter(nn.Module):
         min_nonzero_genes_per_cell:
             Minimum number of genes with nonzero expression required for a cell to be
             retained, computed as ``(x_ng > 0).sum(dim=-1)``.  ``0`` disables this filter.
+        stages:
+            The stages in which the transform is active. If ``None`` (default), it is active in
+            ``"train"``, ``"validate"`` and ``"test"``. Otherwise this replaces that default.
     """
 
-    def __init__(self, min_count_per_cell: int = 0, min_nonzero_genes_per_cell: int = 0) -> None:
-        super().__init__()
+    default_stages: ClassVar[frozenset[Stage]] = frozenset({"train", "validate", "test"})
+
+    def __init__(
+        self,
+        min_count_per_cell: int = 0,
+        min_nonzero_genes_per_cell: int = 0,
+        stages: Sequence[Stage] | None = None,
+    ) -> None:
+        super().__init__(stages)
         if min_count_per_cell < 0:
             raise ValueError(f"min_count_per_cell must be >= 0, got {min_count_per_cell}")
         if min_nonzero_genes_per_cell < 0:
@@ -64,11 +79,8 @@ class CellFilter(nn.Module):
             A dictionary of filtered tensors to merge back into the batch.  Only tensors
             whose first dimension equals ``n`` are included; all others are omitted so the
             pipeline merge leaves them unchanged.  Returns ``{}`` when both thresholds are
-            ``0`` or when ``_predict_mode`` is set.
+            ``0``.
         """
-        if kwargs.get("_predict_mode", False):
-            return {}
-
         x_ng: torch.Tensor = kwargs["x_ng"]
         n = x_ng.shape[0]
 
