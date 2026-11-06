@@ -872,12 +872,7 @@ class SCANVI(SingleCellVariationalInference):
         else:
             library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
 
-        if self.input_gene_dropout_rate > 0.0:
-            with torch.no_grad():
-                dropout_mask_ng = torch.rand_like(x_ng) > self.input_gene_dropout_rate
-                inference_input_x_ng = x_ng * dropout_mask_ng
-        else:
-            inference_input_x_ng = x_ng
+        inference_input_x_ng = self._augment_encoder_input(x_ng)
 
         inference_outputs = self.inference(
             x_ng=inference_input_x_ng,

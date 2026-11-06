@@ -438,3 +438,48 @@ def test_guard_use_flow_raises():
                 "final_additive_bias": False,
             },
         )
+
+
+def test_forward_uses_shared_encoder_input_augmentation():
+    """scANVI's forward goes through the shared augmentation helper and respects train/eval mode."""
+    n, g = 16, 50
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    torch.manual_seed(0)
+    model = SCANVI(
+        classifier_type="flat",
+        cell_type_categories=["T", "B"],
+        classifier_n_hidden=[32],
+        secondary_n_hidden=[32],
+        chunk_size=2,
+        var_names_g=var_names_g,
+        n_batch=2,
+        n_latent=8,
+        encoder=_ENCODER_CFG,
+        decoder=_DECODER_CFG,
+        input_gene_dropout_rate=0.1,
+        binomial_downsampling_prob=1.0,
+        binomial_downsampling_min_counts=100,
+    )
+    x_ng = torch.poisson(torch.full((n, g), 50.0))
+    batch_index_n = torch.zeros(n, dtype=torch.long)
+
+    seen_inputs = []
+    original_inference = model.inference
+
+    def spy(x_ng, **kwargs):
+        seen_inputs.append(x_ng)
+        return original_inference(x_ng=x_ng, **kwargs)
+
+    model.inference = spy  # type: ignore[assignment]
+
+    model.train()
+    out = model(x_ng=x_ng, var_names_g=var_names_g, batch_index_n=batch_index_n)
+    assert isinstance(out["loss"], torch.Tensor)
+    assert out["loss"].isfinite()
+    out["loss"].backward()
+    assert seen_inputs[-1].sum() < x_ng.sum()
+
+    model.eval()
+    with torch.no_grad():
+        model(x_ng=x_ng, var_names_g=var_names_g, batch_index_n=batch_index_n)
+    assert torch.equal(seen_inputs[-1], x_ng)
