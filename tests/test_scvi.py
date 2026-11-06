@@ -2633,3 +2633,158 @@ def test_predict_reconstructed_counts_simulated(matching_scvi_cellarium_models, 
             atol=4,
             msg=f"Reconstructions do not match scvi-tools: max diff {max_abs_diff:.6f}, mean diff {mean_abs_diff:.6f}",
         )
+
+
+def _augmentation_model(**kwargs) -> SingleCellVariationalInference:
+    return SingleCellVariationalInference(**{**standard_kwargs, **kwargs})
+
+
+def test_encoder_input_augmentation_off_by_default_and_in_eval():
+    """No augmentation by default, and none in eval mode even when enabled."""
+    n, g = 64, len(var_names_g)
+    x_ng = torch.poisson(torch.full((n, g), 50.0))
+
+    model = _augmentation_model()
+    assert model.binomial_downsampling_prob == 0.0
+    assert torch.equal(model._augment_encoder_input(x_ng), x_ng)
+
+    model = _augmentation_model(
+        input_gene_dropout_rate=0.5, binomial_downsampling_prob=1.0, binomial_downsampling_min_counts=10
+    )
+    model.eval()
+    assert torch.equal(model._augment_encoder_input(x_ng), x_ng)
+    model.train()
+    assert not torch.equal(model._augment_encoder_input(x_ng), x_ng)
+
+
+def test_binomial_downsampling_properties():
+    n, g, min_counts = 2000, len(var_names_g), 1000
+    torch.manual_seed(0)
+    # half the cells are below the minimum, half are well above it
+    rate_n1 = torch.cat([torch.full((n // 2, 1), 5.0), torch.full((n // 2, 1), 1000.0)])
+    x_ng = torch.poisson(rate_n1.expand(n, g).contiguous())
+    total_n = x_ng.sum(dim=-1)
+    assert (total_n[: n // 2] < min_counts).all() and (total_n[n // 2 :] > min_counts).all()
+
+    model = _augmentation_model(binomial_downsampling_prob=0.5, binomial_downsampling_min_counts=min_counts)
+    model.train()
+    out_ng = model._augment_encoder_input(x_ng)
+    out_total_n = out_ng.sum(dim=-1)
+
+    assert (out_ng <= x_ng).all(), "counts must never increase"
+    assert (out_total_n > 0).all(), "no new zero-count cells"
+    assert torch.equal(out_ng[: n // 2], x_ng[: n // 2]), "cells at or below min_counts are untouched"
+
+    deep = slice(n // 2, n)
+    changed_n = out_total_n[deep] < total_n[deep]
+    assert 0.4 < changed_n.float().mean() < 0.6, "about downsampling_prob of eligible cells are downsampled"
+    # targets are at least about min_counts, up to binomial noise
+    assert (out_total_n[deep] > 0.8 * min_counts).all()
+    # log-uniform targets: the median of the targets sits near the geometric, not arithmetic, mean of the range
+    median_ratio = (out_total_n[deep][changed_n].median() / total_n[deep].float().mean()).item()
+    geometric_ratio = math.sqrt(min_counts / total_n[deep].float().mean().item())
+    assert abs(median_ratio - geometric_ratio) < 0.1
+
+
+def test_binomial_downsampling_never_creates_zero_cells():
+    """Even with a tiny min_counts, a downsampled cell is never left with zero counts."""
+    n, g = 4000, len(var_names_g)
+    torch.manual_seed(0)
+    x_ng = torch.poisson(torch.full((n, g), 0.05))  # very sparse cells
+    x_ng = x_ng[x_ng.sum(dim=-1) > 1]
+    model = _augmentation_model(binomial_downsampling_prob=1.0, binomial_downsampling_min_counts=1)
+    model.train()
+    out_ng = model._augment_encoder_input(x_ng)
+    assert (out_ng.sum(dim=-1) > 0).all()
+    assert (out_ng <= x_ng).all()
+
+
+def test_binomial_downsampling_argument_validation():
+    with pytest.raises(ValueError, match="binomial_downsampling_prob"):
+        _augmentation_model(binomial_downsampling_prob=1.5)
+    with pytest.raises(ValueError, match="binomial_downsampling_min_counts"):
+        _augmentation_model(binomial_downsampling_min_counts=0)
+
+
+def test_forward_with_encoder_input_augmentation():
+    """Forward and backward run, and the loss target is computed from the un-augmented counts."""
+    n, g = 16, len(var_names_g)
+    x_ng = torch.poisson(torch.full((n, g), 50.0))
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    model = _augmentation_model(
+        input_gene_dropout_rate=0.1, binomial_downsampling_prob=1.0, binomial_downsampling_min_counts=100
+    )
+    model.train()
+    seen_inputs = []
+    original_inference = model.inference
+
+    def spy(x_ng, **kwargs):
+        seen_inputs.append(x_ng)
+        return original_inference(x_ng=x_ng, **kwargs)
+
+    model.inference = spy  # type: ignore[assignment]
+    out = model(x_ng, var_names_n, batch_index_n)
+    assert isinstance(out["loss"], torch.Tensor)
+    assert torch.isfinite(out["loss"])
+    out["loss"].backward()
+    assert seen_inputs[0].sum() < x_ng.sum(), "the encoder sees augmented counts"
+
+
+@pytest.mark.parametrize("normalizetotal_variational", [False, True], ids=["no_normalize", "normalize"])
+def test_zero_count_cells_are_finite(normalizetotal_variational: bool):
+    """All-zero cells give finite embeddings, losses and reconstructions, and do not affect other cells."""
+    n, g = 8, len(var_names_g)
+    torch.manual_seed(0)
+    x_ng = torch.poisson(torch.full((n, g), 20.0))
+    x_zero_ng = x_ng.clone()
+    x_zero_ng[[1, 5]] = 0.0
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+
+    model = _augmentation_model(normalizetotal_variational=normalizetotal_variational)
+    model.eval()
+    with torch.no_grad():
+        z_nk = model.predict(x_zero_ng, var_names_n, batch_index_n)["x_ng"]
+        z_ref_nk = model.predict(x_ng, var_names_n, batch_index_n)["x_ng"]
+        assert torch.isfinite(z_nk).all()
+        keep = [i for i in range(n) if i not in (1, 5)]
+        torch.testing.assert_close(z_nk[keep], z_ref_nk[keep])
+
+        out = model(x_zero_ng, var_names_n, batch_index_n)
+        assert isinstance(out["loss"], torch.Tensor)
+        assert isinstance(out["reconstruction_loss"], torch.Tensor)
+        assert torch.isfinite(out["loss"])
+        assert torch.isfinite(out["reconstruction_loss"]).all()
+
+        reconstruction_np = model.reconstruct(x_zero_ng, var_names_n, gene_inds=[0, 1, 2], batch_index_n=batch_index_n)
+        assert torch.isfinite(reconstruction_np["x_ng"]).all()
+
+
+def test_gene_dropout_that_empties_cells_is_finite_with_normalization():
+    n, g = 32, len(var_names_g)
+    torch.manual_seed(0)
+    x_ng = torch.poisson(torch.full((n, g), 0.5))
+    var_names_n = np.array(var_names_g)
+    batch_index_n = torch.randint(0, standard_kwargs["n_batch"], (n,))
+    model = _augmentation_model(normalizetotal_variational=True, input_gene_dropout_rate=0.9)
+    model.train()
+    out = model(x_ng, var_names_n, batch_index_n)
+    assert isinstance(out["loss"], torch.Tensor)
+    assert torch.isfinite(out["loss"])
+    out["loss"].backward()
+
+
+def test_predict_single_cell():
+    """A batch with exactly one cell keeps its batch dimension."""
+    g = len(var_names_g)
+    x_ng = torch.poisson(torch.full((1, g), 20.0))
+    var_names_n = np.array(var_names_g)
+    model = _augmentation_model()
+    model.eval()
+    for batch_index_n in (torch.zeros(1, dtype=torch.long), torch.zeros(1, 1, dtype=torch.long)):
+        with torch.no_grad():
+            z_nk = model.predict(x_ng, var_names_n, batch_index_n)["x_ng"]
+        assert z_nk.shape == (1, standard_kwargs["n_latent"])
+        assert model.batch_representation_from_batch_index(batch_index_n).shape == (1, standard_kwargs["n_batch"])
