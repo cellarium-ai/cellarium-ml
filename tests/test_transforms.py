@@ -8,16 +8,24 @@ import torch
 
 from cellarium.ml import CellariumPipeline
 from cellarium.ml.transforms import (
+    STAGES,
+    BinomialResample,
+    CellariumTransform,
+    CellFilter,
     CenterPerCell,
     Densify,
     DivideByScale,
+    Dropout,
+    Duplicate,
     Filter,
+    GaussianNoise,
     Log1p,
     NormalizeTotal,
     PFlogPF,
+    Stage,
     ZScore,
 )
-from cellarium.ml.utilities.data import to_torch_sparse_csr
+from cellarium.ml.utilities.data import to_torch_sparse_coo, to_torch_sparse_csr
 
 n, g, target_count = 100, 3, 10_000
 
@@ -248,6 +256,86 @@ def test_filter_sparse_column_mismatch_raises(x_ng_sparse: scipy.sparse.csr_matr
 
 
 # ---------------------------------------------------------------------------
+# Filter — sparse (torch COO) input path, used on the mps accelerator
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def x_ng_coo() -> torch.Tensor:
+    return to_torch_sparse_coo(scipy.sparse.csr_matrix(_SPARSE_DENSE))
+
+
+def test_filter_coo_ordering_true_reorders_columns(x_ng_coo: torch.Tensor):
+    """ordering=True on a COO input: output columns follow filter_list order, and stay COO."""
+    filter_list = ["gene_2", "gene_0"]
+    transform = Filter(filter_list, ordering=True)
+    result = transform(x_ng_coo, _SPARSE_VAR_NAMES)
+
+    assert result["x_ng"].layout == torch.sparse_coo
+    assert list(result["var_names_g"]) == filter_list
+
+    dense_out = result["x_ng"].to_dense().numpy()
+    np.testing.assert_array_equal(dense_out[:, 0], _SPARSE_DENSE[:, 2])
+    np.testing.assert_array_equal(dense_out[:, 1], _SPARSE_DENSE[:, 0])
+
+
+def test_filter_coo_ordering_false_preserves_input_order(x_ng_coo: torch.Tensor):
+    """ordering=False on a COO input: output columns follow input order, and stay COO."""
+    filter_list = ["gene_2", "gene_0"]
+    transform = Filter(filter_list, ordering=False)
+    result = transform(x_ng_coo, _SPARSE_VAR_NAMES)
+
+    assert result["x_ng"].layout == torch.sparse_coo
+    assert list(result["var_names_g"]) == ["gene_0", "gene_2"]
+
+    dense_out = result["x_ng"].to_dense().numpy()
+    np.testing.assert_array_equal(dense_out[:, 0], _SPARSE_DENSE[:, 0])
+    np.testing.assert_array_equal(dense_out[:, 1], _SPARSE_DENSE[:, 2])
+
+
+def test_filter_coo_allow_missing_fills_zeros(x_ng_coo: torch.Tensor):
+    """allow_missing=True on a COO input: absent genes produce zero-filled columns, dense output."""
+    filter_list = ["gene_1", "gene_X", "gene_0"]  # gene_X not in input
+    transform = Filter(filter_list, ordering=True, allow_missing=True)
+    result = transform(x_ng_coo, _SPARSE_VAR_NAMES)
+
+    assert not result["x_ng"].is_sparse
+    assert result["x_ng"].shape == (5, 3)
+    assert list(result["var_names_g"]) == filter_list
+
+    out = result["x_ng"].numpy()
+    np.testing.assert_array_equal(out[:, 0], _SPARSE_DENSE[:, 1])  # gene_1
+    np.testing.assert_array_equal(out[:, 1], np.zeros(5))  # gene_X (missing)
+    np.testing.assert_array_equal(out[:, 2], _SPARSE_DENSE[:, 0])  # gene_0
+
+
+def test_filter_coo_column_mismatch_raises(x_ng_coo: torch.Tensor):
+    """x_ng columns != len(var_names_g) raises ValueError for COO input too."""
+    bad_var_names = np.array(["gene_0", "gene_1"])  # 2 names but x_ng has 3 columns
+    transform = Filter(["gene_0"], ordering=True)
+    with pytest.raises(ValueError, match="must match"):
+        transform(x_ng_coo, bad_var_names)
+
+
+def test_filter_coo_then_densify_on_mps():
+    """Filter on a COO input, followed by Densify, reproduces the mps accelerator pipeline."""
+    if not torch.backends.mps.is_available():
+        pytest.skip("mps not available")
+
+    x_ng_coo = to_torch_sparse_coo(scipy.sparse.csr_matrix(_SPARSE_DENSE))
+    filter_list = ["gene_2", "gene_0"]
+    filtered = Filter(filter_list, ordering=True)(x_ng_coo, _SPARSE_VAR_NAMES)["x_ng"]
+
+    x_mps = filtered.to(torch.device("mps"))
+    densified = Densify()(x_mps)["x_ng"]
+
+    assert densified.device.type == "mps"
+    assert not densified.is_sparse
+    np.testing.assert_array_equal(densified.cpu().numpy()[:, 0], _SPARSE_DENSE[:, 2])
+    np.testing.assert_array_equal(densified.cpu().numpy()[:, 1], _SPARSE_DENSE[:, 0])
+
+
+# ---------------------------------------------------------------------------
 # ZScore flexible gene-subset tests
 # ---------------------------------------------------------------------------
 
@@ -306,6 +394,77 @@ def test_zscore_unknown_gene_raises(zscore_full: ZScore):
 
 
 # ---------------------------------------------------------------------------
+# NormalizeTotal sparse tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def x_counts_sparse() -> scipy.sparse.csr_matrix:
+    """Sparse counts with an all-zero row, rows of very different totals, and integer dtype."""
+    rng = np.random.default_rng(7)
+    dense = rng.poisson(rng.uniform(0, 8, size=(1, 12)) * rng.uniform(0.1, 5, size=(9, 1)))
+    dense[3] = 0
+    return scipy.sparse.csr_matrix(dense)
+
+
+_SPARSE_LAYOUTS = {
+    "scipy": lambda x: x,
+    "csr": to_torch_sparse_csr,
+    "coo": to_torch_sparse_coo,
+}
+
+
+@pytest.mark.parametrize("layout", _SPARSE_LAYOUTS)
+@pytest.mark.parametrize("target_count, eps", [(10_000, 1e-6), (500, 0.5)])
+def test_normalize_total_sparse_matches_dense(x_counts_sparse, layout, target_count, eps):
+    x_dense = torch.from_numpy(x_counts_sparse.toarray()).float()
+    expected = NormalizeTotal(target_count=target_count, eps=eps)(x_dense)["x_ng"]
+
+    out = NormalizeTotal(target_count=target_count, eps=eps)(_SPARSE_LAYOUTS[layout](x_counts_sparse))["x_ng"]
+
+    expected_layout = torch.sparse_coo if layout == "coo" else torch.sparse_csr
+    assert out.layout == expected_layout
+    assert out.dtype == torch.float32
+    torch.testing.assert_close(out.to_dense(), expected)
+
+
+@pytest.mark.parametrize("layout", ["csr", "coo"])
+def test_normalize_total_sparse_does_not_modify_input(x_counts_sparse, layout):
+    x = _SPARSE_LAYOUTS[layout](x_counts_sparse)
+    before = x.to_dense().clone()
+
+    NormalizeTotal()(x)
+
+    torch.testing.assert_close(x.to_dense(), before)
+
+
+@pytest.mark.parametrize("layout", ["scipy", "csr", "coo"])
+def test_normalize_total_sparse_total_mrna_umis_n_override(x_counts_sparse, layout):
+    x_dense = torch.from_numpy(x_counts_sparse.toarray()).float()
+    total_mrna_umis_n = torch.arange(1, x_dense.shape[0] + 1).float() * 100
+    expected = NormalizeTotal()(x_dense, total_mrna_umis_n=total_mrna_umis_n)["x_ng"]
+
+    out = NormalizeTotal()(_SPARSE_LAYOUTS[layout](x_counts_sparse), total_mrna_umis_n=total_mrna_umis_n)["x_ng"]
+
+    torch.testing.assert_close(out.to_dense(), expected)
+
+
+def test_normalize_total_sparse_then_filter_then_log1p_matches_scanpy_order(x_counts_sparse):
+    """Normalizing in front of the Filter uses the totals over all genes."""
+    var_names_g = np.array([f"gene_{i}" for i in range(x_counts_sparse.shape[1])])
+    keep = ["gene_5", "gene_1", "gene_9"]
+    x_dense = torch.from_numpy(x_counts_sparse.toarray()).float()
+    normalized = NormalizeTotal()(x_dense)["x_ng"]
+    expected = torch.log1p(normalized[:, [5, 1, 9]])
+
+    pipeline = CellariumPipeline([NormalizeTotal(), Filter(keep, ordering=True), Densify(), Log1p()])
+    out = pipeline({"x_ng": to_torch_sparse_csr(x_counts_sparse), "var_names_g": var_names_g})
+
+    torch.testing.assert_close(out["x_ng"], expected)
+    assert out["var_names_g"].tolist() == keep
+
+
+# ---------------------------------------------------------------------------
 # Densify tests
 # ---------------------------------------------------------------------------
 
@@ -323,6 +482,16 @@ def test_densify_sparse_csr_to_dense():
     dense = torch.tensor([[0.0, 2.0, 0.0], [1.0, 0.0, 3.0]], dtype=torch.float32)
     x_sparse = to_torch_sparse_csr(scipy.sparse.csr_matrix(dense.numpy()))
     assert x_sparse.is_sparse_csr
+    out = Densify()(x_sparse)["x_ng"]
+    assert not out.is_sparse
+    torch.testing.assert_close(out, dense)
+
+
+def test_densify_sparse_coo_to_dense():
+    """torch.sparse_coo_tensor (the mps-accelerator sparse layout) is densified correctly."""
+    dense = torch.tensor([[0.0, 2.0, 0.0], [1.0, 0.0, 3.0]], dtype=torch.float32)
+    x_sparse = to_torch_sparse_coo(scipy.sparse.csr_matrix(dense.numpy()))
+    assert x_sparse.layout == torch.sparse_coo
     out = Densify()(x_sparse)["x_ng"]
     assert not out.is_sparse
     torch.testing.assert_close(out, dense)
@@ -460,3 +629,399 @@ def test_pflogpf_matches_manual_pipeline():
     x = CenterPerCell()(x)["x_ng"]
 
     np.testing.assert_allclose(out_wrapper.numpy(), x.numpy(), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# CellFilter tests
+# ---------------------------------------------------------------------------
+
+_N, _G = 10, 4
+# Row sums: rows 0-6 have sum 30, rows 7-9 have sum 3 (below threshold of 10)
+_THRESHOLD = 10
+
+
+@pytest.fixture
+def cell_filter_batch():
+    rng = torch.Generator()
+    rng.manual_seed(0)
+    x_ng = torch.zeros(_N, _G)
+    x_ng[:7] = 10.0  # row sum 40 — above threshold
+    x_ng[7:] = 1.0  # row sum 4  — below threshold
+    batch_index_n = torch.arange(_N, dtype=torch.float32)
+    total_mrna_umis_n = x_ng.sum(dim=-1)
+    categorical_covariate_index_nd = torch.zeros(_N, 2)
+    var_names_g = np.array([f"gene_{i}" for i in range(_G)])
+    return {
+        "x_ng": x_ng,
+        "batch_index_n": batch_index_n,
+        "total_mrna_umis_n": total_mrna_umis_n,
+        "categorical_covariate_index_nd": categorical_covariate_index_nd,
+        "var_names_g": var_names_g,
+    }
+
+
+def test_cell_filter_removes_low_count_cells(cell_filter_batch):
+    result = CellFilter(min_count_per_cell=_THRESHOLD)(**cell_filter_batch)
+    assert result["x_ng"].shape[0] == 7
+
+
+def test_cell_filter_all_n_indexed_tensors_filtered_consistently(cell_filter_batch):
+    result = CellFilter(min_count_per_cell=_THRESHOLD)(**cell_filter_batch)
+    n_kept = result["x_ng"].shape[0]
+    for key, val in result.items():
+        assert val.shape[0] == n_kept, f"{key} has inconsistent first dimension after filtering"
+
+
+def test_cell_filter_filters_numpy_per_cell_arrays(cell_filter_batch):
+    # SOCAM passes cl_names_n as a numpy string array; it must be filtered with
+    # the same mask as x_ng or cross_entropy crashes on a batch-size mismatch.
+    batch = dict(cell_filter_batch)
+    cl_names_n = np.array([f"label_{i}" for i in range(_N)])
+    batch["cl_names_n"] = cl_names_n
+    result = CellFilter(min_count_per_cell=_THRESHOLD)(**batch)
+    n_kept = result["x_ng"].shape[0]
+    assert n_kept == 7
+    assert result["cl_names_n"].shape[0] == n_kept
+    assert result["cl_names_n"].tolist() == [f"label_{i}" for i in range(7)]
+
+
+def test_cell_filter_gene_indexed_array_not_in_return(cell_filter_batch):
+    # var_names_g is a numpy array — must not appear in the returned dict
+    result = CellFilter(min_count_per_cell=_THRESHOLD)(**cell_filter_batch)
+    assert "var_names_g" not in result
+
+
+def test_cell_filter_zero_threshold_returns_empty_dict(cell_filter_batch):
+    result = CellFilter(min_count_per_cell=0)(**cell_filter_batch)
+    assert result == {}
+
+
+def test_cell_filter_exact_threshold_boundary():
+    # Cells at exactly the threshold are kept; one below is not.
+    x_ng = torch.tensor([[10.0, 0.0], [9.0, 0.0], [11.0, 0.0]])
+    batch_index_n = torch.tensor([0.0, 1.0, 2.0])
+    result = CellFilter(min_count_per_cell=10)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result["x_ng"].shape[0] == 2
+    assert torch.equal(result["batch_index_n"], torch.tensor([0.0, 2.0]))
+
+
+def test_cell_filter_all_cells_removed():
+    x_ng = torch.ones(5, 3)  # row sum = 3
+    batch_index_n = torch.zeros(5)
+    result = CellFilter(min_count_per_cell=100)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result["x_ng"].shape[0] == 0
+    assert result["batch_index_n"].shape[0] == 0
+
+
+def test_cell_filter_in_pipeline(cell_filter_batch):
+    pipeline = CellariumPipeline([CellFilter(min_count_per_cell=_THRESHOLD), NormalizeTotal(target_count=10_000)])
+    batch = dict(cell_filter_batch)
+    out = pipeline(batch)
+    n_kept = out["x_ng"].shape[0]
+    assert n_kept == 7
+    # All n-indexed tensors in the batch must have the same first dimension after pipeline
+    for key in ("batch_index_n", "total_mrna_umis_n", "categorical_covariate_index_nd"):
+        assert out[key].shape[0] == n_kept, f"{key} inconsistent after pipeline"
+
+
+def test_cell_filter_unknown_extra_tensor_filtered():
+    x_ng = torch.ones(6, 3) * 5
+    x_ng[4:] = 0.0  # rows 4-5: sum = 0, filtered out
+    my_custom_tensor_n = torch.arange(6, dtype=torch.float32).unsqueeze(1).expand(6, 2).clone()
+    batch_index_n = torch.zeros(6)
+    result = CellFilter(min_count_per_cell=1)(
+        x_ng=x_ng, batch_index_n=batch_index_n, my_custom_tensor_n=my_custom_tensor_n
+    )
+    assert result["x_ng"].shape[0] == 4
+    assert "my_custom_tensor_n" in result
+    assert result["my_custom_tensor_n"].shape[0] == 4
+
+
+def test_cell_filter_negative_threshold_raises():
+    with pytest.raises(ValueError, match="min_count_per_cell must be >= 0"):
+        CellFilter(min_count_per_cell=-1)
+
+
+def test_cell_filter_predict_stage_via_pipeline():
+    # End-to-end: CellFilter is not active in the predict stage, so all 5 cells survive
+    # despite being below the threshold.
+    from cellarium.ml.models.model import CellariumModel, PredictMixin
+
+    class _PassthroughModel(CellariumModel, PredictMixin):
+        def reset_parameters(self):
+            pass
+
+        def forward(self, **kwargs):
+            return {}
+
+        def predict(self, x_ng: torch.Tensor, **kwargs) -> dict:
+            return {"x_ng": x_ng}
+
+    x_ng = torch.ones(5, 3)  # row sum = 3, below threshold of 100
+    var_names_g = np.array(["g0", "g1", "g2"])
+    batch_index_n = torch.zeros(5)
+
+    pipeline = CellariumPipeline([CellFilter(min_count_per_cell=100), _PassthroughModel()])
+    batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor] = {
+        "x_ng": x_ng,
+        "var_names_g": var_names_g,
+        "batch_index_n": batch_index_n,
+    }
+    out = pipeline.predict(batch)
+    x_ng_out = out["x_ng"]
+    assert isinstance(x_ng_out, torch.Tensor)
+    assert x_ng_out.shape[0] == 5
+    assert "_predict_mode" not in out
+
+
+# ---------------------------------------------------------------------------
+# CellFilter — min_nonzero_genes_per_cell mode
+# ---------------------------------------------------------------------------
+
+
+def test_cell_filter_nonzero_genes_removes_sparse_cells():
+    # Rows 0-4: 3 nonzero genes each.  Rows 5-9: 1 nonzero gene each.
+    x_ng = torch.zeros(10, 5)
+    x_ng[:5, :3] = 1.0
+    x_ng[5:, :1] = 1.0
+    batch_index_n = torch.zeros(10)
+    result = CellFilter(min_nonzero_genes_per_cell=3)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result["x_ng"].shape[0] == 5
+    assert result["batch_index_n"].shape[0] == 5
+
+
+def test_cell_filter_nonzero_genes_boundary():
+    # Cell 0: exactly 3 nonzero genes (kept).  Cell 1: 2 nonzero genes (dropped).
+    x_ng = torch.tensor([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0]])
+    batch_index_n = torch.tensor([0.0, 1.0])
+    result = CellFilter(min_nonzero_genes_per_cell=3)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result["x_ng"].shape[0] == 1
+    assert torch.equal(result["batch_index_n"], torch.tensor([0.0]))
+
+
+def test_cell_filter_nonzero_genes_zero_threshold_is_noop():
+    x_ng = torch.zeros(5, 4)
+    batch_index_n = torch.zeros(5)
+    result = CellFilter(min_nonzero_genes_per_cell=0)(x_ng=x_ng, batch_index_n=batch_index_n)
+    assert result == {}
+
+
+def test_cell_filter_both_modes_raises():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        CellFilter(min_count_per_cell=10, min_nonzero_genes_per_cell=5)
+
+
+def test_cell_filter_nonzero_genes_predict_stage_noop():
+    x_ng = torch.zeros(5, 4)  # all cells have 0 nonzero genes — would all be dropped
+    batch_index_n = torch.zeros(5)
+    pipeline = CellariumPipeline([CellFilter(min_nonzero_genes_per_cell=1)])
+    assert _x_ng(pipeline.transform({"x_ng": x_ng, "batch_index_n": batch_index_n}, "predict")).shape[0] == 5
+    assert _x_ng(pipeline.transform({"x_ng": x_ng, "batch_index_n": batch_index_n}, "validate")).shape[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Stages: CellariumTransform defaults, overrides, and pipeline enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "transform, expected",
+    [
+        (Dropout(0.1, 0.2, 1.0), {"train"}),
+        (GaussianNoise(0.1, 0.2, 1.0), {"train"}),
+        (BinomialResample(0.5, 0.9, 1.0), {"train"}),
+        (Duplicate(), {"train", "validate", "test"}),
+        (CellFilter(min_count_per_cell=1), {"train", "validate", "test"}),
+    ],
+)
+def test_transform_default_stages(transform: CellariumTransform, expected: set[str]):
+    assert transform.stages == expected
+    for stage in STAGES:
+        assert transform.is_active(stage) == (stage in expected)
+
+
+def test_transform_stages_override_replaces_default():
+    transform = Dropout(0.1, 0.2, 1.0, stages=["validate", "predict"])
+    assert transform.stages == {"validate", "predict"}
+    assert not transform.is_active("train")
+    assert Duplicate(stages=["predict"]).stages == {"predict"}
+    assert CellFilter(min_count_per_cell=1, stages=[]).stages == frozenset()
+
+
+def test_transform_stages_unknown_stage_raises():
+    with pytest.raises(ValueError, match="Unknown stages"):
+        Dropout(0.1, 0.2, 1.0, stages=["training"])  # type: ignore[list-item]
+
+
+def test_transform_stages_string_raises():
+    with pytest.raises(TypeError, match="not a string"):
+        Duplicate(stages="train")  # type: ignore[arg-type]
+
+
+def test_transform_stages_missing_attribute_falls_back_to_default():
+    # instances that predate the per-instance override (e.g. unpickled ones) have no `_stages` in their __dict__
+    transform = Duplicate()
+    assert "_stages" not in transform.__dict__
+    assert transform.stages == Duplicate.default_stages
+
+
+def _x_ng(batch: dict) -> torch.Tensor:
+    x_ng = batch["x_ng"]
+    assert isinstance(x_ng, torch.Tensor)
+    return x_ng
+
+
+class _AddOne(torch.nn.Module):
+    """A plain nn.Module transform: active in every stage."""
+
+    def forward(self, x_ng: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {"x_ng": x_ng + 1}
+
+
+@pytest.mark.parametrize("stage", STAGES)
+def test_pipeline_transform_skips_inactive_transforms(stage: Stage):
+    pipeline = CellariumPipeline([Duplicate(), _AddOne()])
+    x_ng = _x_ng(pipeline.transform({"x_ng": torch.zeros(3, 2)}, stage))
+    # Duplicate is active in all but predict; the plain nn.Module is active in every stage
+    assert x_ng.shape[0] == (3 if stage == "predict" else 6)
+    assert torch.all(x_ng == 1)
+
+
+def test_pipeline_forward_validate_test_use_their_stages():
+    from cellarium.ml.models.model import CellariumModel, PredictMixin, TestMixin, ValidateMixin
+
+    seen: dict[str, int] = {}
+
+    class _RecordingModel(CellariumModel, PredictMixin, ValidateMixin, TestMixin):
+        def reset_parameters(self):
+            pass
+
+        def forward(self, x_ng: torch.Tensor, **kwargs) -> dict:
+            seen["forward"] = x_ng.shape[0]
+            return {}
+
+        def predict(self, x_ng: torch.Tensor, **kwargs) -> dict:
+            seen["predict"] = x_ng.shape[0]
+            return {}
+
+        def validate(self, x_ng: torch.Tensor, **kwargs) -> None:  # type: ignore[override]
+            seen["validate"] = x_ng.shape[0]
+
+        def test(self, x_ng: torch.Tensor, **kwargs) -> None:  # type: ignore[override]
+            seen["test"] = x_ng.shape[0]
+
+    def run(method: str, **transform_kwargs):
+        # a transform active in exactly the given stages, with a plain tensor input of 3 rows
+        pipeline = CellariumPipeline([Duplicate(**transform_kwargs), _RecordingModel()])
+        getattr(pipeline, method)({"x_ng": torch.zeros(3, 2)})
+
+    # Duplicate's default: active in train/validate/test, skipped in predict
+    run("forward")
+    run("validate")
+    run("test")
+    run("predict")
+    assert seen == {"forward": 6, "validate": 6, "test": 6, "predict": 3}
+
+    # the override replaces the default
+    seen.clear()
+    run("forward", stages=["predict"])
+    run("validate", stages=["predict"])
+    run("test", stages=["predict"])
+    run("predict", stages=["predict"])
+    assert seen == {"forward": 3, "validate": 3, "test": 3, "predict": 6}
+
+
+# ---------------------------------------------------------------------------
+# Augmentations: Dropout and BinomialResample update total_mrna_umis_n
+# ---------------------------------------------------------------------------
+
+
+def _counts(n_cells: int = 50, n_genes: int = 20) -> torch.Tensor:
+    rng = torch.Generator()
+    rng.manual_seed(3)
+    return torch.poisson(torch.rand((n_cells, n_genes), generator=rng) * 20 + 1, generator=rng)
+
+
+def _augmentations(p_apply: float) -> list[CellariumTransform]:
+    return [Dropout(0.3, 0.5, p_apply), BinomialResample(0.3, 0.8, p_apply)]
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_total_mrna_umis_n_reduced_by_removed_counts(make):
+    x_ng = _counts()
+    # the total includes counts of genes that are not in x_ng
+    unseen_n = torch.full((x_ng.shape[0],), 7.0)
+    total_mrna_umis_n = x_ng.sum(dim=-1) + unseen_n
+
+    out = make(1.0)(x_ng=x_ng, total_mrna_umis_n=total_mrna_umis_n)
+
+    assert out["x_ng"].sum() < x_ng.sum()
+    torch.testing.assert_close(out["total_mrna_umis_n"], out["x_ng"].sum(dim=-1) + unseen_n)
+    assert out["total_mrna_umis_n"].dtype == total_mrna_umis_n.dtype
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_total_mrna_umis_n_unchanged_when_not_applied(make):
+    x_ng = _counts()
+    total_mrna_umis_n = x_ng.sum(dim=-1) + 7.0
+
+    out = make(0.0)(x_ng=x_ng, total_mrna_umis_n=total_mrna_umis_n)
+
+    torch.testing.assert_close(out["x_ng"], x_ng)
+    torch.testing.assert_close(out["total_mrna_umis_n"], total_mrna_umis_n)
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_total_mrna_umis_n_only_reduced_for_applied_cells(make):
+    x_ng = _counts(n_cells=500)
+    total_mrna_umis_n = x_ng.sum(dim=-1)
+
+    out = make(0.5)(x_ng=x_ng, total_mrna_umis_n=total_mrna_umis_n)
+
+    changed_n = (out["x_ng"] != x_ng).any(dim=-1)
+    assert 0 < changed_n.sum() < x_ng.shape[0]  # only some cells were augmented
+    torch.testing.assert_close(out["total_mrna_umis_n"], out["x_ng"].sum(dim=-1))
+    torch.testing.assert_close(out["total_mrna_umis_n"][~changed_n], total_mrna_umis_n[~changed_n])
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_without_total_mrna_umis_n_returns_only_x_ng(make):
+    out = make(1.0)(x_ng=_counts())
+    assert set(out) == {"x_ng"}
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_total_mrna_umis_n_keeps_integer_dtype(make):
+    x_ng = _counts()
+    total_mrna_umis_n = x_ng.sum(dim=-1).long()
+
+    out = make(1.0)(x_ng=x_ng, total_mrna_umis_n=total_mrna_umis_n)
+
+    assert out["total_mrna_umis_n"].dtype == torch.long
+    torch.testing.assert_close(out["total_mrna_umis_n"], out["x_ng"].sum(dim=-1).long())
+
+
+@pytest.mark.parametrize("make", [lambda p: Dropout(0.3, 0.5, p), lambda p: BinomialResample(0.3, 0.8, p)])
+def test_augmentation_pipeline_normalize_total_uses_updated_total(make):
+    x_ng = _counts()
+    batch = {"x_ng": x_ng, "total_mrna_umis_n": x_ng.sum(dim=-1)}
+
+    out = CellariumPipeline([make(1.0), NormalizeTotal(target_count=100)])(batch)
+
+    # every cell is renormalized to its own (resampled) depth
+    torch.testing.assert_close(out["x_ng"].sum(dim=-1), torch.full((x_ng.shape[0],), 100.0), atol=1e-2, rtol=1e-4)
+
+
+@pytest.mark.parametrize("transform", _augmentations(1.0) + [GaussianNoise(0.1, 0.2, 1.0)])
+@pytest.mark.parametrize("stage, active", [("train", True), ("validate", False), ("test", False), ("predict", False)])
+def test_augmentations_are_train_only_in_pipeline(transform: CellariumTransform, stage: Stage, active: bool):
+    x_ng = _counts()
+    out = _x_ng(CellariumPipeline([transform]).transform({"x_ng": x_ng.clone()}, stage))
+    assert torch.equal(out, x_ng) == (not active)
+
+
+def test_augmentation_stages_override_enables_validation():
+    x_ng = _counts()
+    pipeline = CellariumPipeline([BinomialResample(0.3, 0.8, 1.0, stages=["train", "validate"])])
+    assert not torch.equal(_x_ng(pipeline.transform({"x_ng": x_ng.clone()}, "validate")), x_ng)
+    assert torch.equal(_x_ng(pipeline.transform({"x_ng": x_ng.clone()}, "test")), x_ng)

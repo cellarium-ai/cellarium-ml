@@ -4,7 +4,7 @@
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Mapping, Sequence, TypedDict
 
 import lightning.pytorch as pl
 import numpy as np
@@ -74,13 +74,36 @@ class CellariumModel(torch.nn.Module, metaclass=ABCMeta):
             super().__delattr__(name)
 
 
+GenericPrediction = Mapping[str, Any]
+
+
+class TransformPrediction(TypedDict):
+    """Allow a predict call to act as a data :class:`cellarium.ml.transforms.Transform`
+    by returning the keys `x_ng` and `var_names_g`."""
+
+    x_ng: torch.Tensor
+    var_names_g: np.ndarray
+
+
+class ClassifierPrediction(TypedDict):
+    """Prediction for a classification model, with output logits and probabilities."""
+
+    y_logits_nc: torch.Tensor
+    y_probs_nc: torch.Tensor
+    category_labels_c: Sequence[str]
+
+
+class TransformClassifierPrediction(TransformPrediction, ClassifierPrediction):
+    """Prediction that combines both Transform and classification outputs."""
+
+
 class PredictMixin(metaclass=ABCMeta):
     """
     Abstract mixin class for models that can perform prediction.
     """
 
     @abstractmethod
-    def predict(self, *args: Any, **kwargs: Any) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, *args: Any, **kwargs: Any) -> GenericPrediction:
         """
         Perform prediction.
         """

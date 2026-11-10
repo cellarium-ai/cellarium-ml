@@ -4,15 +4,28 @@
 import math
 import os
 from pathlib import Path
+from typing import Final
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.models.socam import SOCAM, _build_nonleaf_info, _expand_with_ancestors, _logsumexp_propagated
+from cellarium.ml.models.model import ClassifierPrediction
+from cellarium.ml.models.socam import (
+    SOCAM,
+    _build_nonleaf_info,
+    _expand_with_ancestors,
+    _logsumexp_propagated,
+    compute_class_weights,
+)
 from cellarium.ml.utilities.data import collate_fn
+
+predict_logit_key: Final = "y_logits_nc"
+predict_prob_key: Final = "y_probs_nc"
+predict_cat_key: Final = "category_labels_c"
 
 
 def test_load_from_checkpoint_multi_device(tmp_path: Path):
@@ -99,20 +112,22 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
 
     # Test prediction from loaded checkpoint
     test_x_ng = torch.randn(2, g)
-    output: dict[str, np.ndarray | torch.Tensor] = loaded_model.predict(test_x_ng, var_names_g)
+    output: ClassifierPrediction = loaded_model.predict(test_x_ng, var_names_g)
 
     # Assert prediction output structure
-    assert "y_logits_nc" in output
-    assert "cell_type_probs_nc" in output
-    assert isinstance(output["y_logits_nc"], torch.Tensor)
-    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
-    assert output["y_logits_nc"].shape == (2, c)
-    assert output["cell_type_probs_nc"].shape == (2, c)
+    assert predict_logit_key in output
+    assert predict_prob_key in output
+    assert predict_cat_key in output
+    assert isinstance(output[predict_cat_key], (list, np.ndarray))
+    assert isinstance(output[predict_logit_key], torch.Tensor)
+    assert isinstance(output[predict_prob_key], torch.Tensor)
+    assert output[predict_logit_key].shape == (2, c)
+    assert output[predict_prob_key].shape == (2, c)
 
     # Assert probabilities are valid
-    assert torch.all(output["cell_type_probs_nc"] >= 0)
-    assert torch.all(output["cell_type_probs_nc"] <= 1)
-    prob_sums = output["cell_type_probs_nc"].sum(dim=1)
+    assert torch.all(output[predict_prob_key] >= 0)
+    assert torch.all(output[predict_prob_key] <= 1)
+    prob_sums = output[predict_prob_key].sum(dim=1)
     assert torch.allclose(prob_sums, torch.ones(2), atol=1e-5)
 
 
@@ -144,21 +159,23 @@ def test_socam_predict():
     output = model.predict(x_ng, var_names_g)
 
     # Assert output structure
-    assert "y_logits_nc" in output
-    assert "cell_type_probs_nc" in output
+    assert predict_logit_key in output
+    assert predict_prob_key in output
 
     # Assert output shapes
-    assert output["y_logits_nc"].shape == (n, c)
-    assert output["cell_type_probs_nc"].shape == (n, c)
+    assert output[predict_logit_key].shape == (n, c)
+    assert output[predict_prob_key].shape == (n, c)
+    assert output[predict_cat_key] is not None
+    assert len(output[predict_cat_key]) == c
 
     # Assert probabilities sum to ~1 for each sample
-    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
-    prob_sums = output["cell_type_probs_nc"].sum(dim=1)
+    assert isinstance(output[predict_prob_key], torch.Tensor)
+    prob_sums = output[predict_prob_key].sum(dim=1)
     assert torch.allclose(prob_sums, torch.ones(n), atol=1e-5)
 
     # Assert all probabilities are in [0, 1]
-    assert torch.all(output["cell_type_probs_nc"] >= 0)
-    assert torch.all(output["cell_type_probs_nc"] <= 1)
+    assert torch.all(output[predict_prob_key] >= 0)
+    assert torch.all(output[predict_prob_key] <= 1)
 
 
 def test_socam_probability_propagation():
@@ -193,17 +210,17 @@ def test_socam_probability_propagation():
     output = model.predict(x_ng, var_names_g)
 
     # Assert output structure
-    assert "y_logits_nc" in output
-    assert "cell_type_probs_nc" in output
+    assert predict_logit_key in output
+    assert predict_prob_key in output
 
     # Assert output shapes
-    assert output["y_logits_nc"].shape == (n, c)
-    assert output["cell_type_probs_nc"].shape == (n, c)
+    assert output[predict_logit_key].shape == (n, c)
+    assert output[predict_prob_key].shape == (n, c)
 
     # Assert all probabilities are in [0, 1] and clamped at max 1.0
-    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
-    assert torch.all(output["cell_type_probs_nc"] >= 0)
-    assert torch.all(output["cell_type_probs_nc"] <= 1)
+    assert isinstance(output[predict_prob_key], torch.Tensor)
+    assert torch.all(output[predict_prob_key] >= 0)
+    assert torch.all(output[predict_prob_key] <= 1)
 
     # Test probability propagation logic:
     # Calculate what the probabilities would be WITHOUT propagation
@@ -228,8 +245,8 @@ def test_socam_probability_propagation():
     expected_propagated = torch.clamp(expected_propagated, max=1.0)
 
     # Assert propagated probabilities match expected values
-    assert torch.allclose(output["cell_type_probs_nc"], expected_propagated, atol=1e-5), (
-        f"Probability propagation failed.\nExpected:\n{expected_propagated}\nGot:\n{output['cell_type_probs_nc']}"
+    assert torch.allclose(output[predict_prob_key], expected_propagated, atol=1e-5), (
+        f"Probability propagation failed.\nExpected:\n{expected_propagated}\nGot:\n{output[predict_prob_key]}"
     )
 
 
@@ -244,6 +261,7 @@ def _make_socam(
     c: int = 5,
     probability_propagation_flag: bool = False,
     cl_name_subset: list[str] | None = None,
+    class_counts: pd.Series | None = None,
 ) -> SOCAM:
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
     cl_names = [f"cell_type_{i}" for i in range(c)]
@@ -256,6 +274,7 @@ def _make_socam(
         cl_name_subset=cl_name_subset,
         probability_propagation_flag=probability_propagation_flag,
         log_metrics=False,
+        class_counts=class_counts,
     )
 
 
@@ -309,10 +328,19 @@ def test_forward_with_cl_name_subset():
     assert result["loss"].shape == torch.Size([])  # scalar
 
 
-def test_forward_no_cl_name_subset():
+@pytest.mark.parametrize(
+    "class_counts",
+    [
+        None,
+        pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(5)}),
+        pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(4)}),  # cell_type_4 missing → weight 1.0
+    ],
+    ids=["no_class_counts", "with_class_counts", "partial_class_counts"],
+)
+def test_forward_no_cl_name_subset(class_counts):
     n, g, c = 4, 3, 5
     var_names_g = np.array([f"gene_{i}" for i in range(g)])
-    model = _make_socam(n=n, g=g, c=c)
+    model = _make_socam(n=n, g=g, c=c, class_counts=class_counts)
     x_ng = torch.randn(n, g)
     cl_names_n = np.array([f"cell_type_{i}" for i in np.random.randint(0, c, size=n)])
     result = model.forward(x_ng, var_names_g, cl_names_n)
@@ -332,13 +360,16 @@ def test_predict_with_cl_name_subset():
     model = _make_socam(n=n, g=g, c=5, cl_name_subset=["cell_type_0", "cell_type_2", "cell_type_4"])
     x_ng = torch.randn(n, g)
     output = model.predict(x_ng, var_names_g)
-    assert isinstance(output["y_logits_nc"], torch.Tensor)
-    assert isinstance(output["cell_type_probs_nc"], torch.Tensor)
-    assert output["y_logits_nc"].shape == (n, 3)
-    assert output["cell_type_probs_nc"].shape == (n, 3)
-    assert torch.all(output["cell_type_probs_nc"] >= 0)
-    assert torch.all(output["cell_type_probs_nc"] <= 1)
-    assert torch.allclose(output["cell_type_probs_nc"].sum(dim=1), torch.ones(n), atol=1e-5)
+    assert isinstance(output[predict_logit_key], torch.Tensor)
+    assert isinstance(output[predict_prob_key], torch.Tensor)
+    assert output[predict_logit_key].shape == (n, 3)
+    assert output[predict_prob_key].shape == (n, 3)
+    assert predict_cat_key in output
+    assert output[predict_cat_key] is not None
+    assert len(output[predict_cat_key]) == 3
+    assert torch.all(output[predict_prob_key] >= 0)
+    assert torch.all(output[predict_prob_key] <= 1)
+    assert torch.allclose(output[predict_prob_key].sum(dim=1), torch.ones(n), atol=1e-5)
 
 
 def test_predict_no_cl_name_subset():
@@ -347,8 +378,151 @@ def test_predict_no_cl_name_subset():
     model = _make_socam(n=n, g=g, c=c)
     x_ng = torch.randn(n, g)
     output = model.predict(x_ng, var_names_g)
-    assert output["y_logits_nc"].shape == (n, c)
-    assert output["cell_type_probs_nc"].shape == (n, c)
+    assert output[predict_logit_key].shape == (n, c)
+    assert output[predict_prob_key].shape == (n, c)
+
+
+# ---------------------------------------------------------------------------
+# class_counts / class_weights tests
+# ---------------------------------------------------------------------------
+
+
+def test_class_weights_none_when_no_counts():
+    model = _make_socam()
+    assert model.class_weights is None
+
+
+def test_class_weights_mean_is_one():
+    c = 5
+    counts = pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(c)})
+    model = _make_socam(c=c, class_counts=counts)
+    assert model.class_weights is not None
+    assert model.class_weights.shape == (c,)
+    assert torch.allclose(model.class_weights.mean(), torch.tensor(1.0), atol=1e-6)
+
+
+def test_class_weights_inverse_frequency():
+    """Rarer classes must receive strictly higher weights than common classes."""
+    c = 5
+    # counts increase monotonically: cell_type_0 is rarest, cell_type_4 is most common
+    counts = pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(c)})
+    model = _make_socam(c=c, class_counts=counts)
+    weights = model.class_weights
+    assert weights is not None
+    for i in range(c - 1):
+        assert weights[i] > weights[i + 1], f"weight[{i}] should exceed weight[{i + 1}]"
+
+
+def test_class_weights_missing_class_gets_neutral_weight():
+    c = 5
+    # cell_type_4 is absent from the Series — should silently get weight 1.0
+    incomplete = pd.Series({f"cell_type_{i}": 10 for i in range(c - 1)})
+    model = _make_socam(c=c, class_counts=incomplete)
+    assert model.class_weights is not None
+    assert torch.allclose(model.class_weights[c - 1], torch.tensor(1.0), atol=1e-6)
+
+
+def test_class_weights_zero_count_gets_neutral_weight():
+    c = 5
+    counts = pd.Series({f"cell_type_{i}": 0 if i == 2 else 10 for i in range(c)})
+    model = _make_socam(c=c, class_counts=counts)
+    assert model.class_weights is not None
+    assert torch.allclose(model.class_weights[2], torch.tensor(1.0), atol=1e-6)
+
+
+def test_class_weights_negative_count_raises():
+    c = 5
+    bad_counts = pd.Series({f"cell_type_{i}": -1 if i == 2 else 10 for i in range(c)})
+    with pytest.raises(ValueError, match=">= 0"):
+        _make_socam(c=c, class_counts=bad_counts)
+
+
+def test_class_weights_extra_series_entries_ignored():
+    c = 5
+    # extra "cell_type_99" is not in active_cl_names — should be silently ignored
+    counts = pd.Series({f"cell_type_{i}": 10 for i in range(c)} | {"cell_type_99": 500})
+    model = _make_socam(c=c, class_counts=counts)
+    assert model.class_weights is not None
+    assert model.class_weights.shape == (c,)
+
+
+def test_class_weights_nonzero_mean_is_one_when_some_zero():
+    c = 5
+    # cell_type_0 has count 0; remaining four have nonzero counts
+    counts = pd.Series({f"cell_type_{i}": 0 if i == 0 else (i + 1) * 10 for i in range(c)})
+    model = _make_socam(c=c, class_counts=counts)
+    weights = model.class_weights
+    assert weights is not None
+    nonzero_weights = weights[1:]  # indices 1-4 have nonzero counts
+    assert torch.allclose(nonzero_weights.mean(), torch.tensor(1.0), atol=1e-6)
+    assert torch.allclose(weights[0], torch.tensor(1.0), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# propagate_class_counts tests
+# ---------------------------------------------------------------------------
+
+
+def _make_chain_model(
+    class_counts: pd.Series | None = None,
+    propagate_class_counts: bool = False,
+) -> SOCAM:
+    """3-node chain A→B→C used for propagation tests. Index: A=0, B=1, C=2."""
+    cl_names = ["A", "B", "C"]
+    c = 3
+    desc = torch.zeros(c, c)
+    desc[0, 0] = desc[0, 1] = desc[0, 2] = 1  # A is ancestor of A, B, C
+    desc[1, 1] = desc[1, 2] = 1  # B is ancestor of B, C
+    desc[2, 2] = 1  # C is its own ancestor
+    return SOCAM(
+        n_obs=4,
+        var_names_g=np.array(["gene_0"]),
+        descendant_tensor=desc,
+        cl_names=cl_names,
+        log_metrics=False,
+        class_counts=class_counts,
+        propagate_class_counts=propagate_class_counts,
+    )
+
+
+def test_class_weights_propagation_reverses_weight_order():
+    """Propagation accumulates descendant counts onto ancestors, flipping weight order.
+
+    Direct counts: A=5 (rarest), B=10, C=40 (most common).
+    Without propagation: weight_A > weight_B > weight_C.
+    With propagation: A_count=55, B_count=50, C_count=40, so weight_A < weight_B < weight_C.
+    """
+    counts = pd.Series({"A": 5, "B": 10, "C": 40})
+    model_raw = _make_chain_model(class_counts=counts, propagate_class_counts=False)
+    model_prop = _make_chain_model(class_counts=counts, propagate_class_counts=True)
+
+    w_raw = model_raw.class_weights
+    w_prop = model_prop.class_weights
+    assert w_raw is not None and w_prop is not None
+
+    # Without propagation: rarer direct count → higher weight
+    assert w_raw[0] > w_raw[1] > w_raw[2], "raw: A > B > C"
+    # With propagation: higher accumulated count → lower weight
+    assert w_prop[0] < w_prop[1] < w_prop[2], "propagated: A < B < C"
+
+
+def test_class_weights_propagation_pure_ancestor_gets_real_weight():
+    """A node with zero direct labels gets weight=1.0 without propagation but a real
+    inverse-frequency weight when propagation pulls in descendant counts."""
+    counts = pd.Series({"B": 10, "C": 40})  # A absent → direct count 0
+    model_raw = _make_chain_model(class_counts=counts, propagate_class_counts=False)
+    model_prop = _make_chain_model(class_counts=counts, propagate_class_counts=True)
+
+    # Without propagation: A has no count → neutral weight 1.0
+    assert torch.allclose(model_raw.class_weights[0], torch.tensor(1.0), atol=1e-6)
+    # With propagation: A accumulates B+C = 50 → weight ≠ 1.0
+    assert not torch.allclose(model_prop.class_weights[0], torch.tensor(1.0), atol=1e-2)
+
+
+def test_class_weights_propagation_no_effect_when_counts_none():
+    """propagate_class_counts=True is a no-op when class_counts is None."""
+    model = _make_chain_model(class_counts=None, propagate_class_counts=True)
+    assert model.class_weights is None
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +690,85 @@ def test_logsumexp_propagated_mixed_extreme_logits():
     result.sum().backward()
     assert isinstance(logits_nc.grad, torch.Tensor)
     assert torch.all(torch.isfinite(logits_nc.grad)), f"Non-finite gradient: {logits_nc.grad}"
+
+
+# ---------------------------------------------------------------------------
+# compute_class_weights direct unit tests
+# ---------------------------------------------------------------------------
+
+
+def _flat_desc(c: int) -> torch.Tensor:
+    """Identity descendant tensor (all leaves, no hierarchy)."""
+    return torch.eye(c, dtype=torch.float)
+
+
+def test_compute_class_weights_none_returns_none():
+    result = compute_class_weights(
+        active_cl_names=["A", "B"],
+        class_counts=None,
+        active_descendant_tensor_cc=_flat_desc(2),
+    )
+    assert result is None
+
+
+def test_compute_class_weights_class_mean_matches_socam():
+    """compute_class_weights(normalize='class_mean') must equal SOCAM's stored class_weights."""
+    c = 5
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    counts = pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(c)})
+    desc = _flat_desc(c)
+    model = _make_socam(c=c, class_counts=counts)
+    direct = compute_class_weights(
+        active_cl_names=cl_names,
+        class_counts=counts,
+        active_descendant_tensor_cc=desc,
+        normalize="class_mean",
+    )
+    assert direct is not None
+    assert model.class_weights is not None
+    assert torch.allclose(model.class_weights, direct, atol=1e-6)
+
+
+def test_compute_class_weights_data_mean_has_weighted_mean_one():
+    """normalize='data_mean': the data-frequency-weighted mean of weights over nonzero classes is 1."""
+    c = 5
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    raw_counts = torch.tensor([(i + 1) * 10.0 for i in range(c)])
+    counts = pd.Series({f"cell_type_{i}": float(raw_counts[i]) for i in range(c)})
+    weights = compute_class_weights(
+        active_cl_names=cl_names,
+        class_counts=counts,
+        active_descendant_tensor_cc=_flat_desc(c),
+        normalize="data_mean",
+    )
+    assert weights is not None
+    # data-frequency-weighted mean: sum(w_i * n_i) / sum(n_i) == 1
+    weighted_mean = (weights * raw_counts).sum() / raw_counts.sum()
+    assert torch.allclose(weighted_mean, torch.tensor(1.0), atol=1e-6)
+
+
+def test_compute_class_weights_data_mean_vs_class_mean_same_ordering():
+    """Both normalizations must produce identical relative weight ordering."""
+    c = 5
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    counts = pd.Series({f"cell_type_{i}": (i + 1) * 10 for i in range(c)})
+    desc = _flat_desc(c)
+    w_cm = compute_class_weights(cl_names, counts, desc, normalize="class_mean")
+    w_dm = compute_class_weights(cl_names, counts, desc, normalize="data_mean")
+    assert w_cm is not None and w_dm is not None
+    # Ratios between any two nonzero-count classes must be identical across both normalizations.
+    for i in range(c - 1):
+        ratio_cm = (w_cm[i] / w_cm[i + 1]).item()
+        ratio_dm = (w_dm[i] / w_dm[i + 1]).item()
+        assert abs(ratio_cm - ratio_dm) < 1e-5, f"Ratio mismatch at i={i}: {ratio_cm} vs {ratio_dm}"
+
+
+def test_compute_class_weights_invalid_normalize_raises():
+    c = 3
+    cl_names = [f"cell_type_{i}" for i in range(c)]
+    counts = pd.Series({f"cell_type_{i}": 10 for i in range(c)})
+    with pytest.raises(ValueError, match="normalize"):
+        compute_class_weights(cl_names, counts, _flat_desc(c), normalize="bogus")
 
 
 # ---------------------------------------------------------------------------

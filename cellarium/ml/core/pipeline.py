@@ -3,12 +3,14 @@
 
 from collections.abc import Iterable
 from itertools import chain
+from typing import Any
 
 import numpy as np
 import torch
 from typing_extensions import Self
 
 from cellarium.ml.models import PredictMixin, TestMixin, ValidateMixin
+from cellarium.ml.transforms.base import CellariumTransform, Stage
 from cellarium.ml.utilities.core import call_func_with_batch
 
 
@@ -19,6 +21,11 @@ class CellariumPipeline(torch.nn.ModuleList):
 
     When used within :class:`cellarium.ml.core.CellariumModule`, the last module in the pipeline is expected to be
     a model (:class:`cellarium.ml.models.CellariumModel`) and any preceding modules are expected to be data transforms.
+
+    Each method runs the transforms for one stage: ``forward`` for ``"train"``, and ``validate``, ``test`` and
+    ``predict`` for their own. A :class:`~cellarium.ml.transforms.base.CellariumTransform` is skipped in the stages
+    it is not active in (e.g. data augmentations are by default active only in ``"train"``), and any other module
+    is run in every stage.
 
     Example:
 
@@ -41,19 +48,42 @@ class CellariumPipeline(torch.nn.ModuleList):
     def __add__(self, other: Iterable[torch.nn.Module]) -> Self:
         return self.__class__(chain(self, other))
 
+    def transform(
+        self,
+        batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor],
+        stage: Stage,
+    ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
+        """
+        Pass the batch through every module of the pipeline that is active in ``stage``,
+        treating all of them as transforms (a model is not treated specially).
+
+        Args:
+            batch: The batch dictionary.
+            stage: The stage whose transforms to run.
+
+        Returns:
+            The batch dictionary, updated with the output of each transform.
+        """
+        self._apply_transforms(self, batch, stage)
+        return batch
+
+    @staticmethod
+    def _apply_transforms(modules: Iterable[torch.nn.Module], batch: dict[str, Any], stage: Stage) -> None:
+        """Update ``batch`` in place with the output of each of the ``modules`` that is active in ``stage``."""
+        for module in modules:
+            if isinstance(module, CellariumTransform) and not module.is_active(stage):
+                continue
+            batch |= call_func_with_batch(module.forward, batch)
+
     def forward(
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
     ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | torch.Tensor | np.ndarray]:
-        for module in self:
-            batch |= call_func_with_batch(module.forward, batch)
-
-        return batch
+        return self.transform(batch, "train")
 
     def predict(
         self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]
     ) -> dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]:
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+        self._apply_transforms(list(self)[:-1], batch, "predict")
 
         model = self[-1]
         if not isinstance(model, PredictMixin):
@@ -63,8 +93,7 @@ class CellariumPipeline(torch.nn.ModuleList):
         return batch
 
     def validate(self, batch: dict[str, dict[str, np.ndarray | torch.Tensor] | np.ndarray | torch.Tensor]) -> None:
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+        self._apply_transforms(list(self)[:-1], batch, "validate")
 
         model = self[-1]
         if not isinstance(model, ValidateMixin):
@@ -72,8 +101,7 @@ class CellariumPipeline(torch.nn.ModuleList):
         call_func_with_batch(model.validate, batch)
 
     def test(self, batch: dict[str, np.ndarray | torch.Tensor]) -> None:
-        for module in self[:-1]:
-            batch |= call_func_with_batch(module.forward, batch)
+        self._apply_transforms(list(self)[:-1], batch, "test")
 
         model = self[-1]
         if not isinstance(model, TestMixin):

@@ -5,8 +5,30 @@ import itertools
 
 import numpy as np
 import pandas as pd
+import pytest
+import scipy.sparse
+import torch
 
-from cellarium.ml.utilities.data import categories_to_codes, categories_to_product_codes
+from cellarium.ml.utilities.data import (
+    categories_to_codes,
+    categories_to_product_codes,
+    sparse_tensor_to_scipy_csr,
+    to_torch_sparse_coo,
+    to_torch_sparse_csr,
+)
+
+
+@pytest.mark.parametrize("to_torch_sparse", [to_torch_sparse_csr, to_torch_sparse_coo])
+def test_sparse_tensor_to_scipy_csr(to_torch_sparse):
+    x = scipy.sparse.random(6, 5, density=0.4, format="csr", dtype=np.float32, random_state=0)
+    result = sparse_tensor_to_scipy_csr(to_torch_sparse(x))
+    assert isinstance(result, scipy.sparse.csr_matrix)
+    np.testing.assert_array_equal(result.toarray(), x.toarray())
+
+
+def test_sparse_tensor_to_scipy_csr_rejects_dense_tensors():
+    with pytest.raises(ValueError):
+        sparse_tensor_to_scipy_csr(torch.zeros(2, 3))
 
 
 def test_categories_to_codes():

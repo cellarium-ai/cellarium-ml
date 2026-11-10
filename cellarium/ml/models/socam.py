@@ -6,10 +6,11 @@ from typing import TypedDict
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.models.model import CellariumModel, ClassifierPrediction, PredictMixin, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -81,8 +82,7 @@ def _build_nonleaf_info(desc_matrix_cc: torch.Tensor) -> NonleafInfo:
     return {"nonleaf_desc_cc": nonleaf_desc_cc, "perm": perm, "inv_perm": inv_perm}
 
 
-@torch.compile()
-def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
+def _propagate_probs_impl(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) -> torch.Tensor:
     """
     Propagate probabilities up the hierarchy defined by ``descendant_tensor_cc`` using matrix multiplication.
     This effectively sums the probabilities of all descendant categories for each category.
@@ -103,13 +103,19 @@ def propagate_probs(probs_nc: torch.Tensor, descendant_tensor_cc: torch.Tensor) 
     return torch.clamp(propagated_probs_nc, max=1.0)
 
 
+# Compiled wrapper (used by SOCAM). The plain ``_propagate_probs_impl`` is importable by callers
+# (e.g. SCANVI) that want to avoid recompilation for variable-shape inputs.
+propagate_probs = torch.compile(_propagate_probs_impl)
+
+
 def _logsumexp_propagated(logits_nc: torch.Tensor, desc_matrix_cc: torch.Tensor) -> torch.Tensor:
-    temp = torch.where(desc_matrix_cc.T == 0, float("-inf"), logits_nc.unsqueeze(dim=-1) * desc_matrix_cc.T)
+    c_nonleaf = desc_matrix_cc.shape[0]
+    expanded_logits = logits_nc.unsqueeze(dim=-1).expand(-1, -1, c_nonleaf)
+    temp = expanded_logits.masked_fill(desc_matrix_cc.T == 0, float("-inf"))
     return temp.logsumexp(dim=1)
 
 
-@torch.compile()
-def propagate_logits(
+def _propagate_logits_impl(
     logits_nc: torch.Tensor,
     nonleaf_desc_cc: torch.Tensor,
     perm: torch.Tensor,
@@ -145,9 +151,76 @@ def propagate_logits(
     return out - torch.logsumexp(logits_nc, dim=1, keepdim=True)
 
 
+# Compiled wrapper (used by SOCAM). The plain ``_propagate_logits_impl`` is importable by callers
+# (e.g. SCANVI) that want an eager version to avoid recompilation for variable-shape inputs.
+propagate_logits = torch.compile(_propagate_logits_impl)
+
+
+def compute_class_weights(
+    active_cl_names: list[str],
+    class_counts: "pd.Series | None",
+    active_descendant_tensor_cc: torch.Tensor,
+    propagate_class_counts: bool = False,
+    normalize: str = "class_mean",
+) -> torch.Tensor | None:
+    """Compute per-class cross-entropy weights from training cell counts.
+
+    Classes absent from ``class_counts`` (typically pure-ancestor nodes with no direct cell
+    labels) and classes with a count of zero are treated as unlabeled and receive a neutral
+    weight of 1.0. Inverse-frequency weights are computed over the nonzero-count classes only.
+
+    Args:
+        active_cl_names: Ordered list of active category names (defines the output order).
+        class_counts: Optional pandas Series mapping class names to training cell counts.
+            When ``None`` this returns ``None`` (no weighting). Extra entries not in
+            ``active_cl_names`` are ignored. Negative counts raise a ``ValueError``.
+        active_descendant_tensor_cc: ``(c, c)`` binary descendant submatrix over the active
+            categories (diagonal included). Used only when ``propagate_class_counts`` is True.
+        propagate_class_counts: If True, propagate raw counts up the ontology
+            (``active_descendant_tensor_cc @ counts``) so each node's effective count becomes
+            its own count plus the sum of all descendant counts.
+        normalize: Normalization convention for the inverse-frequency weights.
+            ``"class_mean"`` (SOCAM, self-normalizing ``reduction="mean"`` CE) divides by the
+            unweighted class mean. ``"data_mean"`` (SCANVI, ``reduction="none"`` CE) leaves the
+            weights with a data-frequency-weighted mean of 1 so an outer scalar weight keeps
+            its meaning.
+
+    Returns:
+        A float tensor of length ``len(active_cl_names)``, or ``None`` if ``class_counts`` is None.
+    """
+    if class_counts is None:
+        return None
+    provided_counts = {c: class_counts[c] for c in active_cl_names if c in class_counts.index}
+    if any(v < 0 for v in provided_counts.values()):
+        raise ValueError("All class_counts values must be >= 0.")
+    # Pin to CPU so this works inside a torch.device("meta") construction context.
+    counts = torch.tensor(
+        [float(provided_counts.get(c, 0.0)) for c in active_cl_names], dtype=torch.float, device="cpu"
+    )
+    if propagate_class_counts:
+        counts = active_descendant_tensor_cc.cpu() @ counts
+    nonzero = counts > 0
+    weights = torch.ones(len(active_cl_names), dtype=torch.float, device="cpu")
+    if nonzero.any():
+        total = counts[nonzero].sum()
+        n_nonzero = nonzero.sum().float()
+        raw = total / (n_nonzero * counts[nonzero])  # data-frequency-weighted mean of 1
+        if normalize == "class_mean":
+            weights[nonzero] = raw / raw.mean()
+        elif normalize == "data_mean":
+            weights[nonzero] = raw
+        else:
+            raise ValueError(f"normalize must be 'class_mean' or 'data_mean', got {normalize!r}.")
+    return weights
+
+
 class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
     """
-    Logistic regression model for cell type ontology classification.
+    Logistic regression model for cell type ontology classification. [1]
+
+    References:
+        [1] Magre et al., "A supervised ontology-aware cell annotation method for single-cell
+            transcriptomic data", bioRxiv, 2026. https://doi.org/10.64898/2026.01.13.699356
 
     Args:
         n_obs: Number of observations in the dataset (used to scale the cross-entropy loss).
@@ -169,6 +242,22 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         seed: Random seed used to initialize parameters.
         log_metrics: If True, logs weight histograms (TensorBoard) during training.
             If True, logs weight histograms (TensorBoard) during training.
+        class_counts: Optional pandas Series mapping class names to cell counts in the
+            training data. Classes absent from the Series (typically pure-ancestor nodes
+            with no direct cell labels) and classes with a count of zero are both treated
+            as unlabeled and receive a neutral weight of 1.0, which has no effect on the
+            loss since no cells carry those labels. Inverse-frequency weights are computed
+            and normalized to mean 1 over the nonzero-count classes only. Negative counts
+            raise a ``ValueError``. Extra Series entries not in the active category set are
+            ignored. When ``None``, all classes are weighted equally.
+        propagate_class_counts: If ``True`` and ``class_counts`` is provided, propagate
+            raw counts up the ontology before computing weights. Each node's effective
+            count becomes its own direct count plus the sum of all descendant counts. This
+            down-weights ancestor nodes (they accumulate large effective counts) relative
+            to rare leaf nodes. A pure-ancestor node with zero direct labels but nonzero
+            descendant counts will receive a real inverse-frequency weight rather than the
+            neutral 1.0 it would otherwise get. Has no effect when ``class_counts`` is
+            ``None``.
     """
 
     def __init__(
@@ -184,6 +273,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         seed: int = 0,
         log_metrics: bool = True,
         include_ancestors_of_cl_name_subset: bool = True,
+        class_counts: pd.Series | None = None,
+        propagate_class_counts: bool = False,
     ) -> None:
         super().__init__()
         self.n_obs = n_obs
@@ -207,6 +298,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
             cl_name_subset = _expand_with_ancestors(cl_name_subset, cl_names, descendant_tensor)
         self.cl_name_subset = cl_name_subset
         self.probability_propagation_flag = probability_propagation_flag
+        self.propagate_class_counts = propagate_class_counts
         self.seed = seed
         self.log_metrics = log_metrics
 
@@ -245,6 +337,17 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.W_gc = torch.nn.Parameter(torch.empty(self.n_vars, self.n_active_cats, dtype=torch.float))
         self.b_c = torch.nn.Parameter(torch.empty(self.n_active_cats, dtype=torch.float))
 
+        # Class weights for cross-entropy loss
+        weights = compute_class_weights(
+            active_cl_names=active_cl_names,
+            class_counts=class_counts,
+            active_descendant_tensor_cc=active_descendant_tensor_cc,
+            propagate_class_counts=propagate_class_counts,
+            normalize="class_mean",
+        )
+        self._class_weights: torch.Tensor | None = weights
+        self.register_buffer("class_weights", weights.clone() if weights is not None else None)
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -257,6 +360,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self.nonleaf_desc_cc.copy_(self._nonleaf_desc_cc)
         self.perm.copy_(self._perm)
         self.inv_perm.copy_(self._inv_perm)
+        if self._class_weights is not None:
+            self.class_weights.copy_(self._class_weights)
         self.W_gc.data.normal_(0, self.W_init_scale, generator=rng)
         self.b_c.data.zero_()
 
@@ -307,9 +412,8 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         logits_nc = self._compute_regression(x_ng, self.W_gc, self.b_c)
         if self.probability_propagation_flag:
             logits_nc = propagate_logits(logits_nc, self.nonleaf_desc_cc, self.perm, self.inv_perm)
-        scale = self.n_obs / x_ng.shape[0]
-        ce_loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="sum") * scale
-        laplace_loss = self.W_gc.abs().sum() / self.W_prior_scale
+        ce_loss = torch.nn.functional.cross_entropy(logits_nc, y_n, reduction="mean", weight=self.class_weights)
+        laplace_loss = (self.W_gc.abs().sum() / self.W_prior_scale) / self.n_obs
         loss = ce_loss + laplace_loss
         return {"loss": loss}
 
@@ -344,7 +448,7 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         self,
         x_ng: torch.Tensor,
         var_names_g: np.ndarray,
-    ) -> dict[str, np.ndarray | torch.Tensor]:
+    ) -> ClassifierPrediction:
         """
         Predict the target logits.
 
@@ -355,8 +459,9 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
                 The variable names for the input data.
 
         Returns:
-            A dictionary with the target logits. Output tensors have shape
-            ``(n, n_active_cats)``.
+            A dictionary with the target logits in ``y_logits_nc`` and the
+            predicted probabilities in ``y_probs_nc`` (possibly propagated).
+            Output tensors have shape ``(n, n_active_cats)``.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
@@ -364,7 +469,11 @@ class SOCAM(CellariumModel, PredictMixin, ValidateMixin):
         probs_nc = torch.nn.functional.softmax(logits_nc, dim=1)
         if self.probability_propagation_flag:
             probs_nc = propagate_probs(probs_nc, self.active_descendant_tensor_cc)
-        return {"y_logits_nc": logits_nc, "cell_type_probs_nc": probs_nc}
+        return {
+            "y_logits_nc": logits_nc,
+            "y_probs_nc": probs_nc,
+            "category_labels_c": self.cl_name_subset if self.cl_name_subset is not None else self.cl_names,
+        }
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:

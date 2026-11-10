@@ -68,7 +68,8 @@ class OnePassMeanVarStd(CellariumModel):
         self.x_size_b: torch.Tensor
         self.register_buffer("x_sums_bg", torch.empty(self.n_batch, n_vars))
         self.register_buffer("x_squared_sums_bg", torch.empty(self.n_batch, n_vars))
-        self.register_buffer("x_size_b", torch.empty(self.n_batch))
+        # int64 so that the count stays exact past 2**24 cells (a float32 count stops incrementing there)
+        self.register_buffer("x_size_b", torch.empty(self.n_batch, dtype=torch.int64))
 
         self._dummy_param = torch.nn.Parameter(torch.empty(()))
         self.reset_parameters()
@@ -145,11 +146,11 @@ class OnePassMeanVarStd(CellariumModel):
             )
 
     def on_train_epoch_end(self, trainer: pl.Trainer) -> None:
-        if trainer.world_size == 1:
-            return
-        dist.reduce(self.x_sums_bg, dst=0, op=dist.ReduceOp.SUM)
-        dist.reduce(self.x_squared_sums_bg, dst=0, op=dist.ReduceOp.SUM)
-        dist.reduce(self.x_size_b, dst=0, op=dist.ReduceOp.SUM)
+        if trainer.world_size > 1:
+            dist.reduce(self.x_sums_bg, dst=0, op=dist.ReduceOp.SUM)
+            dist.reduce(self.x_squared_sums_bg, dst=0, op=dist.ReduceOp.SUM)
+            dist.reduce(self.x_size_b, dst=0, op=dist.ReduceOp.SUM)
+        trainer.should_stop = True
 
     @property
     def mean_g(self) -> torch.Tensor:

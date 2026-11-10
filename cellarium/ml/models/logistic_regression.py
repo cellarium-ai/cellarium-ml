@@ -8,7 +8,7 @@ import pyro
 import pyro.distributions as dist
 import torch
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction, ValidateMixin
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -113,7 +113,7 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
     def guide(self, x_ng: torch.Tensor, y_n: torch.Tensor) -> None:
         pyro.sample("W", dist.Delta(self.W_gc).to_event(2))
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> TransformPrediction:
         """
         Predict the target logits.
 
@@ -124,13 +124,13 @@ class LogisticRegression(CellariumModel, PredictMixin, ValidateMixin):
                 The variable names for the input data.
 
         Returns:
-            A dictionary with the target logits.
+            A dictionary with the target logits as `x_ng` (misnomer).
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "self.var_names_g", self.var_names_g)
 
         logits_nc = x_ng @ self.W_gc + self.b_c
-        return {"y_logits_nc": logits_nc}
+        return {"x_ng": logits_nc, "var_names_g": np.array([f"feature_{i}" for i in range(logits_nc.shape[1])])}
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         if trainer.global_rank != 0:

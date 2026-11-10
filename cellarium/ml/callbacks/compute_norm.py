@@ -43,7 +43,8 @@ class ComputeNorm(pl.Callback):
         ):
             assert trainer.strategy.model is not None
             # Sum all local norms to get the total norm
-            dist.all_reduce(param_norm_sq, op=dist.ReduceOp.SUM, group=trainer.strategy.model.process_group)
+            process_group: dist.ProcessGroup = trainer.strategy.model.process_group  # type: ignore[assignment]
+            dist.all_reduce(param_norm_sq, op=dist.ReduceOp.SUM, group=process_group)
 
         pl_module.log("model_wise_param_norm", torch.sqrt(param_norm_sq).item(), rank_zero_only=True)
 
@@ -75,11 +76,10 @@ class ComputeNorm(pl.Callback):
         ):
             assert trainer.strategy.model is not None
             # Sum all local norms to get the total norm
-            dist.all_reduce(model_wise_grad_norm_sq, op=dist.ReduceOp.SUM, group=trainer.strategy.model.process_group)
+            process_group: dist.ProcessGroup = trainer.strategy.model.process_group  # type: ignore[assignment]
+            dist.all_reduce(model_wise_grad_norm_sq, op=dist.ReduceOp.SUM, group=process_group)
             for layer_id in per_layer_grad_norm_sq:
-                dist.all_reduce(
-                    per_layer_grad_norm_sq[layer_id], op=dist.ReduceOp.SUM, group=trainer.strategy.model.process_group
-                )
+                dist.all_reduce(per_layer_grad_norm_sq[layer_id], op=dist.ReduceOp.SUM, group=process_group)
 
         pl_module.log("model_wise_grad_norm", torch.sqrt(model_wise_grad_norm_sq).item(), rank_zero_only=True)
         if per_layer_grad_norm_sq:

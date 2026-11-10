@@ -104,10 +104,10 @@ class Geneformer(CellariumModel, PredictMixin):
 
     def reset_parameters(self) -> None:
         self.feature_ids = torch.arange(2, len(self.var_names_g) + 2)
-        self.bert.bert.embeddings.position_ids = torch.arange(self.config.max_position_embeddings).expand((1, -1))
+        self.bert.bert.embeddings.position_ids = torch.arange(self.config.max_position_embeddings).expand((1, -1))  # type: ignore[assignment]
         self.bert.bert.embeddings.token_type_ids = torch.zeros(
             self.bert.bert.embeddings.position_ids.size(), dtype=torch.long
-        )
+        )  # type: ignore[assignment]
         self.bert.apply(lambda module: setattr(module, "_is_hf_initialized", False))
         self.bert.init_weights()
 

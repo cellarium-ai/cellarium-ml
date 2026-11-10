@@ -17,11 +17,13 @@ class BoringDataset(torch.utils.data.Dataset):
         self,
         data: np.ndarray,
         var_names: np.ndarray | None = None,
+        obs_names: np.ndarray | None = None,
         y: np.ndarray | None = None,
         y_categories: np.ndarray | None = None,
     ) -> None:
         self.data = data
         self.var_names = var_names
+        self.obs_names = obs_names
         self.y = y
         self.y_categories = y_categories
 
@@ -32,6 +34,8 @@ class BoringDataset(torch.utils.data.Dataset):
         data = {"x_ng": self.data[idx, None]}
         if self.var_names is not None:
             data["var_names_g"] = self.var_names
+        if self.obs_names is not None:
+            data["obs_names_n"] = self.obs_names[idx, None]
         if self.y is not None:
             data["y_n"] = self.y[idx, None]
         if self.y_categories is not None:
@@ -80,3 +84,20 @@ class BoringModel(CellariumModel):
 
     def set_extra_state(self, state) -> None:
         self.iter_data = state["iter_data"]
+
+
+class CrashingModel(CellariumModel):
+    """A model that raises a :class:`RuntimeError` on its first forward pass. Used to test that
+    behavior triggered by ``Trainer.fit()`` (e.g. CPU transforms dispatched to the dataloader) is
+    correctly reverted even when training does not complete normally."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._dummy_param = torch.nn.Parameter(torch.empty(()))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self._dummy_param.data.zero_()
+
+    def forward(self, **kwargs: torch.Tensor) -> dict:
+        raise RuntimeError("Simulated training crash")

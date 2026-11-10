@@ -1,9 +1,27 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import warnings
 from typing import Any, Type
 
 import torch
+
+
+class SwiGLUActivation(torch.nn.Module):
+    """
+    Stateless SwiGLU gated activation.
+
+    Chunks the input in half along the last dimension and returns
+    ``x_val * F.silu(gate)``. When used as ``activation_fn`` in
+    :class:`DressedLayer`, the upstream linear layer should produce
+    ``2 × inner_dim`` outputs; :class:`~cellarium.ml.models.scvi.FullyConnectedWithBatchArchitecture`
+    handles this automatically when ``out_features`` is set to the desired
+    post-gating width.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_val, gate = x.chunk(2, dim=-1)
+        return x_val * torch.nn.functional.silu(gate)
 
 
 class DressedLayer(torch.nn.Module):
@@ -29,6 +47,9 @@ class DressedLayer(torch.nn.Module):
         use_layer_norm: whether to use layer normalization
         activation_fn: the activation function to use
         dropout_rate: dropout rate, can be zero
+        use_residual: if ``True``, adds the input as a residual when the output shape matches the
+            input shape. Silently disabled when shapes differ (e.g. dimension-changing layers).
+            Intended for constant-width hidden stacks.
     """
 
     def __init__(
@@ -40,6 +61,7 @@ class DressedLayer(torch.nn.Module):
         layer_norm_kwargs: dict | None = None,
         activation_fn: Type[torch.nn.Module] | None = torch.nn.ReLU,
         dropout_rate: float = 0,
+        use_residual: bool = False,
     ):
         if batch_norm_kwargs is None:
             batch_norm_kwargs = {"momentum": 0.01, "eps": 0.001}
@@ -57,14 +79,28 @@ class DressedLayer(torch.nn.Module):
         dropout = torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None
         module_list = [batch_norm, layer_norm, activation, dropout]
         self.layer = layer
+        self.use_residual = use_residual
+        self.out_features = out_features // 2 if (activation_fn is SwiGLUActivation) else out_features
+        if use_residual:
+            in_features = getattr(layer, "in_features", None)
+            if in_features is not None and in_features != self.out_features:
+                warnings.warn(
+                    f"use_residual=True but in_features={in_features} != out_features={self.out_features}; "
+                    "residual connection will be disabled for this layer.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         self.dressing = torch.nn.Sequential(*[m for m in module_list if m is not None])
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         """
         Computes the forward pass of the block.
         """
-        x = self.layer(*args, **kwargs)
-        return self.dressing(x)
+        residual = args[0]
+        h = self.dressing(self.layer(*args, **kwargs))
+        if self.use_residual and h.shape == residual.shape:
+            h = h + residual
+        return h
 
 
 class FullyConnectedLinear(torch.nn.Module):

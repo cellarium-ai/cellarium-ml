@@ -19,8 +19,8 @@ from torch.distributions import Distribution, Normal, Poisson
 from torch.distributions import kl_divergence as kl
 
 from cellarium.ml.distributions import NegativeBinomial
-from cellarium.ml.layers import DressedLayer, FullyConnectedLinear
-from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
+from cellarium.ml.layers import DressedLayer, FullyConnectedLinear, SwiGLUActivation
+from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction, ValidateMixin
 from cellarium.ml.utilities.data import categories_to_product_codes
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
@@ -198,24 +198,33 @@ class FullyConnectedWithBatchArchitecture(torch.nn.Module):
             out_features = in_features
         else:
             module_list = torch.nn.ModuleList()
-            n_hidden = [layer["init_args"].get("out_features") for layer in layers]
-            for layer, n_in, n_out in zip(layers, [in_features] + n_hidden, n_hidden):
-                layer["init_args"]["out_features"] = n_out
+            current_in = in_features
+            for layer_spec in layers:
+                init_args = {**layer_spec["init_args"]}
+                dressing_init_args = {**layer_spec["dressing_init_args"]}
+                # Resolve string activation_fn to a class (supports YAML/CLI class-path strings)
+                activation_fn_val = dressing_init_args.get("activation_fn")
+                if isinstance(activation_fn_val, str):
+                    dressing_init_args["activation_fn"] = class_from_class_path(activation_fn_val)
+                    activation_fn_val = dressing_init_args["activation_fn"]
+                # Double out_features for SwiGLU so chunking yields the user-configured effective output
+                if activation_fn_val is SwiGLUActivation:
+                    init_args["out_features"] = init_args["out_features"] * 2
                 module_list.append(
                     DressedLayer(
                         instantiate_from_class_path(
-                            layer["class_path"],
-                            in_features=n_in,
+                            layer_spec["class_path"],
+                            in_features=current_in,
                             bias=True,
-                            **layer["init_args"],
+                            **init_args,
                         ),
-                        **layer["dressing_init_args"],
+                        **dressing_init_args,
                     )
                 )
-            assert hasattr(module_list[-1].layer, "out_features") and isinstance(
-                module_list[-1].layer.out_features, int
-            )
-            out_features = module_list[-1].layer.out_features
+                assert isinstance(module_list[-1], torch.nn.Module)
+                assert isinstance(module_list[-1].out_features, int)
+                current_in = module_list[-1].out_features
+            out_features = current_in
         self.module_list = module_list
         self.out_features = out_features
 
@@ -485,6 +494,12 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         n_cats_per_cov: A list of integers containing the number of categories for each categorical covariate.
         dropout_rate: Dropout rate for hidden units in the encoder only.
         input_gene_dropout_rate: Gene dropout rate for input data that goes into the encoder during training.
+        binomial_downsampling_prob: Probability, per cell, of binomially downsampling the input data that goes into
+            the encoder during training. Applied after gene dropout. The reconstruction target and library size are
+            always computed from the original, un-augmented counts. ``0.0`` disables downsampling.
+        binomial_downsampling_min_counts: Cells whose total counts (over the model's genes, after gene dropout) do not
+            exceed this value are never downsampled. A downsampled cell has its total counts reduced to a target drawn
+            log-uniformly between this value and the cell's total counts.
         dispersion: Flexibility of the dispersion parameter when ``gene_likelihood`` is either ``"nb"`` or
             ``"zinb"``. One of the following:
                 * ``"gene"``: parameter is constant per gene across cells.
@@ -493,6 +508,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 * ``"gene-cell"``: parameter is constant per gene per cell.
         log_variational: If ``True``, use :func:`~torch.log1p` on input data before encoding for numerical stability
             (not normalization).
+        normalizetotal_variational: If ``True``, normalize input data to a total of 10,000 counts per cell before
+            encoding for numerical stability. Happens before log_variational if both are True.
         gene_likelihood: Distribution to use for reconstruction in the generative process. One of the following:
                 * ``"nb"``: :class:`~scvi.distributions.NegativeBinomial`.
                 * ``"zinb"``: :class:`~scvi.distributions.ZeroInflatedNegativeBinomial`. (not implemented)
@@ -561,6 +578,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         dropout_rate: float = 0.1,
         dispersion: Literal["gene", "gene-batch", "gene-label", "gene-cell"] = "gene",
         log_variational: bool = True,
+        normalizetotal_variational: bool = False,
         gene_likelihood: Literal["zinb", "nb", "poisson"] = "nb",
         latent_distribution: Literal["normal", "ln"] = "normal",
         batch_embedded: bool = False,
@@ -569,6 +587,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         z_kl_weight_max: float = 1.0,
         batch_kl_weight_max: float = 0.0,
         input_gene_dropout_rate: float = 0.0,
+        binomial_downsampling_prob: float = 0.0,
+        binomial_downsampling_min_counts: int = 1000,
         use_batch_norm: Literal["encoder", "decoder", "none", "both"] = "both",
         use_layer_norm: Literal["encoder", "decoder", "none", "both"] = "none",
         kl_warmup_epochs: int | None = 400,
@@ -588,6 +608,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         cell_type_categories: list[str] | None = None,
         ontology_distance_matrix: pd.DataFrame | None = None,
         val_cell_type_classifier_reservoir_size: int = 50_000,
+        use_torch_compile: bool = False,
     ):
         super().__init__()
         self.var_names_g = np.array(var_names_g)
@@ -596,8 +617,17 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         self.n_latent = n_latent
         self.n_batch = n_batch
         self.log_variational = log_variational
+        self.normalizetotal_variational = normalizetotal_variational
         self.gene_likelihood = gene_likelihood
         self.input_gene_dropout_rate = input_gene_dropout_rate
+        if not (0.0 <= binomial_downsampling_prob <= 1.0):
+            raise ValueError(
+                f"binomial_downsampling_prob={binomial_downsampling_prob} must be in the range [0.0, 1.0]."
+            )
+        if binomial_downsampling_min_counts < 1:
+            raise ValueError(f"binomial_downsampling_min_counts={binomial_downsampling_min_counts} must be >= 1.")
+        self.binomial_downsampling_prob = binomial_downsampling_prob
+        self.binomial_downsampling_min_counts = binomial_downsampling_min_counts
         self.latent_distribution = latent_distribution
         self.n_cats_per_cov = n_cats_per_cov if n_cats_per_cov is not None else []
         self.use_size_factor_key = use_size_factor_key
@@ -828,6 +858,13 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             and sum(self.n_cats_per_cov) > 0
         )
 
+        self.use_torch_compile = use_torch_compile
+        if use_torch_compile:
+            # Wraps each module in an OptimizedModule; state_dict keys gain an _orig_mod. prefix,
+            # so checkpoints are only compatible across runs with the same use_torch_compile setting.
+            self.z_encoder = torch.compile(self.z_encoder, dynamic=True)  # type: ignore[assignment]
+            self.decoder = torch.compile(self.decoder, dynamic=True)  # type: ignore[assignment]
+
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -882,7 +919,8 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         """
         if not self.batch_embedded:
-            batch_nb = torch.nn.functional.one_hot(batch_index_n.squeeze().long(), num_classes=self.n_batch).float()
+            # reshape (not squeeze) so that a single cell keeps its batch dimension
+            batch_nb = torch.nn.functional.one_hot(batch_index_n.reshape(-1).long(), num_classes=self.n_batch).float()
         else:
             if self.batch_representation_sampled:
                 if use_mean_though_sampling:
@@ -930,6 +968,10 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         """
 
         encoder_input_ng = x_ng
+        if self.normalizetotal_variational:
+            # clamp so that an all-zero cell stays all zeros instead of becoming NaN (counts are integers, so the
+            # clamp does not change any cell with at least one count)
+            encoder_input_ng = encoder_input_ng / encoder_input_ng.sum(dim=-1, keepdim=True).clamp(min=1.0) * 10000
         if self.log_variational:
             encoder_input_ng = torch.log1p(encoder_input_ng)
 
@@ -982,6 +1024,67 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         return dict(px=count_distribution, pz=pz)
 
+    def _log_library_size_n1(self, x_ng: torch.Tensor, total_mrna_umis_n: torch.Tensor | None) -> torch.Tensor:
+        """
+        Log library size of each cell, from ``total_mrna_umis_n`` if :attr:`use_size_factor_key` else from ``x_ng``.
+
+        The total is clamped to be at least one count, so an all-zero cell gets a log library size of 0 instead
+        of ``-inf``.
+        """
+        if self.use_size_factor_key:
+            assert total_mrna_umis_n is not None, "total_mrna_umis_n must be provided when use_size_factor_key=True"
+            total_n1 = total_mrna_umis_n.unsqueeze(-1)
+        else:
+            total_n1 = x_ng.sum(dim=-1, keepdim=True)
+        return torch.log(total_n1.clamp(min=1.0))
+
+    def _augment_encoder_input(self, x_ng: torch.Tensor) -> torch.Tensor:
+        """
+        Data augmentation of the counts that go into the encoder (denoising autoencoder).
+
+        Only active in training mode. Applies, in order, random gene dropout
+        (:attr:`input_gene_dropout_rate`) and random binomial downsampling
+        (:attr:`binomial_downsampling_prob`, :attr:`binomial_downsampling_min_counts`).
+        The reconstruction target and library size should be computed from the original ``x_ng``.
+
+        Args:
+            x_ng: Raw integer gene counts matrix.
+
+        Returns:
+            The counts to be passed to the encoder.
+        """
+        if not self.training:
+            return x_ng
+
+        encoder_input_ng = x_ng
+
+        with torch.no_grad():
+            if self.input_gene_dropout_rate > 0.0:
+                # randomly drop out some genes in the input data to the encoder
+                dropout_mask_ng = torch.rand_like(encoder_input_ng) > self.input_gene_dropout_rate
+                encoder_input_ng = encoder_input_ng * dropout_mask_ng
+
+            if self.binomial_downsampling_prob > 0.0:
+                # randomly downsample the total counts of some cells, to a target between the minimum and the total
+                total_n1 = encoder_input_ng.sum(dim=-1, keepdim=True)
+                min_counts = float(self.binomial_downsampling_min_counts)
+                eligible_n1 = (total_n1 > min_counts) & (torch.rand_like(total_n1) < self.binomial_downsampling_prob)
+
+                # one log-uniform target per cell; the clamp keeps the log well-defined for ineligible cells
+                safe_total_n1 = total_n1.clamp(min=min_counts + 1.0)
+                log_min = torch.log(torch.tensor(min_counts, dtype=total_n1.dtype, device=total_n1.device))
+                u_n1 = torch.rand_like(total_n1)
+                target_n1 = torch.exp(log_min + u_n1 * (torch.log(safe_total_n1) - log_min))
+                p_n1 = (target_n1 / safe_total_n1).clamp(max=1.0)
+
+                downsampled_ng = torch.binomial(encoder_input_ng, p_n1.expand_as(encoder_input_ng))
+
+                # never create new zero-count cells
+                keep_n1 = eligible_n1 & (downsampled_ng.sum(dim=-1, keepdim=True) > 0)
+                encoder_input_ng = torch.where(keep_n1, downsampled_ng, encoder_input_ng)
+
+        return encoder_input_ng
+
     def forward(
         self,
         x_ng: torch.Tensor,
@@ -1020,19 +1123,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
-        if self.use_size_factor_key:
-            assert total_mrna_umis_n is not None, "total_mrna_umis_n must be provided when use_size_factor_key=True"
-            library_size_n1 = torch.log(total_mrna_umis_n).unsqueeze(-1)
-        else:
-            library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
+        library_size_n1 = self._log_library_size_n1(x_ng, total_mrna_umis_n)
 
-        if self.input_gene_dropout_rate > 0.0:
-            # randomly drop out some genes in the input data to the encoder during training
-            with torch.no_grad():
-                dropout_mask_ng = torch.rand_like(x_ng) > self.input_gene_dropout_rate
-                inference_input_x_ng = x_ng * dropout_mask_ng
-        else:
-            inference_input_x_ng = x_ng
+        inference_input_x_ng = self._augment_encoder_input(x_ng)
 
         inference_outputs = self.inference(
             x_ng=inference_input_x_ng,
@@ -1113,7 +1206,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-    ):
+    ) -> TransformPrediction:
         """
         Args:
             x_ng:
@@ -1178,7 +1271,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                 categorical_covariate_np=categorical_covariate_np,
             )["qz"]
         )
-        return {"x_ng": z_nk}
+        return {"x_ng": z_nk, "var_names_g": np.array([f"scvi_{i}" for i in range(z_nk.shape[1])])}
 
     @torch.no_grad()
     def reconstruct(
@@ -1195,7 +1288,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         n_latent_samples: int = 1000,
         use_importance_sampling: bool = False,
         reconstructed_library_size: float = 10_000,
-    ):
+    ) -> TransformPrediction:
         """
         Reconstruct the data using the VAE, optionally transforming the batch.
 
@@ -1278,7 +1371,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         batch_nb = self.batch_representation_from_batch_index(batch_index_n)
         categorical_covariate_np = self.categorical_onehot_from_categorical_index(categorical_covariate_index_nd)
 
-        library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True))
+        library_size_n1 = torch.log(x_ng.sum(dim=-1, keepdim=True).clamp(min=1.0))
 
         # generate the latent distribution
         inference_outputs = self.inference(
@@ -1306,7 +1399,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
             counts_ng = generative_outputs["px"].mean
 
             # normalize and re-scale
-            normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True)
+            normalized_counts_ng = counts_ng / counts_ng.sum(dim=-1, keepdim=True).clamp(
+                min=torch.finfo(counts_ng.dtype).tiny
+            )
             scaled_counts_ng = reconstructed_library_size * normalized_counts_ng
 
             # subset to genes of interest
@@ -1384,7 +1479,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         x_tilde_np = x_tilde_np / len(transformed_batch_index_n_list)
 
-        return {"x_ng": x_tilde_np}
+        return {"x_ng": x_tilde_np, "var_names_g": var_names_g[gene_inds]}
 
     # ------------------------------------------------------------------
     # Validation hooks
@@ -1447,7 +1542,7 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
 
         # log annealed loss for progress bar / on-step visibility
         if isinstance(output["loss"], torch.Tensor):
-            pl_module.log("val_loss", output["loss"], sync_dist=True, on_epoch=True, batch_size=n)
+            pl_module.log("val_loss", output["loss"], sync_dist=True, on_epoch=True, batch_size=n, prog_bar=True)
 
         # accumulate exact ELBO (no annealing)
         kl_batch = output["kl_divergence_batch"]

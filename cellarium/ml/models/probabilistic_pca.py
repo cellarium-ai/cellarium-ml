@@ -11,7 +11,7 @@ import torch
 from pyro.nn.module import PyroParam, _unconstrain
 from torch.distributions import constraints
 
-from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin, TransformPrediction
 from cellarium.ml.utilities.testing import (
     assert_arrays_equal,
     assert_columns_and_array_lengths_equal,
@@ -147,7 +147,7 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
             D_k = self.sigma / torch.sqrt(torch.diag(self.M_kk))  # type: ignore[arg-type]
             pyro.sample("z", dist.Normal((x_ng - self.mean_g) @ V_gk, D_k).to_event(1))
 
-    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> dict[str, np.ndarray | torch.Tensor]:
+    def predict(self, x_ng: torch.Tensor, var_names_g: np.ndarray) -> TransformPrediction:
         """
         Centering and embedding of the input data ``x_ng`` into the principal component space.
 
@@ -163,14 +163,15 @@ class ProbabilisticPCA(CellariumModel, PredictMixin):
         Returns:
             A dictionary with the following keys:
 
-            - ``z_nk``: Embedding of the input data into the principal component space.
+            - ``x_ng``: (misnomer) Embedding of the input data into the principal component space.
+            - ``var_names_g``: The list of the variable names corresponding to the embedding features.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
 
         V_gk = torch.linalg.solve(self.M_kk, self.W_kg).T
         z_nk = (x_ng - self.mean_g) @ V_gk
-        return {"z_nk": z_nk}
+        return {"x_ng": z_nk, "var_names_g": np.array([f"feature_{i}" for i in range(z_nk.shape[1])])}
 
     @property
     def M_kk(self) -> torch.Tensor:

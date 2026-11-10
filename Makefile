@@ -25,10 +25,10 @@ typecheck: FORCE
 
 test: FORCE
 ifeq (${TEST_DEVICES}, 2)
-	pytest -v -k multi_device --ignore=tests/dataloader --ignore=tests/test_cli.py --ignore=tests/test_mup.py
+	pytest -v -k multi_device --ignore=tests/api --ignore=tests/dataloader --ignore=tests/test_cli.py --ignore=tests/test_mup.py
 else ifeq (${TEST_DEVICES}, 1)
 	# default
-	pytest -v --ignore=tests/dataloader --ignore=tests/test_cli.py --ignore=tests/test_mup.py
+	pytest -v --ignore=tests/api --ignore=tests/dataloader --ignore=tests/test_cli.py --ignore=tests/test_mup.py
 endif
 
 test-cli: FORCE
@@ -53,6 +53,9 @@ else
 	# default
 	pytest -v tests/dataloader
 endif
+
+test-api: FORCE
+	pytest -v tests/api
 
 test-examples: FORCE
 	rm -r /tmp/test_examples || true

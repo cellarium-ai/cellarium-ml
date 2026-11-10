@@ -75,6 +75,8 @@ def _run_model(
     n_top_genes: int = N_TOP_GENES,
     batch_size: int = 512,
     flavor: Literal["seurat_v3", "seurat_v3_paper"] = "seurat_v3",
+    accelerator: str = "cpu",
+    accumulator_dtype: Literal["float32", "float64"] = "float64",
 ) -> HVGSeuratV3:
     """Instantiate, fit (2 epochs), and return the HVGSeuratV3 model."""
     model = HVGSeuratV3(
@@ -84,6 +86,7 @@ def _run_model(
         use_batch_key=(batch_key is not None),
         flavor=flavor,
         output_path=output_path,
+        accumulator_dtype=accumulator_dtype,
     )
     module = CellariumModule(model=model)
 
@@ -96,7 +99,8 @@ def _run_model(
     )
 
     trainer = pl.Trainer(
-        accelerator="cpu",
+        accelerator=accelerator,
+        devices=1,
         max_epochs=2,
         enable_progress_bar=False,
         enable_model_summary=False,
@@ -152,15 +156,13 @@ def test_hvg_seurat_v3_sort_order():
     model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=2, flavor="seurat_v3")
 
     # Norm-var values chosen so that double-argsort gives the ranks listed above.
-    # With x_sums_bg=0 and reg_std=1: nv = sq_counts_sum / (N-1)
+    # With reg_std=1: nv = clipped_sq_dev_sum / (N-1)
     nv_b0 = [100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0]  # g0..g7 in batch 0
     nv_b1 = [60.0, 70.0, 50.0, 40.0, 100.0, 90.0, 80.0, 30.0]  # g0..g7 in batch 1
 
-    model.x_size_b = torch.full((2,), float(N))
+    model.x_size_b = torch.full((2,), N)
     model.reg_std_bg = torch.ones(2, n_genes)
-    model.x_sums_bg = torch.zeros(2, n_genes)
-    model.counts_sum_bg = torch.zeros(2, n_genes)
-    model.sq_counts_sum_bg = torch.stack(
+    model.clipped_sq_dev_sum_bg = torch.stack(
         [
             torch.tensor([v * (N - 1) for v in nv_b0]),
             torch.tensor([v * (N - 1) for v in nv_b1]),
@@ -228,17 +230,15 @@ def test_hvg_seurat_v3_flavor_sort_order(flavor, expected_hvg, excluded_hvg):
     gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
     model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=3, flavor=flavor)
 
-    # With x_sums_bg=0 and reg_std=1:
-    #   nv = sq_counts_sum / (N-1)  →  set sq_counts_sum = nv * (N-1)
+    # With reg_std=1:
+    #   nv = clipped_sq_dev_sum / (N-1)  →  set clipped_sq_dev_sum = nv * (N-1)
     nv_b0 = [100.0, 90.0, 80.0, 70.0]  # batch 0 ordering: gene_0>gene_1>gene_2>gene_3
     nv_b1 = [80.0, 90.0, 100.0, 70.0]  # batch 1 ordering: gene_2>gene_1>gene_0>gene_3
     nv_b2 = [80.0, 90.0, 70.0, 100.0]  # batch 2 ordering: gene_3>gene_1>gene_0>gene_2
 
-    model.x_size_b = torch.full((3,), float(N))
+    model.x_size_b = torch.full((3,), N)
     model.reg_std_bg = torch.ones(3, n_genes)
-    model.x_sums_bg = torch.zeros(3, n_genes)
-    model.counts_sum_bg = torch.zeros(3, n_genes)
-    model.sq_counts_sum_bg = torch.stack(
+    model.clipped_sq_dev_sum_bg = torch.stack(
         [
             torch.tensor([v * (N - 1) for v in nv_b0]),
             torch.tensor([v * (N - 1) for v in nv_b1]),
@@ -274,7 +274,7 @@ def test_hvg_seurat_v3_invalid_batch_clip_not_zero():
     gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
     model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=5, n_batch=2)
 
-    model.x_size_b = torch.tensor([float(N), 1.0])  # batch 1 has N=1 → invalid
+    model.x_size_b = torch.tensor([N, 1])  # batch 1 has N=1 → invalid
 
     # Give batch 0 genes with varied means so LOESS can fit (overdispersed model):
     # mean_j = (j+1)*0.5, var_j = mean_j * 2
@@ -337,13 +337,11 @@ def test_hvg_seurat_v3_invalid_batch_excluded_from_ranking():
     gene_names = np.array([f"gene_{i}" for i in range(n_genes)])
     model = HVGSeuratV3(var_names_g=gene_names, n_top_genes=n_top, n_batch=2, flavor="seurat_v3")
 
-    model.x_size_b = torch.tensor([float(N), 1.0])  # batch 1 invalid
+    model.x_size_b = torch.tensor([N, 1])  # batch 1 invalid
     model.reg_std_bg = torch.ones(2, n_genes)
-    model.x_sums_bg = torch.zeros(2, n_genes)
-    model.counts_sum_bg = torch.zeros(2, n_genes)
     # Give batch 0 distinct norm_vars; batch 1 buffers stay zero (N=1, skipped)
     nv_b0 = [100.0, 90.0, 80.0, 70.0, 60.0, 50.0]
-    model.sq_counts_sum_bg[0] = torch.tensor([v * (N - 1) for v in nv_b0])
+    model.clipped_sq_dev_sum_bg[0] = torch.tensor([v * (N - 1) for v in nv_b0], dtype=torch.float64)
 
     df = model._compute_hvg_df(n_top_genes=n_top)
 
@@ -352,6 +350,143 @@ def test_hvg_seurat_v3_invalid_batch_excluded_from_ranking():
         "Invalid batch (N<2) should not be counted in highly_variable_nbatches; "
         f"max was {df['highly_variable_nbatches'].max()} but expected 1"
     )
+
+
+# ---------------------------------------------------------------------------
+# Accumulator precision (float32 is what MPS has)
+# ---------------------------------------------------------------------------
+
+
+def _counts_with_large_means(n_batch: int = 3, n_cells: int = 6000, n_genes: int = 300, seed: int = 0):
+    """
+    Overdispersed counts for genes with means from 0.1 to 5000, each batch with its own scale. The sum of squares of
+    the high-mean genes is much larger than their variance, which is what a naive float32 accumulation cannot take.
+    """
+    rng = np.random.default_rng(seed)
+    gene_mean_g = np.logspace(-1, np.log10(5000), n_genes)
+    batch_idx = rng.integers(0, n_batch, size=n_cells)
+    batch_scale_b = np.linspace(0.5, 2.0, n_batch)
+    mean_ng = gene_mean_g[None, :] * batch_scale_b[batch_idx][:, None]
+    dispersion = 5.0  # negative binomial: var = mean + mean**2 / dispersion
+    x = rng.poisson(rng.gamma(dispersion, mean_ng / dispersion))
+    return x.astype(np.float32), batch_idx.astype(np.int64)
+
+
+def test_hvg_seurat_v3_float32_accumulators_match_float64(tmp_path):
+    x, batch_idx = _counts_with_large_means()
+    var_names = np.array([f"gene_{i}" for i in range(x.shape[1])])
+    models = {
+        dtype: _run_model(
+            x=x,
+            var_names=var_names,
+            n_batch=3,
+            batch_idx=batch_idx,
+            batch_key="batch_index_n",
+            output_path=str(tmp_path / f"{dtype}.csv"),
+            n_top_genes=50,
+            batch_size=64,
+            accumulator_dtype=dtype,
+        )
+        for dtype in ("float32", "float64")
+    }
+    model32, model64 = models["float32"], models["float64"]
+    assert model32.x_sums_bg.dtype == torch.float32
+    assert model64.x_sums_bg.dtype == torch.float64
+
+    # the intermediate statistics
+    torch.testing.assert_close(model32.mean_bg.double(), model64.mean_bg, rtol=1e-5, atol=0)
+    torch.testing.assert_close(model32.reg_std_bg.double(), model64.reg_std_bg, rtol=1e-3, atol=0)
+    torch.testing.assert_close(model32.clip_val_bg.double(), model64.clip_val_bg, rtol=1e-3, atol=0)
+
+    # and the result
+    assert model32.hvg_dfs is not None and model64.hvg_dfs is not None
+    df32, df64 = model32.hvg_dfs[50], model64.hvg_dfs[50]
+    variances_norm_32 = df32["variances_norm"].reindex(df64.index)
+    np.testing.assert_allclose(variances_norm_32, df64["variances_norm"], rtol=1e-3)
+    assert set(df32.index[df32["highly_variable"]]) == set(df64.index[df64["highly_variable"]])
+
+
+def test_hvg_seurat_v3_mean_is_exact_with_large_means_and_float32():
+    """The mean (shift + mean of the shifted counts) is accurate even when the counts are large."""
+    x, _ = _counts_with_large_means(n_batch=1, n_cells=4000)
+    var_names = np.array([f"gene_{i}" for i in range(x.shape[1])])
+    model = HVGSeuratV3(var_names_g=var_names, n_top_genes=10, accumulator_dtype="float32", output_path=None)
+    for chunk in np.array_split(x, 100):
+        model(x_ng=torch.from_numpy(chunk), var_names_g=var_names)
+    model._compute_clip_val()
+    np.testing.assert_allclose(model.mean_bg[0].numpy(), x.astype(np.float64).mean(0), rtol=1e-6)
+
+
+def test_hvg_seurat_v3_shifts_are_set_per_batch_when_a_batch_first_appears():
+    n_genes = 4
+    var_names = np.array([f"gene_{i}" for i in range(n_genes)])
+    model = HVGSeuratV3(var_names_g=var_names, n_top_genes=2, n_batch=3, use_batch_key=True, output_path=None)
+
+    def step(x: np.ndarray, batch: list[int]) -> None:
+        model(
+            x_ng=torch.tensor(x, dtype=torch.float32),
+            var_names_g=var_names,
+            batch_index_n=torch.tensor(batch),
+        )
+
+    # batches 0 and 1 are in the first step, batch 2 is not
+    step(np.array([[1, 2, 3, 4], [3, 4, 5, 6], [10, 10, 10, 10]]), [0, 0, 1])
+    assert model.x_shift_set_b.tolist() == [True, True, False]
+    assert not model._shifts_complete
+    torch.testing.assert_close(model.x_shift_bg[0].float(), torch.tensor([2.0, 3.0, 4.0, 5.0]))
+    torch.testing.assert_close(model.x_shift_bg[1].float(), torch.tensor([10.0, 10.0, 10.0, 10.0]))
+
+    # batch 2 appears in the second step, and the shifts of 0 and 1 stay as they were
+    step(np.array([[100, 200, 300, 400], [20, 20, 20, 20], [50, 60, 70, 80]]), [2, 1, 2])
+    assert model.x_shift_set_b.tolist() == [True, True, True]
+    assert model._shifts_complete
+    torch.testing.assert_close(model.x_shift_bg[2].float(), torch.tensor([75.0, 130.0, 185.0, 240.0]))  # type: ignore[unreachable]
+    torch.testing.assert_close(model.x_shift_bg[1].float(), torch.tensor([10.0, 10.0, 10.0, 10.0]))
+    assert model.x_size_b.tolist() == [2, 2, 2]
+
+    # whatever the shifts, the mean is the mean of the counts of the batch
+    mean_bg = model.x_shift_bg + model.x_sums_bg / model.x_size_b.unsqueeze(1)
+    torch.testing.assert_close(mean_bg[0].float(), torch.tensor([2.0, 3.0, 4.0, 5.0]))
+    torch.testing.assert_close(mean_bg[1].float(), torch.tensor([15.0, 15.0, 15.0, 15.0]))
+    torch.testing.assert_close(mean_bg[2].float(), torch.tensor([75.0, 130.0, 185.0, 240.0]))
+
+
+def test_hvg_seurat_v3_cell_count_is_exact_beyond_float32_integers():
+    """A float32 count would stay at 2**24 when 1 is added to it."""
+    var_names = np.array(["a", "b"])
+    model = HVGSeuratV3(var_names_g=var_names, n_top_genes=1, output_path=None)
+    assert model.x_size_b.dtype == torch.int64
+    model.x_size_b[0] = 2**24
+    model(x_ng=torch.ones(3, 2), var_names_g=var_names)
+    assert model.x_size_b[0].item() == 2**24 + 3
+
+
+def test_hvg_seurat_v3_rejects_an_unknown_accumulator_dtype():
+    with pytest.raises(ValueError, match="accumulator_dtype"):
+        HVGSeuratV3(var_names_g=np.array(["a"]), n_top_genes=1, accumulator_dtype="float16")  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="requires MPS")
+def test_hvg_seurat_v3_runs_on_mps_and_matches_cpu(tmp_path):
+    x, batch_idx = _counts_with_large_means()
+    var_names = np.array([f"gene_{i}" for i in range(x.shape[1])])
+    results = {}
+    for accelerator, dtype in (("mps", "float32"), ("cpu", "float64")):
+        results[accelerator] = _run_model(
+            x=x,
+            var_names=var_names,
+            n_batch=3,
+            batch_idx=batch_idx,
+            batch_key="batch_index_n",
+            output_path=str(tmp_path / f"{accelerator}.csv"),
+            n_top_genes=50,
+            batch_size=64,
+            accelerator=accelerator,
+            accumulator_dtype=dtype,  # type: ignore[arg-type]
+        )
+    mps_df, cpu_df = results["mps"].hvg_dfs[50], results["cpu"].hvg_dfs[50]  # type: ignore[index]
+    np.testing.assert_allclose(mps_df["variances_norm"].reindex(cpu_df.index), cpu_df["variances_norm"], rtol=1e-3)
+    assert set(mps_df.index[mps_df["highly_variable"]]) == set(cpu_df.index[cpu_df["highly_variable"]])
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +593,10 @@ def test_hvg_seurat_v3_matches_scanpy(
     union = our_hvg | sc_hvg
     jaccard = len(our_hvg & sc_hvg) / len(union)
 
-    threshold = jaccard_threshold
+    # Not exactly 1: genes with identical counts in a batch have exactly equal normalized variances there, so which of
+    # them makes the cut at the boundary is arbitrary (scanpy's sort breaks the tie by the rounding noise of its
+    # expanded variance formula, which this model, computing the same variance by centering, does not share).
+    threshold = 0.99
     assert jaccard >= threshold, (
         f"Jaccard similarity {jaccard:.4f} is below {threshold} for {flavor=!r} "
         f"{'with' if use_batch_key else 'without'} batch_key, {n_top_genes=}"
