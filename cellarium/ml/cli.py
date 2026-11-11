@@ -1294,7 +1294,11 @@ def scarches(args: ArgsType = None) -> None:
     The pretrained scVI model must be supplied via a ``!CheckpointLoader`` YAML block.  The
     number of new batches (``n_new_batch``) is inferred automatically from the
     ``batch_index_n`` batch key in ``data.batch_keys``.  The new data is assumed to contain
-    **only** batches that were not present during scVI training.
+    **only** batches that were not present during scVI training; its batch indices are
+    query-local (``0 .. n_new_batch - 1``, as produced by ``categories_to_codes``) and are
+    shifted internally past the original batches.  A pretrained scANVI checkpoint can be
+    supplied in the same way; ``cell_type_labels_n`` is optional (cells without labels are
+    treated as unlabeled).  BatchNorm layers are kept frozen; dropout is unchanged.
 
     Example config (saved as ``scarches.yaml``)::
 

@@ -4,12 +4,15 @@
 """scArches (single-cell Architectural Surgery) for reference mapping onto a trained scVI model."""
 
 import logging
+from typing import Any
 
 import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.modules.batchnorm import _BatchNorm
+from typing_extensions import Self
 
 from cellarium.ml.models.model import CellariumModel, PredictMixin, ValidateMixin
 from cellarium.ml.models.scvi import (
@@ -17,6 +20,7 @@ from cellarium.ml.models.scvi import (
     LinearWithBatchAndCovariates,
     SingleCellVariationalInference,
 )
+from cellarium.ml.utilities.core import call_func_with_batch
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +32,14 @@ class ScArchesLinearSurgeryMixin:
     scArches new-batch surgery.
 
     The original ``bias_decoder`` handles old batches (frozen). A new trainable
-    ``new_batch_bias_weight`` parameter handles new batches via a weight-only linear projection.
-    The two outputs are summed; because the input is a one-hot vector exactly one term is
-    non-zero per cell.
+    ``new_batch_bias_weight`` parameter handles new batches via a weight-only linear projection
+    of the new-batch one-hot. The two are summed.
+
+    For a new-batch cell the frozen ``bias_decoder`` still sees a batch one-hot of zeros, so (if the decoder has
+    hidden layers) it returns a constant, batch-independent offset. That offset is subtracted so that a new-batch
+    cell receives only its own learnable bias (plus, for
+    :class:`~cellarium.ml.models.scvi.LinearWithBatchAndCovariates`, the frozen effect of its categorical covariates).
+    Old-batch cells are unaffected.
 
     This mixin should always appear **before** the parent
     ``LinearWithBatch``/``LinearWithBatchAndCovariates`` in the MRO so that its
@@ -87,10 +96,14 @@ class ScArchesLinearSurgeryMixin:
         Split ``batch_nb`` at ``n_batch_ref`` and route each portion to the appropriate decoder.
 
         Old-batch cells (indices < n_batch_ref) have their one-hot set in the first slice and
-        zeros in the second, so only the frozen ``bias_decoder`` produces a non-zero output.
+        zeros in the second, so the frozen ``bias_decoder`` produces their bias exactly as before
+        surgery and the trainable ``new_batch_bias_weight`` contributes nothing.
+
         New-batch cells (indices >= n_batch_ref) have zeros in the first slice and their one-hot
-        in the second, so only the trainable ``new_batch_bias_weight`` produces a non-zero
-        output (because ``bias_decoder(zeros) = 0`` when no bias is present in its final layer).
+        in the second. The frozen ``bias_decoder`` evaluated on an all-zero batch one-hot gives a
+        constant offset (non-zero when the decoder has hidden layers), which is removed by
+        subtracting the decoder's output for a zero batch one-hot and zero covariates. What remains is the
+        frozen covariate effect plus the trainable ``new_batch_bias_weight`` term.
         """
         old_nb = batch_nb[..., : self.n_batch_ref]
         new_nb = batch_nb[..., self.n_batch_ref :]
@@ -98,8 +111,17 @@ class ScArchesLinearSurgeryMixin:
         old_bias = super().compute_bias(  # type: ignore[misc]
             batch_nb=old_nb, categorical_covariate_np=categorical_covariate_np
         )
+        zero_covariate_1p = (
+            None
+            if categorical_covariate_np is None
+            else categorical_covariate_np.new_zeros(1, categorical_covariate_np.shape[-1])
+        )
+        zero_bias_1o = super().compute_bias(  # type: ignore[misc]
+            batch_nb=old_nb.new_zeros(1, self.n_batch_ref), categorical_covariate_np=zero_covariate_1p
+        )
+        is_new_batch_n1 = new_nb.sum(dim=-1, keepdim=True)
         new_bias = F.linear(new_nb, self.new_batch_bias_weight)
-        return old_bias + new_bias
+        return old_bias - is_new_batch_n1 * zero_bias_1o + new_bias
 
 
 class ScArchesLinearWithBatch(ScArchesLinearSurgeryMixin, LinearWithBatch):
@@ -125,9 +147,15 @@ class ScArchesFinalAdditiveBiasLayer(nn.Module):
     Replacement for :attr:`~cellarium.ml.models.scvi.DecoderSCVI.final_additive_bias_layer` that
     supports scArches new-batch surgery.
 
-    The frozen original handles old batches; a new trainable ``new_bias_weight`` parameter
-    (with a ReLU activation to mirror the original) handles new batches.  Both receive the same
-    categorical covariate portion of the input (if present).
+    The original layer is ``ReLU(Linear([batch_onehot, categorical_covariates]))``. Here the
+    pre-activation of the frozen original (fed the old-batch one-hot and the covariates) is summed
+    with a new trainable ``new_bias_weight`` projection of the new-batch one-hot, and the original
+    ReLU is applied to the sum. Only the new-batch columns are trainable; the covariate weights stay
+    frozen. For old-batch cells the new-batch one-hot is zero, so the output is identical to the original.
+
+    ``new_bias_weight`` is initialised to a small positive constant (:attr:`NEW_BIAS_WEIGHT_INIT`), not to zero.
+    The gradient of the ReLU at zero is zero, and for a new-batch cell without categorical covariates the
+    pre-activation is exactly the new weight, so a zero initialisation would never receive a gradient.
 
     New parameters are explicitly created on the same device as the pretrained weights,
     overriding any ``torch.device("meta")`` default-device context.
@@ -136,16 +164,15 @@ class ScArchesFinalAdditiveBiasLayer(nn.Module):
         original: the existing ``nn.Sequential(FullyConnectedLinear, ReLU)`` to freeze.
         n_batch_ref: number of original (reference) batches.
         n_new_batch: number of new (query) batches being added.
-        categorical_dims: total one-hot dimension of categorical covariates concatenated after
-            the batch one-hot in the input tensor (0 when no categorical covariates are used).
     """
+
+    NEW_BIAS_WEIGHT_INIT = 1e-3
 
     def __init__(
         self,
         original: nn.Sequential,
         n_batch_ref: int,
         n_new_batch: int,
-        categorical_dims: int,
     ) -> None:
         super().__init__()
         self.frozen_layer = original
@@ -153,9 +180,11 @@ class ScArchesFinalAdditiveBiasLayer(nn.Module):
         self.n_new_batch = n_new_batch
         out_features: int = original[0].out_features  # type: ignore[union-attr, assignment]
         pretrained_device = next(original.parameters()).device
-        self.new_bias_weight = nn.Parameter(
-            torch.zeros(out_features, n_new_batch + categorical_dims, device=pretrained_device)
-        )
+        self.new_bias_weight = nn.Parameter(torch.empty(out_features, n_new_batch, device=pretrained_device))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.constant_(self.new_bias_weight, self.NEW_BIAS_WEIGHT_INIT)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -170,35 +199,22 @@ class ScArchesFinalAdditiveBiasLayer(nn.Module):
         new_batch = x[..., self.n_batch_ref : n_total_batch]
         categorical = x[..., n_total_batch:]
 
-        if categorical.shape[-1] > 0:
-            old_x = torch.cat([old_batch, categorical], dim=-1)
-            new_x = torch.cat([new_batch, categorical], dim=-1)
-        else:
-            old_x = old_batch
-            new_x = new_batch
-
-        return self.frozen_layer(old_x) + F.relu(F.linear(new_x, self.new_bias_weight))
-
-
-def _make_freeze_old_rows_hook(n_new_batch: int):
-    """Return a gradient hook that zeros rows 0..(n_batch_ref-1) of a 2-D parameter."""
-
-    def hook(grad: torch.Tensor) -> torch.Tensor:
-        g = grad.clone()
-        g[:-n_new_batch] = 0.0
-        return g
-
-    return hook
+        old_x = torch.cat([old_batch, categorical], dim=-1) if categorical.shape[-1] > 0 else old_batch
+        linear, activation = self.frozen_layer[0], self.frozen_layer[1]
+        return activation(linear(old_x) + F.linear(new_batch, self.new_bias_weight))
 
 
 class ScArches(CellariumModel, PredictMixin, ValidateMixin):
     """
     scArches (single-cell Architectural Surgery) [1] adapter for a trained
-    :class:`~cellarium.ml.models.SingleCellVariationalInference` model.
+    :class:`~cellarium.ml.models.SingleCellVariationalInference` model (or a subclass such as
+    :class:`~cellarium.ml.models.SCANVI`).
 
     Surgery is performed **in-place** on *pretrained_scvi* during ``__init__``:
 
     * All existing parameters are frozen (``requires_grad=False``).
+    * ``BatchNorm`` layers are kept in eval mode (also during training), so their running statistics
+      are frozen too. Dropout is left as it is.
     * ``pretrained_scvi.n_batch`` is extended by *n_new_batch*.
     * For models with ``batch_embedded=False`` (one-hot batch representation):
 
@@ -209,19 +225,30 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
         ``new_batch_bias_weight`` parameter (shape ``(out_features, n_new_batch)``,
         initialised to zero) for the new-batch bias.
       - If the decoder has a ``final_additive_bias_layer``, it is replaced by
-        :class:`ScArchesFinalAdditiveBiasLayer` which routes old/new batch dimensions to a
-        frozen and a trainable branch respectively.
+        :class:`ScArchesFinalAdditiveBiasLayer` which adds a trainable projection of the
+        new-batch one-hot (initialised to a small positive constant) to the frozen pre-activation.
 
     * For models with ``batch_embedded=True`` (learned batch embedding):
 
-      - ``batch_representation_mean_bd`` and ``batch_representation_std_unconstrained_bd``
-        are extended by *n_new_batch* new rows (mean initialised with small Gaussian noise,
-        std initialised to zero).  Gradient hooks zero out gradients for the original rows so
-        the pretrained embeddings remain unchanged.
+      - New embedding rows are added as separate trainable parameters
+        (``batch_representation_mean_new_bd`` and ``batch_representation_std_unconstrained_new_bd``;
+        mean initialised with small Gaussian noise, std initialised to zero). The pretrained embedding
+        tables are untouched and frozen.
 
-    New batch indices must lie in ``[n_batch_ref, n_batch_ref + n_new_batch)``.  Old batch
-    indices (0 to ``n_batch_ref - 1``) continue to work as before and can be mixed with new
-    ones in the same forward pass.
+    Only the new-batch parameters are trainable. Cells from the original batches get exactly the
+    outputs they got before surgery.
+
+    **Batch indices.** By default (``shift_batch_index=True``) the ``batch_index_n`` passed to
+    :meth:`forward`, :meth:`predict` and :meth:`validate` is interpreted as *query-local*: it must
+    lie in ``[0, n_new_batch)`` and is shifted internally by ``n_batch_ref`` so that it addresses the new
+    batches. This is what is wanted when the query dataset consists only of new batches. With
+    ``shift_batch_index=False`` the indices are used as they are, so original batches
+    (``0 .. n_batch_ref - 1``) and new batches (``n_batch_ref .. n_batch_ref + n_new_batch - 1``) can be
+    mixed in the same pass.
+
+    The methods :meth:`forward`, :meth:`predict` and :meth:`validate` accept any of the arguments of the
+    corresponding methods of the wrapped model (e.g. ``cell_type_labels_n`` for
+    :class:`~cellarium.ml.models.SCANVI`) and pass on those that it accepts.
 
     **CLI usage**: supply *pretrained_scvi* via a ``!CheckpointLoader`` YAML block pointing to
     a trained scVI checkpoint; *n_new_batch* is linked automatically from the data's
@@ -237,12 +264,15 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
             Surgery is performed on this object; it should not be used independently after
             ``ScArches`` is constructed.
         n_new_batch: number of new (query) batches to add.
+        shift_batch_index: if ``True`` (default), ``batch_index_n`` is query-local and is shifted by the
+            number of original batches. If ``False``, ``batch_index_n`` is used as is.
     """
 
     def __init__(
         self,
         pretrained_scvi: SingleCellVariationalInference,
         n_new_batch: int,
+        shift_batch_index: bool = True,
     ) -> None:
         super().__init__()
         if pretrained_scvi.n_batch < 1:
@@ -256,8 +286,10 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
         self.scvi = pretrained_scvi
         self.n_batch_ref: int = pretrained_scvi.n_batch
         self.n_new_batch: int = n_new_batch
+        self.shift_batch_index = shift_batch_index
 
-        # Freeze all existing parameters.
+        # Freeze all existing parameters. This must happen before the surgery below creates
+        # the new (trainable) parameters.
         pretrained_scvi.requires_grad_(False)
 
         # Extend the batch count so that batch_representation_from_batch_index generates
@@ -272,6 +304,9 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
             self._surgery_final_additive_bias()
         else:
             self._surgery_batch_embeddings()
+
+        # Put the BatchNorm layers into eval mode right away (see train()).
+        self.train(self.training)
 
     # ------------------------------------------------------------------
     # Surgery helpers
@@ -302,40 +337,57 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
         decoder = self.scvi.decoder
         if decoder.final_additive_bias_layer is None:
             return
-        categorical_dims = sum(self.scvi.n_cats_per_cov)
         decoder.final_additive_bias_layer = ScArchesFinalAdditiveBiasLayer(  # type: ignore[assignment]
             original=decoder.final_additive_bias_layer,
             n_batch_ref=self.n_batch_ref,
             n_new_batch=self.n_new_batch,
-            categorical_dims=categorical_dims,
         )
 
     def _surgery_batch_embeddings(self) -> None:
-        """Extend batch embedding tables and freeze old rows via gradient hooks."""
+        """
+        Add new embedding rows as separate trainable parameters.
+
+        The pretrained embedding tables stay as they are (frozen) and are found by
+        :meth:`~cellarium.ml.models.SingleCellVariationalInference._full_batch_representation_table` together with
+        the new rows. Keeping the old and new rows in different parameters means that the old rows are frozen by
+        ``requires_grad=False`` alone, which every optimizer (including weight decay) respects and which survives
+        copying and checkpointing.
+        """
         scvi = self.scvi
-        n_new = self.n_new_batch
         assert scvi.batch_representation_mean_bd is not None
         assert scvi.batch_representation_std_unconstrained_bd is not None
-
         n_latent_batch: int = scvi.batch_representation_mean_bd.shape[1]
         # Explicit device= so new rows are created on the same device as the pretrained
         # embeddings, not on whatever torch.device("meta") context may be active.
         device = scvi.batch_representation_mean_bd.device
+        scvi.batch_representation_mean_new_bd = nn.Parameter(
+            torch.zeros(self.n_new_batch, n_latent_batch, device=device)
+        )
+        scvi.batch_representation_std_unconstrained_new_bd = nn.Parameter(
+            torch.zeros(self.n_new_batch, n_latent_batch, device=device)
+        )
+        self._reset_new_embedding_rows()
 
-        # Mean: extend with small-noise rows (like the identity-init used for old batches).
-        old_mean = scvi.batch_representation_mean_bd.data
-        new_mean_rows = torch.zeros(n_new, n_latent_batch, device=device)
-        nn.init.normal_(new_mean_rows, mean=0.0, std=0.01)
-        extended_mean = nn.Parameter(torch.cat([old_mean, new_mean_rows], dim=0))
-        scvi.batch_representation_mean_bd = extended_mean
-        extended_mean.register_hook(_make_freeze_old_rows_hook(n_new))
+    def _reset_new_embedding_rows(self) -> None:
+        # mean: small noise (the old rows are close to one-hot-like identity init); std: zeros (std=1 after exp)
+        nn.init.normal_(self.scvi.batch_representation_mean_new_bd, mean=0.0, std=0.01)
+        nn.init.zeros_(self.scvi.batch_representation_std_unconstrained_new_bd)
 
-        # Std (unconstrained): extend with zeros (maps to std=1 after softplus/exp).
-        old_std = scvi.batch_representation_std_unconstrained_bd.data
-        new_std_rows = torch.zeros(n_new, n_latent_batch, device=device)
-        extended_std = nn.Parameter(torch.cat([old_std, new_std_rows], dim=0))
-        scvi.batch_representation_std_unconstrained_bd = extended_std
-        extended_std.register_hook(_make_freeze_old_rows_hook(n_new))
+    # ------------------------------------------------------------------
+    # Training mode
+    # ------------------------------------------------------------------
+
+    def train(self, mode: bool = True) -> Self:
+        """
+        Set the training mode, but keep all ``BatchNorm`` layers of the wrapped model in eval mode so that their
+        running statistics (and the statistics used for normalization) stay those of the pretrained model.
+        Other layers, e.g. dropout, follow ``mode``.
+        """
+        super().train(mode)
+        for module in self.scvi.modules():
+            if isinstance(module, _BatchNorm):
+                module.eval()
+        return self
 
     # ------------------------------------------------------------------
     # CellariumModel interface
@@ -349,81 +401,38 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
         # Widen to nn.Module | None so mypy knows ScArchesFinalAdditiveBiasLayer is reachable.
         final_bias: nn.Module | None = self.scvi.decoder.final_additive_bias_layer
         if isinstance(final_bias, ScArchesFinalAdditiveBiasLayer):
-            nn.init.zeros_(final_bias.new_bias_weight)
+            final_bias.reset_parameters()
         if self.scvi.batch_embedded:
-            n = self.n_new_batch
-            if self.scvi.batch_representation_mean_bd is not None:
-                nn.init.normal_(self.scvi.batch_representation_mean_bd.data[-n:], mean=0.0, std=0.01)
-            if self.scvi.batch_representation_std_unconstrained_bd is not None:
-                self.scvi.batch_representation_std_unconstrained_bd.data[-n:].zero_()
+            self._reset_new_embedding_rows()
 
     @property
     def var_names_g(self) -> np.ndarray:
         return self.scvi.var_names_g
 
     # ------------------------------------------------------------------
-    # Forward / predict / validate — delegate entirely to self.scvi
+    # Forward / predict / validate — delegate to self.scvi
     # ------------------------------------------------------------------
 
-    def forward(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        batch_index_n: torch.Tensor,
-        continuous_covariates_nc: torch.Tensor | None = None,
-        categorical_covariate_index_nd: torch.Tensor | None = None,
-        total_mrna_umis_n: torch.Tensor | None = None,
-    ) -> dict:
-        return self.scvi(
-            x_ng=x_ng,
-            var_names_g=var_names_g,
-            batch_index_n=batch_index_n,
-            continuous_covariates_nc=continuous_covariates_nc,
-            categorical_covariate_index_nd=categorical_covariate_index_nd,
-            total_mrna_umis_n=total_mrna_umis_n,
-        )
+    def _prepare_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Convert query-local ``batch_index_n`` to the index space of the extended model (if enabled)."""
+        if not self.shift_batch_index or "batch_index_n" not in kwargs:
+            return kwargs
+        batch_index_n = kwargs["batch_index_n"]
+        if ((batch_index_n < 0) | (batch_index_n >= self.n_new_batch)).any():
+            raise ValueError(
+                f"With shift_batch_index=True, batch_index_n must be query-local, i.e. in [0, {self.n_new_batch}). "
+                "Use shift_batch_index=False to pass indices of the extended model (original batches first)."
+            )
+        return {**kwargs, "batch_index_n": batch_index_n + self.n_batch_ref}
 
-    def predict(
-        self,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        batch_index_n: torch.Tensor,
-        continuous_covariates_nc: torch.Tensor | None = None,
-        categorical_covariate_index_nd: torch.Tensor | None = None,
-    ) -> dict:
-        return self.scvi.predict(
-            x_ng=x_ng,
-            var_names_g=var_names_g,
-            batch_index_n=batch_index_n,
-            continuous_covariates_nc=continuous_covariates_nc,
-            categorical_covariate_index_nd=categorical_covariate_index_nd,
-        )
+    def forward(self, **kwargs: Any) -> dict:
+        return call_func_with_batch(self.scvi.forward, self._prepare_kwargs(kwargs))
 
-    def validate(
-        self,
-        trainer: pl.Trainer,
-        pl_module: pl.LightningModule,
-        batch_idx: int,
-        x_ng: torch.Tensor,
-        var_names_g: np.ndarray,
-        batch_index_n: torch.Tensor,
-        continuous_covariates_nc: torch.Tensor | None = None,
-        categorical_covariate_index_nd: torch.Tensor | None = None,
-        total_mrna_umis_n: torch.Tensor | None = None,
-        validation_cell_type_index_n: torch.Tensor | None = None,
-    ) -> None:
-        self.scvi.validate(
-            trainer=trainer,
-            pl_module=pl_module,
-            batch_idx=batch_idx,
-            x_ng=x_ng,
-            var_names_g=var_names_g,
-            batch_index_n=batch_index_n,
-            continuous_covariates_nc=continuous_covariates_nc,
-            categorical_covariate_index_nd=categorical_covariate_index_nd,
-            total_mrna_umis_n=total_mrna_umis_n,
-            validation_cell_type_index_n=validation_cell_type_index_n,
-        )
+    def predict(self, **kwargs: Any) -> Any:
+        return call_func_with_batch(self.scvi.predict, self._prepare_kwargs(kwargs))
+
+    def validate(self, **kwargs: Any) -> None:  # type: ignore[override]
+        call_func_with_batch(self.scvi.validate, self._prepare_kwargs(kwargs))
 
     def on_validation_epoch_start(self, trainer: pl.Trainer) -> None:
         self.scvi.on_validation_epoch_start(trainer)
