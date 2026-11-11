@@ -5,6 +5,8 @@
 
 import copy
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import lightning.pytorch as pl
 import numpy as np
@@ -20,7 +22,7 @@ from cellarium.ml.models.scarches import (
     ScArchesLinearWithBatch,
     ScArchesLinearWithBatchAndCovariates,
 )
-from cellarium.ml.models.scvi import LinearWithStructuredBias
+from cellarium.ml.models.scvi import LinearWithStructuredBias, compute_annealed_kl_weight
 from cellarium.ml.utilities.data import collate_fn
 from tests.common import BoringDatasetSCVI
 
@@ -548,6 +550,49 @@ def test_scanvi_through_scarches():
     with torch.no_grad():
         prediction = sa.predict(**inputs)
     assert "y_probs_nc" in prediction
+
+
+# ---------------------------------------------------------------------------
+# The KL annealing schedule continues from the pretrained model's checkpoint
+# ---------------------------------------------------------------------------
+
+
+def test_kl_schedule_continues_from_pretrained_checkpoint(tmp_path: Path):
+    n, batch_size, warmup_steps = 40, 8, 8
+    rng = np.random.default_rng(0)
+    dataset = BoringDatasetSCVI(
+        data=rng.poisson(lam=2.0, size=(n, N_GENES)), batch_index_n=rng.integers(0, 3, size=n), var_names=VAR_NAMES
+    )
+    loader = torch.utils.data.DataLoader(dataset, collate_fn=collate_fn, batch_size=batch_size)
+    scvi = SingleCellVariationalInference(
+        **{**make_model_kwargs(n_batch=3), "kl_warmup_epochs": None, "kl_warmup_steps": warmup_steps}
+    )
+    module = CellariumModule(model=scvi, optim_fn=torch.optim.Adam, optim_kwargs={"lr": 1e-3})
+    trainer = pl.Trainer(accelerator="cpu", devices=1, max_steps=5, enable_checkpointing=False, logger=False)
+    trainer.fit(module, train_dataloaders=loader)
+    ckpt_path = tmp_path / "scvi.ckpt"
+    trainer.save_checkpoint(ckpt_path)
+    base_step = trainer.global_step
+
+    # a model loaded from the checkpoint knows how far its training got (this is not part of the state dict)
+    pretrained = CellariumModule.load_from_checkpoint(ckpt_path).model
+    assert isinstance(pretrained, SingleCellVariationalInference)
+    assert (pretrained.step, pretrained.epoch) == (base_step, trainer.current_epoch)
+
+    # ScArches continues from there: the training position of its own trainer is added
+    sa = ScArches(pretrained, n_new_batch=1)
+    assert pretrained.step == base_step  # the first training step already uses the right KL weight
+    for run_step in (0, 2, 4):
+        sa.on_train_batch_end(cast(pl.Trainer, SimpleNamespace(global_step=run_step, current_epoch=0, logger=None)))
+        assert (pretrained.step, pretrained.epoch) == (base_step + run_step, trainer.current_epoch)
+    # past the warmup of the pretrained model (a restarted schedule would be at 4 / 8 here)
+    weight = compute_annealed_kl_weight(
+        epoch=pretrained.epoch,
+        step=pretrained.step,
+        n_epochs_kl_warmup=pretrained.kl_warmup_epochs,
+        n_steps_kl_warmup=pretrained.kl_warmup_steps,
+    )
+    assert weight == 1.0
 
 
 # ---------------------------------------------------------------------------

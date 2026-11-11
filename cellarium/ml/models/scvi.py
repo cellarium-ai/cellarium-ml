@@ -648,6 +648,9 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
         self.z_kl_weight_max = z_kl_weight_max
         self.epoch = 0
         self.step = 0
+        # added to the training position of the trainer (see on_train_batch_end)
+        self.epoch_offset = 0
+        self.step_offset = 0
         self.reconstruction_var_names_g = reconstruction_var_names_g
         if reconstruction_var_names_g is not None:
             allowed_var_names_g = []
@@ -1794,9 +1797,22 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                             mean_err = err_dist[finite].mean().item()
                             trainer.logger.log_metrics({"val_cell_type_mean_error_distance": mean_err}, step=step)
 
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """
+        Restore the training position (which determines the KL annealing weight) from the checkpoint.
+
+        ``step`` and ``epoch`` are not part of the ``state_dict``, so a model constructed from a checkpoint or from
+        a config would otherwise start at 0, e.g. the first training step after resuming would use the KL weight of
+        the very first step of training.
+        """
+        self.step = checkpoint.get("global_step", self.step)
+        self.epoch = checkpoint.get("epoch", self.epoch)
+
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
-        self.step = trainer.global_step
-        self.epoch = trainer.current_epoch
+        # ``step_offset`` and ``epoch_offset`` (read with a default of 0 so that older pickled models work) are
+        # set by :class:`~cellarium.ml.models.ScArches` to continue the schedule of the pretrained model.
+        self.step = trainer.global_step + getattr(self, "step_offset", 0)
+        self.epoch = trainer.current_epoch + getattr(self, "epoch_offset", 0)
         # log these values to pytorch lightning logger
         if trainer.logger is not None:
             trainer.logger.log_metrics(

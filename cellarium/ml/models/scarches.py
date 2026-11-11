@@ -216,6 +216,8 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
     * ``BatchNorm`` layers are kept in eval mode (also during training), so their running statistics
       are frozen too. Dropout is left as it is.
     * ``pretrained_scvi.n_batch`` is extended by *n_new_batch*.
+    * The KL annealing schedule continues from where the pretrained model's training ended (its step and epoch
+      are restored from its checkpoint): a fully annealed pretrained model is trained with the full KL weight.
     * For models with ``batch_embedded=False`` (one-hot batch representation):
 
       - Each :class:`~cellarium.ml.models.scvi.LinearWithBatch` and
@@ -284,6 +286,10 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
             raise ValueError(f"n_new_batch must be >= 1, got {n_new_batch}.")
 
         self.scvi = pretrained_scvi
+        # Continue the KL annealing schedule of the pretrained model instead of restarting it: the training position
+        # of the pretrained model (restored from its checkpoint) is added to that of this training run.
+        pretrained_scvi.step_offset = pretrained_scvi.step
+        pretrained_scvi.epoch_offset = pretrained_scvi.epoch
         self.n_batch_ref: int = pretrained_scvi.n_batch
         self.n_new_batch: int = n_new_batch
         self.shift_batch_index = shift_batch_index
@@ -442,3 +448,6 @@ class ScArches(CellariumModel, PredictMixin, ValidateMixin):
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         self.scvi.on_train_batch_end(trainer)
+
+    # Note: ``on_load_checkpoint`` is deliberately not delegated to ``self.scvi``. It would overwrite the training
+    # position of the pretrained model with that of this (shorter) run, which is already accounted for by the offsets.
