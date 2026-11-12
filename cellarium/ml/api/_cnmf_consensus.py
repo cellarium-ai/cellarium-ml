@@ -166,6 +166,8 @@ def compute_neighbors(D_rkg: torch.Tensor, local_neighborhood_size: float) -> Ne
 
     # euclidean distance to every other run
     euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+    # for more than 25 factors cdist uses a matrix product, whose roundoff makes the matrix slightly asymmetric
+    euclidean_dist_mm = (euclidean_dist_mm + euclidean_dist_mm.T) / 2
     euclidean_dist_mm.fill_diagonal_(0)  # correct for roundoff errors that may be present
 
     # top n_neighbors plus self (distance 0), and then the distances to the top n_neighbors

@@ -111,6 +111,7 @@ def scvi(
         cpu_transforms = [filter]
         var_names_g = cdata.hvg.index[cdata.hvg].tolist()
     else:
+        print("Warning: running on all genes since no highly variable genes are in the .hvg slot")
         cpu_transforms = []
         var_names_g = datamodule.var_names_g
 

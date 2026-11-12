@@ -12,9 +12,9 @@ import torch
 from cellarium.ml.api._obsm_storage import ObsmWriter, RowSubset, subset_rows
 
 
-def make_writer(values: np.ndarray, max_bytes: int | None, dtype: type = np.float32) -> ObsmWriter:
+def make_writer(values: np.ndarray, dtype: type = np.float32) -> ObsmWriter:
     n_rows, n_cols = values.shape
-    return ObsmWriter(n_rows, n_cols, max_bytes=max_bytes, dtype=dtype)
+    return ObsmWriter(n_rows, n_cols, dtype=dtype)
 
 
 def directory_of(array: np.ndarray) -> str:
@@ -25,7 +25,7 @@ def directory_of(array: np.ndarray) -> str:
 
 def on_disk_array(values: np.ndarray) -> np.memmap:
     """``values`` as a finished, read-only, on-disk array."""
-    with make_writer(values, max_bytes=0, dtype=values.dtype.type) as writer:
+    with make_writer(values, dtype=values.dtype.type) as writer:
         writer.array[:] = values
     result = writer.result
     assert isinstance(result, np.memmap)
@@ -40,23 +40,9 @@ def values() -> np.ndarray:
 # ---- ObsmWriter ----
 
 
-def test_writer_keeps_a_small_array_in_memory(values):
-    with make_writer(values, max_bytes=values.nbytes) as writer:
-        assert not writer.on_disk
-        writer.array[:] = values
-    assert type(writer.result) is np.ndarray
-    assert np.array_equal(writer.result, values)
-
-
-def test_writer_with_no_limit_stays_in_memory(values):
-    with make_writer(values, max_bytes=None) as writer:
-        assert not writer.on_disk
-    assert type(writer.result) is np.ndarray
-
-
-def test_writer_puts_a_big_array_in_a_read_only_file(values):
-    with make_writer(values, max_bytes=values.nbytes - 1) as writer:
-        assert writer.on_disk
+def test_writer_always_puts_the_array_in_a_read_only_file(values):
+    with make_writer(values) as writer:
+        assert isinstance(writer.array, np.memmap)
         writer.array[:10] = values[:10]
         writer.array[10:] = values[10:]
     result = writer.result
@@ -84,7 +70,7 @@ def test_the_file_is_deleted_when_the_array_is_no_longer_referenced(values):
 
 
 def test_the_file_is_deleted_if_filling_it_fails(values):
-    writer = make_writer(values, max_bytes=0)
+    writer = make_writer(values)
     with pytest.raises(RuntimeError, match="boom"):
         with writer:
             directory = directory_of(writer.array)
@@ -96,7 +82,7 @@ def test_the_file_is_deleted_if_filling_it_fails(values):
 
 
 def test_the_array_is_only_available_inside_the_block(values):
-    writer = make_writer(values, max_bytes=None)
+    writer = make_writer(values)
     with pytest.raises(RuntimeError, match="inside the `with` block"):
         writer.array
 
@@ -297,3 +283,18 @@ def test_the_obsm_mapping_accepts_an_entry_that_stays_on_disk(h5ad_cdata, loadin
     view.obsm["again"] = view.obsm["X_test"]  # the length check works with len()
     with pytest.raises(ValueError, match="expected 3"):
         view.obsm["wrong"] = h5ad_cdata.obsm["X_test"]
+
+
+def test_write_puts_the_rows_at_their_positions(values):
+    with make_writer(values) as writer:
+        writer.write(np.arange(0, 5), values[:5])  # a contiguous run
+        writer.write(torch.tensor([9, 7, 5, 6]), values[[9, 7, 5, 6]])  # not contiguous, in any order
+        writer.write(np.array([8]), values[[8]])  # a single cell
+        writer.write(np.arange(10, 20), values[10:])
+    np.testing.assert_array_equal(writer.result, values)
+
+
+def test_write_rejects_values_that_do_not_have_a_row_for_each_cell(values):
+    with make_writer(values) as writer:
+        with pytest.raises(RuntimeError, match="Got 4 rows of values for 5 cells.*CellFilter"):
+            writer.write(np.arange(5), values[:4])

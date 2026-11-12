@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 import lightning.pytorch as pl
@@ -191,10 +191,31 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         self._k_final_epoch_start: dict[int, int | None] = {k: None for k in self.k_values}
         self._k_done: dict[int, bool] = {k: False for k in self.k_values}
 
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True):
+        # The snapshots of the factors and the loss averages are plain tensors, not buffers: without this they would
+        # stay on the accelerator when the module is moved to the cpu at the end of a fit.
+        module = super()._apply(fn, recurse)
+        snapshots = getattr(self, "_D_prev_snapshots", {})
+        for k, snapshot in snapshots.items():
+            if snapshot is not None:
+                snapshots[k] = fn(snapshot)
+        for name in ("_train_nmf_loss_ema", "_val_nmf_loss_ema"):
+            tensor = getattr(self, name, None)
+            if tensor is not None:
+                setattr(self, name, fn(tensor))
+        return module
+
+    def on_train_end(self, trainer: pl.Trainer) -> None:
+        # the snapshots only serve to log the drift of the factors while training: each is a copy of the factors
+        self._D_prev_snapshots = {k: None for k in self.k_values}
+
     @property
     def factors_dict(self) -> dict[int, torch.Tensor]:
         """Return the learned factors for each k value."""
         return {k: getattr(self, f"D_{k}_rkg") for k in self.k_values}
+
+    def _training_buffer_names(self) -> list[str]:
+        return [name for k in self.k_values for name in (f"A_{k}_rkk", f"B_{k}_rkg")]
 
     def online_dictionary_update(self, x_ng: torch.Tensor, k: int, n_iterations: int = 100) -> dict[str, torch.Tensor]:
         """
@@ -254,13 +275,15 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         setattr(self, f"B_{k}_rkg", updated_values["B_rkg"])
         setattr(self, f"D_{k}_rkg", D_rkg)
 
-        return {
+        result = {
             "loss": self.encoder_loss_fn(encoder_loadings_rnk.contiguous(), solver_loadings_rnk.detach().contiguous()),
             "solver_loadings_rnk": solver_loadings_rnk.detach(),
             "encoder_loadings_rnk": encoder_loadings_rnk.detach(),
-            "loadings_history": updated_values.get("loadings_history", None),
-            "factors_history": updated_values.get("factors_history", None),
         }
+        for history in ("loadings_history", "factors_history"):
+            if history in updated_values:  # only some solvers keep a history
+                result[history] = updated_values[history]
+        return result
 
     def forward(
         self,
@@ -327,6 +350,7 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
         return {"loss": loss}
 
     def on_train_start(self, trainer: pl.Trainer) -> None:
+        self._check_training_state_present()
         if trainer.world_size > 1:
             assert isinstance(trainer.strategy, DDPStrategy), (
                 "OnlineNonNegativeMatrixFactorization requires that the trainer uses the DDP strategy."
@@ -404,6 +428,8 @@ class AmortizedOnlineNonNegativeMatrixFactorization(NonNegativeMatrixFactorizati
                     )
 
                 euclidean_dist_mm = torch.cdist(d_norm_mg, d_norm_mg, p=2)
+                # for more than 25 factors cdist uses a matrix product, whose roundoff makes the matrix asymmetric
+                euclidean_dist_mm = (euclidean_dist_mm + euclidean_dist_mm.T) / 2
                 euclidean_dist_mm.fill_diagonal_(0)
                 n_nearest_dist_including_self_mL, _ = torch.topk(euclidean_dist_mm, n_neighbors + 1, largest=False)
                 n_nearest_dist_ml = n_nearest_dist_including_self_mL[:, 1:]

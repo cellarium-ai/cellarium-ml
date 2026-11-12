@@ -10,6 +10,7 @@ import pandas as pd
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
 from cellarium.ml.api.cellariumdata import CellariumData
+from cellarium.ml.api.utils import shutdown_trainer_workers
 from cellarium.ml.models import OnePassMeanVarStd
 from cellarium.ml.transforms import Densify, Log1p, NormalizeTotal, ZScore
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
@@ -37,7 +38,10 @@ def _run_onepass(
         logger=False,
         enable_checkpointing=False,
     )
-    trainer.fit(module, datamodule)
+    try:
+        trainer.fit(module, datamodule)
+    finally:
+        shutdown_trainer_workers(trainer)
     assert isinstance(module.model, OnePassMeanVarStd)
     return module.model
 

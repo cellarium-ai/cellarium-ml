@@ -38,10 +38,6 @@ class DistributedCollection(ABC):
     # call it if this is true.
     supports_prefetch: bool = False
 
-    #: The largest number of dataloader workers that can read this collection, or ``None`` for no limit. A collection
-    # that lives in the memory of one process (so that every worker would need a copy) sets it to ``0``.
-    max_num_workers: int | None = None
-
     limits: list[int]
     var_names: Any
 

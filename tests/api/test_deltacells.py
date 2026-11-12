@@ -39,7 +39,8 @@ def test_create_keeps_the_order_of_the_paths(h5ad_paths, tmp_path, deltacells_kw
     assert uri == str(tmp_path / "out")
 
     cdata = CellariumData.from_deltacells(uri, deltacells_kwargs=deltacells_kwargs)
-    assert list(cdata.obs["cell_type"].index) == list(_obs(reordered).index)
+    assert list(cdata.obs_names) == list(_obs(reordered).index)
+    assert list(cdata.obs["cell_type"].index) == list(range(cdata.n_obs))  # indexed by the cell IDs
 
 
 def test_create_treats_paths_as_literals(make_h5ad_files, tmp_path):
@@ -145,14 +146,15 @@ def test_obs_queries(dcdata, h5ad_paths):
     assert len(obs) == len(expected)
     assert obs.columns == ["cell_type", "n_counts"]
 
+    assert list(obs.names) == list(expected.index)
     cell_type = obs["cell_type"]
-    assert list(cell_type.index) == list(expected.index)
+    assert list(cell_type.index) == list(range(len(expected)))  # the cell IDs: a source dataset has no ID column
     assert list(cell_type.astype(str)) == list(expected["cell_type"].astype(str))
     assert obs[["cell_type", "n_counts"]].shape == (len(expected), 2)
 
     names = [expected.index[7], expected.index[2]]
     selected = obs.loc[names]
-    assert list(selected.index) == names
+    assert list(selected.index) == [7, 2]
     assert list(selected["n_counts"]) == list(expected.loc[names, "n_counts"])
     assert list(obs.loc[names, "n_counts"].columns) == ["n_counts"]
     with pytest.raises(KeyError):
@@ -163,7 +165,7 @@ def test_obs_queries(dcdata, h5ad_paths):
     assert list(pd.concat(batches)["n_counts"]) == list(expected["n_counts"])
 
     frame = obs.to_frame()
-    assert list(frame.index) == list(expected.index)
+    assert list(frame.index) == list(range(len(expected)))
     assert list(frame.columns) == ["cell_type", "n_counts"]
 
 

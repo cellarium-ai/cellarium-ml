@@ -3,6 +3,7 @@
 
 import os
 import tempfile
+from types import SimpleNamespace
 from typing import Literal
 
 import anndata
@@ -15,7 +16,7 @@ from sklearn.decomposition import NMF
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._cnmf_consensus import consensus_factors
-from cellarium.ml.models import OnlineNonNegativeMatrixFactorization
+from cellarium.ml.models import AmortizedOnlineNonNegativeMatrixFactorization, OnlineNonNegativeMatrixFactorization
 from cellarium.ml.models import nmf as nmf_module
 from cellarium.ml.models.nmf import (
     compute_x_squared_sum,
@@ -1025,3 +1026,81 @@ def test_online_nmf_hals_stored_loadings_improve_the_fit():
     # the data has squared norm of about n * g * E[x^2]; the stored loadings must explain a good part of it
     assert (error_after_five_passes_r < 0.5 * x_ng.pow(2).sum()).all()
     assert (error_after_five_passes_r <= error_after_one_pass_r * 1.0001).all()
+
+
+def test_online_nmf_hals_running_errors_follow_the_model_to_another_device():
+    model = _small_online_nmf("hals")
+    assert model._err_running_sum_rk.device.type == "cpu"
+
+    model.to("meta")
+
+    assert model._err_running_sum_rk.device.type == "meta"
+    assert model._prev_err_rk is None  # not set yet: left as it is
+
+
+# ---------------------------------------------------------------------------
+# Releasing the training state of a trained model
+# ---------------------------------------------------------------------------
+
+
+def _small_nmf_models() -> list:
+    return [
+        _small_online_nmf("fista"),
+        AmortizedOnlineNonNegativeMatrixFactorization(
+            var_names_g=[f"gene_{i}" for i in range(8)],
+            k_values=[3, 4],
+            r=2,
+            latent_dim=4,
+            total_n_cells=30,
+            batch_size=5,
+        ),
+    ]
+
+
+@pytest.mark.parametrize("index", [0, 1], ids=["online", "amortized"])
+def test_freeing_the_training_state_keeps_the_factors(index: int):
+    model = _small_nmf_models()[index]
+    factors = {k: v.clone() for k, v in model.factors_dict.items()}
+
+    model.free_training_state()
+
+    names = set(model.state_dict())
+    for k in model.k_values:
+        assert getattr(model, f"A_{k}_rkk") is None and getattr(model, f"B_{k}_rkg") is None
+        assert f"A_{k}_rkk" not in names and f"B_{k}_rkg" not in names
+        assert torch.equal(model.factors_dict[k], factors[k])
+    assert any(name.startswith("D_") for name in names)
+
+
+@pytest.mark.parametrize("index", [0, 1], ids=["online", "amortized"])
+def test_a_model_without_its_training_state_loads_from_its_state_dict(index: int):
+    model = _small_nmf_models()[index]
+    model.free_training_state()
+    state_dict = model.state_dict()
+
+    fresh = _small_nmf_models()[index]
+    fresh.on_load_checkpoint({"state_dict": {f"pipeline.0.{name}": value for name, value in state_dict.items()}})
+    fresh.load_state_dict(state_dict)  # strict: the keys match
+
+    for k in model.k_values:
+        assert getattr(fresh, f"A_{k}_rkk") is None
+        assert torch.equal(fresh.factors_dict[k], model.factors_dict[k])
+
+
+@pytest.mark.parametrize("index", [0, 1], ids=["online", "amortized"])
+def test_a_checkpoint_with_its_training_state_keeps_it_on_load(index: int):
+    model = _small_nmf_models()[index]
+    fresh = _small_nmf_models()[index]
+    state_dict = {f"pipeline.0.{name}": value for name, value in model.state_dict().items()}
+    fresh.on_load_checkpoint({"state_dict": state_dict})
+
+    for k in model.k_values:
+        assert getattr(fresh, f"A_{k}_rkk") is not None and getattr(fresh, f"B_{k}_rkg") is not None
+
+
+@pytest.mark.parametrize("index", [0, 1], ids=["online", "amortized"])
+def test_a_model_without_its_training_state_cannot_be_trained(index: int):
+    model = _small_nmf_models()[index]
+    model.free_training_state()
+    with pytest.raises(RuntimeError, match="free_training_state"):
+        model.on_train_start(SimpleNamespace(world_size=1))  # type: ignore[arg-type]

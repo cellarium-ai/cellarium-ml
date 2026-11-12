@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from cellarium.ml.api import plotting as pl
 from cellarium.ml.api import preprocessing as pp
 from cellarium.ml.api import tools as tl
 from cellarium.ml.api.cellariumdata import CellariumData, CellariumDataView, get_datamodule, get_deltacells_datamodule
@@ -27,6 +28,7 @@ __all__ = [
     "get_h5ad_files_n_cells",
     "h5ad_paths_from_google_bucket",
     "write_obs_parquet",
+    "pl",
     "pp",
     "tl",
     "read_h5ad_file",

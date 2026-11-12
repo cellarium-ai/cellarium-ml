@@ -45,7 +45,7 @@ def test_predict_batches_cover_every_cell_once_with_their_positions(cdata):
     # each row of the batches is the cell at its position
     order = np.argsort(result["positions"])
     assert np.array_equal(result["x"][order], _expected_x(cdata, np.arange(cdata.n_obs)))
-    assert np.array_equal(result["names"][order], cdata.obs.index.to_numpy())
+    assert np.array_equal(result["names"][order], cdata.obs_names.to_numpy())
 
 
 def test_predict_batches_do_not_follow_the_settings_of_the_datamodule(cdata):
@@ -68,7 +68,7 @@ def test_predict_batches_of_a_view_cover_the_cells_of_the_view(cdata):
     assert sorted(result["positions"]) == list(range(len(selected)))  # positions in the view
     order = np.argsort(result["positions"])
     assert np.array_equal(result["x"][order], _expected_x(cdata, selected))
-    assert np.array_equal(result["names"][order], cdata.obs.index.to_numpy()[selected])
+    assert np.array_equal(result["names"][order], cdata.obs_names.to_numpy()[selected])
 
 
 def test_predict_batches_without_a_module_apply_no_transforms(cdata):
