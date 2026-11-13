@@ -28,7 +28,8 @@ predict_prob_key: Final = "y_probs_nc"
 predict_cat_key: Final = "category_labels_c"
 
 
-def test_load_from_checkpoint_multi_device(tmp_path: Path):
+@pytest.mark.parametrize("hidden_layers", [None, [8]])
+def test_load_from_checkpoint_multi_device(tmp_path: Path, hidden_layers: list[int] | None):
     """
     Test SOCAM model checkpoint saving and loading with multi-device support.
     """
@@ -76,6 +77,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
         seed=42,
         probability_propagation_flag=False,
         log_metrics=False,
+        hidden_layers=hidden_layers,
     )
     module = CellariumModule(model=model, optim_fn=torch.optim.Adam, optim_kwargs={"lr": 1e-3})
 
@@ -109,6 +111,7 @@ def test_load_from_checkpoint_multi_device(tmp_path: Path):
     assert model.n_categories == loaded_model.n_categories
     # assert model.n_output_categories == loaded_model.n_output_categories
     assert model.probability_propagation_flag == loaded_model.probability_propagation_flag
+    assert loaded_model.hidden_layers == (hidden_layers or [])
 
     # Test prediction from loaded checkpoint
     test_x_ng = torch.randn(2, g)
@@ -970,3 +973,140 @@ def test_propagate_logits_all_leaves_is_log_softmax():
     result = propagate_logits(logits_nc, info["nonleaf_desc_cc"], info["perm"], info["inv_perm"])
     expected = torch.nn.functional.log_softmax(logits_nc, dim=1)
     assert torch.allclose(result, expected, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# configurable classifier (hidden layers / dressing / L1 / legacy checkpoints)
+# ---------------------------------------------------------------------------
+
+
+def _make_deep_socam(g: int = 6, c: int = 5, **kwargs) -> SOCAM:
+    var_names_g = np.array([f"gene_{i}" for i in range(g)])
+    return SOCAM(
+        n_obs=10,
+        var_names_g=var_names_g,
+        descendant_tensor=torch.eye(c, dtype=torch.float32),
+        cl_names=[f"cell_type_{i}" for i in range(c)],
+        probability_propagation_flag=False,
+        **kwargs,
+    )
+
+
+def test_socam_linear_matches_legacy_formula():
+    """With no hidden layers, the loss and logits equal the original hand-written logistic regression."""
+    g, c, n = 6, 5, 7
+    model = _make_deep_socam(g=g, c=c, W_prior_scale=0.5, W_init_scale=0.3, seed=3)
+    x_ng = torch.randn(n, g)
+    cl_names_n = np.array([f"cell_type_{i % c}" for i in range(n)])
+    var_names_g = model.var_names_g
+
+    legacy_logits = x_ng @ model.W_gc + model.b_c
+    legacy_ce = torch.nn.functional.cross_entropy(
+        legacy_logits, model._cl_names_to_indices(cl_names_n), reduction="mean"
+    )
+    legacy_loss = legacy_ce + (model.W_gc.abs().sum() / 0.5) / model.n_obs
+
+    loss = model(x_ng, var_names_g, cl_names_n)["loss"]
+    assert isinstance(loss, torch.Tensor)
+    assert torch.allclose(loss, legacy_loss, atol=1e-5)
+    assert torch.allclose(model.predict(x_ng, var_names_g)["y_logits_nc"], legacy_logits, atol=1e-5)
+    assert model.W_gc.shape == (g, c)
+    assert model.b_c.shape == (c,)
+
+
+def test_socam_legacy_state_dict_loads():
+    """Checkpoints with ``W_gc`` / ``b_c`` keys load into the ``classifier`` linear layer."""
+    g, c = 6, 5
+    model = _make_deep_socam(g=g, c=c)
+    legacy_W_gc, legacy_b_c = torch.randn(g, c), torch.randn(c)
+    state_dict = {k: v for k, v in model.state_dict().items() if not k.startswith("classifier.")}
+    state_dict["W_gc"] = legacy_W_gc
+    state_dict["b_c"] = legacy_b_c
+    model.load_state_dict(state_dict)
+
+    x_ng = torch.randn(4, g)
+    logits_nc = model.predict(x_ng, model.var_names_g)["y_logits_nc"]
+    assert torch.allclose(logits_nc, x_ng @ legacy_W_gc + legacy_b_c, atol=1e-5)
+    assert set(model.state_dict()) >= {"classifier.module_list.0.weight", "classifier.module_list.0.bias"}
+
+
+def test_socam_l1_on_first_layer_flag():
+    g, c, n = 6, 5, 7
+    x_ng = torch.randn(n, g)
+    cl_names_n = np.array([f"cell_type_{i % c}" for i in range(n)])
+    model_l1 = _make_deep_socam(g=g, c=c, hidden_layers=[8], W_prior_scale=0.1)
+    model_no_l1 = _make_deep_socam(g=g, c=c, hidden_layers=[8], W_prior_scale=0.1, l1_on_first_layer=False)
+    model_no_l1.load_state_dict(model_l1.state_dict())
+
+    loss_l1 = model_l1(x_ng, model_l1.var_names_g, cl_names_n)["loss"]
+    loss_no_l1 = model_no_l1(x_ng, model_l1.var_names_g, cl_names_n)["loss"]
+    assert isinstance(loss_l1, torch.Tensor)
+    assert isinstance(loss_no_l1, torch.Tensor)
+    first_weight = model_l1._first_linear().weight
+    expected_penalty = first_weight.abs().sum() / 0.1 / model_l1.n_obs
+    assert torch.allclose(loss_l1 - loss_no_l1, expected_penalty, atol=1e-5)
+
+
+def test_socam_hidden_layers_forward_predict_and_grads():
+    g, c, n = 6, 5, 7
+    swiglu = "cellarium.ml.layers.SwiGLUActivation"
+    model = _make_deep_socam(
+        g=g,
+        c=c,
+        hidden_layers=[8, 8, 4],
+        dressing_init_kwargs=[
+            {"activation_fn": swiglu, "use_layer_norm": True, "dropout_rate": 0.1},
+            {"activation_fn": swiglu, "use_layer_norm": True, "use_residual": True},
+            {"activation_fn": "torch.nn.ReLU", "use_batch_norm": True},
+        ],
+    )
+    first_linear = model._first_linear()
+    assert first_linear.weight.shape == (16, g)  # SwiGLU doubles the first linear's width
+    with pytest.raises(AttributeError):
+        model.b_c  # noqa: B018
+    assert model.W_gc.shape == (g, 16)
+
+    x_ng = torch.randn(n, g)
+    cl_names_n = np.array([f"cell_type_{i % c}" for i in range(n)])
+    model.train()
+    loss = model(x_ng, model.var_names_g, cl_names_n)["loss"]
+    assert isinstance(loss, torch.Tensor)
+    assert torch.isfinite(loss)
+    loss.backward()
+    for name, p in model.classifier.named_parameters():
+        assert p.grad is not None, name
+
+    model.eval()
+    out = model.predict(x_ng, model.var_names_g)
+    assert out["y_logits_nc"].shape == (n, c)
+    assert torch.allclose(out["y_probs_nc"].sum(dim=1), torch.ones(n), atol=1e-5)
+
+
+def test_socam_hidden_layers_seed_reproducible():
+    a = _make_deep_socam(hidden_layers=[8], seed=5)
+    b = _make_deep_socam(hidden_layers=[8], seed=5)
+    c_ = _make_deep_socam(hidden_layers=[8], seed=6)
+    for pa, pb in zip(a.parameters(), b.parameters()):
+        assert torch.equal(pa, pb)
+    assert not torch.equal(a._first_linear().weight, c_._first_linear().weight)
+
+
+def test_fully_connected_linear_swiglu_widths_and_per_layer_dressing():
+    from cellarium.ml.layers import DressedLayer, FullyConnectedLinear, SwiGLUActivation
+
+    layer = FullyConnectedLinear(
+        in_features=5,
+        out_features=3,
+        n_hidden=[6, 4],
+        dressing_init_kwargs=[{"activation_fn": SwiGLUActivation}, {"dropout_rate": 0.2}],
+        bias=True,
+    )
+    first, second, final = layer.module_list
+    assert isinstance(first, DressedLayer) and isinstance(second, DressedLayer)
+    assert first.layer.out_features == 12 and first.out_features == 6
+    assert second.layer.in_features == 6 and second.layer.out_features == 4
+    assert final.in_features == 4 and final.out_features == 3
+    assert layer(torch.randn(2, 5)).shape == (2, 3)
+
+    with pytest.raises(ValueError, match="one dictionary per hidden layer"):
+        FullyConnectedLinear(5, 3, n_hidden=[6, 4], dressing_init_kwargs=[{}])
