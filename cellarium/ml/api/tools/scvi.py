@@ -40,6 +40,110 @@ DEFAULT_DECODER = {
 }
 
 
+def _select_genes(cdata: CellariumData) -> tuple[list[Filter], list[str]]:
+    """The ``cpu_transforms`` that keep the highly variable genes of ``cdata`` (if it has any), and the gene names."""
+    if cdata.hvg is not None:
+        var_names_g = cdata.hvg.index[cdata.hvg].tolist()
+        return [Filter(filter_list=var_names_g, ordering=True)], var_names_g
+    print("Warning: running on all genes since no highly variable genes are in the .hvg slot")
+    return [], cdata.datamodule.var_names_g
+
+
+def _model_kwargs(scvi_kwargs: dict | None) -> dict:
+    """
+    The keyword arguments of an scVI (family) model: the default encoder, decoder and KL warmup,
+    then those of the user.
+    """
+    scvi_kwargs = dict(scvi_kwargs or {})
+    # The model allows only one of the two KL warmup arguments (and defaults to 400 warmup epochs), so default to
+    # a 1000 step warmup only if the user sets neither, and otherwise turn off the one they did not set.
+    if "kl_warmup_steps" not in scvi_kwargs and "kl_warmup_epochs" not in scvi_kwargs:
+        scvi_kwargs["kl_warmup_steps"] = 1000
+    scvi_kwargs.setdefault("kl_warmup_steps", None)
+    scvi_kwargs.setdefault("kl_warmup_epochs", None)
+    return {
+        "encoder": DEFAULT_ENCODER,
+        "decoder": DEFAULT_DECODER,
+        **scvi_kwargs,
+    }
+
+
+def _train(
+    cdata: CellariumData,
+    model: SingleCellVariationalInference,
+    cpu_transforms: list[Filter],
+    train_batch_keys: dict[str, AnnDataField],
+    recorded_batch_keys: dict[str, AnnDataField],
+    key_added: str,
+    config: dict,
+    max_epochs: int,
+    val_size: float,
+    early_stopping_patience: int,
+    optim_kwargs: dict | None,
+    log_every_n_steps: int,
+    val_check_interval: int,
+    accelerator: Literal["cpu", "mps", "cuda", "auto"],
+) -> None:
+    """
+    Train ``model`` (scVI or a model that extends it) on the data in ``cdata.datamodule``, with early stopping on the
+    validation loss, and store the module in ``cdata.trained_modules[key_added]``.
+
+    ``train_batch_keys`` are the data fields that the datamodule provides during training, and ``recorded_batch_keys``
+    are the ones stored with the module, which is all that is needed for it to run (``cdata.using``) afterwards.
+    """
+    if optim_kwargs is None:
+        optim_kwargs = {"lr": 1e-3}
+
+    datamodule: CellariumAnnDataDataModule = cdata.datamodule
+
+    with (
+        temporary_batch_keys(datamodule, train_batch_keys),
+        temporary_val_split(datamodule, val_size=val_size),
+    ):
+        module = CellariumModule(
+            cpu_transforms=cpu_transforms,
+            transforms=[Densify()],
+            model=model,
+            optim_fn=torch.optim.AdamW,
+            optim_kwargs=optim_kwargs,
+        )
+
+        loss_history = LossHistory()
+        trainer = pl.Trainer(
+            accelerator=accelerator,
+            devices="auto",
+            max_epochs=max_epochs,
+            callbacks=[
+                EarlyStopping(monitor="val_loss", mode="min", patience=early_stopping_patience),
+                PreciseProgressBar(),
+            ],
+            logger=loss_history,
+            log_every_n_steps=log_every_n_steps,
+            # count val_check_interval in global training steps, ignoring epoch boundaries
+            check_val_every_n_epoch=None,
+            val_check_interval=val_check_interval,
+            enable_checkpointing=False,
+        )
+
+        # An interval longer than an epoch would validate less than once per epoch, so cap it at the epoch length
+        # (which makes the checks fall at the end of each epoch). Done after construction because the number of
+        # replicas is only known to the trainer.
+        datamodule.setup("fit")
+        n_replicas = trainer.num_devices * trainer.num_nodes
+        n_batches_per_epoch = max(1, len(datamodule.train_dataset) // n_replicas)
+        trainer.val_check_interval = min(val_check_interval, n_batches_per_epoch)
+
+        fit_and_register(
+            cdata,
+            trainer,
+            module,
+            key_added,
+            config=config,
+            loss_history=loss_history,
+            batch_keys=recorded_batch_keys,
+        )
+
+
 def scvi(
     cdata: CellariumData,
     batch_key: str,
@@ -99,87 +203,31 @@ def scvi(
     if not batch_key:
         raise ValueError("batch_key must be provided; scvi() always performs batch correction.")
 
-    if optim_kwargs is None:
-        optim_kwargs = {"lr": 1e-3}
-
-    datamodule: CellariumAnnDataDataModule = cdata.datamodule
-
-    n_batch = datamodule.obs_key_nunique(batch_key)
-
-    if cdata.hvg is not None:
-        filter = Filter(filter_list=cdata.hvg.index[cdata.hvg].tolist(), ordering=True)
-        cpu_transforms = [filter]
-        var_names_g = cdata.hvg.index[cdata.hvg].tolist()
-    else:
-        print("Warning: running on all genes since no highly variable genes are in the .hvg slot")
-        cpu_transforms = []
-        var_names_g = datamodule.var_names_g
+    n_batch = cdata.datamodule.obs_key_nunique(batch_key)
+    cpu_transforms, var_names_g = _select_genes(cdata)
 
     # the data the module needs to run, recorded with it so that e.g. `cdata.using("scvi")` can provide it again
     batch_keys = {"batch_index_n": AnnDataField(attr="obs", key=batch_key, convert_fn=categories_to_codes)}
 
-    with (
-        temporary_batch_keys(datamodule, batch_keys),
-        temporary_val_split(datamodule, val_size=val_size),
-    ):
-        scvi_kwargs = dict(scvi_kwargs or {})
-        # The model allows only one of the two KL warmup arguments (and defaults to 400 warmup epochs), so default to
-        # a 1000 step warmup only if the user sets neither, and otherwise turn off the one they did not set.
-        if "kl_warmup_steps" not in scvi_kwargs and "kl_warmup_epochs" not in scvi_kwargs:
-            scvi_kwargs["kl_warmup_steps"] = 1000
-        scvi_kwargs.setdefault("kl_warmup_steps", None)
-        scvi_kwargs.setdefault("kl_warmup_epochs", None)
-        model_kwargs = {
-            "encoder": DEFAULT_ENCODER,
-            "decoder": DEFAULT_DECODER,
-            **scvi_kwargs,
-        }
-        module = CellariumModule(
-            cpu_transforms=cpu_transforms,
-            transforms=[Densify()],
-            model=SingleCellVariationalInference(
-                var_names_g=var_names_g,
-                n_batch=n_batch,
-                n_latent=n_latent,
-                **model_kwargs,
-            ),
-            optim_fn=torch.optim.AdamW,
-            optim_kwargs=optim_kwargs,
-        )
-
-        loss_history = LossHistory()
-        trainer = pl.Trainer(
-            accelerator=accelerator,
-            devices="auto",
-            max_epochs=max_epochs,
-            callbacks=[
-                EarlyStopping(monitor="val_loss", mode="min", patience=early_stopping_patience),
-                PreciseProgressBar(),
-            ],
-            logger=loss_history,
-            log_every_n_steps=log_every_n_steps,
-            # count val_check_interval in global training steps, ignoring epoch boundaries
-            check_val_every_n_epoch=None,
-            val_check_interval=val_check_interval,
-            enable_checkpointing=False,
-        )
-
-        # An interval longer than an epoch would validate less than once per epoch, so cap it at the epoch length
-        # (which makes the checks fall at the end of each epoch). Done after construction because the number of
-        # replicas is only known to the trainer.
-        datamodule.setup("fit")
-        n_replicas = trainer.num_devices * trainer.num_nodes
-        n_batches_per_epoch = max(1, len(datamodule.train_dataset) // n_replicas)
-        trainer.val_check_interval = min(val_check_interval, n_batches_per_epoch)
-
-        fit_and_register(
-            cdata,
-            trainer,
-            module,
-            key_added,
-            config={"batch_key": batch_key, "n_latent": n_latent, "val_size": val_size},
-            loss_history=loss_history,
-            batch_keys=batch_keys,
-        )
-
-    return
+    model = SingleCellVariationalInference(
+        var_names_g=var_names_g,
+        n_batch=n_batch,
+        n_latent=n_latent,
+        **_model_kwargs(scvi_kwargs),
+    )
+    _train(
+        cdata,
+        model,
+        cpu_transforms,
+        train_batch_keys=batch_keys,
+        recorded_batch_keys=batch_keys,
+        key_added=key_added,
+        config={"batch_key": batch_key, "n_latent": n_latent, "val_size": val_size},
+        max_epochs=max_epochs,
+        val_size=val_size,
+        early_stopping_patience=early_stopping_patience,
+        optim_kwargs=optim_kwargs,
+        log_every_n_steps=log_every_n_steps,
+        val_check_interval=val_check_interval,
+        accelerator=accelerator,
+    )
