@@ -12,7 +12,7 @@ from torch import nn
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._datamodule_context import temporary_batch_keys, temporary_val_split
 from cellarium.ml.api.cellariumdata import CellariumData, fit_and_register
-from cellarium.ml.api.utils import LossHistory, PreciseProgressBar
+from cellarium.ml.api.utils import LossHistory, PreciseProgressBar, RestoreBestTrainableWeights
 from cellarium.ml.models import ScArches, SingleCellVariationalInference
 from cellarium.ml.transforms import Densify, Filter
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
@@ -95,6 +95,8 @@ def _train(
     val_check_interval: int,
     accelerator: Literal["cpu", "mps", "cuda", "auto"],
     transforms: Sequence[nn.Module] | None = None,
+    optim_fn: type[torch.optim.Optimizer] = torch.optim.AdamW,
+    restore_best_weights: bool = False,
 ) -> None:
     """
     Train ``model`` (scVI or a model that extends or wraps it) on the data in ``cdata.datamodule``, with early stopping
@@ -102,7 +104,9 @@ def _train(
 
     ``train_batch_keys`` are the data fields that the datamodule provides during training, and ``recorded_batch_keys``
     are the ones stored with the module, which is all that is needed for it to run (``cdata.using``) afterwards.
-    ``transforms`` are those that run on the accelerator, by default ``[Densify()]``.
+    ``transforms`` are those that run on the accelerator, by default ``[Densify()]``. With ``restore_best_weights``,
+    the trainable parameters are put back to those of the best validation when training ends (see
+    :class:`~cellarium.ml.api.utils.RestoreBestTrainableWeights`), instead of being those of the last step.
     """
     if optim_kwargs is None:
         optim_kwargs = {"lr": 1e-3}
@@ -117,19 +121,22 @@ def _train(
             cpu_transforms=cpu_transforms,
             transforms=[Densify()] if transforms is None else list(transforms),
             model=model,
-            optim_fn=torch.optim.AdamW,
+            optim_fn=optim_fn,
             optim_kwargs=optim_kwargs,
         )
 
         loss_history = LossHistory()
+        callbacks: list[pl.Callback] = [
+            EarlyStopping(monitor="val_loss", mode="min", patience=early_stopping_patience),
+            PreciseProgressBar(),
+        ]
+        if restore_best_weights:
+            callbacks.append(RestoreBestTrainableWeights(monitor="val_loss"))
         trainer = pl.Trainer(
             accelerator=accelerator,
             devices="auto",
             max_epochs=max_epochs,
-            callbacks=[
-                EarlyStopping(monitor="val_loss", mode="min", patience=early_stopping_patience),
-                PreciseProgressBar(),
-            ],
+            callbacks=callbacks,
             logger=loss_history,
             log_every_n_steps=log_every_n_steps,
             # count val_check_interval in global training steps, ignoring epoch boundaries

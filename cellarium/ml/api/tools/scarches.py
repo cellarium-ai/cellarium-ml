@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any, Literal
 
 import numpy as np
+import torch
 from torch import nn
 
 from cellarium.ml import CellariumModule
@@ -121,7 +122,7 @@ def scarches(
     batch_key: str | None = None,
     max_epochs: int = 50,
     val_size: float = 0.1,
-    early_stopping_patience: int = 5,
+    early_stopping_patience: int = 3,
     optim_kwargs: dict | None = None,
     key_added: str | None = None,
     log_every_n_steps: int = 10,
@@ -167,18 +168,19 @@ def scarches(
             validation loss).
         val_size: The fraction of the cells held out for validation, for early stopping.
         early_stopping_patience: The number of validation checks (see ``val_check_interval``) with no improvement in
-            the validation loss before stopping.
-        optim_kwargs: Keyword arguments of the optimizer (AdamW), by default ``{"lr": 1e-2}``. This is ten times the
-            default of :func:`~cellarium.ml.api.tools.scvi`: only the few parameters of the new batches are trained,
-            and AdamW moves each parameter by about the learning rate per step, so a small one would take many steps
-            to move the batch biases as far as they need to go.
+            the validation loss before stopping. When training stops, the parameters of the new batches are put back
+            to those of the best validation, so stopping a few checks late loses nothing.
+        optim_kwargs: Keyword arguments of the optimizer (Adam, with no weight decay unless given here), by default
+            ``{"lr": 1e-2}``. This is ten times the default of :func:`~cellarium.ml.api.tools.scvi`: only the few
+            parameters of the new batches are trained, and Adam moves each parameter by about the learning rate per
+            step, so a small one would take many steps to move the batch biases as far as they need to go.
         key_added: The key in ``cdata.trained_modules`` to store the new module under, replacing any module there. By
             default ``"<reference>_scarches"`` when ``reference`` is a key, and ``"scarches"`` otherwise.
         log_every_n_steps: How often (in training steps) per-step metrics such as ``train_loss`` are recorded in the
             training history.
         val_check_interval: Validate every this many training steps, or once per epoch if an epoch has fewer. Training
             converges in few steps since few parameters are trained, so the checks are frequent (with
-            ``early_stopping_patience``, training stops 250 steps after the last improvement), and each one evaluates
+            ``early_stopping_patience``, training stops 150 steps after the last improvement), and each one evaluates
             all of the ``val_size`` held-out cells: for a large dataset, consider a smaller ``val_size``.
         accelerator: The accelerator to train on, in ["cpu", "mps", "cuda", "auto"].
 
@@ -256,4 +258,6 @@ def scarches(
         log_every_n_steps=log_every_n_steps,
         val_check_interval=val_check_interval,
         accelerator=accelerator,
+        optim_fn=torch.optim.Adam,
+        restore_best_weights=True,
     )

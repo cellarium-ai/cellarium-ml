@@ -30,6 +30,7 @@ from tqdm.auto import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
+from cellarium.ml.api._cell_order import warn_if_cells_are_grouped
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
 from cellarium.ml.api._obsm_storage import RowSubset, subset_rows
 from cellarium.ml.api._rebatch import ShardChunkDataModule, ShardChunkDataset, make_loader
@@ -532,6 +533,30 @@ def _epochs_completed(checkpoint: dict[str, Any]) -> int:
         return 0
 
 
+class TrainingInterrupted(KeyboardInterrupt):
+    """
+    The interruption of training (e.g. by interrupting the kernel of a notebook), raised once the partially trained
+    module has been stored (see :func:`fit_and_register`). It is a ``KeyboardInterrupt``, so it stops what is running
+    as an interruption does, and IPython (Jupyter) shows its message alone, without a traceback.
+    """
+
+    def _render_traceback_(self) -> list[str]:
+        # IPython shows what this returns in place of the traceback
+        return [f"{type(self).__name__}: {self}"]
+
+
+def _ends_an_interrupted_fit(error: BaseException) -> bool:
+    """
+    Whether ``error``, raised by ``trainer.fit``, is how an interrupted fit ends. Lightning catches the
+    ``KeyboardInterrupt``, shuts down gracefully and calls ``exit(1)``, which raises a ``SystemExit``, or a
+    ``NameError`` in IPython (which takes ``exit`` out of the builtins while it runs code). Any other ``NameError`` is
+    a bug, which is left to propagate.
+    """
+    if isinstance(error, NameError):
+        return isinstance(error.__context__, KeyboardInterrupt)
+    return isinstance(error, (KeyboardInterrupt, SystemExit))
+
+
 def fit_and_register(
     cdata: "CellariumData",
     trainer: pl.Trainer,
@@ -545,7 +570,8 @@ def fit_and_register(
     Fit ``module`` on ``cdata.datamodule`` and store it in ``cdata.trained_modules[key]``, along with the metrics
     recorded by ``loss_history`` (if the trainer's logger is one) and the extra ``batch_keys`` the module needs to
     run. If training is interrupted, the partially trained module is stored the same way, marked ``complete=False``,
-    before the interruption propagates. With ``key=None`` nothing is stored in ``cdata.trained_modules``.
+    and a :class:`TrainingInterrupted` (a ``KeyboardInterrupt`` that says so in one line) is raised in place of the
+    exceptions of Lightning's shutdown. With ``key=None`` nothing is stored in ``cdata.trained_modules``.
 
     The memory that the fit used on the accelerator is released when it ends, whether it completed or was interrupted
     (see :func:`_clean_up_after_interrupt`).
@@ -576,12 +602,23 @@ def fit_and_register(
     try:
         trainer.fit(module, cdata.datamodule)
     except (KeyboardInterrupt, SystemExit, NameError) as error:
-        # Lightning turns a KeyboardInterrupt into a SystemExit after shutting down gracefully
-        # and sometimes throws a NameError if something goes wrong during shutdown
-        if trainer.global_step > 0:
+        if not _ends_an_interrupted_fit(error):
+            raise
+        stored = trainer.global_step > 0
+        if stored:
             register(complete=False)
         _clean_up_after_interrupt(error, module, sigint_handler)
-        raise
+        if not stored:
+            message = "Training was interrupted before its first step, so no module was stored."
+        elif key is None:
+            message = f"Training was interrupted at step {trainer.global_step}."
+        else:
+            message = (
+                f"Training was interrupted at step {trainer.global_step}. The partially trained module is stored as "
+                f"cdata.trained_modules['{key}'] (complete=False)."
+            )
+        # the exceptions of Lightning's shutdown are of no interest: a short message takes their place
+        raise TrainingInterrupted(message) from None
     finally:
         # the workers of the dataloaders are of no use any more, and stay (with what they hold) as long as the trainer
         shutdown_trainer_workers(trainer)
@@ -693,6 +730,12 @@ class LazyObs:
     def columns(self) -> list[str]:
         index_col = self._index_column_name
         return [name for name in self._get_dataset().schema.names if name != index_col]
+
+    @property
+    def categorical_columns(self) -> list[str]:
+        """The categorical columns (dictionary-encoded in the database), from its schema: no values are read."""
+        schema = self._get_dataset().schema
+        return [name for name in self.columns if pa.types.is_dictionary(schema.field(name).type)]
 
     @property
     def index(self) -> pd.Index:
@@ -818,6 +861,11 @@ class DeltaCellsLazyObs:
     def columns(self) -> list[str]:
         return [c for c in self._store.columns if c != self._NAMES]
 
+    @property
+    def categorical_columns(self) -> list[str]:
+        """The categorical columns, from the dataset's obs schema: no values are read."""
+        return [c for c in self.columns if self._store.kind(c) == "category"]
+
     def _names_at(self, indices: np.ndarray | None = None) -> pd.Index:
         """The obs names of the cells at ``indices`` (all cells if ``None``)."""
         if indices is None:
@@ -914,6 +962,11 @@ class ViewLazyObs:
     @property
     def columns(self) -> list[str]:
         return self._source.columns
+
+    @property
+    def categorical_columns(self) -> list[str]:
+        """The categorical columns (those of the root data), from its schema: no values are read."""
+        return self._source.categorical_columns
 
     @property
     def index(self) -> pd.Index:
@@ -1396,7 +1449,14 @@ class CellariumData:
                 this data was opened with, if it was read from a deltacells dataset).
             filesystem: An fsspec filesystem to upload with instead of ``gcsfs`` (for testing).
             **writer_kwargs: Further arguments of :class:`deltacells.DatasetWriter`, for example ``level``.
+
+        Warns:
+            UserWarning: Before anything is written, if the cells are grouped by a categorical ``obs`` column (as they
+                are in data made of per-experiment files): training draws every minibatch from one tile, so the tiles
+                should be about as diverse as all the cells. This reads the categorical ``obs`` columns (one at a time,
+                not the counts). The cells are not shuffled here; shuffle them first, for example with ``annslicer``.
         """
+        warn_if_cells_are_grouped(self.obs, tile_size)
         write_collection_to_deltacells(
             self._datamodule.dadc,
             uri,

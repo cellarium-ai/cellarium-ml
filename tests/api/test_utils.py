@@ -1,6 +1,9 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from types import SimpleNamespace
+from typing import Any, cast
+
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -9,6 +12,7 @@ import torch
 
 from cellarium.ml.api import utils
 from cellarium.ml.api.utils import (
+    RestoreBestTrainableWeights,
     get_h5ad_file_var_names_g,
     get_h5ad_files_limits,
     get_h5ad_files_obs_info,
@@ -18,6 +22,31 @@ from cellarium.ml.api.utils import (
     validate_h5ad_obs_schemas,
     write_obs_parquet,
 )
+
+
+def test_restore_best_trainable_weights_puts_back_the_parameters_of_the_best_validation():
+    module = torch.nn.Module()
+    module.trained = torch.nn.Parameter(torch.zeros(3))
+    module.frozen = torch.nn.Parameter(torch.zeros(3), requires_grad=False)
+    callback = RestoreBestTrainableWeights(monitor="val_loss")
+
+    def validate(step: int, value: float) -> None:
+        trainer = SimpleNamespace(
+            sanity_checking=False, global_step=step, callback_metrics={"val_loss": torch.tensor(value)}
+        )
+        callback.on_validation_end(cast(Any, trainer), cast(Any, module))
+
+    with torch.no_grad():
+        for step, value in [(50, 5.0), (100, 4.0), (150, 4.5), (200, float("nan")), (250, 4.2)]:
+            module.trained.fill_(step)
+            module.frozen.fill_(step)
+            validate(step, value)
+    callback.on_fit_end(cast(Any, None), cast(Any, module))
+
+    assert (callback.best_step, callback.best_value) == (100, 4.0)
+    torch.testing.assert_close(module.trained, torch.full((3,), 100.0))  # the parameters of the best validation
+    torch.testing.assert_close(module.frozen, torch.full((3,), 250.0))  # only the trainable ones are kept and restored
+    assert list(callback.best_parameters) == ["trained"]
 
 
 def _write_h5ad(tmp_path, name: str, obs: pd.DataFrame, n_genes: int = 2) -> str:

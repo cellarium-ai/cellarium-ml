@@ -845,6 +845,61 @@ class PreciseProgressBar(TQDMProgressBar):
         return {k: f"{v:.{self.significant_digits}g}" if isinstance(v, float) else v for k, v in metrics.items()}
 
 
+class RestoreBestTrainableWeights(pl.Callback):
+    """
+    Keep a copy of the trainable parameters (those with ``requires_grad``) of the module whenever the validation
+    metric ``monitor`` reaches a new minimum, and put them back when training ends (or is interrupted), so that the
+    module is the best one that was validated rather than the last one. Lightning's
+    :class:`~lightning.pytorch.callbacks.EarlyStopping` stops ``patience`` checks after the best one, and keeps the
+    weights of the last.
+
+    The copy is kept in memory, on the device of the parameters, so this is meant for modules that train few
+    parameters (such as the new batches of :class:`~cellarium.ml.models.ScArches`). Buffers (such as the running
+    statistics of batch normalization) are not restored.
+    """
+
+    def __init__(self, monitor: str = "val_loss") -> None:
+        super().__init__()
+        self.monitor = monitor
+        self.best_value = float("inf")
+        self.best_step: int | None = None
+        self.best_parameters: dict[str, torch.Tensor] = {}
+
+    def on_validation_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if trainer.sanity_checking:
+            return
+        value = trainer.callback_metrics.get(self.monitor)
+        if value is None or not torch.isfinite(torch.as_tensor(value)):
+            return
+        if float(value) < self.best_value:
+            self.best_value = float(value)
+            self.best_step = trainer.global_step
+            self.best_parameters = {
+                name: parameter.detach().clone()
+                for name, parameter in pl_module.named_parameters()
+                if parameter.requires_grad
+            }
+
+    def restore(self, pl_module: pl.LightningModule) -> None:
+        """Put the parameters of the best validation back into ``pl_module`` (nothing if none was validated)."""
+        if not self.best_parameters:
+            return
+        with torch.no_grad():
+            for name, parameter in pl_module.named_parameters():
+                if name in self.best_parameters:
+                    parameter.copy_(self.best_parameters[name])
+        print(
+            f"Restored the parameters of the best validation, at step {self.best_step} "
+            f"({self.monitor}={self.best_value:.5g})."
+        )
+
+    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        self.restore(pl_module)
+
+    def on_exception(self, trainer: pl.Trainer, pl_module: pl.LightningModule, exception: BaseException) -> None:
+        self.restore(pl_module)
+
+
 class LossHistory(Logger):
     """
     An in-memory Lightning logger that records every metric the module logs, at the cadence it is logged, with no
