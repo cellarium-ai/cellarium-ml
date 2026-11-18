@@ -197,6 +197,51 @@ def test_cellarium_data_obs_parquet_path_is_lazy_and_queryable(tmp_path, h5ad_pa
     assert cdata.obs._dataset is not None  # opened only once actually queried
 
 
+# --- CellariumData construction checks ------------------------------------------------------------
+
+
+def test_cellarium_data_suggests_the_total_mrna_umis_column_that_was_meant(h5ad_paths):
+    message = r"total_mrna_umis_column='n_count' is not an obs column\. Did you mean 'n_counts'"
+    with pytest.raises(ValueError, match=message):
+        CellariumData(h5ad_paths=h5ad_paths, total_mrna_umis_column="n_count")
+
+
+def test_cellarium_data_requires_a_numeric_total_mrna_umis_column(h5ad_paths):
+    with pytest.raises(TypeError, match="total_mrna_umis_column='cell_type' must be a numeric obs column"):
+        CellariumData(h5ad_paths=h5ad_paths, total_mrna_umis_column="cell_type")
+
+
+def test_cellarium_data_names_a_missing_obs_column_by_its_batch_key(h5ad_paths):
+    with pytest.raises(ValueError, match=r"obs_columns\['y_n'\]='celltype' is not an obs column"):
+        CellariumData(h5ad_paths=h5ad_paths, obs_columns={"y_n": ("celltype", lambda x: x)})
+
+
+def test_cellarium_data_fails_at_construction_when_the_obs_of_the_files_differ(h5ad_paths):
+    adata = ad.read_h5ad(h5ad_paths[1])
+    adata.obs["leiden"] = "0"
+    adata.write_h5ad(h5ad_paths[1])
+    with pytest.raises(ValueError, match="obs columns differ"):
+        CellariumData(h5ad_paths=h5ad_paths)
+
+
+def test_cellarium_data_rejects_an_obs_parquet_database_of_other_files(tmp_path, h5ad_paths):
+    other = ad.read_h5ad(h5ad_paths[0])
+    other.obs = other.obs.rename(columns={"n_counts": "count"})
+    other_path = str(tmp_path / "other.h5ad")
+    other.write_h5ad(other_path)
+    output_path = str(tmp_path / "obs.parquet")
+    write_obs_parquet([other_path], output_path)
+    with pytest.raises(ValueError, match=r"lacks \['n_counts'\] and has \['count'\]"):
+        CellariumData(h5ad_paths=h5ad_paths, obs_parquet_path=output_path)
+
+
+def test_cellarium_data_checks_the_obs_columns_of_a_deltacells_dataset(deltacells_uri, deltacells_kwargs):
+    with pytest.raises(ValueError, match="Did you mean 'n_counts'"):
+        CellariumData(
+            deltacells_uri=deltacells_uri, deltacells_kwargs=deltacells_kwargs, total_mrna_umis_column="counts"
+        )
+
+
 # --- CellariumData.var ----------------------------------------------------------------------------
 
 

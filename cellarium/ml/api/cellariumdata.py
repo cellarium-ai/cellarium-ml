@@ -44,9 +44,12 @@ from cellarium.ml.api._view_collections import (
 from cellarium.ml.api.deltacells_store import write_collection_to_deltacells
 from cellarium.ml.api.utils import (
     LossHistory,
-    get_h5ad_files_limits,
+    ObsColumnSchema,
+    check_obs_columns_exist,
+    get_h5ad_files_obs_info,
     release_unused_memory,
     shutdown_trainer_workers,
+    validate_h5ad_obs_schemas,
     write_obs_parquet,
 )
 from cellarium.ml.data import (
@@ -119,6 +122,48 @@ def _build_datamodule(
     return datamodule
 
 
+def _check_requested_obs_columns(
+    obs_columns: dict[str, tuple[str, Callable]], available: list[str] | dict[str, ObsColumnSchema]
+) -> None:
+    """
+    Check that the obs columns that ``obs_columns`` reads are among the ``available`` obs columns, naming each by the
+    argument of :class:`CellariumData` that gave it. If the schemas of the columns are ``available``, also check that
+    the column of ``total_mrna_umis_n`` is numeric.
+    """
+    check_obs_columns_exist(
+        {
+            ("total_mrna_umis_column" if key == "total_mrna_umis_n" else f"obs_columns[{key!r}]"): column
+            for key, (column, _) in obs_columns.items()
+        },
+        available,
+    )
+    if "total_mrna_umis_n" in obs_columns and isinstance(available, dict):
+        column = obs_columns["total_mrna_umis_n"][0]
+        if not available[column].is_numeric:
+            raise TypeError(
+                f"total_mrna_umis_column={column!r} must be a numeric obs column, but it is "
+                f"{available[column].describe_type()}."
+            )
+
+
+def _check_obs_parquet_columns(parquet_path: str, columns: Sequence[str]) -> None:
+    """
+    Check that the obs parquet database at ``parquet_path`` has the obs ``columns`` of the h5ad files, as it does when
+    it was built from them, reading only its schema.
+    """
+    schema = ds.dataset(parquet_path, format="parquet").schema
+    index_columns = (schema.pandas_metadata or {}).get("index_columns", [])
+    parquet_columns = [name for name in schema.names if name not in index_columns]
+    missing = [column for column in columns if column not in parquet_columns]
+    extra = [column for column in parquet_columns if column not in columns]
+    if missing or extra:
+        raise ValueError(
+            f"The obs parquet database {parquet_path!r} does not have the obs columns of the h5ad files (it lacks "
+            f"{missing} and has {extra}): was it built from other files? Build it from these files with "
+            "write_obs_parquet, or leave obs_parquet_path out to have it built when obs is first queried."
+        )
+
+
 def get_datamodule(
     h5ad_paths: list[str],
     obs_columns: dict[str, tuple[str, Callable]] = {},
@@ -131,15 +176,29 @@ def get_datamodule(
     num_workers: int = 0,
     var_names_make_unique: bool = False,
 ):
+    """
+    A datamodule that reads the h5ad files at ``h5ad_paths``.
+
+    First, in one pass that reads only the metadata of the files (only that of the first and last files with
+    ``nexus_extract_uniform_sizes``, whose files all have the same size and schema), checks that the files have the
+    same obs schema (see :func:`~cellarium.ml.api.utils.validate_h5ad_obs_schemas`), and that the obs columns that
+    ``obs_columns`` reads exist (and that ``total_mrna_umis_n`` is numeric), so that a mismatch is found at once rather
+    than when a file is read.
+
+    Raises:
+        ValueError: If the files do not have the same obs schema, or an obs column of ``obs_columns`` does not exist.
+        TypeError: If the obs column of ``total_mrna_umis_n`` is not numeric.
+    """
     if nexus_extract_uniform_sizes is None:
         nexus_extract_uniform_sizes = all(["extract_files" in path for path in h5ad_paths])  # a guess
 
+    limits, obs_infos = get_h5ad_files_obs_info(h5ad_paths, nexus_extract_uniform_sizes=nexus_extract_uniform_sizes)
+    validate_h5ad_obs_schemas(obs_infos)
+    _check_requested_obs_columns(obs_columns, next(iter(obs_infos.values())).columns)
+
     dadc = DistributedAnnDataCollection(
         filenames=h5ad_paths,
-        limits=get_h5ad_files_limits(
-            h5ad_paths,
-            nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
-        ),
+        limits=limits,
         obs_columns_to_validate=[c[0] for c in obs_columns.values()],
         max_cache_size=2,
     )
@@ -166,6 +225,8 @@ def get_deltacells_datamodule(
     :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`.
     """
     dadc = DistributedDeltaCellsCollection(uri, **collection_kwargs)
+    if obs_columns:
+        _check_requested_obs_columns(obs_columns, DeltaCellsLazyObs(dadc).columns)
     return _build_datamodule(
         dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers, var_names_make_unique
     )
@@ -1019,6 +1080,14 @@ class CellariumData:
     are always in temporary files, and a view reads its rows into memory only if they fit). Views inherit it. By default
     it is half of the memory that is available, taking any container limit into account. It can be changed at any time
     with the :attr:`max_gb` attribute.
+
+    The h5ad files must have the same ``obs`` schema: the same obs columns (in any order), each stored with the same
+    type, and each categorical column with the same categories (in any order, unless it is ordered). Construction checks
+    this, reading only the metadata of the files, and raises a ``ValueError`` that tells which columns and files differ
+    (categories that differ can be harmonized with :func:`~cellarium.ml.api.harmonize_obs_categories`). With
+    ``nexus_extract_uniform_sizes=True`` (the files of a Nexus extract all have the same size and schema) only the first
+    and last files are read. Construction also checks that the obs columns that ``total_mrna_umis_column`` and
+    ``obs_columns`` name exist, and that ``total_mrna_umis_column`` is numeric.
     """
 
     def __init__(
@@ -1061,6 +1130,9 @@ class CellariumData:
                 num_workers=datamodule_num_workers,
                 var_names_make_unique=var_names_make_unique,
             )
+            if obs_parquet_path is not None:
+                h5ad_obs_columns = self._datamodule.dadc.schema.attr_values["obs"].columns
+                _check_obs_parquet_columns(obs_parquet_path, list(h5ad_obs_columns))
             # lazy: nothing is read, and no obs parquet database is built, until `.obs` is queried
             self._obs = LazyObs(obs_parquet_path, h5ad_paths=h5ad_paths)
         else:
