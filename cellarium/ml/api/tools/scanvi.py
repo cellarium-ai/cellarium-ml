@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from cellarium.ml.api.cellariumdata import CellariumData, _device_of
-from cellarium.ml.api.tools.scvi import _model_kwargs, _select_genes, _train
+from cellarium.ml.api.cellariumdata import CellariumData, _device_of, _unwrap_scarches
+from cellarium.ml.api.tools.scvi import _batch_categories, _model_kwargs, _select_genes, _train
 from cellarium.ml.api.utils import release_memory_after, resolve_device
 from cellarium.ml.models import SCANVI
 from cellarium.ml.utilities.core import call_func_with_batch
@@ -254,6 +254,7 @@ def scanvi(
     config.update(
         {
             "batch_key": batch_key,
+            "batch_categories": _batch_categories(cdata, batch_key),
             "labels_key": labels_key,
             "n_latent": n_latent,
             "val_size": val_size,
@@ -362,7 +363,8 @@ def scanvi_annotate(
 
     Args:
         cdata: The cells to annotate (a :class:`CellariumData` or a view). It is where the labels are stored.
-        module_key: The key in ``cdata.trained_modules`` of the scANVI module (see :func:`scanvi`).
+        module_key: The key in ``cdata.trained_modules`` of the scANVI module (see :func:`scanvi`), or of a module
+            that :func:`~cellarium.ml.api.tools.scarches` made from one.
         key_added: The key in ``obs_computed`` to store the labels under, replacing any entry there. By default
             ``"<module_key>_annotation"``.
         threshold: The least probability that a cell type must have to be the label, between 0 and 1.
@@ -383,12 +385,13 @@ def scanvi_annotate(
     with cdata.using(module_key) as trained:
         module = trained.module
         module.configure_model()  # idempotent; makes its transforms and model accessible
-        model = module.model
-        if not isinstance(model, SCANVI):
-            raise TypeError(f"The module '{module_key}' ({type(model).__name__}) is not an scANVI module.")
-        names = list(model.active_cl_names)
-        if model.classifier_type == "ontology":
-            depth = _node_depths(model.active_descendant_tensor_cc)
+        model = module.model  # what runs (a ScArches passes the batches on to the scANVI model it wraps)
+        scanvi_model = _unwrap_scarches(model)  # the scANVI model, which has the classes
+        if not isinstance(scanvi_model, SCANVI):
+            raise TypeError(f"The module '{module_key}' ({type(scanvi_model).__name__}) is not an scANVI module.")
+        names = list(scanvi_model.active_cl_names)
+        if scanvi_model.classifier_type == "ontology":
+            depth = _node_depths(scanvi_model.active_descendant_tensor_cc)
         else:  # no node is more specific than another, so the label is the cell type of greatest probability
             depth = np.zeros(len(names), dtype=np.int64)
         depth_c = torch.as_tensor(depth, device=device)
@@ -407,7 +410,7 @@ def scanvi_annotate(
             if original_device is not None:
                 model.to(original_device)
 
-    unlabeled = model.unlabeled_category
+    unlabeled = scanvi_model.unlabeled_category
     categories = names if unlabeled in names else [*names, unlabeled]
     codes = np.where(node_index >= 0, node_index, categories.index(unlabeled))
     labels = pd.Categorical.from_codes(codes, categories=categories).remove_unused_categories()

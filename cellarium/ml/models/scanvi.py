@@ -1012,7 +1012,7 @@ class SCANVI(SingleCellVariationalInference):
         )
         loss = output["loss"]
         if isinstance(loss, torch.Tensor):
-            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True, batch_size=x_ng.shape[0])
+            pl_module.log("val_loss", loss, sync_dist=True, on_epoch=True, batch_size=x_ng.shape[0], prog_bar=True)
 
         if cell_type_labels_n is None:
             return

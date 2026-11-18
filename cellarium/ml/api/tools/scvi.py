@@ -1,17 +1,19 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from collections.abc import Sequence
 from typing import Literal
 
 import lightning.pytorch as pl
 import torch
 from lightning.pytorch.callbacks import EarlyStopping
+from torch import nn
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._datamodule_context import temporary_batch_keys, temporary_val_split
 from cellarium.ml.api.cellariumdata import CellariumData, fit_and_register
 from cellarium.ml.api.utils import LossHistory, PreciseProgressBar
-from cellarium.ml.models import SingleCellVariationalInference
+from cellarium.ml.models import ScArches, SingleCellVariationalInference
 from cellarium.ml.transforms import Densify, Filter
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
 
@@ -49,6 +51,15 @@ def _select_genes(cdata: CellariumData) -> tuple[list[Filter], list[str]]:
     return [], cdata.datamodule.var_names_g
 
 
+def _batch_categories(cdata: CellariumData, batch_key: str) -> list[str]:
+    """
+    The categories of the (categorical) obs column ``batch_key``, in the order of their codes, which are the batch
+    indices of the cells (see :func:`~cellarium.ml.utilities.data.categories_to_codes`). Recorded in the ``config``
+    of a trained module, so that the batch of each index is known wherever the module is used.
+    """
+    return [str(category) for category in cdata.datamodule.dadc.obs_categories(batch_key)]
+
+
 def _model_kwargs(scvi_kwargs: dict | None) -> dict:
     """
     The keyword arguments of an scVI (family) model: the default encoder, decoder and KL warmup,
@@ -70,8 +81,8 @@ def _model_kwargs(scvi_kwargs: dict | None) -> dict:
 
 def _train(
     cdata: CellariumData,
-    model: SingleCellVariationalInference,
-    cpu_transforms: list[Filter],
+    model: SingleCellVariationalInference | ScArches,
+    cpu_transforms: Sequence[nn.Module],
     train_batch_keys: dict[str, AnnDataField],
     recorded_batch_keys: dict[str, AnnDataField],
     key_added: str,
@@ -83,13 +94,15 @@ def _train(
     log_every_n_steps: int,
     val_check_interval: int,
     accelerator: Literal["cpu", "mps", "cuda", "auto"],
+    transforms: Sequence[nn.Module] | None = None,
 ) -> None:
     """
-    Train ``model`` (scVI or a model that extends it) on the data in ``cdata.datamodule``, with early stopping on the
-    validation loss, and store the module in ``cdata.trained_modules[key_added]``.
+    Train ``model`` (scVI or a model that extends or wraps it) on the data in ``cdata.datamodule``, with early stopping
+    on the validation loss, and store the module in ``cdata.trained_modules[key_added]``.
 
     ``train_batch_keys`` are the data fields that the datamodule provides during training, and ``recorded_batch_keys``
     are the ones stored with the module, which is all that is needed for it to run (``cdata.using``) afterwards.
+    ``transforms`` are those that run on the accelerator, by default ``[Densify()]``.
     """
     if optim_kwargs is None:
         optim_kwargs = {"lr": 1e-3}
@@ -102,7 +115,7 @@ def _train(
     ):
         module = CellariumModule(
             cpu_transforms=cpu_transforms,
-            transforms=[Densify()],
+            transforms=[Densify()] if transforms is None else list(transforms),
             model=model,
             optim_fn=torch.optim.AdamW,
             optim_kwargs=optim_kwargs,
@@ -222,7 +235,12 @@ def scvi(
         train_batch_keys=batch_keys,
         recorded_batch_keys=batch_keys,
         key_added=key_added,
-        config={"batch_key": batch_key, "n_latent": n_latent, "val_size": val_size},
+        config={
+            "batch_key": batch_key,
+            "n_latent": n_latent,
+            "val_size": val_size,
+            "batch_categories": _batch_categories(cdata, batch_key),
+        },
         max_epochs=max_epochs,
         val_size=val_size,
         early_stopping_patience=early_stopping_patience,

@@ -45,6 +45,7 @@ from cellarium.ml.api.deltacells_store import write_collection_to_deltacells
 from cellarium.ml.api.utils import (
     LossHistory,
     ObsColumnSchema,
+    _list_preview,
     check_obs_columns_exist,
     get_h5ad_files_obs_info,
     release_unused_memory,
@@ -58,7 +59,8 @@ from cellarium.ml.data import (
     DistributedDeltaCellsCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.models.model import PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.scarches import ScArches
 from cellarium.ml.utilities.core import FunctionComposer
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
 
@@ -459,7 +461,9 @@ class TrainedModule:
         return rows.set_index("step")["value"].rename(name)
 
     def __repr__(self) -> str:
-        config = ", ".join(f"{k}={v}" for k, v in self.config.items())
+        config = ", ".join(
+            f"{k}={_list_preview(v, n=3) if isinstance(v, (list, tuple)) else v}" for k, v in self.config.items()
+        )
         status = "" if self.complete else " (interrupted)"
         return f"{type(self.module.model).__name__}({config}), {self.n_epochs} epochs{status}"
 
@@ -473,6 +477,14 @@ class TrainedModulesMapping(dict[str, TrainedModule]):
         super().__setitem__(key, value)
 
 
+def _unwrap_scarches(model: CellariumModel) -> CellariumModel:
+    """
+    The model that ``model`` wraps if it is a :class:`~cellarium.ml.models.ScArches` (which passes on the arguments of
+    the wrapped model, and has its attributes, such as the classes of an scANVI model), and otherwise ``model``.
+    """
+    return model.scvi if isinstance(model, ScArches) else model
+
+
 def _data_fields_used(module: CellariumModule) -> tuple[set[str], set[str]]:
     """
     The names of the data fields that the transforms and the model of ``module`` take from the batch, and the names
@@ -480,12 +492,12 @@ def _data_fields_used(module: CellariumModule) -> tuple[set[str], set[str]]:
     transforms and the ``predict`` of the model (the arguments that
     :func:`~cellarium.ml.utilities.core.call_func_with_batch` passes), or of the ``forward`` of a model that cannot
     predict, which is left out of the required names since it is not what runs to make predictions. A ``**kwargs``
-    takes no field in particular (transforms have it to ignore the fields they do not use), so it adds none; and a
+    takes no field in particular (transforms have it to ignore the fields they do not use), so it adds none; a
     transform that is itself a :class:`~cellarium.ml.core.CellariumModule` adds the fields that it takes, none of
-    them required.
+    them required; and a :class:`~cellarium.ml.models.ScArches` model takes the fields of the model that it wraps.
     """
     hparams = module.hparams
-    model = hparams["model"]
+    model = _unwrap_scarches(hparams["model"])
     transforms = [*(hparams["cpu_transforms"] or []), *(hparams["transforms"] or [])]
     funcs = [transform.forward for transform in transforms]
     funcs.append(model.predict if isinstance(model, PredictMixin) else model.forward)
@@ -1908,7 +1920,16 @@ class CellariumData:
                 for name, field in trained_with.items()
                 if isinstance(field, AnnDataField) and name not in self._datamodule.batch_keys and name in used
             }
-            self._check_obs_columns_of(batch_keys, path)
+            for name, absent in self._absent_obs_columns(batch_keys).items():
+                raise ValueError(
+                    f"The module in {path} was trained with the data field '{name}', which is read from the obs "
+                    f"column(s) {absent} that this data does not have. Pass batch_keys to say where to find it in this "
+                    f"data, for example batch_keys={{'{name}': AnnDataField(attr='obs', key=..., convert_fn=...)}} "
+                    "(with AnnDataField from cellarium.ml.utilities.data), or batch_keys={} to run the module without "
+                    "it (which is only right if the module can do without it). If the module was trained on other "
+                    "data, with other batches, load it with batch_keys={} and map these cells onto it with "
+                    f"cml.tl.scarches(cdata, reference='{key}', batch_key=...)."
+                )
 
         self._trained_modules[key] = TrainedModule(
             module=module,
@@ -1918,9 +1939,10 @@ class CellariumData:
             batch_keys=dict(batch_keys),
         )
 
-    def _check_obs_columns_of(self, batch_keys: dict[str, AnnDataField], path: str) -> None:
-        """Raise a ``ValueError`` if a field in ``batch_keys`` reads an obs column that this data does not have."""
+    def _absent_obs_columns(self, batch_keys: dict[str, AnnDataField]) -> dict[str, list[str]]:
+        """The fields of ``batch_keys`` that read obs columns that this data does not have, with those columns."""
         columns: set[str] | None = None
+        absent_columns: dict[str, list[str]] = {}
         for name, adfield in batch_keys.items():
             if adfield.attr != "obs" or adfield.key is None:
                 continue
@@ -1929,13 +1951,8 @@ class CellariumData:
             wanted = adfield.key if isinstance(adfield.key, list) else [adfield.key]
             absent = [column for column in wanted if column not in columns]
             if absent:
-                raise ValueError(
-                    f"The module in {path} was trained with the data field '{name}', which is read from the obs "
-                    f"column(s) {absent} that this data does not have. Pass batch_keys to say where to find it in this "
-                    f"data, for example batch_keys={{'{name}': AnnDataField(attr='obs', key=..., convert_fn=...)}} "
-                    "(with AnnDataField from cellarium.ml.utilities.data), or batch_keys={} to run the module without "
-                    "it (which is only right if the module can do without it)."
-                )
+                absent_columns[name] = absent
+        return absent_columns
 
     @contextmanager
     def using(self, key: str) -> Iterator[TrainedModule]:
@@ -1950,9 +1967,11 @@ class CellariumData:
             ...     ...  # code that runs trained.module over cdata.datamodule
 
         Raises:
-            ValueError: If there is no trained module under ``key``, or if the module needs data fields that neither
+            ValueError: If there is no trained module under ``key``, if the module needs data fields that neither
                 ``cdata.datamodule`` nor the ``batch_keys`` of the module provide (this happens for a module loaded
-                with :meth:`load_module_from_ckpt` that was trained with fields that are not in its checkpoint).
+                with :meth:`load_module_from_ckpt` that was trained with fields that are not in its checkpoint), or if
+                its ``batch_keys`` read obs columns that this data does not have (as for a module trained on other
+                data, which :func:`~cellarium.ml.api.tools.scarches` maps these cells onto).
         """
         if key not in self._trained_modules:
             available = list(self._trained_modules)
@@ -1974,6 +1993,15 @@ class CellariumData:
                 f"cdata.load_module_from_ckpt({'path' if source is None else repr(source)}, '{key}', "
                 f"batch_keys={{{', '.join(f'{name!r}: AnnDataField(attr=..., key=...)' for name in missing)}}}), "
                 "with AnnDataField from cellarium.ml.utilities.data."
+            )
+        absent_columns = self._absent_obs_columns(trained.batch_keys)
+        if absent_columns:
+            fields = ", ".join(f"'{name}' from {columns}" for name, columns in absent_columns.items())
+            raise ValueError(
+                f"The module '{key}' reads data fields from obs columns that this data does not have ({fields}). "
+                "If it was trained on other data, with other batches, map these cells onto it with "
+                f"cml.tl.scarches(cdata, reference='{key}', batch_key=...), which trains a module for the batches of "
+                "this data, and use that module."
             )
         if not trained.batch_keys:
             yield trained  # nothing extra needed (e.g. PCA), so leave the datamodule untouched
