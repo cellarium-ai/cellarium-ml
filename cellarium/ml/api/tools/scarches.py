@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 import torch
 from torch import nn
 
@@ -140,6 +141,9 @@ def scarches(
     cdata: CellariumData,
     reference: str | TrainedModule | CellariumModule,
     batch_key: str | None = None,
+    decoder_surgery: Literal["final_layer", "all"] = "final_layer",
+    unlabeled_prior: Literal["mixture", "scanvi", "standard_normal"] = "mixture",
+    cell_type_proportions: pd.Series | dict[str, float] | None = None,
     max_epochs: int = 50,
     val_size: float = 0.1,
     early_stopping_patience: int = 3,
@@ -184,6 +188,21 @@ def scarches(
             otherwise the embedding does not depend on the batch and there is nothing for scArches to do.
         batch_key: The (categorical) ``obs`` column of the batches of ``cdata``, each of which is a new batch, or
             ``None`` if all the cells are of one batch.
+        decoder_surgery: Which layers of the decoder are trained for the new batches. ``"final_layer"`` (default):
+            only its final layer, which gives a per-gene offset of expression for each new batch, the same for every
+            cell state (the reference model must have a final decoder layer that takes the batch, as those of
+            :func:`~cellarium.ml.api.tools.scvi` and :func:`~cellarium.ml.api.tools.scanvi` do), so that the new
+            batches cannot be decoded from the latent space differently from the reference. ``"all"``: every layer of
+            the decoder that takes the batch. The encoder is trained in either case. See
+            :class:`~cellarium.ml.models.ScArches`.
+        unlabeled_prior: (scANVI) The prior on the latent variable of the cells, which are unlabeled.
+            ``"mixture"`` (default): the mixture of the class-conditional priors of the model, weighted by ``p(c)``
+            (see ``cell_type_proportions``), without the classifier. ``"scanvi"``: as in the training of scANVI, with
+            the (frozen) classifier, which gives the encoder a gradient towards wherever the classifier makes the KL
+            terms small. ``"standard_normal"``: the prior of scVI. See :class:`~cellarium.ml.models.SCANVI`.
+        cell_type_proportions: (scANVI) The expected proportions (or numbers of cells) of the cell types in ``cdata``,
+            by name, which become ``p(c)``. Cell types not given get 0. By default, the proportions of the labeled
+            cells that the reference was trained on.
         max_epochs: The most epochs of training (a fallback: training usually stops earlier, by early stopping on the
             validation loss).
         val_size: The fraction of the cells held out for validation, for early stopping.
@@ -238,13 +257,23 @@ def scarches(
     batch_keys = {"batch_index_n": batch_field}
 
     # the surgery is done on a copy: the reference module stays as it is
-    model = ScArches(copy.deepcopy(reference_model), n_new_batch=n_new_batch)
+    model = ScArches(
+        copy.deepcopy(reference_model),
+        n_new_batch=n_new_batch,
+        decoder_surgery=decoder_surgery,
+        unlabeled_prior=unlabeled_prior,
+        cell_type_proportions=cell_type_proportions,
+    )
     print(
         f"scArches: mapping {n_new_batch:,} new batch{'es' if n_new_batch != 1 else ''} onto a "
         f"{type(reference_model).__name__} model of {model.n_batch_ref:,} batches; {n_missing_genes:,} of its "
         f"{len(reference_model.var_names_g):,} genes are not in the data."
     )
-    if isinstance(reference_model, SCANVI) and reference_model.n_partition > _WARN_PARTITION_SIZE:
+    if (
+        isinstance(reference_model, SCANVI)
+        and unlabeled_prior != "standard_normal"
+        and reference_model.n_partition > _WARN_PARTITION_SIZE
+    ):
         warnings.warn(
             f"The cells have no labels, so each is marginalized over the {reference_model.n_partition} cell types of "
             "the scANVI model, which makes training slow and uses a lot of memory on the accelerator. Consider a "
@@ -259,7 +288,15 @@ def scarches(
         "n_reference_batch": model.n_batch_ref,
         "n_missing_genes": n_missing_genes,
         "val_size": val_size,
+        "decoder_surgery": decoder_surgery,
     }
+    if isinstance(reference_model, SCANVI):
+        config["unlabeled_prior"] = unlabeled_prior
+        config["cell_type_proportions"] = (
+            None
+            if cell_type_proportions is None
+            else {str(name): float(value) for name, value in dict(cell_type_proportions).items()}
+        )
     if batch_categories:
         config["batch_categories"] = batch_categories
     _train(

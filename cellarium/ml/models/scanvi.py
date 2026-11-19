@@ -35,6 +35,15 @@ from cellarium.ml.utilities.testing import (
 )
 
 _EPS = 1e-8
+_UNLABELED_PRIORS = ("scanvi", "mixture", "standard_normal")
+
+
+class SCANVIPrediction(TransformClassifierPrediction, total=False):
+    """The prediction of :meth:`SCANVI.predict`: that of a classifier, and with ``n_generative_samples > 0`` also
+    the generative class posterior ``generative_probs_nc`` and ``in_distribution_score_n``."""
+
+    generative_probs_nc: torch.Tensor
+    in_distribution_score_n: torch.Tensor
 
 
 class ConditionalNormalEncoder(torch.nn.Module):
@@ -209,7 +218,11 @@ class SCANVI(SingleCellVariationalInference):
     For labeled cells the ELBO is maximized using the known cell type (or, for a coarse label,
     marginalized over its subtree) together with an auxiliary cross-entropy classification term.
     For unlabeled cells (label equal to ``unlabeled_category``) the cell-type expectation is
-    marginalized over the whole partition in chunks to control peak VRAM.
+    marginalized over the whole partition in chunks to control peak VRAM, with the classifier (as in scANVI)
+    or the exact class posterior of the generative model (see ``unlabeled_prior``).
+
+    Besides the classifier, :meth:`predict` can give the posterior over the classes of the generative model and how
+    well the classes explain each cell (see ``n_generative_samples``).
 
     The classifier is **batch-agnostic** (it consumes only ``z``), so with a batch-agnostic
     encoder configuration one can go ``x -> z -> c`` at inference time.
@@ -237,18 +250,31 @@ class SCANVI(SingleCellVariationalInference):
             Hidden layer widths shared by the u-encoder ``q(u|z,c)`` and the z-prior decoder
             ``p(z|u,c)``. Defaults to ``[128]``.
         y_prior_probs:
-            Prior probabilities over the partition ``p(c)``. Must sum to 1 and have length equal
-            to the partition size. If ``None`` a uniform prior is used (recommended).
+            Prior probabilities over the partition ``p(c)``: a list of length equal to the partition size (normalized
+            to sum to 1), ``"class_counts"`` for the proportions of the labeled cells in ``class_counts`` (see
+            :meth:`reference_class_proportions`), or ``None`` for a uniform prior.
         unlabeled_category:
             String label marking unlabeled cells. Default ``"unknown"``.
+        unlabeled_prior:
+            The prior on ``z`` in the ELBO of an unlabeled cell. ``"scanvi"`` (default): the classifier ``q(c|z)``
+            weights the class-conditional priors ``p(z|u,c)``, with ``KL(q(c|z) || p(c))``, as in scANVI, so the
+            encoder gets gradients through the classifier. ``"mixture"``: the mixture ``sum_c p(c) p(z|c)``, i.e. the
+            classifier is replaced by the exact posterior over classes under the generative model, ``r(c) ∝ p(c)
+            exp(-β K_c)`` where ``K_c`` is the KL term of class ``c`` and ``β`` the KL weight, which makes the term
+            ``-log sum_c p(c) exp(-β K_c)``; its gradient is ``sum_c r(c) β ∇K_c`` (the classifier gets no gradient
+            from unlabeled cells). ``"standard_normal"``: the prior of scVI, ``N(0, I)``, without the classes. Labeled
+            cells are not affected. :class:`~cellarium.ml.models.ScArches` sets this for the query cells.
         descendant_tensor:
             (ontology mode) ``(C, C)`` binary tensor, diagonal 1, where ``[i, j] == 1`` means
             ``j`` is a descendant of ``i``. Rows/columns are indexed by ``cl_names``.
         cl_names:
             (ontology mode) Ordered node names matching ``descendant_tensor``.
         class_counts:
-            (ontology mode) pandas Series mapping node names to training cell counts. Drives both
-            the frontier cut and (optionally) the class-balancing weights.
+            pandas Series mapping cell type names to the numbers of labeled training cells (the unlabeled category is
+            ignored). Required in ontology mode, where it drives both the frontier cut and (optionally) the
+            class-balancing weights. In both modes it is kept as the label proportions of the training data (see
+            :meth:`reference_class_proportions`), which are the default ``p(c)`` of scArches and the reference of
+            the classifier prior correction of :meth:`predict`.
         frontier_min_cells:
             (ontology mode) Support threshold for the frontier cut.
         propagate_class_counts:
@@ -277,8 +303,9 @@ class SCANVI(SingleCellVariationalInference):
         classifier_n_hidden: list[int] | None = None,
         classifier_dropout_rate: float = 0.1,
         secondary_n_hidden: list[int] | None = None,
-        y_prior_probs: list[float] | None = None,
+        y_prior_probs: list[float] | Literal["class_counts"] | None = None,
         unlabeled_category: str = "unknown",
+        unlabeled_prior: Literal["scanvi", "mixture", "standard_normal"] = "scanvi",
         descendant_tensor: torch.Tensor | None = None,
         cl_names: list[str] | None = None,
         class_counts: pd.Series | None = None,
@@ -305,6 +332,7 @@ class SCANVI(SingleCellVariationalInference):
         self.classification_weight = classification_weight
         self.chunk_size = chunk_size
         self.unlabeled_category = unlabeled_category
+        self.set_unlabeled_prior(unlabeled_prior)
         self.probability_propagation_flag = probability_propagation_flag
         self.use_torch_compile = use_torch_compile
         self.marginalization_warn_fraction = marginalization_warn_fraction
@@ -322,6 +350,9 @@ class SCANVI(SingleCellVariationalInference):
             )
         else:
             raise ValueError(f"classifier_type must be 'flat' or 'ontology', got {classifier_type!r}.")
+        # The label counts of the training data (see reference_class_proportions); names that the model cannot place
+        # are left out when they are used, as they are by the frontier cut.
+        self._class_counts: pd.Series | None = None if class_counts is None else pd.Series(class_counts).copy()
 
         # Classifier q(c|z): MLP from latent space to logits over the classifier output space.
         self.cell_type_classifier = FullyConnectedLinear(
@@ -347,13 +378,15 @@ class SCANVI(SingleCellVariationalInference):
 
         # Prior over the partition p(c); uniform by default (kept as numpy so reset_parameters()
         # can restore the buffer after meta-device materialization wipes it).
-        if y_prior_probs is not None:
-            if len(y_prior_probs) != self.n_partition:
-                raise ValueError(
-                    f"len(y_prior_probs)={len(y_prior_probs)} does not match partition size {self.n_partition}."
-                )
-            y_prior_np = np.asarray(y_prior_probs, dtype=np.float32)
-            y_prior_np = y_prior_np / y_prior_np.sum()
+        if isinstance(y_prior_probs, str):
+            if y_prior_probs != "class_counts":
+                raise ValueError(f"y_prior_probs must be a list, 'class_counts' or None, got {y_prior_probs!r}.")
+            reference = self.reference_class_proportions(space="partition")
+            if reference is None:
+                raise ValueError("y_prior_probs='class_counts' requires class_counts.")
+            y_prior_np = self._validated_y_prior(reference)
+        elif y_prior_probs is not None:
+            y_prior_np = self._validated_y_prior(y_prior_probs)
         else:
             y_prior_np = np.ones(self.n_partition, dtype=np.float32) / self.n_partition
         self._y_prior_numpy = y_prior_np
@@ -510,6 +543,134 @@ class SCANVI(SingleCellVariationalInference):
                     self.class_weights.copy_(self._class_weights)
 
     # ------------------------------------------------------------------
+    # Class proportions, the prior p(c), and the prior of unlabeled cells
+    # ------------------------------------------------------------------
+
+    def set_unlabeled_prior(self, unlabeled_prior: Literal["scanvi", "mixture", "standard_normal"]) -> None:
+        """Set the prior on ``z`` of unlabeled cells (see the ``unlabeled_prior`` argument of :class:`SCANVI`)."""
+        if unlabeled_prior not in _UNLABELED_PRIORS:
+            raise ValueError(f"unlabeled_prior must be one of {list(_UNLABELED_PRIORS)}, got {unlabeled_prior!r}.")
+        self.unlabeled_prior = unlabeled_prior
+
+    def _validated_y_prior(self, probs: np.ndarray | list[float]) -> np.ndarray:
+        """``probs`` as a prior over the partition: checked, as float32, and normalized to sum to 1."""
+        probs_np = np.asarray(probs, dtype=np.float32)
+        if probs_np.shape != (self.n_partition,):
+            raise ValueError(f"The prior p(c) has shape {probs_np.shape}, but the partition has {self.n_partition}.")
+        if not np.isfinite(probs_np).all() or (probs_np < 0).any() or probs_np.sum() <= 0:
+            raise ValueError("The prior p(c) must be finite and non-negative, and not all zero.")
+        return probs_np / probs_np.sum()
+
+    def set_y_prior(self, probs: np.ndarray | list[float]) -> None:
+        """Set the prior ``p(c)`` over the partition (normalized to sum to 1)."""
+        self._y_prior_numpy = self._validated_y_prior(probs)
+        with torch.no_grad():
+            self.y_prior.copy_(torch.as_tensor(self._y_prior_numpy, device=self.y_prior.device))
+
+    def _classifier_space_counts(self, counts: pd.Series, strict: bool) -> np.ndarray:
+        """
+        The numbers of cells (or proportions) ``counts`` of cell types, by name, summed into the classifier output
+        space: the partition in flat mode, and the active nodes in ontology mode (where a cell type finer than the
+        frontier counts towards its frontier ancestor). The unlabeled category is left out. A name that the model
+        cannot place is an error if ``strict``, and is left out otherwise.
+        """
+        label_to_index = self._label_to_partition_idx if self.classifier_type == "flat" else self._label_to_active_idx
+        counts_c = np.zeros(self._classifier_out_dim, dtype=np.float64)
+        unknown: list[str] = []
+        for name, count in counts.items():
+            name = str(name)
+            if name == self.unlabeled_category:
+                continue
+            if not np.isfinite(count) or count < 0:
+                raise ValueError(f"The number of cells (or proportion) of {name!r} is {count}, not >= 0.")
+            if name not in label_to_index:
+                unknown.append(name)
+                continue
+            counts_c[label_to_index[name]] += float(count)
+        if unknown and strict:
+            shown = ", ".join(repr(name) for name in unknown[:10])
+            raise ValueError(
+                f"{len(unknown)} cell type(s) are not classes of the model (nor, with an ontology, finer than one): "
+                f"{shown}{', ...' if len(unknown) > 10 else ''}."
+            )
+        return counts_c
+
+    def _partition_space_counts(self, counts_c: np.ndarray) -> np.ndarray:
+        """
+        Counts in the classifier output space as counts over the partition. In ontology mode, a coarse (internal)
+        node's count is split among the frontier nodes below it, in proportion to their own counts (or evenly if they
+        have none).
+        """
+        if self.classifier_type == "flat":
+            return counts_c
+        membership_ap = self._frontier_membership_af.cpu().numpy() > 0
+        frontier_p = self._frontier_active_idx.cpu().numpy()
+        own_p = counts_c[frontier_p]
+        counts_p = own_p.copy()
+        is_frontier_a = np.zeros(len(counts_c), dtype=bool)
+        is_frontier_a[frontier_p] = True
+        for a in np.flatnonzero((counts_c > 0) & ~is_frontier_a):
+            members_p = membership_ap[a]
+            weights = own_p[members_p]
+            total = weights.sum()
+            counts_p[members_p] += counts_c[a] * (weights / total if total > 0 else 1.0 / members_p.sum())
+        return counts_p
+
+    def _proportions(self, counts: pd.Series, space: Literal["partition", "classifier"], strict: bool) -> np.ndarray:
+        counts_c = self._classifier_space_counts(counts, strict=strict)
+        counts_s = counts_c if space == "classifier" else self._partition_space_counts(counts_c)
+        total = counts_s.sum()
+        if total <= 0:
+            raise ValueError("None of the cell types of the model has a positive number of cells (or proportion).")
+        return counts_s / total
+
+    def class_proportions(self, counts: pd.Series, space: Literal["partition", "classifier"]) -> np.ndarray:
+        """
+        Proportions of the classes of the model from numbers of cells (or proportions) of cell types by name.
+
+        Args:
+            counts: Numbers of cells (or proportions) by cell type name. Cell types that are not given get 0, the
+                unlabeled category is left out, and (in ontology mode) a cell type finer than the frontier counts
+                towards its frontier ancestor. A name that the model cannot place is an error.
+            space: ``"partition"`` for the classes ``c`` of the generative model (the frontier in ontology mode,
+                where the count of a coarser node is split among the frontier nodes below it in proportion to their
+                own counts), or ``"classifier"`` for the classifier output space (the active nodes in ontology mode).
+                In flat mode the two are the same.
+
+        Returns:
+            The proportions, which sum to 1.
+        """
+        return self._proportions(counts, space=space, strict=True)
+
+    def reference_class_proportions(self, space: Literal["partition", "classifier"]) -> np.ndarray | None:
+        """
+        The proportions of the classes among the labeled cells that the model was trained on (its ``class_counts``),
+        in the ``space`` of :meth:`class_proportions`, or ``None`` if the model does not know them (it was made without
+        ``class_counts``, or before they were kept).
+        """
+        counts = getattr(self, "_class_counts", None)  # absent from models pickled before it was kept
+        if counts is None:
+            return None
+        return self._proportions(counts, space=space, strict=False)
+
+    def _classifier_implicit_prior(self) -> torch.Tensor:
+        """
+        The prior over the classifier output space that the classifier was trained with: the proportions of the
+        training labels, times the class-balancing weights of the cross-entropy (in ontology mode, if any). In
+        ontology mode this is approximate, as the cross-entropy is on the propagated logits.
+        """
+        reference = self.reference_class_proportions(space="classifier")
+        if reference is None:
+            raise ValueError(
+                "Correcting the classifier prior needs the numbers of labeled cells of each cell type that the model "
+                "was trained on (class_counts), which this model does not have."
+            )
+        prior_c = torch.as_tensor(reference, dtype=torch.float32, device=self.y_prior.device)
+        if self.classifier_type == "ontology" and self.class_weights is not None:
+            prior_c = prior_c * self.class_weights
+        return prior_c / prior_c.sum()
+
+    # ------------------------------------------------------------------
     # Classifier heads (mode-specific)
     # ------------------------------------------------------------------
 
@@ -589,10 +750,6 @@ class SCANVI(SingleCellVariationalInference):
         Returns:
             ``(kl_z, kl_u, kl_c)`` each ``[m]``. ``kl_c`` is exactly 0 when ``|S| == 1``.
         """
-        m = z_m.shape[0]
-        s = int(set_idx.numel())
-        device = z_m.device
-
         q_S = q_partition_m[:, set_idx]  # [m, s]
         q_S_norm = q_S / q_S.sum(dim=-1, keepdim=True).clamp_min(_EPS)  # [m, s]
 
@@ -601,12 +758,35 @@ class SCANVI(SingleCellVariationalInference):
         p_S = p_S / p_S.sum().clamp_min(_EPS)
         kl_c = (q_S_norm * (q_S_norm.clamp_min(_EPS).log() - p_S.unsqueeze(0).clamp_min(_EPS).log())).sum(dim=-1)
 
-        kl_z = torch.zeros(m, device=device)
-        kl_u = torch.zeros(m, device=device)
-        for start in range(0, s, self.chunk_size):
-            end = min(start + self.chunk_size, s)
-            chunk = end - start
-            members = set_idx[start:end]  # [chunk]
+        kl_z_ms, kl_u_ms = self._set_kls(z_m, qz_mean_m, qz_std_m, set_idx)
+        kl_z = (q_S_norm * kl_z_ms).sum(dim=-1)
+        kl_u = (q_S_norm * kl_u_ms).sum(dim=-1)
+        return kl_z, kl_u, kl_c
+
+    def _set_kls(
+        self,
+        z_m: torch.Tensor,
+        qz_mean_m: torch.Tensor,
+        qz_std_m: torch.Tensor,
+        set_idx: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``kl_z`` and ``kl_u`` of each cell for each class in ``set_idx`` (in chunks of :attr:`chunk_size`).
+
+        Args:
+            z_m: Latent values for the group ``[m, n_latent]`` (the input of the u-encoder).
+            qz_mean_m: ``q(z|x)`` mean ``[m, n_latent]``.
+            qz_std_m: ``q(z|x)`` std ``[m, n_latent]``.
+            set_idx: Partition indices ``S`` ``[s]``.
+
+        Returns:
+            ``(kl_z, kl_u)`` each ``[m, s]``.
+        """
+        m = z_m.shape[0]
+        kl_z_chunks: list[torch.Tensor] = []
+        kl_u_chunks: list[torch.Tensor] = []
+        for start in range(0, int(set_idx.numel()), self.chunk_size):
+            members = set_idx[start : start + self.chunk_size]  # [chunk]
+            chunk = int(members.numel())
             c_onehot = F.one_hot(members, self.n_partition).float()  # [chunk, n_partition]
 
             z_exp = z_m.unsqueeze(1).expand(-1, chunk, -1).reshape(m * chunk, -1)
@@ -615,13 +795,69 @@ class SCANVI(SingleCellVariationalInference):
             c_exp = c_onehot.unsqueeze(0).expand(m, -1, -1).reshape(m * chunk, -1)
 
             kl_z_c, kl_u_c = self._conditional_kls(z_exp, qzm_exp, qzs_exp, c_exp)
-            kl_z_c = kl_z_c.view(m, chunk)
-            kl_u_c = kl_u_c.view(m, chunk)
-            w = q_S_norm[:, start:end]
-            kl_z = kl_z + (w * kl_z_c).sum(dim=-1)
-            kl_u = kl_u + (w * kl_u_c).sum(dim=-1)
+            kl_z_chunks.append(kl_z_c.view(m, chunk))
+            kl_u_chunks.append(kl_u_c.view(m, chunk))
+        return torch.cat(kl_z_chunks, dim=1), torch.cat(kl_u_chunks, dim=1)
 
-        return kl_z, kl_u, kl_c
+    def _unlabeled_kls(
+        self,
+        z_m: torch.Tensor,
+        qz_mean_m: torch.Tensor,
+        qz_std_m: torch.Tensor,
+        q_partition_m: torch.Tensor,
+        kl_weight: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``(kl_z, kl_u, kl_c)`` of unlabeled cells, each ``[m]``, for the prior :attr:`unlabeled_prior`.
+
+        The loss of a cell is ``kl_weight * (kl_z + kl_u) + kl_c`` (plus its reconstruction loss), where
+        ``kl_weight`` is the weight of the KL terms of ``z`` and ``u`` (the annealing weight times
+        :attr:`z_kl_weight_max`).
+
+        * ``"scanvi"``: marginalized over the whole partition with the classifier posterior ``q(c|z)``.
+        * ``"mixture"``: the same with the exact posterior ``r(c) ∝ p(c) exp(-kl_weight * K_c)`` in place of
+          ``q(c|z)``, where ``K_c = kl_z_c + kl_u_c``. Then ``kl_weight * (kl_z + kl_u) + kl_c`` is
+          ``-log sum_c p(c) exp(-kl_weight * K_c)``, and since ``r`` minimizes it over distributions on the classes,
+          its gradient through ``r`` is zero: ``r`` is computed without gradient, and the gradient is
+          ``kl_weight * sum_c r(c) ∇K_c``.
+        * ``"standard_normal"``: ``kl_z = KL(q(z|x) || N(0, I))``, and ``kl_u = kl_c = 0``.
+        """
+        unlabeled_prior = getattr(self, "unlabeled_prior", "scanvi")  # absent from models pickled before it existed
+        all_frontier = torch.arange(self.n_partition, dtype=torch.long, device=z_m.device)
+        if unlabeled_prior == "scanvi":
+            return self._marginalize_over_set(z_m, qz_mean_m, qz_std_m, q_partition_m, all_frontier)
+        if unlabeled_prior == "standard_normal":
+            prior = Normal(torch.zeros_like(qz_mean_m), torch.ones_like(qz_std_m))
+            kl_z = torch.distributions.kl_divergence(Normal(qz_mean_m, qz_std_m), prior).sum(dim=-1)
+            zeros = torch.zeros_like(kl_z)
+            return kl_z, zeros, zeros
+        assert unlabeled_prior == "mixture", unlabeled_prior
+        kl_z_mp, kl_u_mp = self._set_kls(z_m, qz_mean_m, qz_std_m, all_frontier)
+        log_prior_p = self.y_prior.clamp_min(_EPS).log()
+        with torch.no_grad():
+            r_mp = F.softmax(log_prior_p - kl_weight * (kl_z_mp + kl_u_mp), dim=-1)
+        kl_c = (r_mp * (r_mp.clamp_min(_EPS).log() - log_prior_p)).sum(dim=-1)
+        return (r_mp * kl_z_mp).sum(dim=-1), (r_mp * kl_u_mp).sum(dim=-1), kl_c
+
+    def generative_class_log_scores(
+        self, qz_mean_n: torch.Tensor, qz_std_n: torch.Tensor, n_samples: int
+    ) -> torch.Tensor:
+        """
+        ``-K̄_c`` for each cell and class ``c`` of the partition, ``[n, n_partition]``, where
+        ``K_c = KL(q(z|x) || p(z|u,c)) + KL(q(u|z,c) || N(0, I))`` with ``z`` at the mean of ``q(z|x)`` (the input of
+        the u-encoder) and ``u`` sampled from ``q(u|z,c)``, averaged over ``n_samples`` samples of ``u``.
+
+        Up to the entropy of ``q(z|x)`` (the same for every class), ``-K_c`` is a lower bound on
+        ``E_q(z|x)[log p(z|c)]``, so ``softmax_c(log p(c) - K̄_c)`` is the posterior over classes of the generative
+        model (see :meth:`predict`).
+        """
+        if n_samples < 1:
+            raise ValueError(f"n_samples must be >= 1, got {n_samples}.")
+        all_frontier = torch.arange(self.n_partition, dtype=torch.long, device=qz_mean_n.device)
+        total_np = torch.zeros(qz_mean_n.shape[0], self.n_partition, device=qz_mean_n.device)
+        for _ in range(n_samples):
+            kl_z_np, kl_u_np = self._set_kls(qz_mean_n, qz_mean_n, qz_std_n, all_frontier)
+            total_np = total_np + kl_z_np + kl_u_np
+        return -total_np / n_samples
 
     def _resolve_group(self, label: str) -> tuple[torch.Tensor, int | None]:
         """Resolve a label string to ``(marg_partition_idx, ce_target_or_None)``.
@@ -944,16 +1180,15 @@ class SCANVI(SingleCellVariationalInference):
             kl_c_n[coarse_idx] = kl_c_c
             ce_loss_n[coarse_idx] = self._supervised_ce(logits[coarse_idx], buckets["coarse_ce_target"])
 
-        # Unlabeled path: single batch marginalized over the whole frontier with a chunk loop.
+        # Unlabeled path: single batch over the whole frontier with a chunk loop, with the prior unlabeled_prior.
         if buckets["unlabeled_idx"].numel() > 0:
             unlabeled_idx = buckets["unlabeled_idx"]
-            all_frontier = torch.arange(self.n_partition, dtype=torch.long, device=device)
-            kl_z_u, kl_u_u, kl_c_u = self._marginalize_over_set(
+            kl_z_u, kl_u_u, kl_c_u = self._unlabeled_kls(
                 z[unlabeled_idx],
                 qz_mean[unlabeled_idx],
                 qz_std[unlabeled_idx],
                 q_partition[unlabeled_idx],
-                all_frontier,
+                kl_weight=kl_annealing_weight * self.z_kl_weight_max,
             )
             kl_z_n[unlabeled_idx] = kl_z_u
             kl_u_n[unlabeled_idx] = kl_u_u
@@ -1057,11 +1292,34 @@ class SCANVI(SingleCellVariationalInference):
         batch_index_n: torch.Tensor,
         continuous_covariates_nc: torch.Tensor | None = None,
         categorical_covariate_index_nd: torch.Tensor | None = None,
-    ) -> TransformClassifierPrediction:
+        n_generative_samples: int = 0,
+        classifier_target_proportions_c: torch.Tensor | None = None,
+    ) -> SCANVIPrediction:
         """Embed cells and predict cell-type probabilities.
 
-        If :attr:`reconstruct_counts_on_predict` is ``True``, falls back to the parent's
-        count-reconstruction behaviour and omits cell-type probabilities.
+        If :attr:`reconstruct_counts_on_predict` is ``True``, ``x_ng`` is the reconstructed counts of the parent
+        instead of the embedding.
+
+        **Generative class posterior** (with ``n_generative_samples > 0``). Besides the classifier ``q(c|z)``, the
+        class-conditional priors ``p(z|u,c)`` of the generative model give a posterior over the classes by Bayes'
+        rule, ``r(c) = softmax_c(log p(c) - K̄_c)`` with ``p(c)`` the :attr:`y_prior` of the model and ``K̄_c`` from
+        :meth:`generative_class_log_scores`. The classifier extrapolates its decision regions to cells far from any
+        that it was trained on, but no class prior explains such a cell well. How well the classes explain a cell is
+        its ``in_distribution_score_n``, ``log sum_c p(c) exp(-K̄_c) - H(q(z|x))``: a lower bound on the expected log
+        density of the cell's latent posterior under the mixture prior ``sum_c p(c) p(z|c)`` (in nats; higher is more
+        in-distribution). The entropy ``H(q(z|x))`` is subtracted
+        since ``K_c`` contains ``-H(q(z|x))``, which would otherwise make cells with narrow posteriors (e.g. many
+        counts) look less in-distribution. Each sample costs one pass over all classes, as an unlabeled cell does in
+        training.
+
+        **Classifier prior correction** (with ``classifier_target_proportions_c``). The classifier was trained with an
+        implicit prior over its classes: the proportions of the training labels (:meth:`reference_class_proportions`,
+        so the model needs ``class_counts``), times the class-balancing weights of the cross-entropy in ontology mode.
+        Its probabilities are changed to those for the prior ``classifier_target_proportions_c`` by
+        ``q(c|z) * target(c) / implicit(c)``, renormalized (Saerens et al., 2002), before propagation in ontology mode.
+        With the proportions of the training labels as the target this is no change in flat mode, and undoes the
+        class balancing in ontology mode, where it is approximate since the cross-entropy is on propagated logits.
+        Classes that have no training labels (implicit prior 0) are left as they are.
 
         Args:
             x_ng: Gene counts matrix ``[N, G]``
@@ -1070,6 +1328,11 @@ class SCANVI(SingleCellVariationalInference):
                 when the encoder is configured batch-agnostic.)
             continuous_covariates_nc: Continuous covariates ``[N, C]``.
             categorical_covariate_index_nd: Integer categorical covariate codes ``[N, D]``.
+            n_generative_samples: The number of samples of ``u`` to average ``K_c`` over for the generative class
+                posterior, or 0 (default) to not compute it.
+            classifier_target_proportions_c: Proportions over the classifier output space (the partition in flat
+                mode, the active nodes in ontology mode; see :meth:`class_proportions`) to correct the classifier
+                prior to, or ``None`` (default) for no correction.
 
         Returns:
             A dict with
@@ -1081,6 +1344,10 @@ class SCANVI(SingleCellVariationalInference):
                 over all active nodes (``[N, n_active]``, columns = :attr:`active_cl_names`); in flat mode
                 it is the softmax over the partition (``[N, n_partition]``).
             - ``y_logits_nc`` (logits before softmax ``[N, n_partition]``).
+            - ``category_labels_c`` The names of the columns of ``y_probs_nc``.
+            - ``generative_probs_nc`` (if ``n_generative_samples > 0``) The generative class posterior, with the
+                columns of ``y_probs_nc`` (propagated over the active nodes in ontology mode).
+            - ``in_distribution_score_n`` (if ``n_generative_samples > 0``) See above.
         """
         assert_columns_and_array_lengths_equal("x_ng", x_ng, "var_names_g", var_names_g)
         assert_arrays_equal("var_names_g", var_names_g, "var_names_g", self.var_names_g)
@@ -1097,11 +1364,13 @@ class SCANVI(SingleCellVariationalInference):
         qz = inference_outputs["qz"]
         z_nk = self._latent_value_from_latent_distribution(qz)
         logits_nc = self.cell_type_classifier(qz.mean)
-        if self.classifier_type == "flat":
-            probs_nc = F.softmax(logits_nc, dim=-1)
-        else:
-            probs_nc = self._propagate_probs(F.softmax(logits_nc, dim=-1))
+        probs_nc = F.softmax(logits_nc, dim=-1)
+        if classifier_target_proportions_c is not None:
+            probs_nc = self._corrected_classifier_probs(probs_nc, classifier_target_proportions_c)
+        if self.classifier_type == "ontology":
+            probs_nc = self._propagate_probs(probs_nc)
 
+        prediction: SCANVIPrediction
         if self.reconstruct_counts_on_predict:
             x_hat_ng = super().predict(
                 x_ng=x_ng,
@@ -1110,7 +1379,7 @@ class SCANVI(SingleCellVariationalInference):
                 continuous_covariates_nc=continuous_covariates_nc,
                 categorical_covariate_index_nd=categorical_covariate_index_nd,
             )["x_ng"]
-            return {
+            prediction = {
                 "x_ng": x_hat_ng,
                 "var_names_g": var_names_g,
                 "y_probs_nc": probs_nc,
@@ -1118,10 +1387,38 @@ class SCANVI(SingleCellVariationalInference):
                 "category_labels_c": self.active_cl_names,
             }
         else:
-            return {
+            prediction = {
                 "x_ng": z_nk,
                 "var_names_g": np.array([f"scanvi_{i}" for i in range(z_nk.shape[1])]),
                 "y_probs_nc": probs_nc,
                 "y_logits_nc": logits_nc,
                 "category_labels_c": self.active_cl_names,
             }
+        if n_generative_samples > 0:
+            log_joint_np = self.y_prior.clamp_min(_EPS).log() + self.generative_class_log_scores(
+                qz.mean, qz.stddev, n_samples=n_generative_samples
+            )
+            generative_probs_nc = F.softmax(log_joint_np, dim=-1)
+            if self.classifier_type == "ontology":
+                active_nc = generative_probs_nc.new_zeros(generative_probs_nc.shape[0], self.n_active)
+                active_nc[:, self.frontier_active_idx] = generative_probs_nc
+                generative_probs_nc = self._propagate_probs(active_nc)
+            prediction["generative_probs_nc"] = generative_probs_nc
+            prediction["in_distribution_score_n"] = torch.logsumexp(log_joint_np, dim=-1) - qz.entropy().sum(dim=-1)
+        return prediction
+
+    def _corrected_classifier_probs(self, probs_nc: torch.Tensor, target_c: torch.Tensor) -> torch.Tensor:
+        """
+        The classifier probabilities ``probs_nc`` (over the classifier output space, before any propagation) for the
+        prior ``target_c`` instead of the implicit prior of the classifier (see :meth:`predict`).
+        """
+        if target_c.shape != (self._classifier_out_dim,):
+            raise ValueError(
+                f"classifier_target_proportions_c has shape {tuple(target_c.shape)}, but the classifier has "
+                f"{self._classifier_out_dim} outputs."
+            )
+        implicit_c = self._classifier_implicit_prior().to(probs_nc)
+        target_c = target_c.to(probs_nc)
+        ratio_c = torch.where(implicit_c > 0, target_c / implicit_c.clamp_min(_EPS), torch.ones_like(implicit_c))
+        corrected_nc = probs_nc * ratio_c
+        return corrected_nc / corrected_nc.sum(dim=-1, keepdim=True).clamp_min(_EPS)

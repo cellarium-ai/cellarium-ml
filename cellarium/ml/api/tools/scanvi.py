@@ -106,6 +106,10 @@ def scanvi(
     classifier predicts. Annotate cells with the trained model with :func:`scanvi_annotate`, and get an embedding of
     them with :func:`~cellarium.ml.api.tools.embed`.
 
+    The model keeps the numbers of labeled cells of each cell type (its ``class_counts``), and its prior over the
+    classes ``p(c)`` is their proportions (unless ``y_prior_probs`` is given in ``scanvi_kwargs``). These are also the
+    default ``p(c)`` of the query cells of :func:`~cellarium.ml.api.tools.scarches`.
+
     Args:
         cdata: :class:`CellariumData` instance containing the data.
         batch_key: The ``obs`` column to use as the batch covariate for batch correction.
@@ -185,7 +189,10 @@ def scanvi(
     config: dict[str, Any] = {}
     if ontology is None:
         # the classes are the cell types in the data, and the unlabeled one is not among them
-        classifier_kwargs: dict[str, Any] = {"cell_type_categories": sorted(labeled_counts.index)}
+        classifier_kwargs: dict[str, Any] = {
+            "cell_type_categories": sorted(labeled_counts.index),
+            "class_counts": labeled_counts,
+        }
     else:
         descendant_tensor, cl_names = _ontology_inputs(ontology)
         outside = labeled_counts[~labeled_counts.index.isin(cl_names)]
@@ -211,7 +218,8 @@ def scanvi(
         n_latent=n_latent,
         unlabeled_category=unlabeled_category,
         **classifier_kwargs,
-        **_model_kwargs(scanvi_kwargs),
+        # p(c) is the proportions of the labeled cells, unless given
+        **{"y_prior_probs": "class_counts", **_model_kwargs(scanvi_kwargs)},
     )
 
     # every label has to be one that the model can resolve, so that training does not fail on one of them midway
@@ -330,12 +338,15 @@ def scanvi_annotate(
     module_key: str = "scanvi",
     key_added: str | None = None,
     threshold: float = 0.2,
+    n_generative_samples: int = 8,
+    classifier_target_proportions: pd.Series | dict[str, float] | Literal["reference"] | None = None,
     accelerator: Literal["cpu", "mps", "cuda", "auto"] = "auto",
     batch_size: int | None = None,
 ) -> None:
     """
     Give each cell of ``cdata`` the cell type that a trained scANVI model predicts, in one pass over the cells, and
-    store the labels, and the probability of each, in ``obs_computed``.
+    store the labels, and the probability of each, in ``obs_computed``. There are two predictions of the cell type:
+    that of the classifier ``q(c|z)``, and that of the generative model (see below).
 
     The classifier gives a probability to each cell type. With an ontology-aware classifier these are the
     probabilities that have been propagated up the ontology, so that the probability of a node includes that of
@@ -351,15 +362,37 @@ def scanvi_annotate(
     specific types, and a high one retreats to more general ones. For a flat one, it is the confidence in the one
     best cell type.
 
+    **The generative prediction.** The class-conditional priors ``p(z|u,c)`` of the model also give a posterior over
+    the cell types, by Bayes' rule with the prior ``p(c)`` of the model (see :meth:`~cellarium.ml.models.SCANVI.predict`
+    and, for scArches, ``cell_type_proportions`` of :func:`~cellarium.ml.api.tools.scarches`). Its label is chosen by
+    the same rule as that of the classifier. The two fail differently: the classifier confidently extends its decision
+    regions to cells unlike any it was trained on, whereas no class prior explains such a cell well. How well the
+    classes explain a cell is its *in-distribution score* (in nats, higher is better), which has no natural threshold:
+    compare it with the scores of reference cells. Cells whose two labels differ, or with low scores, are worth a look.
+    The generative prediction averages over ``n_generative_samples`` samples, each a pass over all the cell types, so
+    it makes annotation slower; with ``n_generative_samples=0`` it is not made.
+
+    **Classifier prior correction.** The classifier was trained with an implicit prior over the cell types: the
+    proportions of the training labels, times the class-balancing weights in ontology mode. With
+    ``classifier_target_proportions``, its probabilities are corrected to another prior (Saerens et al., 2002).
+    ``"reference"`` is the proportions of the training labels, which changes nothing for a flat classifier and undoes
+    the class balancing of an ontology-aware one (approximately). The model needs its ``class_counts`` for this.
+
     Any data the module needs to run (such as the batch column) is provided for you, see :meth:`CellariumData.using`.
     The module is the one in ``cdata.trained_modules[module_key]``, so for a view of cells (which starts with no
     trained modules) it is one that was trained on the view, or assigned to it. The cells need no labels.
 
-    Two things are stored in ``obs_computed``, each a :class:`pandas.Series` indexed by
-    :attr:`CellariumData.cell_ids`, for all the cells:
+    These are stored in ``obs_computed``, each a :class:`pandas.Series` indexed by :attr:`CellariumData.cell_ids`, for
+    all the cells:
 
-    * ``key_added``: the labels (a categorical of the cell types that were assigned),
-    * ``f"{key_added}_confidence"``: the probability of the label of the cell.
+    * ``key_added``: the labels of the classifier (a categorical of the cell types that were assigned),
+    * ``f"{key_added}_confidence"``: the probability of the label of the cell under the classifier,
+
+    and with ``n_generative_samples > 0``:
+
+    * ``f"{key_added}_generative"``: the labels of the generative model,
+    * ``f"{key_added}_generative_confidence"``: the probability of that label under the generative model,
+    * ``f"{key_added}_in_distribution_score"``: the in-distribution score of the cell.
 
     Args:
         cdata: The cells to annotate (a :class:`CellariumData` or a view). It is where the labels are stored.
@@ -368,19 +401,32 @@ def scanvi_annotate(
         key_added: The key in ``obs_computed`` to store the labels under, replacing any entry there. By default
             ``"<module_key>_annotation"``.
         threshold: The least probability that a cell type must have to be the label, between 0 and 1.
+        n_generative_samples: The number of samples to average over for the generative prediction, or 0 to not make
+            it.
+        classifier_target_proportions: The prior to correct the classifier to: ``"reference"``, or proportions (or
+            numbers of cells) by cell type name (cell types not given get 0), or ``None`` (default) for no correction.
         accelerator: The accelerator for the pass, in ["cpu", "mps", "cuda", "auto"].
         batch_size: The number of cells per batch, by default that of the datamodule.
 
     Raises:
         TypeError: If the module is not an scANVI one.
+        ValueError: If ``classifier_target_proportions`` has cell types that are not classes of the model, or is given
+            for a model without ``class_counts``.
     """
     if not 0.0 <= threshold <= 1.0:
         raise ValueError(f"threshold must be between 0 and 1, got {threshold}.")
+    if n_generative_samples < 0:
+        raise ValueError(f"n_generative_samples must be >= 0, got {n_generative_samples}.")
     key_added = f"{module_key}_annotation" if key_added is None else key_added
     device = resolve_device(accelerator)
     n = cdata.n_obs
-    node_index = np.full(n, -1, dtype=np.int64)
-    confidence = np.zeros(n, dtype=np.float32)
+    # the label (as a node index, -1 for none) and its probability, for the probabilities under each key of predict()
+    keys = {"y_probs_nc": key_added}
+    if n_generative_samples > 0:
+        keys["generative_probs_nc"] = f"{key_added}_generative"
+    node_index = {key: np.full(n, -1, dtype=np.int64) for key in keys}
+    confidence = {key: np.zeros(n, dtype=np.float32) for key in keys}
+    in_distribution_score = np.zeros(n, dtype=np.float32)
 
     with cdata.using(module_key) as trained:
         module = trained.module
@@ -395,30 +441,69 @@ def scanvi_annotate(
         else:  # no node is more specific than another, so the label is the cell type of greatest probability
             depth = np.zeros(len(names), dtype=np.int64)
         depth_c = torch.as_tensor(depth, device=device)
+        # the arguments of predict() that are not data
+        predict_kwargs: dict[str, Any] = {"n_generative_samples": n_generative_samples}
+        if classifier_target_proportions is not None:
+            predict_kwargs["classifier_target_proportions_c"] = torch.as_tensor(
+                _classifier_target_proportions(scanvi_model, classifier_target_proportions),
+                dtype=torch.float32,
+                device=device,
+            )
         original_device = _device_of(model)
         model.to(device)
         try:
             for batch in cdata.predict_batches(
                 module, device=device, batch_size=batch_size, desc=f"Annotating cells with '{module_key}'"
             ):
-                prediction = call_func_with_batch(model.predict, batch)
-                index, node_confidence, assigned = _select_nodes(prediction["y_probs_nc"].float(), depth_c, threshold)
+                prediction = call_func_with_batch(model.predict, {**batch, **predict_kwargs})
                 positions = batch["row_indices_n"].numpy()
-                node_index[positions] = np.where(assigned.cpu().numpy(), index.cpu().numpy(), -1)
-                confidence[positions] = node_confidence.cpu().numpy()
+                for key in keys:
+                    index, node_confidence, assigned = _select_nodes(prediction[key].float(), depth_c, threshold)
+                    node_index[key][positions] = np.where(assigned.cpu().numpy(), index.cpu().numpy(), -1)
+                    confidence[key][positions] = node_confidence.cpu().numpy()
+                if n_generative_samples > 0:
+                    in_distribution_score[positions] = prediction["in_distribution_score_n"].float().cpu().numpy()
         finally:
             if original_device is not None:
                 model.to(original_device)
 
     unlabeled = scanvi_model.unlabeled_category
     categories = names if unlabeled in names else [*names, unlabeled]
-    codes = np.where(node_index >= 0, node_index, categories.index(unlabeled))
-    labels = pd.Categorical.from_codes(codes, categories=categories).remove_unused_categories()
-    cdata.obs_computed[key_added] = pd.Series(labels)
-    cdata.obs_computed[f"{key_added}_confidence"] = pd.Series(confidence)
+    for key, label_key in keys.items():
+        codes = np.where(node_index[key] >= 0, node_index[key], categories.index(unlabeled))
+        labels = pd.Categorical.from_codes(codes, categories=categories).remove_unused_categories()
+        cdata.obs_computed[label_key] = pd.Series(labels)
+        cdata.obs_computed[f"{label_key}_confidence"] = pd.Series(confidence[key])
+    if n_generative_samples > 0:
+        cdata.obs_computed[f"{key_added}_in_distribution_score"] = pd.Series(in_distribution_score)
 
-    n_unassigned = int((node_index < 0).sum())
-    print(
-        f"scanvi_annotate: {n - n_unassigned:,} of {n:,} cells have a cell type with probability of at least "
-        f"{threshold}; the other {n_unassigned:,} ({n_unassigned / max(n, 1):.1%}) are '{unlabeled}'."
-    )
+    for key, what in (("y_probs_nc", "the classifier"), ("generative_probs_nc", "the generative model")):
+        if key not in keys:
+            continue
+        n_unassigned = int((node_index[key] < 0).sum())
+        print(
+            f"scanvi_annotate: by {what}, {n - n_unassigned:,} of {n:,} cells have a cell type with probability of at "
+            f"least {threshold}; the other {n_unassigned:,} ({n_unassigned / max(n, 1):.1%}) are '{unlabeled}'."
+        )
+    if n_generative_samples > 0:
+        n_differ = int((node_index["y_probs_nc"] != node_index["generative_probs_nc"]).sum())
+        print(f"scanvi_annotate: the two labels differ for {n_differ:,} cells ({n_differ / max(n, 1):.1%}).")
+
+
+def _classifier_target_proportions(
+    model: SCANVI, proportions: pd.Series | dict[str, float] | Literal["reference"]
+) -> np.ndarray:
+    """The ``classifier_target_proportions`` of :func:`scanvi_annotate`, over the classifier outputs of ``model``."""
+    if isinstance(proportions, str):
+        if proportions != "reference":
+            raise ValueError(
+                f"classifier_target_proportions must be 'reference', proportions or None, not {proportions!r}."
+            )
+        reference = model.reference_class_proportions(space="classifier")
+        if reference is None:
+            raise ValueError(
+                "classifier_target_proportions='reference' needs the numbers of labeled cells of each cell type that "
+                "the model was trained on (class_counts), which this model does not have."
+            )
+        return reference
+    return model.class_proportions(pd.Series(proportions), space="classifier")

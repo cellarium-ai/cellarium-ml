@@ -2041,8 +2041,9 @@ def test_scarches_cli(tmp_path: Path) -> None:
                   out_features: 16
                   label_to_bias_hidden_layers: []
             final_layer:
-              class_path: torch.nn.Linear
-              init_args: {{}}
+              class_path: cellarium.ml.models.scvi.LinearWithBatch
+              init_args:
+                label_to_bias_hidden_layers: []
             final_additive_bias: false
       optim_fn: torch.optim.Adam
     data:

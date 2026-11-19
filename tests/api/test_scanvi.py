@@ -167,6 +167,50 @@ def test_annotate_gives_unknown_to_the_cells_below_the_threshold(cdata):
     scanvi_annotate(cdata, "scanvi", key_added="strict", threshold=1.0, accelerator="cpu")
     assert (cdata.obs_computed["strict"].astype(str) == "unknown").all()
     assert (cdata.obs_computed["strict_confidence"] == 0).all()
+    # and so do the generative labels
+    assert (cdata.obs_computed["strict_generative"].astype(str) == "unknown").all()
+
+
+def test_scanvi_keeps_the_label_counts_and_makes_the_prior_from_them(cdata):
+    scanvi(cdata, batch_key="batch", labels_key="cell_type", n_latent=3, max_epochs=1, accelerator="cpu")
+    model = cdata.trained_modules["scanvi"].module.model
+    counts = _label_counts(cdata, "cell_type", "unknown").drop("unknown")
+    expected = (counts / counts.sum())[model.class_names].to_numpy()
+    np.testing.assert_allclose(model.reference_class_proportions(space="partition"), expected)
+    np.testing.assert_allclose(model.y_prior.cpu().numpy(), expected, rtol=1e-6)
+
+
+def test_annotate_gives_the_generative_labels_and_the_in_distribution_score(cdata):
+    scanvi(cdata, batch_key="batch", labels_key="cell_type", n_latent=3, max_epochs=1, accelerator="cpu")
+    scanvi_annotate(cdata, "scanvi", threshold=0.0, n_generative_samples=2, accelerator="cpu", batch_size=7)
+    labels = cdata.obs_computed["scanvi_annotation_generative"]
+    confidence = cdata.obs_computed["scanvi_annotation_generative_confidence"]
+    score = cdata.obs_computed["scanvi_annotation_in_distribution_score"]
+    assert isinstance(labels.dtype, pd.CategoricalDtype) and labels.index.equals(cdata.cell_ids)
+    assert set(labels.cat.categories) <= {"B", "NK", "T"}
+    assert ((confidence > 0) & (confidence <= 1)).all()
+    assert np.isfinite(score.to_numpy()).all() and score.index.equals(cdata.cell_ids)
+
+    scanvi_annotate(cdata, "scanvi", key_added="fast", n_generative_samples=0, accelerator="cpu")
+    assert "fast" in cdata.obs_computed and "fast_generative" not in cdata.obs_computed
+    assert "fast_in_distribution_score" not in cdata.obs_computed
+
+
+def test_annotate_corrects_the_classifier_prior(cdata):
+    scanvi(cdata, batch_key="batch", labels_key="cell_type", n_latent=3, max_epochs=1, accelerator="cpu")
+    common = {"threshold": 0.0, "n_generative_samples": 0, "accelerator": "cpu"}
+    scanvi_annotate(cdata, "scanvi", key_added="plain", **common)
+    # to the proportions of the training labels: no change for a flat classifier
+    scanvi_annotate(cdata, "scanvi", key_added="reference", classifier_target_proportions="reference", **common)
+    computed = cdata.obs_computed
+    np.testing.assert_allclose(
+        computed["reference_confidence"].to_numpy(), computed["plain_confidence"].to_numpy(), rtol=1e-5
+    )
+    # a prior with only T makes every cell T
+    scanvi_annotate(cdata, "scanvi", key_added="only_t", classifier_target_proportions={"T": 1.0}, **common)
+    assert (cdata.obs_computed["only_t"].astype(str) == "T").all()
+    with pytest.raises(ValueError, match="not classes of the model"):
+        scanvi_annotate(cdata, "scanvi", classifier_target_proportions={"Mono": 1.0}, **common)
 
 
 # ---- ontology ----

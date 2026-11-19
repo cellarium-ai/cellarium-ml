@@ -97,8 +97,42 @@ def test_scarches_maps_new_data_onto_a_scanvi_module_trained_on_other_data(refer
     # and the other tools use the module as any other
     embed(query, "scarches", accelerator="cpu")
     assert query.obsm["X_scarches"].shape == (40, 3)
-    scanvi_annotate(query, "scarches", threshold=0.0, accelerator="cpu")
+    scanvi_annotate(query, "scarches", threshold=0.0, n_generative_samples=2, accelerator="cpu")
     assert set(query.obs_computed["scarches_annotation"].cat.categories) <= {"B", "NK", "T"}
+    assert set(query.obs_computed["scarches_annotation_generative"].cat.categories) <= {"B", "NK", "T"}
+    assert np.isfinite(query.obs_computed["scarches_annotation_in_distribution_score"].to_numpy()).all()
+
+    # by default, only the encoder and the final layer of the decoder are trained, with the mixture prior, and p(c)
+    # of the reference
+    assert trained.config["decoder_surgery"] == "final_layer" and trained.config["unlabeled_prior"] == "mixture"
+    trainable = {name for name, p in model.named_parameters() if p.requires_grad}
+    assert "scvi.decoder.normalized_count_decoder.new_batch_bias_weight" in trainable
+    assert not any(name.startswith("scvi.decoder.fully_connected.") for name in trainable)
+    assert model.scvi.unlabeled_prior == "mixture"
+    torch.testing.assert_close(model.scvi.y_prior.cpu(), reference_model.y_prior.cpu())
+
+
+def test_scarches_options_for_a_scanvi_reference(reference, query):
+    trained_reference = _trained_scanvi(reference)
+    scarches(
+        query,
+        reference=trained_reference,
+        batch_key="donor",
+        decoder_surgery="all",
+        unlabeled_prior="scanvi",
+        cell_type_proportions={"T": 2.0, "B": 1.0, "NK": 1.0},
+        **FIT,
+    )
+    trained = query.trained_modules["scarches"]
+    model = trained.module.model
+    assert trained.config["decoder_surgery"] == "all" and trained.config["unlabeled_prior"] == "scanvi"
+    assert trained.config["cell_type_proportions"] == {"T": 2.0, "B": 1.0, "NK": 1.0}
+    trainable = [name for name, p in model.named_parameters() if p.requires_grad]
+    assert any(name.startswith("scvi.decoder.fully_connected.") for name in trainable)
+    assert model.scvi.unlabeled_prior == "scanvi"
+    # p(c) in the order of the classes of the model
+    expected = {"T": 0.5, "B": 0.25, "NK": 0.25}
+    np.testing.assert_allclose(model.scvi.y_prior.cpu().numpy(), [expected[c] for c in model.scvi.class_names])
 
 
 def test_the_reference_cannot_run_on_data_without_its_batch_column_and_says_to_use_scarches(reference, query):
