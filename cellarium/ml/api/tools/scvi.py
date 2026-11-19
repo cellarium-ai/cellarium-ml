@@ -27,6 +27,8 @@ DEFAULT_ENCODER = {
     "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
 }
 
+# As in scvi-tools, the batch enters the decoder's hidden layers but not its final layer (scvi-tools' px_scale_decoder
+# is a plain Linear), so there is no per-gene, per-batch bias on the normalized expression.
 DEFAULT_DECODER = {
     "hidden_layers": [
         {
@@ -34,10 +36,7 @@ DEFAULT_DECODER = {
             "init_args": {"out_features": 128, "label_to_bias_hidden_layers": []},
         }
     ],
-    "final_layer": {
-        "class_path": "cellarium.ml.models.scvi.LinearWithBatch",
-        "init_args": {"label_to_bias_hidden_layers": []},
-    },
+    "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}},
     "final_additive_bias": False,
 }
 

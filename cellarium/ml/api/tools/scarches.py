@@ -111,14 +111,13 @@ def _ensembl_version_hint(data_var_names_g: np.ndarray, var_names_g: np.ndarray,
     )
 
 
-def _count_missing_genes(cdata: CellariumData, var_names_g: np.ndarray) -> int:
+def _count_missing_genes(data_var_names_g: np.ndarray, var_names_g: np.ndarray) -> int:
     """
-    The number of the genes ``var_names_g`` of the reference model that the data does not have, which are taken as
-    zero counts. A warning if they are many, and an error if they are most of them, each with a hint to strip the
-    Ensembl versions of the data's gene names if that would find more of them.
+    The number of the genes ``var_names_g`` of the reference model that are not among the genes ``data_var_names_g``
+    of the data, which are taken as zero counts. A warning if they are many, and an error if they are most of them,
+    each with a hint to strip the Ensembl versions of the data's gene names if that would find more of them.
     """
     n_genes = len(var_names_g)
-    data_var_names_g = np.asarray(cdata.datamodule.var_names_g)
     n_missing = int((~np.isin(var_names_g, data_var_names_g)).sum())
     fraction = n_missing / n_genes
     if fraction > _MAX_MISSING_GENES_FRACTION:
@@ -225,7 +224,7 @@ def scarches(
 
     reference_module = _reference_module(cdata, reference)
     reference_model = _check_reference_model(reference_module.model)
-    n_missing_genes = _count_missing_genes(cdata, reference_model.var_names_g)
+    n_missing_genes = _count_missing_genes(np.asarray(cdata.datamodule.var_names_g), reference_model.var_names_g)
     cpu_transforms, transforms = _query_transforms(reference_module, reference_model.var_names_g)
 
     if batch_key is None:

@@ -167,11 +167,4 @@ def test_the_warning_for_missing_genes_also_tells_to_strip_ensembl_versions():
     # a fifth of the genes have versions
     data_genes = np.array([f"{name}.1" if k < 6 else name for k, name in enumerate(reference_genes)])
     with pytest.warns(UserWarning, match="6 more of its genes would be found"):
-        _count_missing_genes(_FakeCData(data_genes), reference_genes)
-
-
-class _FakeCData:
-    """Just the ``datamodule.var_names_g`` of a CellariumData."""
-
-    def __init__(self, var_names_g: np.ndarray):
-        self.datamodule = type("FakeDataModule", (), {"var_names_g": var_names_g})()
+        _count_missing_genes(data_genes, reference_genes)
