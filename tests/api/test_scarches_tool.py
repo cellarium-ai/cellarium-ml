@@ -12,6 +12,7 @@ import torch
 
 from cellarium.ml.api.cellariumdata import CellariumData, _data_fields_used
 from cellarium.ml.api.tools import embed, scanvi, scanvi_annotate, scarches, scvi
+from cellarium.ml.api.tools.scarches import _count_missing_genes
 from cellarium.ml.models import SCANVI, ScArches
 from cellarium.ml.models.scarches import ScArchesLinearSurgeryMixin
 
@@ -19,8 +20,13 @@ N_GENES = 30
 FIT: dict[str, Any] = {"max_epochs": 2, "accelerator": "cpu"}
 
 
-def _write_cdata(tmp_path, name: str, genes: list[str], obs_columns: dict[str, list[str]], seed: int) -> CellariumData:
-    """40 cells in two h5ad files, with the genes ``genes`` and a categorical obs column for each of ``obs_columns``."""
+def _write_cdata(
+    tmp_path, name: str, genes: list[str], obs_columns: dict[str, list[str]], seed: int, **cdata_kwargs: Any
+) -> CellariumData:
+    """
+    40 cells in two h5ad files, with the genes ``genes`` and a categorical obs column for each of ``obs_columns``, as a
+    CellariumData with ``cdata_kwargs``.
+    """
     rng = np.random.default_rng(seed)
     j = np.arange(20)
     paths = []
@@ -36,7 +42,7 @@ def _write_cdata(tmp_path, name: str, genes: list[str], obs_columns: dict[str, l
         path = tmp_path / f"{name}_{i}.h5ad"
         ad.AnnData(X=x, obs=obs, var=pd.DataFrame(index=genes)).write_h5ad(path)
         paths.append(str(path))
-    return CellariumData(h5ad_paths=paths)
+    return CellariumData(h5ad_paths=paths, **cdata_kwargs)
 
 
 @pytest.fixture
@@ -131,5 +137,41 @@ def test_a_reference_whose_encoder_does_not_take_the_batch_is_an_error(reference
 def test_data_without_most_of_the_genes_of_the_reference_is_an_error(reference, tmp_path):
     scvi(reference, batch_key="batch", n_latent=3, **FIT)
     other = _write_cdata(tmp_path, "other", [f"ENSG{k}" for k in range(N_GENES)], {"donor": ["d0"]}, seed=2)
-    with pytest.raises(ValueError, match=r"30 of the 30 genes of the reference model \(100.0%\) are not in the data"):
+    with pytest.raises(
+        ValueError, match=r"30 of the 30 genes of the reference model \(100.0%\) are not in the data"
+    ) as error:
         scarches(other, reference=reference.trained_modules["scvi"], **FIT)
+    assert "var_names_strip_ensembl_version" not in str(error.value)  # stripping would not find them
+
+
+def test_data_with_ensembl_versions_that_the_reference_lacks_is_told_to_strip_them(tmp_path):
+    ensembl_ids = [f"ENSG{k:011d}" for k in range(N_GENES)]
+    reference = _write_cdata(tmp_path, "ref", ensembl_ids, {"batch": ["b0", "b1"]}, seed=0)
+    scvi(reference, batch_key="batch", n_latent=3, **FIT)
+    versioned_ids = [f"{name}.{k % 3 + 1}" for k, name in enumerate(ensembl_ids)]
+
+    query = _write_cdata(tmp_path, "query", versioned_ids, {"donor": ["d0"]}, seed=1)
+    with pytest.raises(ValueError, match="Pass var_names_strip_ensembl_version=True") as error:
+        scarches(query, reference=reference.trained_modules["scvi"], **FIT)
+    assert "30 more of its genes would be found" in str(error.value)
+
+    query = _write_cdata(
+        tmp_path, "query", versioned_ids, {"donor": ["d0"]}, seed=1, var_names_strip_ensembl_version=True
+    )
+    scarches(query, reference=reference.trained_modules["scvi"], **FIT)
+    assert query.trained_modules["scarches"].config["n_missing_genes"] == 0
+
+
+def test_the_warning_for_missing_genes_also_tells_to_strip_ensembl_versions():
+    reference_genes = np.array([f"ENSG{k:011d}" for k in range(N_GENES)])
+    # a fifth of the genes have versions
+    data_genes = np.array([f"{name}.1" if k < 6 else name for k, name in enumerate(reference_genes)])
+    with pytest.warns(UserWarning, match="6 more of its genes would be found"):
+        _count_missing_genes(_FakeCData(data_genes), reference_genes)
+
+
+class _FakeCData:
+    """Just the ``datamodule.var_names_g`` of a CellariumData."""
+
+    def __init__(self, var_names_g: np.ndarray):
+        self.datamodule = type("FakeDataModule", (), {"var_names_g": var_names_g})()

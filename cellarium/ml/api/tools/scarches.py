@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.api.cellariumdata import CellariumData, TrainedModule
+from cellarium.ml.api.cellariumdata import CellariumData, TrainedModule, _strip_ensembl_version
 from cellarium.ml.api.tools.scanvi import _WARN_PARTITION_SIZE
 from cellarium.ml.api.tools.scvi import _batch_categories, _train
 from cellarium.ml.models import SCANVI, ScArches, SingleCellVariationalInference
@@ -93,24 +93,45 @@ def _query_transforms(reference: CellariumModule, var_names_g: np.ndarray) -> tu
     return cpu_transforms, transforms
 
 
+def _ensembl_version_hint(data_var_names_g: np.ndarray, var_names_g: np.ndarray, n_missing: int) -> str:
+    """
+    A hint to pass ``var_names_strip_ensembl_version=True`` to :class:`CellariumData`, if the data's gene names
+    ``data_var_names_g`` with the Ensembl versions stripped would have more of the genes ``var_names_g`` of the
+    reference model than the ``n_missing`` that they lack; otherwise ``""``.
+    """
+    stripped = _strip_ensembl_version(data_var_names_g)
+    n_missing_stripped = int((~np.isin(var_names_g, stripped)).sum())
+    if n_missing_stripped >= n_missing:
+        return ""
+    example = data_var_names_g[stripped != data_var_names_g.astype(str)][0]  # one is stripped, as more are found
+    return (
+        f" The data's gene names have Ensembl versions (e.g. {str(example)!r}) and the reference model's "
+        f"do not: with the versions stripped, {n_missing - n_missing_stripped:,} more of its genes would be found. "
+        "Pass var_names_strip_ensembl_version=True to CellariumData to strip them."
+    )
+
+
 def _count_missing_genes(cdata: CellariumData, var_names_g: np.ndarray) -> int:
     """
     The number of the genes ``var_names_g`` of the reference model that the data does not have, which are taken as
-    zero counts. A warning if they are many, and an error if they are most of them.
+    zero counts. A warning if they are many, and an error if they are most of them, each with a hint to strip the
+    Ensembl versions of the data's gene names if that would find more of them.
     """
     n_genes = len(var_names_g)
-    n_missing = int((~np.isin(var_names_g, np.asarray(cdata.datamodule.var_names_g))).sum())
+    data_var_names_g = np.asarray(cdata.datamodule.var_names_g)
+    n_missing = int((~np.isin(var_names_g, data_var_names_g)).sum())
     fraction = n_missing / n_genes
     if fraction > _MAX_MISSING_GENES_FRACTION:
         raise ValueError(
             f"{n_missing:,} of the {n_genes:,} genes of the reference model ({fraction:.1%}) are not in the data, more "
             f"than the {_MAX_MISSING_GENES_FRACTION:.0%} that can be taken as zero counts. Are the genes named the "
-            "same way (e.g. Ensembl IDs in both)?"
+            "same way (e.g. Ensembl IDs in both)?" + _ensembl_version_hint(data_var_names_g, var_names_g, n_missing)
         )
     if fraction > _WARN_MISSING_GENES_FRACTION:
         warnings.warn(
             f"{n_missing:,} of the {n_genes:,} genes of the reference model ({fraction:.1%}) are not in the data, and "
-            "are taken as zero counts, which the reference model takes as no expression.",
+            "are taken as zero counts, which the reference model takes as no expression."
+            + _ensembl_version_hint(data_var_names_g, var_names_g, n_missing),
             UserWarning,
         )
     return n_missing

@@ -6,6 +6,7 @@ import inspect
 import json
 import math
 import os
+import re
 import signal
 import tempfile
 import traceback
@@ -79,6 +80,33 @@ def _make_names_unique(names: Any) -> np.ndarray:
     return np.asarray(anndata.utils.make_index_unique(pd.Index(np.asarray(names).astype(str))), dtype=object)
 
 
+# an Ensembl gene ID (any species: ENSG, ENSMUSG, ...) with a version suffix, which may be followed by "_PAR_Y"
+_ENSEMBL_GENE_VERSION = re.compile(r"^(ENS[A-Z]*G\d+)\.\d+(?=_|$)")
+
+
+def _strip_ensembl_version(names: Any) -> np.ndarray:
+    """
+    The gene ``names`` with the version suffix of the Ensembl gene IDs among them removed (``"ENSG00000198804.2"`` to
+    ``"ENSG00000198804"``, ``"ENSG00000182378.15_PAR_Y"`` to ``"ENSG00000182378_PAR_Y"``). Other names, such as gene
+    symbols with a dot (``"AC000061.1"``), are unchanged.
+    """
+    return np.asarray(
+        pd.Index(np.asarray(names).astype(str)).str.replace(_ENSEMBL_GENE_VERSION, r"\1", regex=True), dtype=object
+    )
+
+
+def _convert_var_names(names: Any, strip_ensembl_version: bool, make_unique: bool) -> np.ndarray:
+    """
+    The ``convert_fn`` of the gene names: first the Ensembl versions stripped, if ``strip_ensembl_version``, then the
+    repeated names suffixed, if ``make_unique``. A module-level function so that data workers can pickle it.
+    """
+    if strip_ensembl_version:
+        names = _strip_ensembl_version(names)
+    if make_unique:
+        names = _make_names_unique(names)
+    return np.asarray(names, dtype=object)
+
+
 def _build_datamodule(
     dadc: DistributedCollection,
     obs_columns: dict[str, tuple[str, Callable]],
@@ -89,8 +117,17 @@ def _build_datamodule(
     stage: Literal["fit", "validate", "predict", "test"],
     num_workers: int,
     var_names_make_unique: bool = False,
+    var_names_strip_ensembl_version: bool = False,
 ) -> CellariumAnnDataDataModule:
-    convert_fn = _make_names_unique if var_names_make_unique else None
+    convert_fn = (
+        partial(
+            _convert_var_names,
+            strip_ensembl_version=var_names_strip_ensembl_version,
+            make_unique=var_names_make_unique,
+        )
+        if var_names_make_unique or var_names_strip_ensembl_version
+        else None
+    )
     datamodule = CellariumAnnDataDataModule(
         dadc=dadc,
         batch_keys={
@@ -178,6 +215,7 @@ def get_datamodule(
     nexus_extract_uniform_sizes: bool | None = None,
     num_workers: int = 0,
     var_names_make_unique: bool = False,
+    var_names_strip_ensembl_version: bool = False,
 ):
     """
     A datamodule that reads the h5ad files at ``h5ad_paths``.
@@ -206,7 +244,16 @@ def get_datamodule(
         max_cache_size=2,
     )
     return _build_datamodule(
-        dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers, var_names_make_unique
+        dadc,
+        obs_columns,
+        var_key,
+        batch_size,
+        shuffle,
+        train_size,
+        stage,
+        num_workers,
+        var_names_make_unique=var_names_make_unique,
+        var_names_strip_ensembl_version=var_names_strip_ensembl_version,
     )
 
 
@@ -220,6 +267,7 @@ def get_deltacells_datamodule(
     stage: Literal["fit", "validate", "predict", "test"] = "fit",
     num_workers: int = 0,
     var_names_make_unique: bool = False,
+    var_names_strip_ensembl_version: bool = False,
     **collection_kwargs: Any,
 ):
     """
@@ -231,18 +279,32 @@ def get_deltacells_datamodule(
     if obs_columns:
         _check_requested_obs_columns(obs_columns, DeltaCellsLazyObs(dadc).columns)
     return _build_datamodule(
-        dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers, var_names_make_unique
+        dadc,
+        obs_columns,
+        var_key,
+        batch_size,
+        shuffle,
+        train_size,
+        stage,
+        num_workers,
+        var_names_make_unique=var_names_make_unique,
+        var_names_strip_ensembl_version=var_names_strip_ensembl_version,
     )
 
 
-def _check_var_names_unique(var: pd.DataFrame, names: pd.Index, var_key: str | None) -> None:
+def _check_var_names_unique(
+    var: pd.DataFrame, names: pd.Index, var_key: str | None, stripped_ensembl_version: bool = False
+) -> None:
     """
-    Raise a ``ValueError`` if the gene ``names`` (``var[var_key]``, or the ``var_names`` if ``var_key`` is ``None``)
-    are not unique, listing the ``var_key`` values that would give unique names.
+    Raise a ``ValueError`` if the gene ``names`` (``var[var_key]``, or the ``var_names`` if ``var_key`` is ``None``,
+    with the Ensembl versions stripped if ``stripped_ensembl_version``) are not unique, listing the ``var_key`` values
+    that would give unique names.
     """
     if names.is_unique:
         return
     where = "var_names" if var_key is None else f"var_key={var_key!r}"
+    if stripped_ensembl_version:
+        where += ", with the Ensembl versions stripped"
     repeated = names[names.duplicated()].unique()
 
     def is_name_like(column: pd.Series) -> bool:
@@ -1140,6 +1202,12 @@ class CellariumData:
     instead suffixed (``"TBCE"``, ``"TBCE-1"``, ...), as in :func:`anndata.utils.make_index_unique`, and the names as
     they were stay in ``var`` as the column ``"<var_key>_original"`` (``"var_names_original"`` without a ``var_key``).
 
+    With ``var_names_strip_ensembl_version=True`` the version suffix of Ensembl gene IDs is removed from the names
+    (``"ENSG00000198804.2"`` becomes ``"ENSG00000198804"``; other names, such as gene symbols, are unchanged), so that
+    the genes match a module trained on data with unversioned IDs. The names as they were stay in ``var`` in the same
+    ``"_original"`` column. The stripped names must be unique too (or are made so with ``var_names_make_unique=True``,
+    which suffixes them after the versions are stripped).
+
     ``max_gb`` is the memory budget (in GiB) for what api functions hold in memory: the cells read by :meth:`to_ram` and
     :meth:`to_anndata`, and the rows of the per-cell results in ``obsm`` that a view copies into memory (those results
     are always in temporary files, and a view reads its rows into memory only if they fit). Views inherit it. By default
@@ -1171,6 +1239,7 @@ class CellariumData:
         datamodule_num_workers: int = 0,
         obs_parquet_path: str | None = None,
         var_names_make_unique: bool = False,
+        var_names_strip_ensembl_version: bool = False,
         max_gb: float | None = None,
     ):
         if (h5ad_paths is None) == (deltacells_uri is None):
@@ -1194,6 +1263,7 @@ class CellariumData:
                 nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
                 num_workers=datamodule_num_workers,
                 var_names_make_unique=var_names_make_unique,
+                var_names_strip_ensembl_version=var_names_strip_ensembl_version,
             )
             if obs_parquet_path is not None:
                 h5ad_obs_columns = self._datamodule.dadc.schema.attr_values["obs"].columns
@@ -1211,6 +1281,7 @@ class CellariumData:
                 stage=stage,
                 num_workers=datamodule_num_workers,
                 var_names_make_unique=var_names_make_unique,
+                var_names_strip_ensembl_version=var_names_strip_ensembl_version,
                 **(deltacells_kwargs or {}),
             )
             self._obs = DeltaCellsLazyObs(self._datamodule.dadc)
@@ -1223,14 +1294,17 @@ class CellariumData:
             anndatafield: AnnDataField = self._datamodule.batch_keys["var_names_g"]
             if anndatafield.key is not None:
                 self._var.set_index(anndatafield.key, inplace=True)
-            if var_names_make_unique:
-                # the original names stay available, in a column named after where they came from
+            if var_names_make_unique or var_names_strip_ensembl_version:
+                # the names are converted: the original names stay available, in a column named after where they
+                # came from
                 original_names = self._var.index.to_numpy()
                 self._var.index = pd.Index(self._datamodule.var_names_g, name=self._var.index.name)
                 self._var[f"{anndatafield.key or 'var_names'}_original"] = original_names
-            else:
+            if not var_names_make_unique:
                 assert anndatafield.key is None or isinstance(anndatafield.key, str)  # None: the var_names
-                _check_var_names_unique(self._datamodule.dadc.var, self._var.index, anndatafield.key)
+                _check_var_names_unique(
+                    self._datamodule.dadc.var, self._var.index, anndatafield.key, var_names_strip_ensembl_version
+                )
         self._init_state()
         # lineage: a root is the data that views are taken from (see `CellariumDataView`)
         self._parent: CellariumData | None = None
