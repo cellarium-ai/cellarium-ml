@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
 from collections.abc import Sequence
 from typing import Literal
 
@@ -81,6 +82,18 @@ def _model_kwargs(scvi_kwargs: dict | None) -> dict:
         "decoder": DEFAULT_DECODER,
         **scvi_kwargs,
     }
+
+
+def _with_decoder_final_additive_bias(scvi_kwargs: dict | None) -> dict:
+    """
+    ``scvi_kwargs`` with ``final_additive_bias`` turned on in the decoder: that of ``scvi_kwargs`` if it has one, and
+    otherwise the default decoder (a copy in either case, so neither is changed).
+    """
+    scvi_kwargs = dict(scvi_kwargs or {})
+    decoder = copy.deepcopy(scvi_kwargs.get("decoder", DEFAULT_DECODER))
+    decoder["final_additive_bias"] = True
+    scvi_kwargs["decoder"] = decoder
+    return scvi_kwargs
 
 
 def _train(
@@ -172,6 +185,7 @@ def scvi(
     cdata: CellariumData,
     batch_key: str,
     n_latent: int = 10,
+    decoder_final_additive_bias: bool = False,
     max_epochs: int = 200,
     val_size: float = 0.1,
     early_stopping_patience: int = 10,
@@ -190,6 +204,12 @@ def scvi(
         batch_key: The ``obs`` column to use as the batch covariate for scVI's batch correction.
             Injected into ``cdata.datamodule.batch_keys`` as ``"batch_index_n"`` if not already present.
         n_latent: Dimension of the scVI latent space.
+        decoder_final_additive_bias: If True, the decoder adds a per-gene, per-batch number of background counts to
+            the mean counts of each cell (independent of its library size and state), like ambient RNA or the
+            spillover of segmentation. It is in addition to the per-gene, per-batch scaling of expression of the final
+            layer of the decoder, and :func:`~cellarium.ml.api.tools.scarches` trains both for new batches. It turns on
+            ``final_additive_bias`` in the decoder of ``scvi_kwargs`` if that has one, and otherwise in the default
+            decoder. If False (default), the decoder is left as it is.
         max_epochs: Maximum number of training epochs (a fallback; training usually stops earlier
             via early stopping on the validation ELBO).
         val_size: Fraction of cells held out for validation (used for early stopping). Restored to
@@ -226,6 +246,8 @@ def scvi(
     """
     if not batch_key:
         raise ValueError("batch_key must be provided; scvi() always performs batch correction.")
+    if decoder_final_additive_bias:
+        scvi_kwargs = _with_decoder_final_additive_bias(scvi_kwargs)
 
     n_batch = cdata.datamodule.obs_key_nunique(batch_key)
     cpu_transforms, var_names_g = _select_genes(cdata)
@@ -251,6 +273,7 @@ def scvi(
             "n_latent": n_latent,
             "val_size": val_size,
             "batch_categories": _batch_categories(cdata, batch_key),
+            "decoder_final_additive_bias": model.decoder.final_additive_bias_layer is not None,
         },
         max_epochs=max_epochs,
         val_size=val_size,

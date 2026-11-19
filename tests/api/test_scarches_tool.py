@@ -135,6 +135,21 @@ def test_scarches_options_for_a_scanvi_reference(reference, query):
     np.testing.assert_allclose(model.scvi.y_prior.cpu().numpy(), [expected[c] for c in model.scvi.class_names])
 
 
+def test_scarches_trains_the_final_additive_bias_of_an_scvi_reference_made_with_it(reference, query):
+    scvi(reference, batch_key="batch", n_latent=3, decoder_final_additive_bias=True, **FIT)
+    trained_reference = reference.trained_modules["scvi"]
+    assert trained_reference.config["decoder_final_additive_bias"] is True
+    assert trained_reference.module.model.decoder.final_additive_bias_layer is not None
+
+    scarches(query, reference=trained_reference, batch_key="donor", **FIT)
+    model = query.trained_modules["scarches"].module.model
+    trainable = {name for name, p in model.named_parameters() if p.requires_grad}
+    assert {
+        "scvi.decoder.final_additive_bias_layer.new_bias_weight",
+        "scvi.decoder.normalized_count_decoder.new_batch_bias_weight",
+    } <= trainable
+
+
 def test_the_reference_cannot_run_on_data_without_its_batch_column_and_says_to_use_scarches(reference, query):
     query.trained_modules["scanvi"] = _trained_scanvi(reference)
     with pytest.raises(ValueError, match=r"obs columns that this data does not have.*cml\.tl\.scarches"):

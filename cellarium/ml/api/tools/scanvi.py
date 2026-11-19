@@ -10,7 +10,13 @@ import pandas as pd
 import torch
 
 from cellarium.ml.api.cellariumdata import CellariumData, _device_of, _unwrap_scarches
-from cellarium.ml.api.tools.scvi import _batch_categories, _model_kwargs, _select_genes, _train
+from cellarium.ml.api.tools.scvi import (
+    _batch_categories,
+    _model_kwargs,
+    _select_genes,
+    _train,
+    _with_decoder_final_additive_bias,
+)
 from cellarium.ml.api.utils import release_memory_after, resolve_device
 from cellarium.ml.models import SCANVI
 from cellarium.ml.utilities.core import call_func_with_batch
@@ -78,6 +84,7 @@ def scanvi(
     labels_key: str = "cell_type_ontology_term_id",
     n_latent: int = 10,
     ontology: str | tuple[torch.Tensor, list[str]] | None = None,
+    decoder_final_additive_bias: bool = False,
     max_epochs: int = 200,
     val_size: float = 0.1,
     early_stopping_patience: int = 10,
@@ -122,6 +129,12 @@ def scanvi(
             file (which is parsed once, and needs ``owlready2``), or a tuple ``(descendant_tensor, cl_names)`` that
             has been prepared already, where ``descendant_tensor[i, j]`` is 1 if ``cl_names[j]`` is ``cl_names[i]``
             or one of its descendants (see :func:`~cellarium.ml.utilities.data.get_cl_descendant_tensor_from_owl`).
+        decoder_final_additive_bias: If True, the decoder adds a per-gene, per-batch number of background counts to
+            the mean counts of each cell (independent of its library size and state), like ambient RNA or the
+            spillover of segmentation. It is in addition to the per-gene, per-batch scaling of expression of the final
+            layer of the decoder, and :func:`~cellarium.ml.api.tools.scarches` trains both for new batches. It turns on
+            ``final_additive_bias`` in the decoder of ``scanvi_kwargs`` if that has one, and otherwise in the default
+            decoder. If False (default), the decoder is left as it is.
         max_epochs: Maximum number of training epochs (a fallback; training usually stops earlier
             via early stopping on the validation loss).
         val_size: Fraction of cells held out for validation (used for early stopping). Restored to
@@ -174,6 +187,8 @@ def scanvi(
     reserved = sorted(_RESERVED_KWARGS & set(scanvi_kwargs or {}))
     if reserved:
         raise ValueError(f"scanvi_kwargs cannot contain {reserved}, which scanvi() sets from its own arguments.")
+    if decoder_final_additive_bias:
+        scanvi_kwargs = _with_decoder_final_additive_bias(scanvi_kwargs)
     columns = cdata.obs.columns
     for name, key in (("batch_key", batch_key), ("labels_key", labels_key)):
         if key not in columns:
@@ -266,6 +281,7 @@ def scanvi(
             "labels_key": labels_key,
             "n_latent": n_latent,
             "val_size": val_size,
+            "decoder_final_additive_bias": model.decoder.final_additive_bias_layer is not None,
             "classifier_type": model.classifier_type,
             "n_labeled": n_labeled,
             "n_unlabeled": n_unlabeled,

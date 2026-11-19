@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import sys
+from typing import Any
 
 import anndata as ad
 import numpy as np
@@ -13,6 +14,8 @@ import torch
 from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.api.tools import embed, scanvi, scanvi_annotate, scvi
 from cellarium.ml.api.tools.scanvi import _fill_unlabeled, _label_counts, _node_depths, _select_nodes
+from cellarium.ml.api.tools.scvi import DEFAULT_DECODER
+from cellarium.ml.models.scvi import LinearWithBatch
 from cellarium.ml.utilities.core import call_func_with_batch
 
 CL_NAMES = ["R", "T", "B", "Mono", "CD4", "CD8", "unknown"]  # R -> {T -> {CD4, CD8}, B, Mono}, and a stray "unknown"
@@ -169,6 +172,43 @@ def test_annotate_gives_unknown_to_the_cells_below_the_threshold(cdata):
     assert (cdata.obs_computed["strict_confidence"] == 0).all()
     # and so do the generative labels
     assert (cdata.obs_computed["strict_generative"].astype(str) == "unknown").all()
+
+
+def test_scanvi_decoder_final_additive_bias(cdata):
+    common: dict[str, Any] = {
+        "batch_key": "batch",
+        "labels_key": "cell_type",
+        "n_latent": 3,
+        "max_epochs": 1,
+        "accelerator": "cpu",
+    }
+    scanvi(cdata, key_added="plain", **common)
+    plain = cdata.trained_modules["plain"]
+    assert plain.module.model.decoder.final_additive_bias_layer is None
+    assert plain.config["decoder_final_additive_bias"] is False
+
+    scanvi(cdata, key_added="additive", decoder_final_additive_bias=True, **common)
+    additive = cdata.trained_modules["additive"]
+    decoder = additive.module.model.decoder
+    assert decoder.final_additive_bias_layer is not None
+    assert additive.config["decoder_final_additive_bias"] is True
+    # the rest of the decoder is the default one, which is not changed
+    assert isinstance(decoder.normalized_count_decoder, LinearWithBatch)
+    assert DEFAULT_DECODER["final_additive_bias"] is False
+
+    # with a decoder of the user's, it is turned on in that one
+    user_decoder = {**DEFAULT_DECODER, "hidden_layers": []}
+    scanvi(
+        cdata,
+        key_added="user",
+        decoder_final_additive_bias=True,
+        scanvi_kwargs={"decoder": user_decoder},
+        **common,
+    )
+    decoder = cdata.trained_modules["user"].module.model.decoder
+    assert decoder.final_additive_bias_layer is not None
+    assert [type(m) for m in decoder.fully_connected.module_list] == [torch.nn.Identity]  # no hidden layers
+    assert user_decoder["final_additive_bias"] is False
 
 
 def test_scanvi_keeps_the_label_counts_and_makes_the_prior_from_them(cdata):
