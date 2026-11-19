@@ -87,6 +87,10 @@ class DistributedCollection(ABC):
         """Number of distinct values of the ``obs`` column ``key``."""
         raise NotImplementedError(f"{type(self).__name__} does not provide obs_key_nunique.")
 
+    def obs_is_categorical(self, key: str) -> bool:
+        """Whether the ``obs`` column ``key`` is categorical (from the schema of the data, without reading values)."""
+        raise NotImplementedError(f"{type(self).__name__} does not provide obs_is_categorical.")
+
     def prefetch(self, indices: np.ndarray) -> None:
         """
         Hint that cells ``indices`` will be requested soon (in about that order), so that their shards can be fetched

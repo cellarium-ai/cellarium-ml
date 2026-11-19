@@ -12,13 +12,14 @@ import torch
 from torch import nn
 
 from cellarium.ml import CellariumModule
+from cellarium.ml.api._datamodule_context import batch_index_field, check_batch_key
 from cellarium.ml.api.cellariumdata import CellariumData, TrainedModule, _strip_ensembl_version
 from cellarium.ml.api.tools.scanvi import _WARN_PARTITION_SIZE
 from cellarium.ml.api.tools.scvi import _batch_categories, _train
 from cellarium.ml.models import SCANVI, ScArches, SingleCellVariationalInference
 from cellarium.ml.models.scvi import LinearWithBatch, LinearWithBatchAndCovariates
 from cellarium.ml.transforms import Filter
-from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
+from cellarium.ml.utilities.data import AnnDataField
 
 _WARN_MISSING_GENES_FRACTION = 0.1  # warn if more than this fraction of the genes of the reference is not in the data
 _MAX_MISSING_GENES_FRACTION = 0.5  # and refuse if more than this fraction is not
@@ -236,8 +237,12 @@ def scarches(
     """
     if optim_kwargs is None:
         optim_kwargs = {"lr": 1e-2}
-    if batch_key is not None and batch_key not in cdata.obs.columns:
-        raise ValueError(f"batch_key '{batch_key}' is not a column of obs. The columns are: {list(cdata.obs.columns)}.")
+    if batch_key is not None:
+        if batch_key not in cdata.obs.columns:
+            raise ValueError(
+                f"batch_key '{batch_key}' is not a column of obs. The columns are: {list(cdata.obs.columns)}."
+            )
+        check_batch_key(cdata.datamodule, batch_key)
     if key_added is None:
         key_added = f"{reference}_scarches" if isinstance(reference, str) else "scarches"
 
@@ -251,7 +256,7 @@ def scarches(
         batch_categories: list[str] = []
         n_new_batch = 1
     else:
-        batch_field = AnnDataField(attr="obs", key=batch_key, convert_fn=categories_to_codes)
+        batch_field = batch_index_field(batch_key)
         batch_categories = _batch_categories(cdata, batch_key)
         n_new_batch = len(batch_categories)
     batch_keys = {"batch_index_n": batch_field}

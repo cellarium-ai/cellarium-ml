@@ -351,6 +351,34 @@ def categories_to_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
         return np.asarray(x.cat.codes, dtype=np.int32)
 
 
+def batch_categories_to_codes(x: pd.Series) -> np.ndarray:
+    """
+    The codes of a categorical batch column, like :func:`categories_to_codes`, but with a clear error if the column is
+    not categorical, or if some of these cells have no batch (a missing value, which would be code ``-1``). The check
+    is on the cells of each batch as they are read, so it costs no pass of its own.
+
+    Args:
+        x: The batch column of some cells (a pandas Series, named after the ``obs`` column).
+
+    Returns:
+        Numpy array of the codes.
+
+    Raises:
+        ValueError: If ``x`` is not categorical, or has missing values.
+    """
+    if not isinstance(x.dtype, pd.CategoricalDtype):
+        raise ValueError(f"The batch column obs[{x.name!r}] is of dtype {x.dtype}, not categorical.")
+    codes = np.asarray(x.cat.codes, dtype=np.int32)
+    n_missing = int((codes < 0).sum())
+    if n_missing:
+        raise ValueError(
+            f"The batch column obs[{x.name!r}] has no value for {n_missing} of {len(codes)} cells that were read "
+            "together, but every cell needs a batch. Give those cells a batch (e.g. a category of their own), or leave "
+            "them out."
+        )
+    return codes
+
+
 def categories_to_product_codes(x: pd.Series | pd.DataFrame) -> np.ndarray:
     """
     Convert a pandas Series or DataFrame of categorical data to a numpy array of codes.

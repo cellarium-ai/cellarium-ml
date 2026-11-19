@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from cellarium.ml.api._datamodule_context import batch_index_field, check_batch_key
 from cellarium.ml.api.cellariumdata import CellariumData, _device_of, _unwrap_scarches
 from cellarium.ml.api.tools.scvi import (
     _batch_categories,
@@ -22,7 +23,6 @@ from cellarium.ml.models import SCANVI
 from cellarium.ml.utilities.core import call_func_with_batch
 from cellarium.ml.utilities.data import (
     AnnDataField,
-    categories_to_codes,
     get_cl_descendant_tensor_from_owl,
     get_cl_names_from_owl,
 )
@@ -193,6 +193,7 @@ def scanvi(
     for name, key in (("batch_key", batch_key), ("labels_key", labels_key)):
         if key not in columns:
             raise ValueError(f"{name} '{key}' is not a column of obs. The columns are: {list(columns)}.")
+    check_batch_key(cdata.datamodule, batch_key)
 
     counts = _label_counts(cdata, labels_key, unlabeled_category)
     n_unlabeled = int(counts.get(unlabeled_category, 0))
@@ -268,7 +269,7 @@ def scanvi(
             UserWarning,
         )
 
-    batch_keys = {"batch_index_n": AnnDataField(attr="obs", key=batch_key, convert_fn=categories_to_codes)}
+    batch_keys = {"batch_index_n": batch_index_field(batch_key)}
     label_field = AnnDataField(
         attr="obs",
         key=labels_key,

@@ -1,9 +1,15 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import numpy as np
 import pytest
 
-from cellarium.ml.api._datamodule_context import temporary_batch_keys, temporary_val_split
+from cellarium.ml.api._datamodule_context import (
+    batch_index_field,
+    check_batch_key,
+    temporary_batch_keys,
+    temporary_val_split,
+)
 from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
 
 # --- temporary_batch_keys() -------------------------------------------------------------------
@@ -116,3 +122,45 @@ def test_temporary_val_split_restores_on_exception(cdata):
 
     assert datamodule.n_train == original_n_train
     assert datamodule.n_val == original_n_val
+
+
+# --- check_batch_key() and batch_index_field() ------------------------------------------------
+
+
+def test_obs_is_categorical_comes_from_the_schema_of_the_data(cdata):
+    for datamodule in (cdata.datamodule, cdata[[1, 5, 30]].datamodule):  # also through a view
+        assert datamodule.obs_is_categorical("cell_type")
+        assert not datamodule.obs_is_categorical("n_counts")
+        with pytest.raises(ValueError, match="not found in obs columns"):
+            datamodule.obs_is_categorical("nope")
+
+
+def test_check_batch_key_fails_fast_on_a_column_that_is_not_categorical(cdata):
+    check_batch_key(cdata.datamodule, "cell_type")  # fine
+    with pytest.raises(ValueError, match="batch_key 'n_counts' is not a categorical obs column"):
+        check_batch_key(cdata.datamodule, "n_counts")
+
+
+def test_api_functions_fail_fast_on_a_batch_key_that_is_not_categorical(cdata):
+    from cellarium.ml.api.preprocessing import highly_variable_genes, pseudobulk
+    from cellarium.ml.api.tools import scvi
+
+    for call in (
+        lambda: highly_variable_genes(cdata, flavor="seurat_v3", batch_key="n_counts", accelerator="cpu"),
+        lambda: highly_variable_genes(cdata, flavor="seurat", batch_key="n_counts", accelerator="cpu"),
+        lambda: pseudobulk(cdata, batch_key="n_counts", accelerator="cpu"),
+        lambda: scvi(cdata, batch_key="n_counts", max_epochs=1, accelerator="cpu"),
+    ):
+        with pytest.raises(ValueError, match="not a categorical obs column"):
+            call()
+    assert not cdata.trained_modules  # nothing was trained
+
+
+def test_batch_index_field_reads_the_codes_of_the_batch_column(cdata):
+    cells = cdata.datamodule.dadc[np.arange(12)]
+    codes = batch_index_field("cell_type")(cells)
+    categories = list(cdata.datamodule.dadc.obs_categories("cell_type"))
+    expected = [categories.index(label) for label in cdata.obs["cell_type"].iloc[:12]]
+    np.testing.assert_array_equal(codes, expected)
+    with pytest.raises(ValueError, match="not categorical"):  # the backstop, as the cells are read
+        batch_index_field("n_counts")(cells)

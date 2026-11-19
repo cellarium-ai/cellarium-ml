@@ -187,6 +187,10 @@ class DeltaCellsBatchCollection(DistributedCollection):
             return len(obs.categories(key))
         return int(obs.to_pandas(key)[key].nunique())
 
+    def obs_is_categorical(self, key: str) -> bool:
+        """Whether the ``obs`` column ``key`` is categorical, from the schema of the obs."""
+        return self._obs_store(key).kind(key) == "category"
+
     def take_obs(self, indices: np.ndarray, columns: Sequence[str]) -> pd.DataFrame:
         """Obs columns for the given cells (a deltacells dataset fetches them on first use if they are not local)."""
         obs = self.obs_store

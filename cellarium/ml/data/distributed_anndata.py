@@ -253,6 +253,10 @@ class DistributedAnnDataCollection(AnnCollection, DistributedCollection):
         """Number of distinct values of the ``obs`` column ``key`` in the first anndata file."""
         return int(self._first_obs(key).nunique())
 
+    def obs_is_categorical(self, key: str) -> bool:
+        """Whether the ``obs`` column ``key`` is categorical in the first anndata file."""
+        return isinstance(self._first_obs(key).dtype, pd.CategoricalDtype)
+
     def reset_cache(self) -> None:
         """Forget the cached anndata files."""
         self.cache.clear()

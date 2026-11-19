@@ -134,6 +134,9 @@ class ViewCollection(DistributedCollection):
     def obs_key_nunique(self, key: str) -> int:
         return self.source.obs_key_nunique(key)
 
+    def obs_is_categorical(self, key: str) -> bool:
+        return self.source.obs_is_categorical(key)
+
 
 def unwrap_collection(dadc: Any) -> Any:
     """The collection that actually holds the cells: ``dadc`` itself unless it is a :class:`ViewCollection`."""

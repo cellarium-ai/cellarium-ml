@@ -11,12 +11,17 @@ from lightning.pytorch.callbacks import EarlyStopping
 from torch import nn
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
-from cellarium.ml.api._datamodule_context import temporary_batch_keys, temporary_val_split
+from cellarium.ml.api._datamodule_context import (
+    batch_index_field,
+    check_batch_key,
+    temporary_batch_keys,
+    temporary_val_split,
+)
 from cellarium.ml.api.cellariumdata import CellariumData, fit_and_register
 from cellarium.ml.api.utils import LossHistory, PreciseProgressBar, RestoreBestTrainableWeights
 from cellarium.ml.models import ScArches, SingleCellVariationalInference
 from cellarium.ml.transforms import Densify, Filter
-from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
+from cellarium.ml.utilities.data import AnnDataField
 
 DEFAULT_ENCODER = {
     "hidden_layers": [
@@ -59,8 +64,8 @@ def _select_genes(cdata: CellariumData) -> tuple[list[Filter], list[str]]:
 def _batch_categories(cdata: CellariumData, batch_key: str) -> list[str]:
     """
     The categories of the (categorical) obs column ``batch_key``, in the order of their codes, which are the batch
-    indices of the cells (see :func:`~cellarium.ml.utilities.data.categories_to_codes`). Recorded in the ``config``
-    of a trained module, so that the batch of each index is known wherever the module is used.
+    indices of the cells (see :func:`~cellarium.ml.utilities.data.batch_categories_to_codes`). Recorded in the
+    ``config`` of a trained module, so that the batch of each index is known wherever the module is used.
     """
     return [str(category) for category in cdata.datamodule.dadc.obs_categories(batch_key)]
 
@@ -246,6 +251,7 @@ def scvi(
     """
     if not batch_key:
         raise ValueError("batch_key must be provided; scvi() always performs batch correction.")
+    check_batch_key(cdata.datamodule, batch_key)
     if decoder_final_additive_bias:
         scvi_kwargs = _with_decoder_final_additive_bias(scvi_kwargs)
 
@@ -253,7 +259,7 @@ def scvi(
     cpu_transforms, var_names_g = _select_genes(cdata)
 
     # the data the module needs to run, recorded with it so that e.g. `cdata.using("scvi")` can provide it again
-    batch_keys = {"batch_index_n": AnnDataField(attr="obs", key=batch_key, convert_fn=categories_to_codes)}
+    batch_keys = {"batch_index_n": batch_index_field(batch_key)}
 
     model = SingleCellVariationalInference(
         var_names_g=var_names_g,

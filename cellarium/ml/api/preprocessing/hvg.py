@@ -6,6 +6,7 @@ from typing import Literal
 import pandas as pd
 
 from cellarium.ml.api._data_transforms import OnePassRecipe, SeuratV3Recipe, fit_or_reuse
+from cellarium.ml.api._datamodule_context import check_batch_key
 from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.api.utils import resolve_device
 from cellarium.ml.models import HVGSeuratV3, OnePassMeanVarStd
@@ -67,6 +68,8 @@ def highly_variable_genes(
             f"batch_key is only supported for flavor='seurat_v3' and flavor='seurat'; "
             f"got flavor={flavor!r} with batch_key={batch_key!r}."
         )
+    if batch_key is not None:
+        check_batch_key(datamodule, batch_key)
 
     if flavor == "seurat_v3":
         trained = fit_or_reuse(

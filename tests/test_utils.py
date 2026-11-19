@@ -10,6 +10,7 @@ import scipy.sparse
 import torch
 
 from cellarium.ml.utilities.data import (
+    batch_categories_to_codes,
     categories_to_codes,
     categories_to_product_codes,
     sparse_tensor_to_scipy_csr,
@@ -41,6 +42,18 @@ def test_categories_to_codes():
     ).apply(pd.Categorical)
     df_codes = categories_to_codes(df)
     np.testing.assert_array_equal(df_codes, np.array([[0, 0, 0], [1, 1, 1], [0, 0, 0], [2, 2, 2], [1, 1, 1]]))
+
+
+def test_batch_categories_to_codes():
+    batch = pd.Series(pd.Categorical(["b", "a", "b"], categories=["a", "b"]), name="donor")
+    codes = batch_categories_to_codes(batch)
+    np.testing.assert_array_equal(codes, [1, 0, 1])
+    assert codes.dtype == np.int32
+    # not categorical, or with cells of no batch: a clear error that names the column
+    with pytest.raises(ValueError, match=r"obs\['donor'\] is of dtype int64, not categorical"):
+        batch_categories_to_codes(pd.Series([3, 1, 3], name="donor"))
+    with pytest.raises(ValueError, match=r"obs\['donor'\] has no value for 1 of 3 cells"):
+        batch_categories_to_codes(pd.Series(pd.Categorical(["a", None, "b"]), name="donor"))
 
 
 def enumerate_combinations(categories_per_column: list[int]) -> pd.DataFrame:
