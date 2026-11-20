@@ -1,10 +1,19 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import importlib
 import warnings
 from typing import Any, Type
 
 import torch
+
+
+def _resolve_activation_fn(activation_fn: "Type[torch.nn.Module] | str | None") -> Type[torch.nn.Module] | None:
+    """Resolve a class-path string (e.g. from a YAML config) to an activation class; pass classes/None through."""
+    if isinstance(activation_fn, str):
+        module_name, class_name = activation_fn.rsplit(".", 1)
+        return getattr(importlib.import_module(module_name), class_name)
+    return activation_fn
 
 
 class SwiGLUActivation(torch.nn.Module):
@@ -15,8 +24,8 @@ class SwiGLUActivation(torch.nn.Module):
     ``x_val * F.silu(gate)``. When used as ``activation_fn`` in
     :class:`DressedLayer`, the upstream linear layer should produce
     ``2 × inner_dim`` outputs; :class:`~cellarium.ml.models.scvi.FullyConnectedWithBatchArchitecture`
-    handles this automatically when ``out_features`` is set to the desired
-    post-gating width.
+    and :class:`FullyConnectedLinear` handle this automatically when ``out_features`` is set to the
+    desired post-gating width.
     """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -45,7 +54,8 @@ class DressedLayer(torch.nn.Module):
         layer: single layer `torch.nn.Module`, such as an instance of `torch.nn.Linear`
         use_batch_norm: whether to use batch normalization
         use_layer_norm: whether to use layer normalization
-        activation_fn: the activation function to use
+        activation_fn: the activation function to use, as a class or a class-path string
+            such as ``"torch.nn.ReLU"``
         dropout_rate: dropout rate, can be zero
         use_residual: if ``True``, adds the input as a residual when the output shape matches the
             input shape. Silently disabled when shapes differ (e.g. dimension-changing layers).
@@ -59,10 +69,11 @@ class DressedLayer(torch.nn.Module):
         batch_norm_kwargs: dict | None = None,
         use_layer_norm: bool = False,
         layer_norm_kwargs: dict | None = None,
-        activation_fn: Type[torch.nn.Module] | None = torch.nn.ReLU,
+        activation_fn: Type[torch.nn.Module] | str | None = torch.nn.ReLU,
         dropout_rate: float = 0,
         use_residual: bool = False,
     ):
+        activation_fn = _resolve_activation_fn(activation_fn)
         if batch_norm_kwargs is None:
             batch_norm_kwargs = {"momentum": 0.01, "eps": 0.001}
         if layer_norm_kwargs is None:
@@ -110,8 +121,11 @@ class FullyConnectedLinear(torch.nn.Module):
     Args:
         in_features: The dimensionality of the input
         out_features: The dimensionality of the output
-        n_hidden: A list of sizes of torch.nn.Linear hidden layers
-        dressing_init_kwargs: A dictionary of keyword arguments to pass ``DressedLayer``'s constructor
+        n_hidden: A list of sizes of torch.nn.Linear hidden layers. For a layer whose activation is
+            :class:`SwiGLUActivation` the size is the post-gating width; the linear layer is built
+            with twice that many outputs.
+        dressing_init_kwargs: Keyword arguments to pass to ``DressedLayer``'s constructor. Either a single
+            dictionary applied to every hidden layer, or a list of dictionaries (one per hidden layer).
         bias: True to include a bias in the final linear layer
     """
 
@@ -120,23 +134,38 @@ class FullyConnectedLinear(torch.nn.Module):
         in_features: int,
         out_features: int,
         n_hidden: list[int],
-        dressing_init_kwargs: dict[str, Any] | None = None,
+        dressing_init_kwargs: dict[str, Any] | list[dict[str, Any]] | None = None,
         bias: bool = False,
     ):
         super().__init__()
         if dressing_init_kwargs is None:
             dressing_init_kwargs = {}
+        if isinstance(dressing_init_kwargs, dict):
+            per_layer_kwargs = [dressing_init_kwargs] * len(n_hidden)
+        else:
+            if len(dressing_init_kwargs) != len(n_hidden):
+                raise ValueError(
+                    f"dressing_init_kwargs has {len(dressing_init_kwargs)} entries but n_hidden has "
+                    f"{len(n_hidden)} layers; provide one dictionary per hidden layer."
+                )
+            per_layer_kwargs = dressing_init_kwargs
         module_list = torch.nn.ModuleList()
         layer_size = in_features
-        if len(n_hidden) > 0:
-            for n_in, n_out in zip([in_features] + n_hidden, n_hidden):
-                module_list.append(
-                    DressedLayer(
-                        torch.nn.Linear(in_features=n_in, out_features=n_out, bias=True),
-                        **dressing_init_kwargs,
-                    )
-                )
-            layer_size = n_out
+        for n_out, layer_kwargs in zip(n_hidden, per_layer_kwargs):
+            layer_kwargs = {**layer_kwargs}
+            if "activation_fn" in layer_kwargs:
+                layer_kwargs["activation_fn"] = _resolve_activation_fn(layer_kwargs["activation_fn"])
+                activation_fn = layer_kwargs["activation_fn"]
+            else:
+                activation_fn = torch.nn.ReLU  # DressedLayer default
+            # SwiGLU halves the width, so the linear layer must emit twice the effective width
+            linear_out = n_out * 2 if activation_fn is SwiGLUActivation else n_out
+            dressed_layer = DressedLayer(
+                torch.nn.Linear(in_features=layer_size, out_features=linear_out, bias=True),
+                **layer_kwargs,
+            )
+            module_list.append(dressed_layer)
+            layer_size = dressed_layer.out_features
         module_list.append(torch.nn.Linear(layer_size, out_features, bias=bias))
         self.module_list = module_list
         self.out_features = out_features
