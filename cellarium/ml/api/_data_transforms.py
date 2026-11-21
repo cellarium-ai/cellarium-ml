@@ -21,17 +21,17 @@ import lightning.pytorch as pl
 from torch import nn
 
 from cellarium.ml import CellariumModule
-from cellarium.ml.api._datamodule_context import temporary_batch_keys
+from cellarium.ml.api._datamodule_context import batch_index_field, temporary_batch_keys
 from cellarium.ml.api.cellariumdata import CellariumData, TrainedModule, fit_and_register
 from cellarium.ml.models import HVGSeuratV3, OnePassMeanVarStd
 from cellarium.ml.transforms import Densify, Log1p, NormalizeTotal
-from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
+from cellarium.ml.utilities.data import AnnDataField
 
 
 def _batch_keys(batch_key: str | None) -> dict[str, AnnDataField]:
     if batch_key is None:
         return {}
-    return {"batch_index_n": AnnDataField(attr="obs", key=batch_key, convert_fn=categories_to_codes)}
+    return {"batch_index_n": batch_index_field(batch_key)}
 
 
 @dataclass(frozen=True)

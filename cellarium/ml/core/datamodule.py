@@ -8,6 +8,7 @@ from functools import partial
 from typing import Any, Literal
 
 import lightning.pytorch as pl
+import pandas as pd
 import torch
 from anndata import AnnData
 
@@ -430,3 +431,11 @@ class CellariumAnnDataDataModule(pl.LightningDataModule):
         if key not in self.dadc.obs:
             raise ValueError(f"Key '{key}' not found in obs columns: {list(self.dadc.obs.columns)}")
         return self.dadc.obs[key].nunique()
+
+    def obs_is_categorical(self, key: str) -> bool:
+        """Whether the ``obs`` column ``key`` is categorical (from the schema of the data, without reading values)."""
+        if isinstance(self.dadc, DistributedCollection):
+            return self.dadc.obs_is_categorical(key)
+        if key not in self.dadc.obs:
+            raise ValueError(f"Key '{key}' not found in obs columns: {list(self.dadc.obs.columns)}")
+        return isinstance(self.dadc.obs[key].dtype, pd.CategoricalDtype)

@@ -8,12 +8,11 @@ import lightning.pytorch as pl
 import pandas as pd
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
-from cellarium.ml.api._datamodule_context import temporary_batch_keys
+from cellarium.ml.api._datamodule_context import batch_index_field, check_batch_key, temporary_batch_keys
 from cellarium.ml.api.cellariumdata import CellariumData
 from cellarium.ml.api.utils import shutdown_trainer_workers
 from cellarium.ml.models import OnePassMeanVarStd
 from cellarium.ml.transforms import Densify, Log1p, NormalizeTotal, ZScore
-from cellarium.ml.utilities.data import AnnDataField, categories_to_codes
 
 
 def _run_onepass(
@@ -88,6 +87,7 @@ def pseudobulk(
 
     datamodule: CellariumAnnDataDataModule = cdata.datamodule
     dadc = datamodule.dadc
+    check_batch_key(datamodule, batch_key)
 
     preprocessing_transforms: list = []
     if normalize_total:
@@ -115,9 +115,7 @@ def pseudobulk(
 
     n_batch = datamodule.obs_key_nunique(batch_key)
 
-    with temporary_batch_keys(
-        datamodule, {"batch_index_n": AnnDataField(attr="obs", key=batch_key, convert_fn=categories_to_codes)}
-    ):
+    with temporary_batch_keys(datamodule, {"batch_index_n": batch_index_field(batch_key)}):
         group_labels = dadc.obs_categories(batch_key)
 
         model = _run_onepass(

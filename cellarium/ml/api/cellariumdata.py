@@ -6,6 +6,7 @@ import inspect
 import json
 import math
 import os
+import re
 import signal
 import tempfile
 import traceback
@@ -30,6 +31,7 @@ from tqdm.auto import tqdm
 
 from cellarium.ml import CellariumAnnDataDataModule, CellariumModule
 from cellarium.ml.api._cell_ids import CELL_ID_COLUMN
+from cellarium.ml.api._cell_order import warn_if_cells_are_grouped
 from cellarium.ml.api._datamodule_context import temporary_batch_keys
 from cellarium.ml.api._obsm_storage import RowSubset, subset_rows
 from cellarium.ml.api._rebatch import ShardChunkDataModule, ShardChunkDataset, make_loader
@@ -44,9 +46,13 @@ from cellarium.ml.api._view_collections import (
 from cellarium.ml.api.deltacells_store import write_collection_to_deltacells
 from cellarium.ml.api.utils import (
     LossHistory,
-    get_h5ad_files_limits,
+    ObsColumnSchema,
+    _list_preview,
+    check_obs_columns_exist,
+    get_h5ad_files_obs_info,
     release_unused_memory,
     shutdown_trainer_workers,
+    validate_h5ad_obs_schemas,
     write_obs_parquet,
 )
 from cellarium.ml.data import (
@@ -55,7 +61,8 @@ from cellarium.ml.data import (
     DistributedDeltaCellsCollection,
     IterableDistributedAnnDataCollectionDataset,
 )
-from cellarium.ml.models.model import PredictMixin
+from cellarium.ml.models.model import CellariumModel, PredictMixin
+from cellarium.ml.models.scarches import ScArches
 from cellarium.ml.utilities.core import FunctionComposer
 from cellarium.ml.utilities.data import AnnDataField, to_float_tensor, to_torch_sparse_coo, to_torch_sparse_csr
 
@@ -73,6 +80,33 @@ def _make_names_unique(names: Any) -> np.ndarray:
     return np.asarray(anndata.utils.make_index_unique(pd.Index(np.asarray(names).astype(str))), dtype=object)
 
 
+# an Ensembl gene ID (any species: ENSG, ENSMUSG, ...) with a version suffix, which may be followed by "_PAR_Y"
+_ENSEMBL_GENE_VERSION = re.compile(r"^(ENS[A-Z]*G\d+)\.\d+(?=_|$)")
+
+
+def _strip_ensembl_version(names: Any) -> np.ndarray:
+    """
+    The gene ``names`` with the version suffix of the Ensembl gene IDs among them removed (``"ENSG00000198804.2"`` to
+    ``"ENSG00000198804"``, ``"ENSG00000182378.15_PAR_Y"`` to ``"ENSG00000182378_PAR_Y"``). Other names, such as gene
+    symbols with a dot (``"AC000061.1"``), are unchanged.
+    """
+    return np.asarray(
+        pd.Index(np.asarray(names).astype(str)).str.replace(_ENSEMBL_GENE_VERSION, r"\1", regex=True), dtype=object
+    )
+
+
+def _convert_var_names(names: Any, strip_ensembl_version: bool, make_unique: bool) -> np.ndarray:
+    """
+    The ``convert_fn`` of the gene names: first the Ensembl versions stripped, if ``strip_ensembl_version``, then the
+    repeated names suffixed, if ``make_unique``. A module-level function so that data workers can pickle it.
+    """
+    if strip_ensembl_version:
+        names = _strip_ensembl_version(names)
+    if make_unique:
+        names = _make_names_unique(names)
+    return np.asarray(names, dtype=object)
+
+
 def _build_datamodule(
     dadc: DistributedCollection,
     obs_columns: dict[str, tuple[str, Callable]],
@@ -83,8 +117,17 @@ def _build_datamodule(
     stage: Literal["fit", "validate", "predict", "test"],
     num_workers: int,
     var_names_make_unique: bool = False,
+    var_names_strip_ensembl_version: bool = False,
 ) -> CellariumAnnDataDataModule:
-    convert_fn = _make_names_unique if var_names_make_unique else None
+    convert_fn = (
+        partial(
+            _convert_var_names,
+            strip_ensembl_version=var_names_strip_ensembl_version,
+            make_unique=var_names_make_unique,
+        )
+        if var_names_make_unique or var_names_strip_ensembl_version
+        else None
+    )
     datamodule = CellariumAnnDataDataModule(
         dadc=dadc,
         batch_keys={
@@ -119,6 +162,48 @@ def _build_datamodule(
     return datamodule
 
 
+def _check_requested_obs_columns(
+    obs_columns: dict[str, tuple[str, Callable]], available: list[str] | dict[str, ObsColumnSchema]
+) -> None:
+    """
+    Check that the obs columns that ``obs_columns`` reads are among the ``available`` obs columns, naming each by the
+    argument of :class:`CellariumData` that gave it. If the schemas of the columns are ``available``, also check that
+    the column of ``total_mrna_umis_n`` is numeric.
+    """
+    check_obs_columns_exist(
+        {
+            ("total_mrna_umis_column" if key == "total_mrna_umis_n" else f"obs_columns[{key!r}]"): column
+            for key, (column, _) in obs_columns.items()
+        },
+        available,
+    )
+    if "total_mrna_umis_n" in obs_columns and isinstance(available, dict):
+        column = obs_columns["total_mrna_umis_n"][0]
+        if not available[column].is_numeric:
+            raise TypeError(
+                f"total_mrna_umis_column={column!r} must be a numeric obs column, but it is "
+                f"{available[column].describe_type()}."
+            )
+
+
+def _check_obs_parquet_columns(parquet_path: str, columns: Sequence[str]) -> None:
+    """
+    Check that the obs parquet database at ``parquet_path`` has the obs ``columns`` of the h5ad files, as it does when
+    it was built from them, reading only its schema.
+    """
+    schema = ds.dataset(parquet_path, format="parquet").schema
+    index_columns = (schema.pandas_metadata or {}).get("index_columns", [])
+    parquet_columns = [name for name in schema.names if name not in index_columns]
+    missing = [column for column in columns if column not in parquet_columns]
+    extra = [column for column in parquet_columns if column not in columns]
+    if missing or extra:
+        raise ValueError(
+            f"The obs parquet database {parquet_path!r} does not have the obs columns of the h5ad files (it lacks "
+            f"{missing} and has {extra}): was it built from other files? Build it from these files with "
+            "write_obs_parquet, or leave obs_parquet_path out to have it built when obs is first queried."
+        )
+
+
 def get_datamodule(
     h5ad_paths: list[str],
     obs_columns: dict[str, tuple[str, Callable]] = {},
@@ -130,21 +215,45 @@ def get_datamodule(
     nexus_extract_uniform_sizes: bool | None = None,
     num_workers: int = 0,
     var_names_make_unique: bool = False,
+    var_names_strip_ensembl_version: bool = False,
 ):
+    """
+    A datamodule that reads the h5ad files at ``h5ad_paths``.
+
+    First, in one pass that reads only the metadata of the files (only that of the first and last files with
+    ``nexus_extract_uniform_sizes``, whose files all have the same size and schema), checks that the files have the
+    same obs schema (see :func:`~cellarium.ml.api.utils.validate_h5ad_obs_schemas`), and that the obs columns that
+    ``obs_columns`` reads exist (and that ``total_mrna_umis_n`` is numeric), so that a mismatch is found at once rather
+    than when a file is read.
+
+    Raises:
+        ValueError: If the files do not have the same obs schema, or an obs column of ``obs_columns`` does not exist.
+        TypeError: If the obs column of ``total_mrna_umis_n`` is not numeric.
+    """
     if nexus_extract_uniform_sizes is None:
         nexus_extract_uniform_sizes = all(["extract_files" in path for path in h5ad_paths])  # a guess
 
+    limits, obs_infos = get_h5ad_files_obs_info(h5ad_paths, nexus_extract_uniform_sizes=nexus_extract_uniform_sizes)
+    validate_h5ad_obs_schemas(obs_infos)
+    _check_requested_obs_columns(obs_columns, next(iter(obs_infos.values())).columns)
+
     dadc = DistributedAnnDataCollection(
         filenames=h5ad_paths,
-        limits=get_h5ad_files_limits(
-            h5ad_paths,
-            nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
-        ),
+        limits=limits,
         obs_columns_to_validate=[c[0] for c in obs_columns.values()],
         max_cache_size=2,
     )
     return _build_datamodule(
-        dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers, var_names_make_unique
+        dadc,
+        obs_columns,
+        var_key,
+        batch_size,
+        shuffle,
+        train_size,
+        stage,
+        num_workers,
+        var_names_make_unique=var_names_make_unique,
+        var_names_strip_ensembl_version=var_names_strip_ensembl_version,
     )
 
 
@@ -158,6 +267,7 @@ def get_deltacells_datamodule(
     stage: Literal["fit", "validate", "predict", "test"] = "fit",
     num_workers: int = 0,
     var_names_make_unique: bool = False,
+    var_names_strip_ensembl_version: bool = False,
     **collection_kwargs: Any,
 ):
     """
@@ -166,19 +276,35 @@ def get_deltacells_datamodule(
     :class:`~cellarium.ml.data.DistributedDeltaCellsCollection`.
     """
     dadc = DistributedDeltaCellsCollection(uri, **collection_kwargs)
+    if obs_columns:
+        _check_requested_obs_columns(obs_columns, DeltaCellsLazyObs(dadc).columns)
     return _build_datamodule(
-        dadc, obs_columns, var_key, batch_size, shuffle, train_size, stage, num_workers, var_names_make_unique
+        dadc,
+        obs_columns,
+        var_key,
+        batch_size,
+        shuffle,
+        train_size,
+        stage,
+        num_workers,
+        var_names_make_unique=var_names_make_unique,
+        var_names_strip_ensembl_version=var_names_strip_ensembl_version,
     )
 
 
-def _check_var_names_unique(var: pd.DataFrame, names: pd.Index, var_key: str | None) -> None:
+def _check_var_names_unique(
+    var: pd.DataFrame, names: pd.Index, var_key: str | None, stripped_ensembl_version: bool = False
+) -> None:
     """
-    Raise a ``ValueError`` if the gene ``names`` (``var[var_key]``, or the ``var_names`` if ``var_key`` is ``None``)
-    are not unique, listing the ``var_key`` values that would give unique names.
+    Raise a ``ValueError`` if the gene ``names`` (``var[var_key]``, or the ``var_names`` if ``var_key`` is ``None``,
+    with the Ensembl versions stripped if ``stripped_ensembl_version``) are not unique, listing the ``var_key`` values
+    that would give unique names.
     """
     if names.is_unique:
         return
     where = "var_names" if var_key is None else f"var_key={var_key!r}"
+    if stripped_ensembl_version:
+        where += ", with the Ensembl versions stripped"
     repeated = names[names.duplicated()].unique()
 
     def is_name_like(column: pd.Series) -> bool:
@@ -398,7 +524,9 @@ class TrainedModule:
         return rows.set_index("step")["value"].rename(name)
 
     def __repr__(self) -> str:
-        config = ", ".join(f"{k}={v}" for k, v in self.config.items())
+        config = ", ".join(
+            f"{k}={_list_preview(v, n=3) if isinstance(v, (list, tuple)) else v}" for k, v in self.config.items()
+        )
         status = "" if self.complete else " (interrupted)"
         return f"{type(self.module.model).__name__}({config}), {self.n_epochs} epochs{status}"
 
@@ -412,6 +540,14 @@ class TrainedModulesMapping(dict[str, TrainedModule]):
         super().__setitem__(key, value)
 
 
+def _unwrap_scarches(model: CellariumModel) -> CellariumModel:
+    """
+    The model that ``model`` wraps if it is a :class:`~cellarium.ml.models.ScArches` (which passes on the arguments of
+    the wrapped model, and has its attributes, such as the classes of an scANVI model), and otherwise ``model``.
+    """
+    return model.scvi if isinstance(model, ScArches) else model
+
+
 def _data_fields_used(module: CellariumModule) -> tuple[set[str], set[str]]:
     """
     The names of the data fields that the transforms and the model of ``module`` take from the batch, and the names
@@ -419,12 +555,12 @@ def _data_fields_used(module: CellariumModule) -> tuple[set[str], set[str]]:
     transforms and the ``predict`` of the model (the arguments that
     :func:`~cellarium.ml.utilities.core.call_func_with_batch` passes), or of the ``forward`` of a model that cannot
     predict, which is left out of the required names since it is not what runs to make predictions. A ``**kwargs``
-    takes no field in particular (transforms have it to ignore the fields they do not use), so it adds none; and a
+    takes no field in particular (transforms have it to ignore the fields they do not use), so it adds none; a
     transform that is itself a :class:`~cellarium.ml.core.CellariumModule` adds the fields that it takes, none of
-    them required.
+    them required; and a :class:`~cellarium.ml.models.ScArches` model takes the fields of the model that it wraps.
     """
     hparams = module.hparams
-    model = hparams["model"]
+    model = _unwrap_scarches(hparams["model"])
     transforms = [*(hparams["cpu_transforms"] or []), *(hparams["transforms"] or [])]
     funcs = [transform.forward for transform in transforms]
     funcs.append(model.predict if isinstance(model, PredictMixin) else model.forward)
@@ -459,6 +595,30 @@ def _epochs_completed(checkpoint: dict[str, Any]) -> int:
         return 0
 
 
+class TrainingInterrupted(KeyboardInterrupt):
+    """
+    The interruption of training (e.g. by interrupting the kernel of a notebook), raised once the partially trained
+    module has been stored (see :func:`fit_and_register`). It is a ``KeyboardInterrupt``, so it stops what is running
+    as an interruption does, and IPython (Jupyter) shows its message alone, without a traceback.
+    """
+
+    def _render_traceback_(self) -> list[str]:
+        # IPython shows what this returns in place of the traceback
+        return [f"{type(self).__name__}: {self}"]
+
+
+def _ends_an_interrupted_fit(error: BaseException) -> bool:
+    """
+    Whether ``error``, raised by ``trainer.fit``, is how an interrupted fit ends. Lightning catches the
+    ``KeyboardInterrupt``, shuts down gracefully and calls ``exit(1)``, which raises a ``SystemExit``, or a
+    ``NameError`` in IPython (which takes ``exit`` out of the builtins while it runs code). Any other ``NameError`` is
+    a bug, which is left to propagate.
+    """
+    if isinstance(error, NameError):
+        return isinstance(error.__context__, KeyboardInterrupt)
+    return isinstance(error, (KeyboardInterrupt, SystemExit))
+
+
 def fit_and_register(
     cdata: "CellariumData",
     trainer: pl.Trainer,
@@ -472,7 +632,8 @@ def fit_and_register(
     Fit ``module`` on ``cdata.datamodule`` and store it in ``cdata.trained_modules[key]``, along with the metrics
     recorded by ``loss_history`` (if the trainer's logger is one) and the extra ``batch_keys`` the module needs to
     run. If training is interrupted, the partially trained module is stored the same way, marked ``complete=False``,
-    before the interruption propagates. With ``key=None`` nothing is stored in ``cdata.trained_modules``.
+    and a :class:`TrainingInterrupted` (a ``KeyboardInterrupt`` that says so in one line) is raised in place of the
+    exceptions of Lightning's shutdown. With ``key=None`` nothing is stored in ``cdata.trained_modules``.
 
     The memory that the fit used on the accelerator is released when it ends, whether it completed or was interrupted
     (see :func:`_clean_up_after_interrupt`).
@@ -503,12 +664,23 @@ def fit_and_register(
     try:
         trainer.fit(module, cdata.datamodule)
     except (KeyboardInterrupt, SystemExit, NameError) as error:
-        # Lightning turns a KeyboardInterrupt into a SystemExit after shutting down gracefully
-        # and sometimes throws a NameError if something goes wrong during shutdown
-        if trainer.global_step > 0:
+        if not _ends_an_interrupted_fit(error):
+            raise
+        stored = trainer.global_step > 0
+        if stored:
             register(complete=False)
         _clean_up_after_interrupt(error, module, sigint_handler)
-        raise
+        if not stored:
+            message = "Training was interrupted before its first step, so no module was stored."
+        elif key is None:
+            message = f"Training was interrupted at step {trainer.global_step}."
+        else:
+            message = (
+                f"Training was interrupted at step {trainer.global_step}. The partially trained module is stored as "
+                f"cdata.trained_modules['{key}'] (complete=False)."
+            )
+        # the exceptions of Lightning's shutdown are of no interest: a short message takes their place
+        raise TrainingInterrupted(message) from None
     finally:
         # the workers of the dataloaders are of no use any more, and stay (with what they hold) as long as the trainer
         shutdown_trainer_workers(trainer)
@@ -620,6 +792,12 @@ class LazyObs:
     def columns(self) -> list[str]:
         index_col = self._index_column_name
         return [name for name in self._get_dataset().schema.names if name != index_col]
+
+    @property
+    def categorical_columns(self) -> list[str]:
+        """The categorical columns (dictionary-encoded in the database), from its schema: no values are read."""
+        schema = self._get_dataset().schema
+        return [name for name in self.columns if pa.types.is_dictionary(schema.field(name).type)]
 
     @property
     def index(self) -> pd.Index:
@@ -745,6 +923,11 @@ class DeltaCellsLazyObs:
     def columns(self) -> list[str]:
         return [c for c in self._store.columns if c != self._NAMES]
 
+    @property
+    def categorical_columns(self) -> list[str]:
+        """The categorical columns, from the dataset's obs schema: no values are read."""
+        return [c for c in self.columns if self._store.kind(c) == "category"]
+
     def _names_at(self, indices: np.ndarray | None = None) -> pd.Index:
         """The obs names of the cells at ``indices`` (all cells if ``None``)."""
         if indices is None:
@@ -841,6 +1024,11 @@ class ViewLazyObs:
     @property
     def columns(self) -> list[str]:
         return self._source.columns
+
+    @property
+    def categorical_columns(self) -> list[str]:
+        """The categorical columns (those of the root data), from its schema: no values are read."""
+        return self._source.categorical_columns
 
     @property
     def index(self) -> pd.Index:
@@ -1014,11 +1202,25 @@ class CellariumData:
     instead suffixed (``"TBCE"``, ``"TBCE-1"``, ...), as in :func:`anndata.utils.make_index_unique`, and the names as
     they were stay in ``var`` as the column ``"<var_key>_original"`` (``"var_names_original"`` without a ``var_key``).
 
+    With ``var_names_strip_ensembl_version=True`` the version suffix of Ensembl gene IDs is removed from the names
+    (``"ENSG00000198804.2"`` becomes ``"ENSG00000198804"``; other names, such as gene symbols, are unchanged), so that
+    the genes match a module trained on data with unversioned IDs. The names as they were stay in ``var`` in the same
+    ``"_original"`` column. The stripped names must be unique too (or are made so with ``var_names_make_unique=True``,
+    which suffixes them after the versions are stripped).
+
     ``max_gb`` is the memory budget (in GiB) for what api functions hold in memory: the cells read by :meth:`to_ram` and
     :meth:`to_anndata`, and the rows of the per-cell results in ``obsm`` that a view copies into memory (those results
     are always in temporary files, and a view reads its rows into memory only if they fit). Views inherit it. By default
     it is half of the memory that is available, taking any container limit into account. It can be changed at any time
     with the :attr:`max_gb` attribute.
+
+    The h5ad files must have the same ``obs`` schema: the same obs columns (in any order), each stored with the same
+    type, and each categorical column with the same categories (in any order, unless it is ordered). Construction checks
+    this, reading only the metadata of the files, and raises a ``ValueError`` that tells which columns and files differ
+    (categories that differ can be harmonized with :func:`~cellarium.ml.api.harmonize_obs_categories`). With
+    ``nexus_extract_uniform_sizes=True`` (the files of a Nexus extract all have the same size and schema) only the first
+    and last files are read. Construction also checks that the obs columns that ``total_mrna_umis_column`` and
+    ``obs_columns`` name exist, and that ``total_mrna_umis_column`` is numeric.
     """
 
     def __init__(
@@ -1037,6 +1239,7 @@ class CellariumData:
         datamodule_num_workers: int = 0,
         obs_parquet_path: str | None = None,
         var_names_make_unique: bool = False,
+        var_names_strip_ensembl_version: bool = False,
         max_gb: float | None = None,
     ):
         if (h5ad_paths is None) == (deltacells_uri is None):
@@ -1060,7 +1263,11 @@ class CellariumData:
                 nexus_extract_uniform_sizes=nexus_extract_uniform_sizes,
                 num_workers=datamodule_num_workers,
                 var_names_make_unique=var_names_make_unique,
+                var_names_strip_ensembl_version=var_names_strip_ensembl_version,
             )
+            if obs_parquet_path is not None:
+                h5ad_obs_columns = self._datamodule.dadc.schema.attr_values["obs"].columns
+                _check_obs_parquet_columns(obs_parquet_path, list(h5ad_obs_columns))
             # lazy: nothing is read, and no obs parquet database is built, until `.obs` is queried
             self._obs = LazyObs(obs_parquet_path, h5ad_paths=h5ad_paths)
         else:
@@ -1074,6 +1281,7 @@ class CellariumData:
                 stage=stage,
                 num_workers=datamodule_num_workers,
                 var_names_make_unique=var_names_make_unique,
+                var_names_strip_ensembl_version=var_names_strip_ensembl_version,
                 **(deltacells_kwargs or {}),
             )
             self._obs = DeltaCellsLazyObs(self._datamodule.dadc)
@@ -1086,14 +1294,17 @@ class CellariumData:
             anndatafield: AnnDataField = self._datamodule.batch_keys["var_names_g"]
             if anndatafield.key is not None:
                 self._var.set_index(anndatafield.key, inplace=True)
-            if var_names_make_unique:
-                # the original names stay available, in a column named after where they came from
+            if var_names_make_unique or var_names_strip_ensembl_version:
+                # the names are converted: the original names stay available, in a column named after where they
+                # came from
                 original_names = self._var.index.to_numpy()
                 self._var.index = pd.Index(self._datamodule.var_names_g, name=self._var.index.name)
                 self._var[f"{anndatafield.key or 'var_names'}_original"] = original_names
-            else:
+            if not var_names_make_unique:
                 assert anndatafield.key is None or isinstance(anndatafield.key, str)  # None: the var_names
-                _check_var_names_unique(self._datamodule.dadc.var, self._var.index, anndatafield.key)
+                _check_var_names_unique(
+                    self._datamodule.dadc.var, self._var.index, anndatafield.key, var_names_strip_ensembl_version
+                )
         self._init_state()
         # lineage: a root is the data that views are taken from (see `CellariumDataView`)
         self._parent: CellariumData | None = None
@@ -1312,7 +1523,14 @@ class CellariumData:
                 this data was opened with, if it was read from a deltacells dataset).
             filesystem: An fsspec filesystem to upload with instead of ``gcsfs`` (for testing).
             **writer_kwargs: Further arguments of :class:`deltacells.DatasetWriter`, for example ``level``.
+
+        Warns:
+            UserWarning: Before anything is written, if the cells are grouped by a categorical ``obs`` column (as they
+                are in data made of per-experiment files): training draws every minibatch from one tile, so the tiles
+                should be about as diverse as all the cells. This reads the categorical ``obs`` columns (one at a time,
+                not the counts). The cells are not shuffled here; shuffle them first, for example with ``annslicer``.
         """
+        warn_if_cells_are_grouped(self.obs, tile_size)
         write_collection_to_deltacells(
             self._datamodule.dadc,
             uri,
@@ -1836,7 +2054,16 @@ class CellariumData:
                 for name, field in trained_with.items()
                 if isinstance(field, AnnDataField) and name not in self._datamodule.batch_keys and name in used
             }
-            self._check_obs_columns_of(batch_keys, path)
+            for name, absent in self._absent_obs_columns(batch_keys).items():
+                raise ValueError(
+                    f"The module in {path} was trained with the data field '{name}', which is read from the obs "
+                    f"column(s) {absent} that this data does not have. Pass batch_keys to say where to find it in this "
+                    f"data, for example batch_keys={{'{name}': AnnDataField(attr='obs', key=..., convert_fn=...)}} "
+                    "(with AnnDataField from cellarium.ml.utilities.data), or batch_keys={} to run the module without "
+                    "it (which is only right if the module can do without it). If the module was trained on other "
+                    "data, with other batches, load it with batch_keys={} and map these cells onto it with "
+                    f"cml.tl.scarches(cdata, reference='{key}', batch_key=...)."
+                )
 
         self._trained_modules[key] = TrainedModule(
             module=module,
@@ -1846,9 +2073,10 @@ class CellariumData:
             batch_keys=dict(batch_keys),
         )
 
-    def _check_obs_columns_of(self, batch_keys: dict[str, AnnDataField], path: str) -> None:
-        """Raise a ``ValueError`` if a field in ``batch_keys`` reads an obs column that this data does not have."""
+    def _absent_obs_columns(self, batch_keys: dict[str, AnnDataField]) -> dict[str, list[str]]:
+        """The fields of ``batch_keys`` that read obs columns that this data does not have, with those columns."""
         columns: set[str] | None = None
+        absent_columns: dict[str, list[str]] = {}
         for name, adfield in batch_keys.items():
             if adfield.attr != "obs" or adfield.key is None:
                 continue
@@ -1857,13 +2085,8 @@ class CellariumData:
             wanted = adfield.key if isinstance(adfield.key, list) else [adfield.key]
             absent = [column for column in wanted if column not in columns]
             if absent:
-                raise ValueError(
-                    f"The module in {path} was trained with the data field '{name}', which is read from the obs "
-                    f"column(s) {absent} that this data does not have. Pass batch_keys to say where to find it in this "
-                    f"data, for example batch_keys={{'{name}': AnnDataField(attr='obs', key=..., convert_fn=...)}} "
-                    "(with AnnDataField from cellarium.ml.utilities.data), or batch_keys={} to run the module without "
-                    "it (which is only right if the module can do without it)."
-                )
+                absent_columns[name] = absent
+        return absent_columns
 
     @contextmanager
     def using(self, key: str) -> Iterator[TrainedModule]:
@@ -1878,9 +2101,11 @@ class CellariumData:
             ...     ...  # code that runs trained.module over cdata.datamodule
 
         Raises:
-            ValueError: If there is no trained module under ``key``, or if the module needs data fields that neither
+            ValueError: If there is no trained module under ``key``, if the module needs data fields that neither
                 ``cdata.datamodule`` nor the ``batch_keys`` of the module provide (this happens for a module loaded
-                with :meth:`load_module_from_ckpt` that was trained with fields that are not in its checkpoint).
+                with :meth:`load_module_from_ckpt` that was trained with fields that are not in its checkpoint), or if
+                its ``batch_keys`` read obs columns that this data does not have (as for a module trained on other
+                data, which :func:`~cellarium.ml.api.tools.scarches` maps these cells onto).
         """
         if key not in self._trained_modules:
             available = list(self._trained_modules)
@@ -1902,6 +2127,15 @@ class CellariumData:
                 f"cdata.load_module_from_ckpt({'path' if source is None else repr(source)}, '{key}', "
                 f"batch_keys={{{', '.join(f'{name!r}: AnnDataField(attr=..., key=...)' for name in missing)}}}), "
                 "with AnnDataField from cellarium.ml.utilities.data."
+            )
+        absent_columns = self._absent_obs_columns(trained.batch_keys)
+        if absent_columns:
+            fields = ", ".join(f"'{name}' from {columns}" for name, columns in absent_columns.items())
+            raise ValueError(
+                f"The module '{key}' reads data fields from obs columns that this data does not have ({fields}). "
+                "If it was trained on other data, with other batches, map these cells onto it with "
+                f"cml.tl.scarches(cdata, reference='{key}', batch_key=...), which trains a module for the batches of "
+                "this data, and use that module."
             )
         if not trained.batch_keys:
             yield trained  # nothing extra needed (e.g. PCA), so leave the datamodule untouched

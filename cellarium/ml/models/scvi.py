@@ -1797,16 +1797,27 @@ class SingleCellVariationalInference(CellariumModel, PredictMixin, ValidateMixin
                             mean_err = err_dist[finite].mean().item()
                             trainer.logger.log_metrics({"val_cell_type_mean_error_distance": mean_err}, step=step)
 
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """
+        Keep the training position (which determines the KL annealing weight) in the checkpoint, so that
+        :meth:`on_load_checkpoint` restores it also from a checkpoint that is not saved by a trainer, which has no
+        ``global_step`` or ``epoch`` (such as a module of a saved :class:`~cellarium.ml.api.CellariumData` session).
+        """
+        checkpoint["scvi_training_position"] = {"step": self.step, "epoch": self.epoch}
+
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """
-        Restore the training position (which determines the KL annealing weight) from the checkpoint.
+        Restore the training position (which determines the KL annealing weight) from the checkpoint: that of the
+        trainer that saved it (which is up to date also when an epoch has just ended), or else the one that
+        :meth:`on_save_checkpoint` kept.
 
         ``step`` and ``epoch`` are not part of the ``state_dict``, so a model constructed from a checkpoint or from
         a config would otherwise start at 0, e.g. the first training step after resuming would use the KL weight of
         the very first step of training.
         """
-        self.step = checkpoint.get("global_step", self.step)
-        self.epoch = checkpoint.get("epoch", self.epoch)
+        position = checkpoint.get("scvi_training_position", {})
+        self.step = checkpoint.get("global_step", position.get("step", self.step))
+        self.epoch = checkpoint.get("epoch", position.get("epoch", self.epoch))
 
     def on_train_batch_end(self, trainer: pl.Trainer) -> None:
         # ``step_offset`` and ``epoch_offset`` (read with a default of 0 so that older pickled models work) are

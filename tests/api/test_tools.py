@@ -1,6 +1,7 @@
 # Copyright Contributors to the Cellarium project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import builtins
 import signal
 import warnings
 import weakref
@@ -16,6 +17,7 @@ import torch
 
 from cellarium.ml import CellariumModule
 from cellarium.ml.api import CellariumData, cellariumdata
+from cellarium.ml.api.cellariumdata import TrainingInterrupted, _ends_an_interrupted_fit
 from cellarium.ml.api.preprocessing import highly_variable_genes
 from cellarium.ml.api.tools import geometric_sketch, pca, scvi
 from cellarium.ml.api.utils import PreciseProgressBar
@@ -500,7 +502,7 @@ def test_an_interrupted_fit_frees_what_the_fit_loop_held_and_restores_sigint(cda
     )
     handler_before = signal.getsignal(signal.SIGINT)
     try:
-        with pytest.raises(SystemExit) as raised:
+        with pytest.raises(TrainingInterrupted) as raised:
             scvi(cdata, batch_key="cell_type", n_latent=3, max_epochs=5, log_every_n_steps=1, accelerator="cpu")
 
         # Lightning ignores SIGINT while it shuts down, and leaves it so
@@ -513,7 +515,8 @@ def test_an_interrupted_fit_frees_what_the_fit_loop_held_and_restores_sigint(cda
         signal.signal(signal.SIGINT, handler_before)
 
 
-def test_scvi_registers_partial_module_on_interrupt(cdata, monkeypatch):
+@pytest.mark.parametrize("in_ipython", [False, True], ids=["python", "ipython"])
+def test_scvi_registers_partial_module_on_interrupt(cdata, monkeypatch, in_ipython):
     def interrupt_after_first_epoch(self, trainer):
         if trainer.current_epoch == 1:
             raise KeyboardInterrupt
@@ -521,11 +524,32 @@ def test_scvi_registers_partial_module_on_interrupt(cdata, monkeypatch):
     monkeypatch.setattr(
         SingleCellVariationalInference, "on_train_epoch_end", interrupt_after_first_epoch, raising=False
     )
-    # Lightning turns the KeyboardInterrupt into a SystemExit after shutting down gracefully
-    with pytest.raises(SystemExit):
+    if in_ipython:
+        # IPython takes `exit` out of the builtins while it runs a cell, so Lightning's `exit(1)` is a NameError
+        monkeypatch.delattr(builtins, "exit")
+    # Lightning's SystemExit (or NameError) after its graceful shutdown is replaced by a one-line interruption
+    with pytest.raises(TrainingInterrupted, match=r"stored as cdata\.trained_modules\['scvi'\] \(complete=False\)"):
         scvi(cdata, batch_key="cell_type", n_latent=3, max_epochs=5, log_every_n_steps=1, accelerator="cpu")
 
     trained = cdata.trained_modules["scvi"]
     assert not trained.complete
     assert len(trained.history) > 0
     assert "(interrupted)" in repr(cdata)
+
+
+def test_an_interruption_is_shown_by_ipython_as_its_message_alone():
+    interrupted = TrainingInterrupted("Training was interrupted at step 3.")
+    assert isinstance(interrupted, KeyboardInterrupt)  # it stops what runs as an interruption does
+    assert interrupted._render_traceback_() == ["TrainingInterrupted: Training was interrupted at step 3."]
+
+
+def test_only_the_name_error_of_lightnings_exit_call_ends_an_interrupted_fit():
+    try:
+        try:
+            raise KeyboardInterrupt
+        except KeyboardInterrupt:
+            exit_call  # type: ignore[name-defined] # noqa: F821, B018 -- like Lightning's `exit(1)` in IPython
+    except NameError as error:
+        assert _ends_an_interrupted_fit(error)
+    assert not _ends_an_interrupted_fit(NameError("a bug in the training code"))
+    assert _ends_an_interrupted_fit(SystemExit(1)) and _ends_an_interrupted_fit(KeyboardInterrupt())

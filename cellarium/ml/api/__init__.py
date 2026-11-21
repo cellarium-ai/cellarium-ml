@@ -12,6 +12,7 @@ from cellarium.ml.api.utils import (
     get_h5ad_files_limits,
     get_h5ad_files_n_cells,
     h5ad_paths_from_google_bucket,
+    harmonize_obs_categories,
     write_obs_parquet,
 )
 from cellarium.ml.data.fileio import read_h5ad_file
@@ -27,6 +28,7 @@ __all__ = [
     "get_h5ad_files_limits",
     "get_h5ad_files_n_cells",
     "h5ad_paths_from_google_bucket",
+    "harmonize_obs_categories",
     "write_obs_parquet",
     "pl",
     "pp",

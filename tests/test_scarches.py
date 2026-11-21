@@ -10,6 +10,7 @@ from typing import cast
 
 import lightning.pytorch as pl
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 import torch.nn.functional as F
@@ -86,6 +87,15 @@ def make_model_kwargs(
 
 def make_scvi(n_batch: int, **kwargs) -> SingleCellVariationalInference:
     return SingleCellVariationalInference(**make_model_kwargs(n_batch, **kwargs))  # type: ignore[arg-type]
+
+
+def surgery_kwargs(config: dict) -> dict:
+    """The arguments of ScArches for a model of ``config``: a batch embedding needs ``decoder_surgery="all"``."""
+    return {"decoder_surgery": "all"} if config.get("batch_embedded", False) else {}
+
+
+def frozen_new_param_names(sa: ScArches) -> set[str]:
+    return {n for n, p in sa.named_parameters() if is_new(n) and not p.requires_grad}
 
 
 def rand_counts(n: int) -> torch.Tensor:
@@ -179,13 +189,17 @@ CONFIGS = {
 def test_training_only_changes_new_params(config, optim_cls, optim_kwargs):
     n_batch_ref, n_new = 3, 2
     with_covariates = config.get("with_covariates", False)
-    sa = ScArches(make_scvi(n_batch=n_batch_ref, **config), n_new_batch=n_new, shift_batch_index=False)
+    sa = ScArches(
+        make_scvi(n_batch=n_batch_ref, **config), n_new_batch=n_new, shift_batch_index=False, **surgery_kwargs(config)
+    )
     snapshot = {k: v.clone() for k, v in sa.state_dict().items()}
 
-    # only the new parameters require grad
+    # only the new parameters require grad (and, for one-hot batches, not those of the hidden decoder layers)
     trainable = {n for n, p in sa.named_parameters() if p.requires_grad}
     assert len(trainable) > 0
     assert all(is_new(n) for n in trainable), f"Unexpected trainable parameters: {trainable}"
+    if not config.get("batch_embedded", False):
+        assert frozen_new_param_names(sa) == {"scvi.decoder.fully_connected.module_list.0.layer.new_batch_bias_weight"}
 
     old_cells = make_inputs(torch.tensor([0, 1, 2, 0, 1, 2]), with_covariates)
 
@@ -207,11 +221,12 @@ def test_training_only_changes_new_params(config, optim_cls, optim_kwargs):
         optimizer.step()
 
     after = sa.state_dict()
-    # all parameters *and buffers* (e.g. BatchNorm running statistics) other than the new parameters are bitwise equal
+    # all parameters *and buffers* (e.g. BatchNorm running statistics) other than the trainable new parameters are
+    # bitwise equal
     for key, value in snapshot.items():
-        if not is_new(key):
+        if key not in trainable:
             assert torch.equal(value, after[key]), f"{key} changed during training"
-    assert any(not torch.equal(v, after[k]) for k, v in snapshot.items() if is_new(k)), "No new parameter trained"
+    assert any(not torch.equal(v, after[k]) for k, v in snapshot.items() if k in trainable), "No new parameter trained"
 
     # cells from the original batches get exactly the same output as before training
     torch.testing.assert_close(predict_old_cells(), z_before, rtol=0, atol=0)
@@ -234,7 +249,7 @@ def test_batchnorm_stays_in_eval_mode():
 
 def test_old_batch_output_unchanged_by_surgery():
     """
-    Before surgery the new-batch weights are zero, so old-batch cells should get exactly the same
+    The new-batch weights only act on new-batch cells, so old-batch cells should get exactly the same
     loss from the pretrained model and the ScArches-wrapped model.
 
     We reseed before each forward pass because ScArches.__init__ creates new
@@ -301,9 +316,19 @@ def test_new_batch_cells_get_no_constant_offset(with_covariates):
         frozen_decoder(old_nb[:, :n_batch_ref], cov),
     )
 
+    # new-batch cells start as the average reference batch: the mean of the biases of the reference batches, plus (only
+    # if there are covariates) the frozen covariate effect
+    zero_cov_b = None if cov is None else torch.zeros(n_batch_ref, N_CATS)
+    average_reference_bias = frozen_decoder(torch.eye(n_batch_ref), zero_cov_b).mean(dim=0)
+    torch.testing.assert_close(
+        layer.compute_bias(batch_nb=new_nb, categorical_covariate_np=cov),
+        frozen_decoder(torch.zeros(n, n_batch_ref), cov) - baseline + average_reference_bias,
+    )
     if cov is None:
-        # new-batch cells start with no bias at all
-        torch.testing.assert_close(layer.compute_bias(batch_nb=new_nb), torch.zeros(n, layer.out_features))
+        torch.testing.assert_close(
+            layer.compute_bias(batch_nb=new_nb),
+            frozen_decoder(torch.eye(n_batch_ref), None).mean(dim=0).expand(n, -1),
+        )
 
     # new-batch cells get their own bias plus (only if there are covariates) the frozen covariate effect
     with torch.no_grad():
@@ -386,7 +411,7 @@ def test_new_batch_forward(batch_embedded, n_latent_batch, final_additive_bias):
         n_latent_batch=n_latent_batch,
         final_additive_bias=final_additive_bias,
     )
-    sa = ScArches(scvi, n_new_batch=n_new)
+    sa = ScArches(scvi, n_new_batch=n_new, **surgery_kwargs({"batch_embedded": batch_embedded}))
     x = rand_counts(6)
     # query-local indices
     for new_idx in range(n_new):
@@ -450,25 +475,90 @@ def test_query_local_batch_index_out_of_range_raises(bad_index):
 # ---------------------------------------------------------------------------
 
 
-def test_reset_parameters_zeroes_new_weights():
-    n_batch_ref, n_new = 3, 2
-    scvi = make_scvi(n_batch=n_batch_ref)
-    sa = ScArches(scvi, n_new_batch=n_new)
-
-    # Dirty the new weights
-    for _, m in scvi.named_modules():
-        if isinstance(m, ScArchesLinearSurgeryMixin):
-            with torch.no_grad():
-                m.new_batch_bias_weight.fill_(99.0)
-
+@pytest.mark.parametrize("config", [CONFIGS["one_hot"], CONFIGS["embedded"]], ids=["one_hot", "embedded"])
+def test_reset_parameters_restores_the_average_reference_batch(config):
+    sa = ScArches(make_scvi(n_batch=3, **config), n_new_batch=2, **surgery_kwargs(config))
+    initial = {n: p.clone() for n, p in sa.named_parameters() if is_new(n)}
+    assert initial
+    with torch.no_grad():
+        for name, param in sa.named_parameters():
+            if is_new(name):
+                param.fill_(99.0)  # dirty the new weights
     sa.reset_parameters()
+    for name, param in sa.named_parameters():
+        if is_new(name):
+            torch.testing.assert_close(param, initial[name])
 
-    for _, m in scvi.named_modules():
-        if isinstance(m, ScArchesLinearSurgeryMixin):
-            torch.testing.assert_close(
-                m.new_batch_bias_weight,
-                torch.zeros_like(m.new_batch_bias_weight),
-            )
+
+def test_new_embedding_rows_start_at_the_mean_of_the_reference_rows():
+    scvi = make_scvi(n_batch=3, batch_embedded=True, n_latent_batch=8)
+    with torch.no_grad():
+        assert scvi.batch_representation_mean_bd is not None
+        scvi.batch_representation_mean_bd.normal_()
+    ScArches(scvi, n_new_batch=2, decoder_surgery="all")
+    assert scvi.batch_representation_mean_new_bd is not None
+    torch.testing.assert_close(
+        scvi.batch_representation_mean_new_bd, scvi.batch_representation_mean_bd.mean(dim=0).expand(2, -1)
+    )
+
+
+def test_new_batch_biases_start_at_the_mean_of_the_reference_batch_biases():
+    scvi = make_scvi(n_batch=3)
+    for module in scvi.modules():
+        if isinstance(module, LinearWithStructuredBias):
+            for p in module.bias_decoder.parameters():
+                torch.nn.init.normal_(p)
+    sa = ScArches(scvi, n_new_batch=2, shift_batch_index=False)
+    for module in sa.modules():
+        if isinstance(module, ScArchesLinearWithBatch):
+            reference_bias_bo = module.compute_bias(batch_nb=F.one_hot(torch.arange(3), 5).float())
+            new_bias_bo = module.compute_bias(batch_nb=F.one_hot(torch.tensor([3, 4]), 5).float())
+            torch.testing.assert_close(new_bias_bo, reference_bias_bo.mean(dim=0).expand(2, -1))
+
+
+# ---------------------------------------------------------------------------
+# Which layers get trainable new-batch parameters (decoder_surgery)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("final_additive_bias", [False, True], ids=["", "final_additive_bias"])
+@pytest.mark.parametrize("decoder_surgery", ["final_layer", "all"])
+def test_decoder_surgery_sets_the_trainable_layers(decoder_surgery, final_additive_bias):
+    sa = ScArches(
+        make_scvi(n_batch=3, final_additive_bias=final_additive_bias), n_new_batch=2, decoder_surgery=decoder_surgery
+    )
+    hidden_decoder = "scvi.decoder.fully_connected.module_list.0.layer.new_batch_bias_weight"
+    expected = {
+        "scvi.z_encoder.fully_connected.module_list.0.layer.new_batch_bias_weight",
+        "scvi.z_encoder.mean_encoder.new_batch_bias_weight",
+        "scvi.z_encoder.var_encoder.new_batch_bias_weight",
+        "scvi.decoder.normalized_count_decoder.new_batch_bias_weight",
+    }
+    if final_additive_bias:
+        expected.add("scvi.decoder.final_additive_bias_layer.new_bias_weight")
+    if decoder_surgery == "all":
+        expected.add(hidden_decoder)
+    assert {n for n, p in sa.named_parameters() if p.requires_grad} == expected
+    # the hidden decoder layer has its new-batch parameter in either case (the one-hot of the batch is wider)
+    assert hidden_decoder in dict(sa.named_parameters())
+
+
+def test_final_layer_surgery_needs_a_final_decoder_layer_that_takes_the_batch():
+    kwargs = make_model_kwargs(n_batch=3)
+    kwargs["decoder"] = {**kwargs["decoder"], "final_layer": {"class_path": "torch.nn.Linear", "init_args": {}}}
+    with pytest.raises(ValueError, match="final layer of the decoder that takes the batch"):
+        ScArches(SingleCellVariationalInference(**kwargs), n_new_batch=2)
+    ScArches(SingleCellVariationalInference(**kwargs), n_new_batch=2, decoder_surgery="all")  # fine
+
+
+def test_final_layer_surgery_needs_a_one_hot_batch():
+    with pytest.raises(ValueError, match="one-hot batch representation"):
+        ScArches(make_scvi(n_batch=3, batch_embedded=True, n_latent_batch=8), n_new_batch=2)
+
+
+def test_invalid_decoder_surgery_raises():
+    with pytest.raises(ValueError, match="decoder_surgery"):
+        ScArches(make_scvi(n_batch=3), n_new_batch=2, decoder_surgery="encoder")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +640,54 @@ def test_scanvi_through_scarches():
     with torch.no_grad():
         prediction = sa.predict(**inputs)
     assert "y_probs_nc" in prediction
+    assert "generative_probs_nc" not in prediction
+    with torch.no_grad():
+        prediction = sa.predict(**inputs, n_generative_samples=2)  # passed on to the scANVI model
+    assert prediction["generative_probs_nc"].shape == (6, 3)
+    assert prediction["in_distribution_score_n"].shape == (6,)
+
+
+def make_scanvi(**kwargs) -> SCANVI:
+    return SCANVI(
+        classifier_type="flat",
+        cell_type_categories=["T", "B", "NK"],
+        classifier_n_hidden=[16],
+        secondary_n_hidden=[16],
+        chunk_size=2,
+        **make_model_kwargs(n_batch=3),
+        **kwargs,
+    )
+
+
+def test_scarches_sets_the_prior_of_the_query_cells_of_scanvi():
+    counts = pd.Series({"T": 60, "B": 30, "NK": 10})
+    scanvi = make_scanvi(class_counts=counts)
+    ScArches(scanvi, n_new_batch=1)
+    assert scanvi.unlabeled_prior == "mixture"
+    # p(c) is that of the labeled cells of the reference, in the order of the classes
+    np.testing.assert_allclose(scanvi.y_prior.numpy(), [0.6, 0.3, 0.1], rtol=1e-6)
+
+    scanvi = make_scanvi(class_counts=counts)
+    ScArches(scanvi, n_new_batch=1, unlabeled_prior="scanvi", cell_type_proportions={"NK": 1.0, "T": 3.0})
+    assert scanvi.unlabeled_prior == "scanvi"
+    np.testing.assert_allclose(scanvi.y_prior.numpy(), [0.75, 0.0, 0.25], rtol=1e-6)
+
+
+def test_scarches_keeps_the_prior_of_a_scanvi_model_without_class_counts():
+    scanvi = make_scanvi()
+    with pytest.warns(UserWarning, match="no class_counts"):
+        ScArches(scanvi, n_new_batch=1)
+    np.testing.assert_allclose(scanvi.y_prior.numpy(), np.full(3, 1 / 3), rtol=1e-6)
+
+
+def test_cell_type_proportions_are_only_for_scanvi():
+    with pytest.raises(ValueError, match="only for scANVI"):
+        ScArches(make_scvi(n_batch=3), n_new_batch=1, cell_type_proportions={"T": 1.0})
+
+
+def test_cell_type_proportions_must_be_classes_of_the_model():
+    with pytest.raises(ValueError, match="not classes of the model"):
+        ScArches(make_scanvi(), n_new_batch=1, cell_type_proportions={"T": 1.0, "Mono": 1.0})
 
 
 # ---------------------------------------------------------------------------
@@ -613,8 +751,10 @@ def test_frozen_state_survives_lightning_training_and_checkpoint_reload(config, 
         )
         return torch.utils.data.DataLoader(dataset, collate_fn=collate_fn, batch_size=batch_size)
 
-    sa = ScArches(make_scvi(n_batch=3, **config), n_new_batch=n_new)
-    frozen_before = {k: v.clone() for k, v in sa.state_dict().items() if not is_new(k)}
+    sa = ScArches(make_scvi(n_batch=3, **config), n_new_batch=n_new, **surgery_kwargs(config))
+    # everything but the trainable new parameters, including the frozen new ones of the hidden decoder layers
+    trainable = {n for n, p in sa.named_parameters() if p.requires_grad}
+    frozen_before = {k: v.clone() for k, v in sa.state_dict().items() if k not in trainable}
     module = CellariumModule(model=sa, optim_fn=torch.optim.AdamW, optim_kwargs={"lr": 1e-2, "weight_decay": 0.1})
 
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_steps=3, enable_checkpointing=False, logger=False)
@@ -627,7 +767,8 @@ def test_frozen_state_survives_lightning_training_and_checkpoint_reload(config, 
     trainer = pl.Trainer(accelerator="cpu", devices=1, max_steps=3, enable_checkpointing=False, logger=False)
     trainer.fit(loaded, train_dataloaders=make_loader())
 
-    frozen_after = {k: v for k, v in loaded.model.state_dict().items() if not is_new(k)}
+    assert {n for n, p in loaded.model.named_parameters() if p.requires_grad} == trainable
+    frozen_after = {k: v for k, v in loaded.model.state_dict().items() if k not in trainable}
     assert frozen_before.keys() == frozen_after.keys()
     for key, value in frozen_before.items():
         assert torch.equal(value, frozen_after[key].cpu()), f"{key} changed"

@@ -14,7 +14,31 @@ from cellarium.ml import CellariumAnnDataDataModule
 from cellarium.ml.api._view_collections import unwrap_collection
 from cellarium.ml.data import DistributedAnnDataCollection
 from cellarium.ml.utilities.core import train_val_split
-from cellarium.ml.utilities.data import AnnDataField
+from cellarium.ml.utilities.data import AnnDataField, batch_categories_to_codes
+
+
+def check_batch_key(datamodule: CellariumAnnDataDataModule, batch_key: str, arg_name: str = "batch_key") -> None:
+    """
+    Check that ``batch_key`` is a categorical ``obs`` column of the data, from the schema of the data (deltacells) or
+    the first h5ad file, without reading its values, so that a wrong column fails at once with a clear error rather
+    than in a worker of the dataloader. (Missing values are found as the cells are read, see
+    :func:`~cellarium.ml.utilities.data.batch_categories_to_codes`.)
+
+    Raises:
+        ValueError: If ``batch_key`` is not an ``obs`` column of the data, or is not categorical.
+    """
+    if not datamodule.obs_is_categorical(batch_key):
+        raise ValueError(
+            f"{arg_name} {batch_key!r} is not a categorical obs column, but a batch column must be categorical in the "
+            f"data: e.g. adata.obs[{batch_key!r}] = adata.obs[{batch_key!r}].astype('category') before writing the "
+            "h5ad files (with the same categories in every file), or before making the deltacells dataset."
+        )
+
+
+def batch_index_field(batch_key: str) -> AnnDataField:
+    """The field ``batch_index_n`` of the codes of the categorical batch column ``batch_key`` (see
+    :func:`check_batch_key`)."""
+    return AnnDataField(attr="obs", key=batch_key, convert_fn=batch_categories_to_codes)
 
 
 @contextmanager
